@@ -15,7 +15,7 @@ namespace Sendspin.SDK.Protocol;
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-    Converters = [typeof(SnakeCaseEnumConverter), typeof(OptionalJsonConverterFactory)])]
+    Converters = [typeof(OptionalJsonConverterFactory)])]
 [JsonSerializable(typeof(ClientHelloMessage))]
 [JsonSerializable(typeof(ClientGoodbyeMessage))]
 [JsonSerializable(typeof(ClientTimeMessage))]
@@ -34,16 +34,4 @@ namespace Sendspin.SDK.Protocol;
 [JsonSerializable(typeof(ServerStateMessage))]
 internal partial class MessageSerializerContext : JsonSerializerContext
 {
-}
-
-/// <summary>
-/// Concrete enum converter for source generation (JsonStringEnumConverter cannot be
-/// used directly in [JsonSourceGenerationOptions] Converters array).
-/// </summary>
-internal sealed class SnakeCaseEnumConverter : JsonStringEnumConverter
-{
-    public SnakeCaseEnumConverter()
-        : base(JsonNamingPolicy.SnakeCaseLower)
-    {
-    }
 }
