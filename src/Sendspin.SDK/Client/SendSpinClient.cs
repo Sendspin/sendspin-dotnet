@@ -13,7 +13,7 @@ namespace Sendspin.SDK.Client;
 /// <summary>
 /// Main Sendspin client that orchestrates connection, handshake, and message handling.
 /// </summary>
-public sealed class SendspinClientService : ISendspinClient
+public sealed class SendspinClientService : ISendspinClient, IDisposable
 {
     private readonly ILogger<SendspinClientService> _logger;
     private readonly ISendspinConnection _connection;
@@ -1065,12 +1065,27 @@ public sealed class SendspinClientService : ISendspinClient
         }
     }
 
+    /// <summary>
+    /// Synchronous dispose — unsubscribes connection events to break the reference
+    /// cycle that prevents GC when <see cref="DisposeAsync"/> is not called.
+    /// Prefer <see cref="DisposeAsync"/> for full cleanup including async operations.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        StopTimeSyncLoop();
+        UnsubscribeConnectionEvents();
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
         _disposed = true;
 
         StopTimeSyncLoop();
+        UnsubscribeConnectionEvents();
 
         // NOTE: We do NOT dispose _audioPipeline here - it's a shared singleton
         // managed by the DI container. We only stop playback if active.
@@ -1079,10 +1094,13 @@ public sealed class SendspinClientService : ISendspinClient
             await _audioPipeline.StopAsync();
         }
 
+        await _connection.DisposeAsync();
+    }
+
+    private void UnsubscribeConnectionEvents()
+    {
         _connection.StateChanged -= OnConnectionStateChanged;
         _connection.TextMessageReceived -= OnTextMessageReceived;
         _connection.BinaryMessageReceived -= OnBinaryMessageReceived;
-
-        await _connection.DisposeAsync();
     }
 }
