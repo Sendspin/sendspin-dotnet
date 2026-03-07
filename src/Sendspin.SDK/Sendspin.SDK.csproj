@@ -439,6 +439,10 @@ For older release notes (v5.0.0 and earlier), see https://github.com/chrisuthe/w
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Sendspin.SDK.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Core dependencies - all cross-platform -->
     <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="Zeroconf" Version="3.7.16" />
