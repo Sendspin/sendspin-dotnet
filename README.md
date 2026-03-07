@@ -65,8 +65,6 @@ You provide the audio output by implementing `IAudioPlayer` for your platform (W
 | Project | Platform | Audio Backend |
 |---------|----------|---------------|
 | [WindowsSpin](https://github.com/chrisuthe/windowsSpin) | Windows (WPF) | NAudio / WASAPI |
-| [sendspin-js](https://github.com/Sendspin/sendspin-js) | Browser | Web Audio API |
-| [sendspin-rs](https://github.com/Sendspin/sendspin-rs) | Linux / cross-platform | cpal |
 
 ## Development
 
