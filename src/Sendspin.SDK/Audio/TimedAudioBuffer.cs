@@ -571,6 +571,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 _samplesOutputSinceStart += toRead;
 
                 CalculateSyncError(currentLocalTime);
+
                 // NOTE: We do NOT call UpdateCorrectionRate() here.
                 // The caller is responsible for correction via ISyncCorrectionProvider.
 
@@ -713,6 +714,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             Interlocked.Exchange(ref _reanchorEventPending, 0);
             _lastOutputFrame = null;
             TargetPlaybackRate = 1.0;
+
             // Note: Don't reset _samplesDroppedForSync/_samplesInsertedForSync - these are cumulative stats
             // Note: Don't reset _lastReanchorTimeMicroseconds - reanchor itself calls Clear(),
             // so resetting the cooldown here would defeat its purpose (matches Android/Python CLI)
@@ -1315,6 +1317,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         if (Math.Abs(TargetPlaybackRate - rate) > 0.0001)
         {
             TargetPlaybackRate = rate;
+
             // Fire event inline while holding lock. This is safe because:
             // 1. The event is [Obsolete] with no active subscribers
             // 2. Any future subscriber must be lightweight (just store value, no callbacks)
@@ -1481,6 +1484,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
                 outputPos += frameSamples;
                 _samplesInsertedForSync += frameSamples;
+
                 // Don't increment samplesConsumed - we didn't consume from buffer
                 continue;
             }
