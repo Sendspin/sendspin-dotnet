@@ -70,6 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     permissions:
+      contents: write
       id-token: write
       packages: write
 
