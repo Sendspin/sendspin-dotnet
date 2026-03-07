@@ -105,12 +105,17 @@ jobs:
       - name: Extract tag message
         id: tag-message
         run: |
-          # Get the annotated tag message (empty for lightweight tags)
-          TAG_MSG=$(git tag -l --format='%(contents)' "${{ github.ref_name }}" 2>/dev/null || true)
-          if [ -n "$TAG_MSG" ]; then
-            # Write to file to preserve newlines
-            echo "$TAG_MSG" > /tmp/release-notes.md
-            echo "has_notes=true" >> $GITHUB_OUTPUT
+          # Check if this is an annotated tag (objecttype=tag) vs lightweight (objecttype=commit)
+          OBJ_TYPE=$(git for-each-ref --format='%(objecttype)' "refs/tags/${{ github.ref_name }}" 2>/dev/null || true)
+          if [ "$OBJ_TYPE" = "tag" ]; then
+            # Extract the annotated tag body (excludes subject line duplication)
+            TAG_MSG=$(git for-each-ref --format='%(contents)' "refs/tags/${{ github.ref_name }}")
+            if [ -n "$TAG_MSG" ]; then
+              echo "$TAG_MSG" > /tmp/release-notes.md
+              echo "has_notes=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_notes=false" >> $GITHUB_OUTPUT
+            fi
           else
             echo "has_notes=false" >> $GITHUB_OUTPUT
           fi
