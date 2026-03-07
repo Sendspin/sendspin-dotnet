@@ -3,7 +3,7 @@
 A cross-platform .NET SDK for the Sendspin synchronized multi-room audio protocol. Build players that sync perfectly with Music Assistant and other Sendspin-compatible players.
 
 [![NuGet](https://img.shields.io/nuget/v/Sendspin.SDK.svg)](https://www.nuget.org/packages/Sendspin.SDK/)
-[![GitHub](https://img.shields.io/github/license/chrisuthe/windowsSpin)](https://github.com/chrisuthe/windowsSpin/blob/master/LICENSE)
+[![GitHub](https://img.shields.io/github/license/Sendspin/sendspin-dotnet)](https://github.com/Sendspin/sendspin-dotnet/blob/main/LICENSE)
 
 ## Features
 
@@ -347,4 +347,4 @@ See the [Windows client](https://github.com/chrisuthe/windowsSpin/tree/master/sr
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/chrisuthe/windowsSpin/blob/master/LICENSE) for details.
+MIT License - see [LICENSE](https://github.com/Sendspin/sendspin-dotnet/blob/main/LICENSE) for details.
