@@ -21,12 +21,12 @@ public sealed class SendspinConnection : ISendspinConnection
     private CancellationTokenSource? _receiveCts;
     private Task? _receiveTask;
     private Uri? _serverUri;
-    private ConnectionState _state = ConnectionState.Disconnected;
+    private int _state = (int)ConnectionState.Disconnected;
     private int _reconnectAttempt;
     private int _connectionLostGuard;
     private bool _disposed;
 
-    public ConnectionState State => _state;
+    public ConnectionState State => (ConnectionState)Volatile.Read(ref _state);
     public Uri? ServerUri => _serverUri;
 
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
@@ -43,9 +43,9 @@ public sealed class SendspinConnection : ISendspinConnection
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        if (_state is ConnectionState.Connected or ConnectionState.Connecting)
+        if (State is ConnectionState.Connected or ConnectionState.Connecting)
         {
-            throw new InvalidOperationException($"Cannot connect while in state {_state}");
+            throw new InvalidOperationException($"Cannot connect while in state {State}");
         }
 
         _serverUri = serverUri;
@@ -122,7 +122,7 @@ public sealed class SendspinConnection : ISendspinConnection
 
     public async Task DisconnectAsync(string reason = "user_request", CancellationToken cancellationToken = default)
     {
-        if (_state == ConnectionState.Disconnected)
+        if (State == ConnectionState.Disconnected)
             return;
 
         SetState(ConnectionState.Disconnecting, reason);
@@ -163,7 +163,7 @@ public sealed class SendspinConnection : ISendspinConnection
         {
             // Trigger connection lost handling if receive loop hasn't detected it yet.
             // This handles the race where WebSocket detected closure but ReceiveAsync is still blocking.
-            if (_state is ConnectionState.Connected or ConnectionState.Handshaking)
+            if (State is ConnectionState.Connected or ConnectionState.Handshaking)
             {
                 _ = Task.Run(() => HandleConnectionLostAsync());
             }
@@ -196,7 +196,7 @@ public sealed class SendspinConnection : ISendspinConnection
 
         if (_webSocket?.State != WebSocketState.Open)
         {
-            if (_state is ConnectionState.Connected or ConnectionState.Handshaking)
+            if (State is ConnectionState.Connected or ConnectionState.Handshaking)
             {
                 _ = Task.Run(() => HandleConnectionLostAsync());
             }
@@ -286,7 +286,7 @@ public sealed class SendspinConnection : ISendspinConnection
 
     private async Task HandleConnectionLostAsync()
     {
-        if (_state == ConnectionState.Disconnecting || _disposed)
+        if (State == ConnectionState.Disconnecting || _disposed)
             return;
 
         // Atomic guard - only the first caller proceeds, prevents duplicate reconnection attempts
@@ -338,7 +338,7 @@ public sealed class SendspinConnection : ISendspinConnection
                 await Task.Delay(delay, cancellationToken);
                 await ConnectInternalAsync(cancellationToken);
 
-                if (_state == ConnectionState.Handshaking || _state == ConnectionState.Connected)
+                if (State is ConnectionState.Handshaking or ConnectionState.Connected)
                 {
                     return; // Successfully reconnected
                 }
@@ -393,10 +393,8 @@ public sealed class SendspinConnection : ISendspinConnection
 
     private void SetState(ConnectionState newState, string? reason = null, Exception? exception = null)
     {
-        var oldState = _state;
+        var oldState = (ConnectionState)Interlocked.Exchange(ref _state, (int)newState);
         if (oldState == newState) return;
-
-        _state = newState;
         _logger.LogDebug("Connection state: {OldState} -> {NewState} ({Reason})",
             oldState, newState, reason ?? "N/A");
 
@@ -414,7 +412,7 @@ public sealed class SendspinConnection : ISendspinConnection
     /// </summary>
     public void MarkConnected()
     {
-        if (_state == ConnectionState.Handshaking)
+        if (State == ConnectionState.Handshaking)
         {
             SetState(ConnectionState.Connected);
         }

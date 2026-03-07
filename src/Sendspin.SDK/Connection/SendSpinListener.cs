@@ -13,7 +13,7 @@ public sealed class SendspinListener : IAsyncDisposable
     private readonly ListenerOptions _options;
     private SimpleWebSocketServer? _server;
     private bool _disposed;
-    private bool _isListening;
+    private volatile bool _isListening;
 
     /// <summary>
     /// Raised when a new server connects.
