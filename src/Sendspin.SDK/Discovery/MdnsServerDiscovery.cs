@@ -355,9 +355,18 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
     {
         if (_servers.TryGetValue(server.ServerId, out var existing))
         {
-            // Update last seen time
-            existing.LastSeenAt = DateTimeOffset.UtcNow;
-            ServerUpdated?.Invoke(this, existing);
+            if (!existing.Equals(server))
+            {
+                // Connection details changed (IP, port, or host) — replace the entry
+                _servers[server.ServerId] = server;
+                _logger.LogInformation("Server updated: {Server} (connection details changed)", server);
+            }
+            else
+            {
+                existing.LastSeenAt = DateTimeOffset.UtcNow;
+            }
+
+            ServerUpdated?.Invoke(this, _servers[server.ServerId]);
         }
         else
         {

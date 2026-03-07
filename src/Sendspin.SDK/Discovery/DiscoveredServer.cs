@@ -69,8 +69,12 @@ public sealed class DiscoveredServer
 
     public override bool Equals(object? obj)
     {
-        return obj is DiscoveredServer other && ServerId == other.ServerId;
+        return obj is DiscoveredServer other
+               && ServerId == other.ServerId
+               && Host == other.Host
+               && Port == other.Port
+               && IpAddresses.SequenceEqual(other.IpAddresses);
     }
 
-    public override int GetHashCode() => ServerId.GetHashCode();
+    public override int GetHashCode() => HashCode.Combine(ServerId, Host, Port);
 }
