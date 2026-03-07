@@ -75,6 +75,7 @@ public sealed class ServerMetadata
     /// </list>
     /// </summary>
     [JsonPropertyName("progress")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public Optional<PlaybackProgress?> Progress { get; init; } = Optional<PlaybackProgress?>.Absent();
 
     [JsonPropertyName("repeat")]
