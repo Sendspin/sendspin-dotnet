@@ -1080,7 +1080,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// Implements a tiered correction strategy:
     /// </para>
     /// <list type="bullet">
-    /// <item>Error &lt; 1ms (deadband): No correction, playback rate = 1.0</item>
+    /// <item>Error &lt; deadband (default 1ms): No correction, playback rate = 1.0</item>
     /// <item>Error 1-15ms: Proportional rate adjustment (error / targetSeconds), clamped to max</item>
     /// <item>Error &gt; 15ms: Frame drop/insert for faster correction</item>
     /// </list>
@@ -1125,12 +1125,12 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // Use smoothed error for correction decisions (filters measurement jitter)
         var absError = Math.Abs(_smoothedSyncErrorMicroseconds);
 
-        // Thresholds for correction tiers
-        const long DeadbandThreshold = 1_000;      // 1ms - no correction below this
-        const long ResamplingThreshold = 15_000;   // 15ms - above this use drop/insert
+        // Thresholds for correction tiers (from options)
+        var deadbandThreshold = _syncOptions.DeadbandMicroseconds;
+        var resamplingThreshold = _syncOptions.ResamplingThresholdMicroseconds;
 
         // Tier 1: Deadband - error is small enough to ignore
-        if (absError < DeadbandThreshold)
+        if (absError < deadbandThreshold)
         {
             LogCorrectionModeTransition(SyncCorrectionMode.None);
             SetTargetPlaybackRate(1.0);
@@ -1143,7 +1143,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // Rate = 1.0 + (error_µs / target_seconds / 1,000,000)
         // This calculates the rate needed to eliminate the error over the target time.
         // Example: 10ms error with 3s target → rate = 1.00333 (0.33% faster)
-        if (absError < ResamplingThreshold)
+        if (absError < resamplingThreshold)
         {
             // Log transition from drop/insert mode back to resampling (effectively None for drop/insert)
             LogCorrectionModeTransition(SyncCorrectionMode.Resampling);
