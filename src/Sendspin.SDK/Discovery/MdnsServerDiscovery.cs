@@ -19,6 +19,17 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
     /// </summary>
     public const string ClientServiceType = "_sendspin._tcp.local.";
 
+    /// <summary>
+    /// Maximum allowed length for a TXT record value used as a server ID.
+    /// mDNS TXT records are limited to 255 bytes per key-value pair.
+    /// </summary>
+    internal const int MaxServerIdLength = 255;
+
+    /// <summary>
+    /// Maximum allowed length for a TXT record path value.
+    /// </summary>
+    internal const int MaxPathLength = 512;
+
     private readonly ILogger<MdnsServerDiscovery> _logger;
     private readonly ConcurrentDictionary<string, DiscoveredServer> _servers = new();
     private readonly TimeSpan _serverTimeout = TimeSpan.FromMinutes(2);
@@ -184,11 +195,18 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
             }
 
             // Get server ID from TXT record or generate from name
-            var serverId = properties.TryGetValue("id", out var id)
+            var rawServerId = properties.TryGetValue("id", out var id)
                 ? id
                 : properties.TryGetValue("server_id", out var sid)
                     ? sid
                     : $"{host.DisplayName}-{host.IPAddresses.FirstOrDefault()}";
+            var serverId = SanitizeServerId(rawServerId);
+
+            if (string.IsNullOrEmpty(serverId))
+            {
+                _logger.LogWarning("Server ID was empty after sanitization for host {Host}", host.DisplayName);
+                return null;
+            }
 
             // Try multiple common TXT record keys for friendly name
             var friendlyName = GetFriendlyName(properties, host.DisplayName);
@@ -211,6 +229,67 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
             _logger.LogWarning(ex, "Failed to parse host {Host}", host.DisplayName);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Sanitizes a server ID from mDNS TXT records by removing control characters
+    /// and enforcing a maximum length.
+    /// </summary>
+    internal static string SanitizeServerId(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return string.Empty;
+
+        // Strip control characters (prevents log injection, dictionary key surprises)
+        var sanitized = new string(raw.Where(c => !char.IsControl(c)).ToArray());
+
+        if (sanitized.Length > MaxServerIdLength)
+            sanitized = sanitized[..MaxServerIdLength];
+
+        return sanitized;
+    }
+
+    /// <summary>
+    /// Sanitizes a WebSocket path from mDNS TXT records.
+    /// Only allows path segments — strips query strings, fragments, authority components,
+    /// and path traversal sequences.
+    /// </summary>
+    internal static string SanitizePath(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return "/sendspin";
+
+        // Strip control characters
+        var sanitized = new string(raw.Where(c => !char.IsControl(c)).ToArray());
+
+        // Remove query string and fragment
+        var queryIndex = sanitized.IndexOf('?');
+        if (queryIndex >= 0)
+            sanitized = sanitized[..queryIndex];
+
+        var fragmentIndex = sanitized.IndexOf('#');
+        if (fragmentIndex >= 0)
+            sanitized = sanitized[..fragmentIndex];
+
+        // Remove authority-style prefixes (e.g. "//evil.com/path")
+        while (sanitized.StartsWith("//"))
+            sanitized = sanitized[1..];
+
+        // Collapse path traversal sequences
+        sanitized = sanitized.Replace("../", string.Empty).Replace("..\\", string.Empty);
+
+        // Enforce leading slash
+        if (!sanitized.StartsWith('/'))
+            sanitized = "/" + sanitized;
+
+        if (sanitized.Length > MaxPathLength)
+            sanitized = sanitized[..MaxPathLength];
+
+        // If we ended up with just "/" or empty after sanitization, use default
+        if (sanitized is "/" or "")
+            return "/sendspin";
+
+        return sanitized;
     }
 
     /// <summary>

@@ -59,9 +59,8 @@ public sealed class DiscoveredServer
         var address = IpAddresses.FirstOrDefault() ?? Host;
 
         // Use path from TXT record if available, otherwise default to /sendspin
-        var path = Properties.TryGetValue("path", out var p) ? p : "/sendspin";
-        if (!path.StartsWith('/'))
-            path = "/" + path;
+        var rawPath = Properties.TryGetValue("path", out var p) ? p : "/sendspin";
+        var path = MdnsServerDiscovery.SanitizePath(rawPath);
 
         return new Uri($"ws://{address}:{Port}{path}");
     }

@@ -111,10 +111,13 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
                 port: (ushort)_options.Port,
                 addresses: addresses);
 
-            // Add TXT records - path must start with /
+            // Add TXT records
+            if (!string.IsNullOrEmpty(_options.PlayerName))
+            {
+                _serviceProfile.AddProperty("name", _options.PlayerName);
+            }
+
             _serviceProfile.AddProperty("path", _options.Path);
-            // TODO: Re-enable once "name" TXT record is in official spec
-            // _serviceProfile.AddProperty("name", _options.PlayerName);
 
             // Log the service profile details
             _logger.LogInformation(
