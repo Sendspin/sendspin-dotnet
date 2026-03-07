@@ -20,6 +20,7 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
     /// The correct GUID from the RFC is "258EAFA5-E914-47DA-95CA-C5AB0DC85B11".
     /// </summary>
     private const string WebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    private const int MaxHttpHeaderSize = 8192;
 
     private readonly ILogger? _logger;
     private TcpListener? _listener;
@@ -131,18 +132,15 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
         {
             var stream = tcpClient.GetStream();
 
-            // Read the HTTP upgrade request
-            var requestBytes = new byte[4096];
-            var bytesRead = await stream.ReadAsync(requestBytes.AsMemory(), cancellationToken)
-                .ConfigureAwait(false);
+            // Read the HTTP upgrade request. Headers may span multiple TCP segments,
+            // so loop until the \r\n\r\n terminator is found.
+            var request = await ReadHttpHeaderAsync(stream, cancellationToken).ConfigureAwait(false);
 
-            if (bytesRead == 0)
+            if (request is null)
             {
                 tcpClient.Dispose();
                 return;
             }
-
-            var request = Encoding.UTF8.GetString(requestBytes, 0, bytesRead);
 
             // Parse the request
             var pathMatch = GetRequestLineRegex().Match(request);
@@ -212,6 +210,38 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
         }
     }
 
+    private static async Task<string?> ReadHttpHeaderAsync(
+        NetworkStream stream, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[MaxHttpHeaderSize];
+        var totalRead = 0;
+
+        while (totalRead < MaxHttpHeaderSize)
+        {
+            var bytesRead = await stream.ReadAsync(
+                buffer.AsMemory(totalRead, MaxHttpHeaderSize - totalRead),
+                cancellationToken).ConfigureAwait(false);
+
+            if (bytesRead == 0)
+                return null; // Client disconnected
+
+            totalRead += bytesRead;
+
+            // Check for end-of-headers marker in the newly read portion.
+            // The marker could span the boundary between reads, so search
+            // from a few bytes back to cover that case.
+            var searchStart = Math.Max(0, totalRead - bytesRead - 3);
+            var headerEnd = buffer.AsSpan(0, totalRead).Slice(searchStart)
+                .IndexOf("\r\n\r\n"u8);
+
+            if (headerEnd >= 0)
+                return Encoding.UTF8.GetString(buffer, 0, searchStart + headerEnd + 4);
+        }
+
+        // Headers exceeded max size — reject
+        return null;
+    }
+
     private static string ComputeAcceptKey(string webSocketKey)
     {
         var combined = webSocketKey + WebSocketGuid;
@@ -228,10 +258,10 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
         await stream.WriteAsync(bytes.AsMemory(), cancellationToken).ConfigureAwait(false);
     }
 
-    [GeneratedRegex(@"^GET\s+(\S+)\s+HTTP/1\.1", RegexOptions.Compiled)]
+    [GeneratedRegex(@"^GET\s+(\S+)\s+HTTP/1\.1")]
     private static partial Regex GetRequestLineRegex();
 
-    [GeneratedRegex(@"Sec-WebSocket-Key:\s*(\S+)", RegexOptions.Compiled | RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"Sec-WebSocket-Key:\s*(\S+)", RegexOptions.IgnoreCase)]
     private static partial Regex WebSocketKeyHeaderRegex();
 
     public async ValueTask DisposeAsync()

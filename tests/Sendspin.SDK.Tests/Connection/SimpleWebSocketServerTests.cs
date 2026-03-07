@@ -1,4 +1,7 @@
+using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
+using System.Text;
 using Sendspin.SDK.Connection;
 
 namespace Sendspin.SDK.Tests.Connection;
@@ -229,6 +232,81 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
 
             Assert.NotEqual(WebSocketState.Open, ws.State);
             ws.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task Server_HandlesPartialHttpUpgradeReads()
+    {
+        // Simulate a client that sends the HTTP upgrade request in multiple
+        // small TCP segments — the server must accumulate them.
+        _server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        _server.ClientConnected += (s, c) => connected.TrySetResult(c);
+
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", _server.Port);
+        var stream = tcp.GetStream();
+
+        // Build a valid WebSocket upgrade request
+        var key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
+        var request = $"GET /sendspin HTTP/1.1\r\n" +
+                      $"Host: 127.0.0.1:{_server.Port}\r\n" +
+                      $"Upgrade: websocket\r\n" +
+                      $"Connection: Upgrade\r\n" +
+                      $"Sec-WebSocket-Key: {key}\r\n" +
+                      $"Sec-WebSocket-Version: 13\r\n" +
+                      $"\r\n";
+
+        var bytes = Encoding.UTF8.GetBytes(request);
+
+        // Send in small chunks to simulate partial TCP segments
+        const int chunkSize = 20;
+        for (var i = 0; i < bytes.Length; i += chunkSize)
+        {
+            var len = Math.Min(chunkSize, bytes.Length - i);
+            await stream.WriteAsync(bytes.AsMemory(i, len));
+            await Task.Delay(10); // Give the OS time to deliver each segment separately
+        }
+
+        // Server should still accept the connection
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.NotNull(serverConn);
+        Assert.Equal("/sendspin", serverConn.Path);
+
+        await serverConn.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Server_RejectsOversizedHttpHeaders()
+    {
+        // A client sending more than MaxHttpHeaderSize bytes without a \r\n\r\n
+        // terminator should be rejected, not cause unbounded reads.
+        _server.Start(0);
+
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", _server.Port);
+        var stream = tcp.GetStream();
+
+        // Send 9KB of junk (exceeds 8KB limit) with no header terminator
+        var junk = new byte[9000];
+        Array.Fill(junk, (byte)'X');
+        await stream.WriteAsync(junk);
+
+        // The server should reject the connection — either by closing the socket
+        // gracefully (0 bytes), sending a 400, or resetting the connection.
+        var buffer = new byte[128];
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            var bytesRead = await stream.ReadAsync(buffer.AsMemory(), cts.Token);
+            Assert.True(bytesRead == 0 || Encoding.UTF8.GetString(buffer, 0, bytesRead).Contains("400"));
+        }
+        catch (IOException)
+        {
+            // Connection reset by server — expected
         }
     }
 
