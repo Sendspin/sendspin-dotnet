@@ -144,7 +144,7 @@ public sealed class SendspinClientService : ISendspinClient
 
         try
         {
-            var registration = linkedCts.Token.Register(() => _handshakeTcs.TrySetCanceled());
+            await using var registration = linkedCts.Token.Register(() => _handshakeTcs.TrySetCanceled());
             var success = await _handshakeTcs.Task;
 
             if (success)
