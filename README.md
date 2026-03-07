@@ -1,7 +1,7 @@
 # sendspin-dotnet
 
 [![NuGet](https://img.shields.io/nuget/v/Sendspin.SDK.svg)](https://www.nuget.org/packages/Sendspin.SDK/)
-[![CI](https://github.com/Sendspin/sendspin-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/Sendspin/sendspin-dotnet/actions/workflows/ci.yml)
+[![Build](https://github.com/Sendspin/sendspin-dotnet/actions/workflows/build.yml/badge.svg)](https://github.com/Sendspin/sendspin-dotnet/actions/workflows/build.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Cross-platform .NET SDK implementing the [Sendspin Protocol](https://www.sendspin-audio.com) for clock-synchronized multi-room audio streaming. Build players that sync perfectly with [Music Assistant](https://music-assistant.io/) and other Sendspin-compatible players.
@@ -79,16 +79,12 @@ dotnet test
 dotnet pack src/Sendspin.SDK/Sendspin.SDK.csproj -c Release
 ```
 
-### Releasing
+### Branching & Releases
 
-Push a version tag to trigger the release workflow:
+- **`dev`** — development branch. PRs merge here. Pushes produce `7.2.1-dev.abc1234` pre-release packages (uploaded as build artifacts).
+- **`main`** — production branch. PRs from `dev` merge here. Pushes automatically publish to [nuget.org](https://www.nuget.org/packages/Sendspin.SDK/) via [NuGet Trusted Publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing).
 
-```bash
-git tag v7.2.1
-git push origin v7.2.1
-```
-
-This builds, tests, packs, and publishes to [nuget.org](https://www.nuget.org/packages/Sendspin.SDK/).
+To release a new version, bump the `<Version>` in `Sendspin.SDK.csproj` on `dev`, then PR to `main`.
 
 ## License
 
