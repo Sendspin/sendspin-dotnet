@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main, dev]
+    tags: ['v*.*.*']
   pull_request:
     branches: [main, dev]
 
@@ -26,12 +27,17 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          BASE_VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
-          if [ "${{ github.ref }}" == "refs/heads/dev" ]; then
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # Release: version from tag (v7.3.0 → 7.3.0)
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [ "${{ github.ref }}" == "refs/heads/dev" ]; then
+            # Dev: pre-release suffix
+            BASE_VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
             SHORT_SHA=${GITHUB_SHA::7}
             VERSION="${BASE_VERSION}-dev.${SHORT_SHA}"
           else
-            VERSION="${BASE_VERSION}"
+            # Main branch push (no tag): use csproj version
+            VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "📦 Version: $VERSION"
@@ -60,7 +66,7 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -90,3 +96,11 @@ jobs:
 
       - name: Push to GitHub Packages
         run: dotnet nuget push "artifacts/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/Sendspin/index.json --skip-duplicate
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg

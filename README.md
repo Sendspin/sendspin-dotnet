@@ -82,9 +82,15 @@ dotnet pack src/Sendspin.SDK/Sendspin.SDK.csproj -c Release
 ### Branching & Releases
 
 - **`dev`** — development branch. PRs merge here. Pushes produce `7.2.1-dev.abc1234` pre-release packages (uploaded as build artifacts).
-- **`main`** — production branch. PRs from `dev` merge here. Pushes automatically publish to [nuget.org](https://www.nuget.org/packages/Sendspin.SDK/) via [NuGet Trusted Publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing).
+- **`main`** — production branch. PRs from `dev` merge here. Merges build and test but do not publish.
+- **Tags** (`v*.*.*`) — pushing a version tag triggers the publish to [nuget.org](https://www.nuget.org/packages/Sendspin.SDK/) and [GitHub Packages](https://github.com/orgs/Sendspin/packages) via [NuGet Trusted Publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing).
 
-To release a new version, bump the `<Version>` in `Sendspin.SDK.csproj` on `dev`, then PR to `main`.
+To release a new version:
+
+```bash
+git tag v7.3.0
+git push origin v7.3.0
+```
 
 ## License
 
