@@ -440,15 +440,20 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     {
         lock (_lock)
         {
+            var offsetUncertainty = Math.Sqrt(_offsetVariance);
+            var driftUncertainty = Math.Sqrt(_driftVariance);
+
             return new ClockSyncStatus
             {
                 OffsetMicroseconds = _offset,
                 DriftMicrosecondsPerSecond = _drift,
-                OffsetUncertaintyMicroseconds = Math.Sqrt(_offsetVariance),
-                DriftUncertaintyMicrosecondsPerSecond = Math.Sqrt(_driftVariance),
+                OffsetUncertaintyMicroseconds = offsetUncertainty,
+                DriftUncertaintyMicrosecondsPerSecond = driftUncertainty,
                 MeasurementCount = _measurementCount,
-                IsConverged = IsConverged,
-                IsDriftReliable = IsDriftReliable,
+                IsConverged = _measurementCount >= MinMeasurementsForConvergence
+                              && offsetUncertainty < MaxOffsetUncertaintyForConvergence,
+                IsDriftReliable = _measurementCount >= MinMeasurementsForConvergence
+                                  && driftUncertainty < MaxDriftUncertaintyForReliable,
                 AdaptiveForgettingTriggerCount = _adaptiveForgettingTriggerCount
             };
         }
