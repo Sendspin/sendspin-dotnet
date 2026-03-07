@@ -10,7 +10,7 @@ namespace Sendspin.SDK.Protocol;
 /// This matches the CLI's <c>UndefinedField</c> pattern in Python.
 /// </remarks>
 /// <typeparam name="T">The type of the optional value.</typeparam>
-public readonly struct Optional<T>
+public readonly struct Optional<T> : IEquatable<Optional<T>>
 {
     private readonly T? _value;
     private readonly bool _isPresent;
@@ -56,6 +56,20 @@ public readonly struct Optional<T>
     /// </summary>
     /// <param name="value">The value (can be null for explicit JSON null).</param>
     public static Optional<T> Present(T? value) => new(value, true);
+
+    /// <inheritdoc />
+    public bool Equals(Optional<T> other) =>
+        _isPresent == other._isPresent &&
+        EqualityComparer<T>.Default.Equals(_value, other._value);
+
+    /// <inheritdoc />
+    public override bool Equals(object? obj) => obj is Optional<T> other && Equals(other);
+
+    /// <inheritdoc />
+    public override int GetHashCode() => _isPresent ? HashCode.Combine(true, _value) : 0;
+
+    public static bool operator ==(Optional<T> left, Optional<T> right) => left.Equals(right);
+    public static bool operator !=(Optional<T> left, Optional<T> right) => !left.Equals(right);
 
     /// <inheritdoc />
     public override string ToString() => _isPresent

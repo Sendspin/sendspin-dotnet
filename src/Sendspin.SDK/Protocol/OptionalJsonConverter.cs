@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Protocol;
 
@@ -21,6 +22,11 @@ namespace Sendspin.SDK.Protocol;
 /// Standard C# nullable types collapse the latter two into <c>null</c>.
 /// This converter preserves the distinction using <see cref="Optional{T}"/>.
 /// </para>
+/// <para>
+/// <b>NativeAOT note:</b> Each <c>Optional&lt;T&gt;</c> type used in the protocol must be
+/// registered in <see cref="CreateConverter"/> with an explicit instantiation. The AOT compiler
+/// cannot discover generic types constructed via reflection at runtime.
+/// </para>
 /// </remarks>
 public sealed class OptionalJsonConverterFactory : JsonConverterFactory
 {
@@ -33,8 +39,17 @@ public sealed class OptionalJsonConverterFactory : JsonConverterFactory
     public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options)
     {
         var valueType = typeToConvert.GetGenericArguments()[0];
-        var converterType = typeof(OptionalJsonConverter<>).MakeGenericType(valueType);
-        return (JsonConverter)Activator.CreateInstance(converterType)!;
+
+        // AOT-safe: explicit converter instantiation instead of Activator.CreateInstance.
+        // Add a case here when introducing a new Optional<T> property in protocol messages.
+        if (valueType == typeof(PlaybackProgress))
+        {
+            return new OptionalJsonConverter<PlaybackProgress?>();
+        }
+
+        throw new NotSupportedException(
+            $"No AOT-safe converter registered for Optional<{valueType.Name}>. " +
+            $"Add an explicit case in {nameof(OptionalJsonConverterFactory)}.{nameof(CreateConverter)}().");
     }
 }
 
