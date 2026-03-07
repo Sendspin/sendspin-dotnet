@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Sendspin.SDK/Sendspin.SDK.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Sendspin.SDK.Tests/Sendspin.SDK.Tests.csproj" />
+  </Folder>
+</Solution>
