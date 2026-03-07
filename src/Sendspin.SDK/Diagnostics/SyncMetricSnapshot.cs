@@ -48,7 +48,7 @@ public readonly record struct SyncMetricSnapshot
 
     /// <summary>
     /// Gets the current playback rate (1.0 = normal speed).
-    /// Values > 1.0 indicate speedup, < 1.0 indicate slowdown.
+    /// Values &gt; 1.0 indicate speedup, &lt; 1.0 indicate slowdown.
     /// </summary>
     public double PlaybackRate { get; init; }
 

@@ -83,6 +83,7 @@ public sealed class OpusDecoder : IAudioDecoder
         }
 
         _disposed = true;
+
         // Concentus decoder doesn't implement IDisposable
     }
 }
