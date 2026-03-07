@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -13,6 +14,7 @@ namespace Sendspin.SDK.Connection;
 /// </summary>
 public sealed class WebSocketClientConnection : IAsyncDisposable
 {
+    private readonly TcpClient _tcpClient;
     private readonly WebSocket _webSocket;
     private readonly ILogger? _logger;
     private readonly CancellationTokenSource _cts = new();
@@ -41,12 +43,14 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
     public Action<Exception>? OnError { get; set; }
 
     public WebSocketClientConnection(
+        TcpClient tcpClient,
         WebSocket webSocket,
         IPAddress clientIpAddress,
         int clientPort,
         string path,
         ILogger? logger = null)
     {
+        _tcpClient = tcpClient;
         _webSocket = webSocket;
         ClientIpAddress = clientIpAddress;
         ClientPort = clientPort;
@@ -219,6 +223,7 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
         }
 
         _webSocket.Dispose();
+        _tcpClient.Dispose();
         _cts.Dispose();
     }
 }

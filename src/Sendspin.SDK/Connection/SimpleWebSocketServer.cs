@@ -191,6 +191,7 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
             var clientPort = remoteEndPoint?.Port ?? 0;
 
             var connection = new WebSocketClientConnection(
+                tcpClient,
                 webSocket,
                 clientIp,
                 clientPort,
