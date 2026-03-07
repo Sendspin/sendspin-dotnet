@@ -84,8 +84,9 @@ public sealed class DiagnosticAudioRingBuffer
         _sampleRate = sampleRate;
         _channels = channels;
 
-        // Calculate required capacity and round up to next power of 2
-        var requiredSamples = sampleRate * channels * durationSeconds;
+        // Calculate required capacity and round up to next power of 2.
+        // Use checked to prevent silent overflow producing a tiny buffer.
+        var requiredSamples = checked(sampleRate * channels * durationSeconds);
         _capacity = RoundUpToPowerOfTwo(requiredSamples);
         _mask = _capacity - 1;
         _buffer = new float[_capacity];
