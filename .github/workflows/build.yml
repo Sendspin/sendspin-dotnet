@@ -74,6 +74,10 @@ jobs:
       packages: write
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -97,7 +101,30 @@ jobs:
       - name: Push to GitHub Packages
         run: dotnet nuget push "artifacts/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/Sendspin/index.json --skip-duplicate
 
-      - name: Create GitHub Release
+      - name: Extract tag message
+        id: tag-message
+        run: |
+          # Get the annotated tag message (empty for lightweight tags)
+          TAG_MSG=$(git tag -l --format='%(contents)' "${{ github.ref_name }}" 2>/dev/null || true)
+          if [ -n "$TAG_MSG" ]; then
+            # Write to file to preserve newlines
+            echo "$TAG_MSG" > /tmp/release-notes.md
+            echo "has_notes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_notes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release (with notes)
+        if: steps.tag-message.outputs.has_notes == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release-notes.md
+          files: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+
+      - name: Create GitHub Release (auto-generated)
+        if: steps.tag-message.outputs.has_notes != 'true'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
