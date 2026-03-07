@@ -280,6 +280,9 @@ public sealed class SendspinHostService : IAsyncDisposable
     {
         // All code must be inside try-catch since async void exceptions crash the app
         string? connectionId = null;
+        SendspinClientService? client = null;
+        var registered = false;
+
         try
         {
             connectionId = Guid.NewGuid().ToString("N")[..8];
@@ -293,7 +296,7 @@ public sealed class SendspinHostService : IAsyncDisposable
             // Use the shared clock synchronizer if provided, otherwise create a per-connection one
             var clockSync = _clockSynchronizer
                 ?? new KalmanClockSynchronizer(_loggerFactory.CreateLogger<KalmanClockSynchronizer>());
-            var client = new SendspinClientService(
+            client = new SendspinClientService(
                 _loggerFactory.CreateLogger<SendspinClientService>(),
                 connection,
                 clockSync,
@@ -353,6 +356,8 @@ public sealed class SendspinHostService : IAsyncDisposable
                 _connections[serverId] = activeConnection;
             }
 
+            registered = true;
+
             _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
                 serverId, client.ServerName);
 
@@ -367,6 +372,22 @@ public sealed class SendspinHostService : IAsyncDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling server connection {ConnectionId}", connectionId ?? "unknown");
+        }
+        finally
+        {
+            // If the client was created but never registered in _connections,
+            // dispose it to prevent leaking the WebSocket, semaphore, and CTS.
+            if (client is not null && !registered)
+            {
+                try
+                {
+                    await client.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Error disposing unregistered client {ConnectionId}", connectionId);
+                }
+            }
         }
     }
 
