@@ -276,15 +276,25 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
     }
 
-    private async void OnServerConnected(object? sender, WebSocketClientConnection webSocket)
+    private void OnServerConnected(object? sender, WebSocketClientConnection webSocket)
     {
-        // All code must be inside try-catch since async void exceptions crash the app
+        HandleServerConnectedAsync(webSocket).SafeFireAndForget(_logger);
+    }
+
+    private async Task HandleServerConnectedAsync(WebSocketClientConnection webSocket)
+    {
         string? connectionId = null;
         SendspinClientService? client = null;
         var registered = false;
 
         try
         {
+            // Guard against connections arriving after the listener has been stopped
+            if (!_listener.IsListening)
+            {
+                _logger.LogDebug("Ignoring connection — listener is stopping");
+                return;
+            }
             connectionId = Guid.NewGuid().ToString("N")[..8];
             _logger.LogInformation("New server connection: {ConnectionId}", connectionId);
             // Create connection wrapper for WebSocket
