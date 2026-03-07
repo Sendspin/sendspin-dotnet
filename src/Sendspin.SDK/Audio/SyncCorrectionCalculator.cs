@@ -259,18 +259,8 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         var absError = Math.Abs(smoothedMicroseconds);
 
         // Thresholds from options
-        var deadbandThreshold = _options.EntryDeadbandMicroseconds;
+        var deadbandThreshold = _options.DeadbandMicroseconds;
         var resamplingThreshold = _options.ResamplingThresholdMicroseconds;
-
-        // Use exit deadband (hysteresis) if we're currently correcting
-        if (_currentMode != SyncCorrectionMode.None && absError < _options.ExitDeadbandMicroseconds)
-        {
-            _currentMode = SyncCorrectionMode.None;
-            _targetPlaybackRate = 1.0;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
-            return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
-        }
 
         // Tier 1: Deadband - error is small enough to ignore
         if (absError < deadbandThreshold)

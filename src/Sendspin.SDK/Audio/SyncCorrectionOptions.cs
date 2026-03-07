@@ -29,11 +29,6 @@ namespace Sendspin.SDK.Audio;
 /// filter jitter and prevent oscillation. Proportional correction prevents overshoot
 /// by adjusting rate based on error magnitude rather than using fixed rate steps.
 /// </para>
-/// <para>
-/// <b>Note:</b> The <see cref="EntryDeadbandMicroseconds"/>, <see cref="ExitDeadbandMicroseconds"/>,
-/// and <see cref="BypassDeadband"/> properties are retained for backward compatibility but are no
-/// longer used.
-/// </para>
 /// </remarks>
 /// <example>
 /// <code>
@@ -48,36 +43,15 @@ namespace Sendspin.SDK.Audio;
 public sealed class SyncCorrectionOptions
 {
     /// <summary>
-    /// Gets or sets the error threshold to START correcting (microseconds).
+    /// Gets or sets the deadband threshold (microseconds).
+    /// Sync errors below this are ignored — no correction is applied.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// <b>Deprecated:</b> This property is no longer used. The sync correction now uses
-    /// fixed discrete thresholds matching the JS library: 1ms deadband, 8ms for 1% correction,
-    /// 15ms for 2% correction.
-    /// </para>
-    /// <para>
-    /// Retained for backward compatibility. Default: 2000 (2ms).
-    /// </para>
+    /// Matches the JS/CLI spec: 1ms deadband. Errors within this range are
+    /// considered "in sync" and do not trigger rate adjustment or frame manipulation.
+    /// Default: 1000 (1ms).
     /// </remarks>
-    [Obsolete("No longer used. Discrete thresholds are now fixed to match JS library.")]
-    public long EntryDeadbandMicroseconds { get; set; } = 2_000;
-
-    /// <summary>
-    /// Gets or sets the error threshold to STOP correcting (microseconds).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Deprecated:</b> This property is no longer used. The hysteresis deadband has been
-    /// removed in favor of EMA smoothing and discrete rate steps, which provide more stable
-    /// correction without oscillation.
-    /// </para>
-    /// <para>
-    /// Retained for backward compatibility. Default: 500 (0.5ms).
-    /// </para>
-    /// </remarks>
-    [Obsolete("No longer used. Hysteresis replaced by EMA smoothing.")]
-    public long ExitDeadbandMicroseconds { get; set; } = 500;
+    public long DeadbandMicroseconds { get; set; } = 1_000;
 
     /// <summary>
     /// Gets or sets the maximum playback rate adjustment (0.0 to 1.0).
@@ -195,23 +169,6 @@ public sealed class SyncCorrectionOptions
     public long ScheduledStartGraceWindowMicroseconds { get; set; } = 10_000;
 
     /// <summary>
-    /// Gets or sets whether to bypass the deadband entirely.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Deprecated:</b> This property is no longer used. The sync correction now uses
-    /// EMA-smoothed error values with discrete rate steps, which eliminates the need for
-    /// deadband bypass. The EMA filter provides natural smoothing that handles small
-    /// errors without requiring continuous micro-adjustments.
-    /// </para>
-    /// <para>
-    /// Retained for backward compatibility. Default: false.
-    /// </para>
-    /// </remarks>
-    [Obsolete("No longer used. EMA smoothing replaces the need for deadband bypass.")]
-    public bool BypassDeadband { get; set; }
-
-    /// <summary>
     /// Gets the minimum playback rate (1.0 - MaxSpeedCorrection).
     /// </summary>
     public double MinRate => 1.0 - MaxSpeedCorrection;
@@ -227,25 +184,11 @@ public sealed class SyncCorrectionOptions
     /// <exception cref="ArgumentException">Thrown when options are invalid.</exception>
     public void Validate()
     {
-        if (EntryDeadbandMicroseconds < 0)
+        if (DeadbandMicroseconds < 0)
         {
             throw new ArgumentException(
-                "EntryDeadbandMicroseconds must be non-negative.",
-                nameof(EntryDeadbandMicroseconds));
-        }
-
-        if (ExitDeadbandMicroseconds < 0)
-        {
-            throw new ArgumentException(
-                "ExitDeadbandMicroseconds must be non-negative.",
-                nameof(ExitDeadbandMicroseconds));
-        }
-
-        if (ExitDeadbandMicroseconds >= EntryDeadbandMicroseconds && !BypassDeadband)
-        {
-            throw new ArgumentException(
-                "ExitDeadbandMicroseconds must be less than EntryDeadbandMicroseconds to create hysteresis.",
-                nameof(ExitDeadbandMicroseconds));
+                "DeadbandMicroseconds must be non-negative.",
+                nameof(DeadbandMicroseconds));
         }
 
         if (MaxSpeedCorrection is <= 0 or > 1.0)
@@ -311,8 +254,7 @@ public sealed class SyncCorrectionOptions
     /// <returns>A new instance with the same values.</returns>
     public SyncCorrectionOptions Clone() => new()
     {
-        EntryDeadbandMicroseconds = EntryDeadbandMicroseconds,
-        ExitDeadbandMicroseconds = ExitDeadbandMicroseconds,
+        DeadbandMicroseconds = DeadbandMicroseconds,
         MaxSpeedCorrection = MaxSpeedCorrection,
         CorrectionTargetSeconds = CorrectionTargetSeconds,
         ResamplingThresholdMicroseconds = ResamplingThresholdMicroseconds,
@@ -321,7 +263,6 @@ public sealed class SyncCorrectionOptions
         StartupGracePeriodMicroseconds = StartupGracePeriodMicroseconds,
         ScheduledStartGraceWindowMicroseconds = ScheduledStartGraceWindowMicroseconds,
         ReconnectStabilizationMicroseconds = ReconnectStabilizationMicroseconds,
-        BypassDeadband = BypassDeadband,
     };
 
     /// <summary>
@@ -338,8 +279,7 @@ public sealed class SyncCorrectionOptions
     /// </remarks>
     public static SyncCorrectionOptions CliDefaults => new()
     {
-        EntryDeadbandMicroseconds = 2_000,
-        ExitDeadbandMicroseconds = 500,
+        DeadbandMicroseconds = 1_000,
         MaxSpeedCorrection = 0.04,        // 4% vs Windows 2%
         CorrectionTargetSeconds = 2.0,    // 2s vs Windows 3s
         ResamplingThresholdMicroseconds = 15_000,
