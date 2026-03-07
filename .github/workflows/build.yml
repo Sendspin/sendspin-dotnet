@@ -3,6 +3,7 @@ name: Build
 on:
   push:
     branches: [main, dev]
+    tags: ['v*.*.*']
   pull_request:
     branches: [main, dev]
 
@@ -26,12 +27,17 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          BASE_VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
-          if [ "${{ github.ref }}" == "refs/heads/dev" ]; then
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # Release: version from tag (v7.3.0 → 7.3.0)
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [ "${{ github.ref }}" == "refs/heads/dev" ]; then
+            # Dev: pre-release suffix
+            BASE_VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
             SHORT_SHA=${GITHUB_SHA::7}
             VERSION="${BASE_VERSION}-dev.${SHORT_SHA}"
           else
-            VERSION="${BASE_VERSION}"
+            # Main branch push (no tag): use csproj version
+            VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "📦 Version: $VERSION"
@@ -60,7 +66,7 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: production
     permissions:
@@ -68,6 +74,10 @@ jobs:
       packages: write
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -90,3 +100,34 @@ jobs:
 
       - name: Push to GitHub Packages
         run: dotnet nuget push "artifacts/*.nupkg" --api-key ${{ secrets.GITHUB_TOKEN }} --source https://nuget.pkg.github.com/Sendspin/index.json --skip-duplicate
+
+      - name: Extract tag message
+        id: tag-message
+        run: |
+          # Get the annotated tag message (empty for lightweight tags)
+          TAG_MSG=$(git tag -l --format='%(contents)' "${{ github.ref_name }}" 2>/dev/null || true)
+          if [ -n "$TAG_MSG" ]; then
+            # Write to file to preserve newlines
+            echo "$TAG_MSG" > /tmp/release-notes.md
+            echo "has_notes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_notes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release (with notes)
+        if: steps.tag-message.outputs.has_notes == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release-notes.md
+          files: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+
+      - name: Create GitHub Release (auto-generated)
+        if: steps.tag-message.outputs.has_notes != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
