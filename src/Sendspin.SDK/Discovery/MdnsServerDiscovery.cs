@@ -381,19 +381,24 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
 
     private void CleanupStaleServers(object? state)
     {
-        var cutoff = DateTimeOffset.UtcNow - _serverTimeout;
-        var staleServers = _servers.Values
-            .Where(s => s.LastSeenAt < cutoff)
-            .ToList();
-
-        foreach (var server in staleServers)
+        // Schedule on the thread pool so ServerLost fires on a Task thread,
+        // consistent with ServerFound/ServerUpdated which fire from ScanAsync.
+        _ = Task.Run(() =>
         {
-            if (_servers.TryRemove(server.ServerId, out _))
+            var cutoff = DateTimeOffset.UtcNow - _serverTimeout;
+            var staleServers = _servers.Values
+                .Where(s => s.LastSeenAt < cutoff)
+                .ToList();
+
+            foreach (var server in staleServers)
             {
-                _logger.LogInformation("Server lost (timeout): {Server}", server);
-                ServerLost?.Invoke(this, server);
+                if (_servers.TryRemove(server.ServerId, out _))
+                {
+                    _logger.LogInformation("Server lost (timeout): {Server}", server);
+                    ServerLost?.Invoke(this, server);
+                }
             }
-        }
+        });
     }
 
     public async ValueTask DisposeAsync()
