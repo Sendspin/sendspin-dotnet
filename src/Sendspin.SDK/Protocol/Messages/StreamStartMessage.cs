@@ -38,4 +38,11 @@ public sealed class StreamStartPayload
     /// </summary>
     [JsonPropertyName("player")]
     public AudioFormat? Format { get; set; }
+
+    /// <summary>
+    /// Gets or sets the artwork channels the server is about to stream.
+    /// Null when the stream/start only carries player/audio info (no artwork key).
+    /// </summary>
+    [JsonPropertyName("artwork")]
+    public StreamStartArtwork? Artwork { get; set; }
 }
