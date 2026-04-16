@@ -37,6 +37,17 @@ public interface ISendspinClient : IAsyncDisposable
     ServerHelloPayload? LastServerHello { get; }
 
     /// <summary>
+    /// The most recent <c>stream/start</c> payload received from the server,
+    /// or <c>null</c> if no stream has started on this connection yet.
+    /// </summary>
+    /// <remarks>
+    /// Includes both <see cref="StreamStartPayload.Format"/> (player audio format) and
+    /// <see cref="StreamStartPayload.Artwork"/>. Either may be null depending on the stream type.
+    /// Replaced on every <c>stream/start</c>, including artwork-only updates.
+    /// </remarks>
+    StreamStartPayload? LastStreamStart { get; }
+
+    /// <summary>
     /// Current group state (volume/mute represent group averages for display).
     /// </summary>
     GroupState? CurrentGroup { get; }
@@ -144,4 +155,11 @@ public interface ISendspinClient : IAsyncDisposable
     /// same object cached on <see cref="LastServerHello"/>.
     /// </summary>
     event EventHandler<ServerHelloPayload>? ServerHelloReceived;
+
+    /// <summary>
+    /// Raised when a <c>stream/start</c> message is received and parsed.
+    /// Fires for every <c>stream/start</c>, whether it carries audio format, artwork metadata, or both.
+    /// The payload is the same object cached on <see cref="LastStreamStart"/>.
+    /// </summary>
+    event EventHandler<StreamStartPayload>? StreamStartReceived;
 }

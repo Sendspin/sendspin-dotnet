@@ -72,4 +72,90 @@ public class SendspinClientServiceEventTests
         // Subscribers observe the scalar property already set when the event fires.
         Assert.Equal("srv-1", serverIdAtEventTime);
     }
+
+    [Fact]
+    public void StreamStart_WithPlayerAndArtwork_RaisesEventAndCachesPayload()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        StreamStartPayload? received = null;
+        client.StreamStartReceived += (_, payload) => received = payload;
+
+        const string json = """
+        {
+            "type": "stream/start",
+            "payload": {
+                "player": { "codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16 },
+                "artwork": { "channels": [ { "source": "album", "format": "jpeg", "width": 512, "height": 512 } ] }
+            }
+        }
+        """;
+
+        connection.RaiseTextMessageReceived(json);
+
+        Assert.NotNull(received);
+        Assert.NotNull(received.Format);
+        Assert.Equal("pcm", received.Format.Codec);
+        Assert.NotNull(received.Artwork);
+        Assert.Single(received.Artwork.Channels);
+        Assert.Same(received, client.LastStreamStart);
+    }
+
+    [Fact]
+    public void StreamStart_ArtworkOnly_StillRaisesEvent()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        StreamStartPayload? received = null;
+        client.StreamStartReceived += (_, payload) => received = payload;
+
+        const string json = """
+        {
+            "type": "stream/start",
+            "payload": {
+                "artwork": { "channels": [ { "source": "album", "format": "jpeg", "width": 256, "height": 256 } ] }
+            }
+        }
+        """;
+
+        connection.RaiseTextMessageReceived(json);
+
+        Assert.NotNull(received);
+        Assert.Null(received.Format);
+        Assert.NotNull(received.Artwork);
+        Assert.Equal(256, received.Artwork.Channels[0].Width);
+    }
+
+    [Fact]
+    public void StreamStart_PlayerOnly_ArtworkNullOnPayload()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        StreamStartPayload? received = null;
+        client.StreamStartReceived += (_, payload) => received = payload;
+
+        const string json = """
+        {
+            "type": "stream/start",
+            "payload": {
+                "player": { "codec": "pcm", "sample_rate": 44100, "channels": 2, "bit_depth": 16 }
+            }
+        }
+        """;
+
+        connection.RaiseTextMessageReceived(json);
+
+        Assert.NotNull(received);
+        Assert.NotNull(received.Format);
+        Assert.Null(received.Artwork);
+    }
 }
