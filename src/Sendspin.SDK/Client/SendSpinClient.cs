@@ -74,6 +74,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public string? ConnectionReason { get; private set; }
 
+    /// <inheritdoc />
+    public ServerHelloPayload? LastServerHello { get; private set; }
+
     public GroupState? CurrentGroup => _currentGroup;
     public PlayerState CurrentPlayerState => _playerState;
     public ClockSyncStatus? ClockSyncStatus => _clockSynchronizer.GetStatus();
@@ -86,6 +89,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler? ArtworkCleared;
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
     public event EventHandler<SyncOffsetEventArgs>? SyncOffsetApplied;
+    public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
     public SendspinClientService(
         ILogger<SendspinClientService> logger,
@@ -403,9 +407,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        ServerId = message.ServerId;
-        ServerName = message.Name;
-        ConnectionReason = message.Payload.ConnectionReason;
+        var payload = message.Payload;
+        LastServerHello = payload;
+        ServerId = payload.ServerId;
+        ServerName = payload.Name;
+        ConnectionReason = payload.ConnectionReason;
 
         _logger.LogInformation("Server hello received: {ServerId} ({ServerName}), reason: {ConnectionReason}, roles: {Roles}",
             message.ServerId, message.Name, ConnectionReason ?? "none", string.Join(", ", message.ActiveRoles));
@@ -435,6 +441,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Start time synchronization loop with adaptive intervals
         StartTimeSyncLoop();
+
+        // Raise the typed event after state is populated but before awaiters of
+        // ConnectAsync wake up, so handlers see a fully initialized client.
+        ServerHelloReceived?.Invoke(this, payload);
 
         _handshakeTcs?.TrySetResult(true);
     }

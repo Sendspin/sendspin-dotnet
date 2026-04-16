@@ -1,5 +1,6 @@
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Client;
@@ -23,6 +24,17 @@ public interface ISendspinClient : IAsyncDisposable
     /// Server name after successful connection.
     /// </summary>
     string? ServerName { get; }
+
+    /// <summary>
+    /// The most recent <c>server/hello</c> payload received from the server,
+    /// or <c>null</c> if the handshake has not yet completed.
+    /// </summary>
+    /// <remarks>
+    /// Exposes fields that the scalar <see cref="ServerId"/>/<see cref="ServerName"/> properties
+    /// don't surface, notably <see cref="ServerHelloPayload.ActiveRoles"/> and
+    /// <see cref="ServerHelloPayload.Version"/>. Re-set on every reconnect handshake.
+    /// </remarks>
+    ServerHelloPayload? LastServerHello { get; }
 
     /// <summary>
     /// Current group state (volume/mute represent group averages for display).
@@ -125,4 +137,11 @@ public interface ISendspinClient : IAsyncDisposable
     /// The offset adjusts the static delay to compensate for speaker/room acoustics.
     /// </summary>
     event EventHandler<SyncOffsetEventArgs>? SyncOffsetApplied;
+
+    /// <summary>
+    /// Raised when a <c>server/hello</c> message is received and parsed.
+    /// Fires once per successful handshake (including reconnects). The payload is the
+    /// same object cached on <see cref="LastServerHello"/>.
+    /// </summary>
+    event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 }
