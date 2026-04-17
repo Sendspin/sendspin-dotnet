@@ -99,6 +99,20 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler? ArtworkCleared;
 
     /// <summary>
+    /// Raised when any connected client receives a <c>server/hello</c>.
+    /// Fires once per server handshake (including reconnects). Multiple concurrent
+    /// connections will each raise this event independently — consumers that care
+    /// about per-server state should key off <see cref="ServerHelloPayload.ServerId"/>.
+    /// </summary>
+    public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
+
+    /// <summary>
+    /// Raised when any connected client receives a <c>stream/start</c>.
+    /// Fires once per stream/start frame (audio, artwork, or both).
+    /// </summary>
+    public event EventHandler<StreamStartPayload>? StreamStartReceived;
+
+    /// <summary>
     /// Raised when the last-played server ID changes.
     /// Consumers should persist this value so it survives app restarts.
     /// </summary>
@@ -327,6 +341,8 @@ public sealed class SendspinHostService : IAsyncDisposable
             client.PlayerStateChanged += (s, p) => PlayerStateChanged?.Invoke(this, p);
             client.ArtworkReceived += (s, data) => ArtworkReceived?.Invoke(this, data);
             client.ArtworkCleared += (s, e) => ArtworkCleared?.Invoke(this, EventArgs.Empty);
+            client.ServerHelloReceived += (s, payload) => ServerHelloReceived?.Invoke(this, payload);
+            client.StreamStartReceived += (s, payload) => StreamStartReceived?.Invoke(this, payload);
 
             // Start the connection (begins receive loop)
             await connection.StartAsync();

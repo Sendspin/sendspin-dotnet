@@ -4,6 +4,12 @@
 [Ll]og/
 [Ll]ogs/
 
+#Local Notes
+.localnotes/*
+
+# Git worktrees
+.worktrees/
+
 # Visual Studio files
 .vs/
 *.suo

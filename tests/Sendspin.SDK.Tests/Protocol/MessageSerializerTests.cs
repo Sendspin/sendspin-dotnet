@@ -91,4 +91,50 @@ public class MessageSerializerTests
             Assert.IsType(expectedType, msg);
         }
     }
+
+    [Fact]
+    public void Deserialize_StreamStartMessage_ParsesArtworkChannels()
+    {
+        var json = """
+        {
+            "type": "stream/start",
+            "payload": {
+                "artwork": {
+                    "channels": [
+                        { "source": "album", "format": "jpeg", "width": 512, "height": 512 }
+                    ]
+                }
+            }
+        }
+        """;
+
+        var msg = MessageSerializer.Deserialize(json) as StreamStartMessage;
+
+        Assert.NotNull(msg);
+        Assert.NotNull(msg.Payload.Artwork);
+        var channel = Assert.Single(msg.Payload.Artwork.Channels);
+        Assert.Equal("album", channel.Source);
+        Assert.Equal("jpeg", channel.Format);
+        Assert.Equal(512, channel.Width);
+        Assert.Equal(512, channel.Height);
+    }
+
+    [Fact]
+    public void Deserialize_StreamStartMessage_ArtworkAbsent_YieldsNull()
+    {
+        var json = """
+        {
+            "type": "stream/start",
+            "payload": {
+                "player": { "codec": "pcm", "sample_rate": 48000, "channels": 2, "bit_depth": 16 }
+            }
+        }
+        """;
+
+        var msg = MessageSerializer.Deserialize(json) as StreamStartMessage;
+
+        Assert.NotNull(msg);
+        Assert.Null(msg.Payload.Artwork);
+        Assert.NotNull(msg.Payload.Format);
+    }
 }

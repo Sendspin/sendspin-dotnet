@@ -74,6 +74,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public string? ConnectionReason { get; private set; }
 
+    /// <inheritdoc />
+    public ServerHelloPayload? LastServerHello { get; private set; }
+
+    /// <inheritdoc />
+    public StreamStartPayload? LastStreamStart { get; private set; }
+
     public GroupState? CurrentGroup => _currentGroup;
     public PlayerState CurrentPlayerState => _playerState;
     public ClockSyncStatus? ClockSyncStatus => _clockSynchronizer.GetStatus();
@@ -86,6 +92,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler? ArtworkCleared;
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
     public event EventHandler<SyncOffsetEventArgs>? SyncOffsetApplied;
+    public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
+
+    public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
     public SendspinClientService(
         ILogger<SendspinClientService> logger,
@@ -403,9 +412,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        ServerId = message.ServerId;
-        ServerName = message.Name;
-        ConnectionReason = message.Payload.ConnectionReason;
+        var payload = message.Payload;
+        LastServerHello = payload;
+        ServerId = payload.ServerId;
+        ServerName = payload.Name;
+        ConnectionReason = payload.ConnectionReason;
 
         _logger.LogInformation("Server hello received: {ServerId} ({ServerName}), reason: {ConnectionReason}, roles: {Roles}",
             message.ServerId, message.Name, ConnectionReason ?? "none", string.Join(", ", message.ActiveRoles));
@@ -435,6 +446,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Start time synchronization loop with adaptive intervals
         StartTimeSyncLoop();
+
+        // Raise the typed event after state is populated but before awaiters of
+        // ConnectAsync wake up, so handlers see a fully initialized client.
+        ServerHelloReceived?.Invoke(this, payload);
 
         _handshakeTcs?.TrySetResult(true);
     }
@@ -910,14 +925,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        var payload = message.Payload;
+        LastStreamStart = payload;
+        StreamStartReceived?.Invoke(this, payload);
+
         // stream/start with no "player" key is artwork-only — skip pipeline start
-        if (message.Format is null)
+        if (payload.Format is null)
         {
             _logger.LogDebug("Stream start is artwork-only (no player key), skipping pipeline start");
             return;
         }
 
-        _logger.LogInformation("Stream starting: {Format}", message.Format);
+        _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
         // Clear any stale chunks from previous streams
         while (_earlyChunkQueue.TryDequeue(out _))
@@ -943,7 +962,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             try
             {
-                await _audioPipeline.StartAsync(message.Format);
+                await _audioPipeline.StartAsync(payload.Format);
 
                 // Drain any chunks that arrived during initialization
                 var drainedCount = 0;
