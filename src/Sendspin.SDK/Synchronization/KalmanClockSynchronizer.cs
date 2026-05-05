@@ -360,9 +360,12 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             _covariance = (1 - k0) * p01;
             _driftVariance = p11 - k1 * p01;
 
-            // Ensure covariance stays positive definite
-            if (_offsetVariance < 0) _offsetVariance = 1;
-            if (_driftVariance < 0) _driftVariance = 0.01;
+            // Floor to a tiny positive value if FP error pushes the simplified covariance
+            // update below zero. Recovery values are small enough to be effectively invisible
+            // versus typical measurement noise but prevent NaN cascades on subsequent updates.
+            const double VarianceFloor = 1e-6;
+            if (_offsetVariance < VarianceFloor) _offsetVariance = VarianceFloor;
+            if (_driftVariance < VarianceFloor) _driftVariance = VarianceFloor;
 
             _lastUpdateTime = t4;
             _measurementCount++;
@@ -462,8 +465,8 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// </summary>
     public double StaticDelayMs
     {
-        get => _staticDelayMicroseconds / 1000.0;
-        set => _staticDelayMicroseconds = (long)(value * 1000);
+        get { lock (_lock) return _staticDelayMicroseconds / 1000.0; }
+        set { lock (_lock) _staticDelayMicroseconds = (long)(value * 1000); }
     }
 
     /// <summary>
