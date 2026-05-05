@@ -305,6 +305,56 @@ public class KalmanClockSynchronizerTests
             "If this regressed, check the measurement-variance formula (upstream PR #6).");
     }
 
+    // =========================================================================
+    // Two-stage initialization — see upstream sendspin_time_filter.cpp:53-75
+    //
+    // First measurement seeds offset and offset_variance from the measurement.
+    // Second measurement bootstraps drift via finite differences and propagates
+    // measurement uncertainties into drift_variance.
+    // =========================================================================
+
+    [Fact]
+    public void Init_AfterFirstMeasurement_OffsetUncertaintyEqualsMeasurementStdDev()
+    {
+        // Upstream initializes offset_variance to (max_error × maxErrorScale)² on the
+        // first measurement. Old C# code left it at the Reset default (~1e12), so a
+        // single measurement claimed ≈1 second of uncertainty regardless of RTT.
+        // RTT = 1900 µs → max_error = 950 → uncertainty (default scale 0.5) = 475.
+        _sync.ProcessMeasurement(0, 5000, 5100, 2000);
+
+        var status = _sync.GetStatus();
+
+        Assert.Equal(1, status.MeasurementCount);
+        Assert.Equal(475.0, status.OffsetUncertaintyMicroseconds, precision: 0);
+    }
+
+    [Fact]
+    public void DriftBootstrap_AfterTwoMeasurements_EstimatesDriftFromFiniteDifference()
+    {
+        // Two measurements 1 second apart with apparent offset shifting by 1000 µs.
+        // Upstream bootstrap: drift = (z1 - z0) / dt = 1000 µs/s.
+        // Old C# code (no bootstrap) ran the standard Kalman update with a very
+        // high drift prior, producing drift ≈ 0 after these inputs.
+        _sync.ProcessMeasurement(0, 5000, 5100, 2000);                          // z0 = 4050
+        _sync.ProcessMeasurement(1_000_000, 1_005_000 + 1000, 1_005_100 + 1000, 1_002_000); // z1 = 5050
+
+        var status = _sync.GetStatus();
+
+        Assert.Equal(2, status.MeasurementCount);
+        Assert.Equal(1000.0, status.DriftMicrosecondsPerSecond, precision: 0);
+    }
+
+    [Fact]
+    public void DriftBootstrap_NoDriftSignal_EstimatesNearZero()
+    {
+        // Two identical measurements 1 second apart → drift ≈ 0.
+        _sync.ProcessMeasurement(0, 5000, 5100, 2000);
+        _sync.ProcessMeasurement(1_000_000, 1_005_000, 1_005_100, 1_002_000);
+
+        var status = _sync.GetStatus();
+        Assert.Equal(0.0, status.DriftMicrosecondsPerSecond, precision: 0);
+    }
+
     [Fact]
     public void DriftSignificanceThreshold_LowerThresholdAcceptsWeakerSignals()
     {

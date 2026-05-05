@@ -209,10 +209,13 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     {
         lock (_lock)
         {
+            // Variance placeholders shown to callers via OffsetUncertainty/GetStatus
+            // before the first measurement arrives; both init branches in
+            // ProcessMeasurement overwrite these once measurements start flowing.
             _offset = 0;
             _drift = 0;
-            _offsetVariance = 1e12;  // Start with very high uncertainty (1 second)
-            _driftVariance = 1e6;    // 1000 μs/s uncertainty
+            _offsetVariance = 1e12;
+            _driftVariance = 1e6;
             _covariance = 0;
             _lastUpdateTime = 0;
             _measurementCount = 0;
@@ -241,12 +244,21 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
         // zero or negative measurement variance / forgetting thresholds.
         double maxError = Math.Max(rtt / 2.0, 1.0);
 
+        // Measurement variance derived from max_error (used in init branches and update step).
+        double measurementStdDev = maxError * _maxErrorScale;
+        double measurementVariance = _measurementNoiseFloor + measurementStdDev * measurementStdDev;
+
         lock (_lock)
         {
-            // First measurement: initialize state
+            // First measurement: seed offset directly from the measurement; defer drift
+            // estimation until the next measurement provides a finite-difference baseline.
             if (_measurementCount == 0)
             {
                 _offset = measuredOffset;
+                _offsetVariance = measurementVariance;
+                _drift = 0;
+                _driftVariance = 0;
+                _covariance = 0;
                 _lastUpdateTime = t4;
                 _measurementCount = 1;
 
@@ -261,6 +273,21 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             if (dt <= 0)
             {
                 _logger?.LogWarning("Non-positive time delta: {Dt}s, skipping measurement", dt);
+                return;
+            }
+
+            // Second measurement: bootstrap drift from finite differences.
+            // Propagating the two offset variances through the (z1-z0)/dt operation
+            // gives drift_variance = (R0 + R1) / dt². Matches upstream cpp:64-75.
+            if (_measurementCount == 1)
+            {
+                _drift = (measuredOffset - _offset) / dt;
+                _driftVariance = (_offsetVariance + measurementVariance) / (dt * dt);
+                _offset = measuredOffset;
+                _offsetVariance = measurementVariance;
+                _covariance = 0;
+                _lastUpdateTime = t4;
+                _measurementCount = 2;
                 return;
             }
 
@@ -312,11 +339,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             // ═══════════════════════════════════════════════════════════════════
             // We only measure the offset directly, H = [1, 0]
 
-            // Measurement variance: max_error is a worst-case bound (RTT/2), not
-            // a 1σ estimate; scale it before squaring so we don't over-inflate R
-            // and under-weight new measurements. See upstream PR #6.
-            double measurementStdDev = maxError * _maxErrorScale;
-            double measurementVariance = _measurementNoiseFloor + measurementStdDev * measurementStdDev;
+            // measurementVariance was computed above so the init branches can use it.
 
             // Innovation (measurement residual)
             double innovation = measuredOffset - predictedOffset;
