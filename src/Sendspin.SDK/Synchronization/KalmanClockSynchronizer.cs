@@ -427,29 +427,19 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// Converts a server timestamp to client time.
     /// </summary>
     /// <param name="serverTime">Server time in microseconds.</param>
-    /// <returns>Estimated client time in microseconds.</returns>
+    /// <returns>Estimated client time in microseconds, with <see cref="StaticDelayMs"/> applied.</returns>
     /// <remarks>
-    /// <para>
-    /// Includes static delay: positive delay means play LATER (adds to client time).
-    /// This allows manual tuning to sync with other players.
-    /// </para>
-    /// <para>
-    /// Applies drift compensation when drift estimate is reliable, mirroring
-    /// the behavior of ClientToServerTime. This is critical for accurate audio
-    /// timestamp conversion during long playback sessions.
-    /// </para>
+    /// Subtracts <see cref="StaticDelayMs"/> from the converted client time per the Sendspin
+    /// protocol spec (positive value compensates for hardware delay; audio is scheduled earlier
+    /// from the digital pipeline so it emerges from external speakers/amplifiers on time).
     /// </remarks>
     public long ServerToClientTime(long serverTime)
     {
         lock (_lock)
         {
-            // Account for drift since last update (mirrors ClientToServerTime behavior)
-            // This is critical for audio sync - without drift compensation, timestamps
-            // drift apart during playback causing progressive sync errors
             if (_lastUpdateTime > 0)
             {
-                // We need elapsed time since last update to extrapolate drift.
-                // Use the approximate client time to calculate elapsed seconds.
+                // Approximate client time used only to compute elapsed seconds for drift extrapolation.
                 long approxClientTime = serverTime - (long)_offset;
                 double elapsedSeconds = (approxClientTime - _lastUpdateTime) / 1_000_000.0;
 
@@ -457,17 +447,18 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                     ? _offset + _drift * elapsedSeconds
                     : _offset;
 
-                // Static delay is added (positive = play later, per user preference)
-                return serverTime - (long)currentOffset + _staticDelayMicroseconds;
+                return serverTime - (long)currentOffset - _staticDelayMicroseconds;
             }
 
-            return serverTime - (long)_offset + _staticDelayMicroseconds;
+            return serverTime - (long)_offset - _staticDelayMicroseconds;
         }
     }
 
     /// <summary>
-    /// Gets or sets the static delay in milliseconds.
-    /// Positive values delay playback (play later), negative values advance it (play earlier).
+    /// Gets or sets the static delay in milliseconds. Compensates for hardware delay beyond
+    /// the device's audio port (external speakers, amplifiers). Per the Sendspin protocol spec,
+    /// this value is subtracted from server timestamps when scheduling playback: positive values
+    /// schedule audio earlier from the digital pipeline; negative values schedule it later.
     /// </summary>
     public double StaticDelayMs
     {
@@ -544,8 +535,10 @@ public interface IClockSynchronizer
     ClockSyncStatus GetStatus();
 
     /// <summary>
-    /// Gets or sets the static delay in milliseconds.
-    /// Positive values delay playback (play later), negative values advance it (play earlier).
+    /// Gets or sets the static delay in milliseconds. Compensates for hardware delay beyond
+    /// the audio port (external speakers, amplifiers). Per the Sendspin protocol spec, the
+    /// value is subtracted from server timestamps when scheduling playback: positive values
+    /// schedule audio earlier; negative values schedule it later.
     /// </summary>
     double StaticDelayMs { get; set; }
 }

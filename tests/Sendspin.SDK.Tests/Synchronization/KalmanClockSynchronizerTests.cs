@@ -116,8 +116,18 @@ public class KalmanClockSynchronizerTests
         Assert.InRange(Math.Abs(roundTripped - clientTime), 0, 5);
     }
 
+    // Per Sendspin protocol spec and all reference implementations
+    // (sendspin-cpp, SendspinKit, sendspin-js, aiosendspin), positive
+    // static_delay_ms is SUBTRACTED from server timestamps to compensate
+    // for hardware delay beyond the audio port. The audio is scheduled
+    // earlier from the digital pipeline so it emerges from external
+    // hardware (speakers, amplifiers) on time relative to peers.
+    //
+    // The previous C# behavior (positive = play later, ADD to client time)
+    // was opposite to spec; see .localNotes/static-delay-research/FINDINGS.md.
+
     [Fact]
-    public void StaticDelay_AffectsServerToClientTime()
+    public void StaticDelay_PositiveValue_AdvancesPlaybackEarlier()
     {
         _sync.ProcessMeasurement(0, 5000, 5100, 10_000);
         _sync.ProcessMeasurement(100_000, 105_000, 105_100, 110_000);
@@ -125,10 +135,42 @@ public class KalmanClockSynchronizerTests
         long serverTime = 200_000L;
         long withoutDelay = _sync.ServerToClientTime(serverTime);
 
-        _sync.StaticDelayMs = 10.0; // 10ms = 10000μs
+        _sync.StaticDelayMs = 10.0; // 10 ms = 10000 µs of hardware compensation
         long withDelay = _sync.ServerToClientTime(serverTime);
 
-        Assert.Equal(10_000, withDelay - withoutDelay);
+        // Positive static_delay subtracts from the converted client time,
+        // so the scheduled play time is 10 ms earlier.
+        Assert.Equal(-10_000, withDelay - withoutDelay);
+    }
+
+    [Fact]
+    public void StaticDelay_NegativeValue_DelaysPlaybackLater()
+    {
+        _sync.ProcessMeasurement(0, 5000, 5100, 10_000);
+        _sync.ProcessMeasurement(100_000, 105_000, 105_100, 110_000);
+
+        long serverTime = 200_000L;
+        long withoutDelay = _sync.ServerToClientTime(serverTime);
+
+        _sync.StaticDelayMs = -5.0; // negative compensation → schedule later
+        long withDelay = _sync.ServerToClientTime(serverTime);
+
+        Assert.Equal(5_000, withDelay - withoutDelay);
+    }
+
+    [Fact]
+    public void StaticDelay_ZeroValue_NoOp()
+    {
+        _sync.ProcessMeasurement(0, 5000, 5100, 10_000);
+        _sync.ProcessMeasurement(100_000, 105_000, 105_100, 110_000);
+
+        long serverTime = 200_000L;
+        long withoutDelay = _sync.ServerToClientTime(serverTime);
+
+        _sync.StaticDelayMs = 0.0;
+        long withDelay = _sync.ServerToClientTime(serverTime);
+
+        Assert.Equal(0, withDelay - withoutDelay);
     }
 
     // =========================================================================

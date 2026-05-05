@@ -45,9 +45,10 @@ public sealed class ClientSyncOffsetPayload
     required public string PlayerId { get; init; }
 
     /// <summary>
-    /// Offset in milliseconds to apply.
-    /// Positive = delay playback (plays later)
-    /// Negative = advance playback (plays earlier)
+    /// Offset in milliseconds to apply, written into the player's
+    /// <c>static_delay_ms</c>. Per the Sendspin protocol spec the value is subtracted from
+    /// server timestamps when scheduling playback: positive values schedule audio earlier
+    /// (compensating for downstream hardware delay); negative values schedule it later.
     /// </summary>
     [JsonPropertyName("offset_ms")]
     public double OffsetMs { get; init; }

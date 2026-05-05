@@ -11,8 +11,11 @@ public sealed class SyncOffsetEventArgs : EventArgs
     public string PlayerId { get; }
 
     /// <summary>
-    /// The offset in milliseconds that was applied.
-    /// Positive = delay playback, Negative = advance playback.
+    /// The offset in milliseconds that was applied to the player's
+    /// <see cref="Sendspin.SDK.Synchronization.IClockSynchronizer.StaticDelayMs"/>. Per the Sendspin
+    /// protocol spec the value is subtracted from server timestamps when scheduling playback:
+    /// positive values advance playback (compensating for downstream hardware delay), negative
+    /// values delay it.
     /// </summary>
     public double OffsetMs { get; }
 

@@ -306,15 +306,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
-            // Scheduled start logic: wait for the target playback time before starting
-            // This enables the StaticDelayMs feature to work correctly.
-            //
-            // The first segment's LocalPlaybackTime includes any static delay from
-            // IClockSynchronizer.ServerToClientTime(). By waiting for this time to arrive,
-            // positive static delay causes us to start later (as intended).
-            //
-            // Without this, we'd start immediately and the static delay would only affect
-            // sync error calculation, which can't handle large offsets (exceeds re-anchor threshold).
+            // Scheduled start: wait for the first segment's LocalPlaybackTime before emitting audio.
+            // LocalPlaybackTime already has StaticDelayMs applied by IClockSynchronizer.ServerToClientTime
+            // (subtracted per spec, so positive static_delay schedules earlier). Without this wait,
+            // we'd start immediately and the static delay would only affect sync error calculation,
+            // which can't handle large offsets (exceeds re-anchor threshold).
             if (_segments.Count > 0 && !_playbackStarted)
             {
                 var firstSegment = _segments.Peek();
