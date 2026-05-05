@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Sendspin.SDK</PackageId>
-    <Version>7.4.0</Version>
+    <Version>8.0.0</Version>
     <Authors>Sendspin Contributors</Authors>
     <Company>Sendspin</Company>
     <Product>Sendspin SDK</Product>
@@ -20,6 +20,137 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
+v8.0.0 - Time-Filter Spec Conformance:
+
+This release brings KalmanClockSynchronizer into alignment with the upstream
+Sendspin time-filter reference (github.com/Sendspin/time-filter) and the
+protocol spec for static_delay_ms. Six audit findings worth of correctness
+fixes against PR #5 (drift SNR gate), PR #6 (measurement-variance defaults),
+the spec's static_delay_ms convention, and the README's recommended sequential
+burst pattern.
+
+BREAKING CHANGES:
+
+KalmanClockSynchronizer constructor:
+- `measurementNoise` renamed to `measurementNoiseFloor`; default changed
+  from 10000 µs² to 0 µs² to match upstream. The previous floor had no
+  equivalent in the reference and over-inflated R on low-RTT paths,
+  preventing the filter from converging tighter than ~32 µs uncertainty
+  on localhost / loopback / USB even with 100+ measurements.
+- `forgetFactor` default changed from 1.0 to 2.0. The previous 1.0 produced
+  a forget_variance_factor of 1.0, which silently disabled adaptive
+  forgetting in every default-constructed instance (the internal gate
+  `_forgetVarianceFactor &gt; 1.0` was permanently false). Network-disruption
+  recovery never fired.
+- `adaptiveCutoff` default changed from 0.75 to 3.0 AND its semantic
+  changed: the threshold is now `cutoff × max_error` (RTT-based, matches
+  upstream cpp:99) instead of `cutoff × √(predicted_variance)` (Kalman-
+  state-based). Consumers passing this value explicitly will see
+  substantially different forgetting behavior. Reset to 3.0 unless you have
+  a specific tuning reason.
+- New `maxErrorScale` parameter (default 0.5). max_error is a worst-case
+  bound (RTT/2), not a 1σ estimate; scaling before squaring it into R
+  matches upstream PR #6.
+- New `driftSignificanceThreshold` parameter (default 2.0). Mirrors
+  upstream's drift_significance_threshold from PR #5.
+
+ServerToClientTime sign convention (static_delay_ms):
+- The value held in `StaticDelayMs` is now SUBTRACTED from the converted
+  client time (was added). Per the Sendspin spec and every reference
+  implementation (sendspin-cpp, SendspinKit, sendspin-js, aiosendspin),
+  positive static_delay_ms compensates for downstream hardware delay by
+  scheduling audio earlier from the digital pipeline.
+- The previous SDK behavior produced approximately 2× the configured
+  delay's worth of error against a spec-conformant server: the SDK
+  applied the value with the wrong sign locally AND sent the same value
+  over the wire in client/state for the server to compensate. Both halves
+  pulled in the wrong direction.
+- Consumers using non-zero `StaticDelayMs` through a UI slider need to
+  flip their sign convention: positive means "play earlier" / "compensate
+  hardware delay" now.
+
+`ClientSyncOffsetPayload.OffsetMs` and `SyncOffsetEventArgs.OffsetMs`:
+- Documentation aligned with the new spec convention. The wire format is
+  unchanged; only the semantic of positive vs negative values flipped to
+  match StaticDelayMs.
+
+ALGORITHMIC FIXES:
+
+- Drift compensation gate now uses an SNR / z-score test
+  (|drift| &gt; k × σ_drift, default k = 2.0) instead of an absolute
+  uncertainty threshold (σ_drift &lt; 50 µs/s). The previous gate could apply
+  a drift correction whose uncertainty exceeded its magnitude, making
+  timestamps actively worse than no compensation. Ports upstream PR #5.
+- Two-stage initialization: the second measurement now bootstraps drift
+  via finite differences (drift = (z1 - z0) / dt) and propagates the two
+  measurement variances into drift_variance = (R0 + R1) / dt². The
+  previous code went straight to the standard Kalman update with a 1e6
+  drift_variance prior, producing a drift gain of ~1e-6 and effectively
+  zero drift estimate after two measurements. Matches upstream cpp:53-75.
+- Adaptive forgetting threshold is now RTT-aware (3 × max_error). The
+  previous Kalman-state-based threshold (0.75 × √variance) could fire on
+  microsecond-scale jitter once the filter converged.
+- max_error floored to 1µs to prevent zero-variance NaN cascades on
+  localhost (RTT = 0) and pathological clock-skew (RTT &lt; 0). Matches the
+  SwiftKit port's clamp.
+- Covariance variance floor lowered from arbitrary 1.0 / 0.01 µs² to a
+  uniform 1e-6 µs². The simplified Kalman covariance update's underflow
+  recovery is now effectively invisible against measurement noise instead
+  of causing observable state discontinuities.
+
+TIME-SYNC BURST LOOP:
+
+- Probes are now sent sequentially: each client/time message is awaited
+  individually with a 2-second per-probe timeout before the next is sent.
+  The previous fire-and-forget pattern shared a TCP send window across all
+  8 probes, correlating their RTTs via head-of-line blocking and defeating
+  the burst's purpose ("find the cleanest sample"). Matches the JS
+  reference player and sendspin-cpp.
+- Concurrent-burst guard: the continuous time-sync loop and the smart-sync
+  trigger in HandleStreamStart can no longer wedge each other's
+  TaskCompletionSource. Interlocked.CompareExchange flag matches JS's
+  timeSyncBurstActive guard.
+- Late / unmatched server/time responses are now discarded rather than
+  fed to ProcessMeasurement directly. Prevents a slow sample from
+  polluting burst-best selection.
+
+OTHER:
+
+- `KalmanClockSynchronizer.StaticDelayMs` getter and setter are now lock-
+  protected for consistency with the other public properties on the class.
+- `KalmanClockSynchronizer.SendTimeSyncBurstAsync` is now `internal`
+  (visible only to the test assembly via InternalsVisibleTo) for direct
+  invocation in regression tests.
+
+TEST COVERAGE:
+
+14 new xUnit tests added (now 85 total, up from 71): drift SNR gate (4),
+measurement-variance + adaptive forgetting + localhost (3), two-stage
+initialization (3), static_delay_ms sign convention (3), and time-sync
+burst concurrent-call guard plus unmatched-response discard (2).
+
+Migration:
+
+If you construct KalmanClockSynchronizer with default arguments and never
+set StaticDelayMs, no migration is required — every default behavior is
+either identical or strictly more conformant.
+
+If you set StaticDelayMs to a non-zero value through a UI slider:
+- Flip the sign convention in your binding. A slider value that previously
+  produced "play later" behavior under v7.x will produce "play earlier"
+  under v8.x. Add a migration step to negate persisted values once on
+  upgrade if you want to preserve user intent.
+
+If you pass `adaptiveCutoff` or `forgetFactor` explicitly:
+- Reset to defaults (3.0 and 2.0) unless you have specific tuning reasons.
+  The semantic of adaptiveCutoff changed from σ-multiple to max_error-multiple.
+
+If you implement IClockSynchronizer directly (rather than using
+KalmanClockSynchronizer):
+- No interface signature changes. The XML doc on StaticDelayMs has been
+  updated to reflect the spec convention; review your implementation if
+  you previously inverted the sign internally.
+
 v7.4.0 - Typed Protocol Event Surface:
 
 New Features:
