@@ -172,13 +172,11 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
                 return null;
             }
 
-            // Log the raw host info for debugging
             _logger.LogInformation("mDNS Host: {DisplayName}, IPs: [{IPs}], Port: {Port}",
                 host.DisplayName,
                 string.Join(", ", host.IPAddresses),
                 service.Port);
 
-            // Extract TXT record properties
             var properties = new Dictionary<string, string>();
             foreach (var prop in service.Properties)
             {
@@ -194,7 +192,7 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
                 _logger.LogWarning("No TXT records found for host {Host}", host.DisplayName);
             }
 
-            // Get server ID from TXT record or generate from name
+            // Server ID from TXT records ("id" or "server_id"), falling back to host+IP.
             var rawServerId = properties.TryGetValue("id", out var id)
                 ? id
                 : properties.TryGetValue("server_id", out var sid)
@@ -208,7 +206,6 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
                 return null;
             }
 
-            // Try multiple common TXT record keys for friendly name
             var friendlyName = GetFriendlyName(properties, host.DisplayName);
 
             var server = new DiscoveredServer

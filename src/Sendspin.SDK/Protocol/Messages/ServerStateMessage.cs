@@ -66,13 +66,9 @@ public sealed class ServerMetadata
     public int? Track { get; init; }
 
     /// <summary>
-    /// Playback progress information.
-    /// Uses <see cref="Optional{T}"/> to distinguish:
-    /// <list type="bullet">
-    ///   <item><description><b>Absent</b>: No progress update (keep existing)</description></item>
-    ///   <item><description><b>Present but null</b>: Track ended (clear progress)</description></item>
-    ///   <item><description><b>Present with value</b>: Update progress</description></item>
-    /// </list>
+    /// Playback progress. <see cref="Optional{T}"/> distinguishes "absent"
+    /// (no update; keep existing) from "present but null" (track ended; clear)
+    /// and "present with value" (update).
     /// </summary>
     [JsonPropertyName("progress")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]

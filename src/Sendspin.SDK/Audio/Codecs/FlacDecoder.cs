@@ -12,12 +12,8 @@ namespace Sendspin.SDK.Audio.Codecs;
 /// <summary>
 /// FLAC audio decoder using SimpleFlac library.
 /// Decodes FLAC-encoded audio frames to interleaved float PCM samples.
+/// Suitable for real-time streaming.
 /// </summary>
-/// <remarks>
-/// This decoder handles streaming FLAC data by synthesizing a minimal FLAC header
-/// for each frame. While this adds overhead, it provides robust frame-by-frame
-/// decoding suitable for real-time streaming applications.
-/// </remarks>
 public sealed class FlacDecoder : IAudioDecoder
 {
     /// <summary>

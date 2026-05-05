@@ -216,13 +216,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _channels = format.Channels;
         _samplesPerMs = (_sampleRate * _channels) / 1000;
 
-        // Pre-allocate buffer for specified duration
         var bufferSamples = bufferCapacityMs * _samplesPerMs;
         _buffer = new float[bufferSamples];
         _segments = new Queue<TimestampedSegment>();
-
-        // Calculate microseconds per interleaved sample (for sync error calculation)
-        // For stereo 48kHz: 1,000,000 / (48000 * 2) = ~10.42 μs per sample
         _microsecondsPerSample = 1_000_000.0 / (_sampleRate * _channels);
     }
 
@@ -306,15 +302,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
-            // Scheduled start logic: wait for the target playback time before starting
-            // This enables the StaticDelayMs feature to work correctly.
-            //
-            // The first segment's LocalPlaybackTime includes any static delay from
-            // IClockSynchronizer.ServerToClientTime(). By waiting for this time to arrive,
-            // positive static delay causes us to start later (as intended).
-            //
-            // Without this, we'd start immediately and the static delay would only affect
-            // sync error calculation, which can't handle large offsets (exceeds re-anchor threshold).
+            // Scheduled start: wait for the first segment's LocalPlaybackTime before emitting audio.
+            // LocalPlaybackTime already has StaticDelayMs applied by IClockSynchronizer.ServerToClientTime
+            // (subtracted per spec, so positive static_delay schedules earlier). Without this wait,
+            // we'd start immediately and the static delay would only affect sync error calculation,
+            // which can't handle large offsets (exceeds re-anchor threshold).
             if (_segments.Count > 0 && !_playbackStarted)
             {
                 var firstSegment = _segments.Peek();
@@ -781,7 +773,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     {
         lock (_lock)
         {
-            // Determine current correction mode based on active correction method
             SyncCorrectionMode correctionMode;
             if (_dropEveryNFrames > 0)
                 correctionMode = SyncCorrectionMode.Dropping;
@@ -1077,25 +1068,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// Updates the correction rate based on current sync error.
     /// Must be called under lock.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Implements a tiered correction strategy:
-    /// </para>
-    /// <list type="bullet">
-    /// <item>Error &lt; deadband (default 1ms): No correction, playback rate = 1.0</item>
-    /// <item>Error 1-15ms: Proportional rate adjustment (error / targetSeconds), clamped to max</item>
-    /// <item>Error &gt; 15ms: Frame drop/insert for faster correction</item>
-    /// </list>
-    /// <para>
-    /// Uses EMA-smoothed sync error to prevent jittery corrections from measurement noise.
-    /// Proportional correction (matching Python CLI) prevents overshoot by adjusting rate
-    /// based on error magnitude rather than using fixed rate steps.
-    /// </para>
-    /// </remarks>
     private void UpdateCorrectionRate()
     {
-        // Skip correction during startup grace period to allow playback to stabilize
-        // This prevents over-correction due to initial timing jitter
+        // Suppress corrections during the startup grace period; initial timing
+        // jitter would otherwise drive over-corrections.
         var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
         if (elapsedSinceStart < _syncOptions.StartupGracePeriodMicroseconds)
         {
@@ -1105,7 +1081,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             return;
         }
 
-        // Skip correction during reconnect stabilization (Kalman filter re-converging)
+        // Suppress corrections while the Kalman filter re-converges after reconnect.
         if (_inReconnectStabilization)
         {
             var samplesSinceReconnect = _samplesOutputSinceStart - _reconnectStabilizationStartOutput;
@@ -1124,14 +1100,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             }
         }
 
-        // Use smoothed error for correction decisions (filters measurement jitter)
         var absError = Math.Abs(_smoothedSyncErrorMicroseconds);
-
-        // Thresholds for correction tiers (from options)
         var deadbandThreshold = _syncOptions.DeadbandMicroseconds;
         var resamplingThreshold = _syncOptions.ResamplingThresholdMicroseconds;
 
-        // Tier 1: Deadband - error is small enough to ignore
         if (absError < deadbandThreshold)
         {
             LogCorrectionModeTransition(SyncCorrectionMode.None);
@@ -1141,66 +1113,48 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             return;
         }
 
-        // Tier 2: Proportional rate correction (1-15ms errors)
-        // Rate = 1.0 + (error_µs / target_seconds / 1,000,000)
-        // This calculates the rate needed to eliminate the error over the target time.
-        // Example: 10ms error with 3s target → rate = 1.00333 (0.33% faster)
         if (absError < resamplingThreshold)
         {
-            // Log transition from drop/insert mode back to resampling (effectively None for drop/insert)
             LogCorrectionModeTransition(SyncCorrectionMode.Resampling);
 
-            // Calculate proportional correction (matching Python CLI approach)
+            // Rate = 1 + error / (targetSeconds × 1e6); clamp to MaxSpeedCorrection.
             var correctionFactor = _smoothedSyncErrorMicroseconds
                 / _syncOptions.CorrectionTargetSeconds
                 / 1_000_000.0;
-
-            // Clamp to configured maximum speed adjustment
             correctionFactor = Math.Clamp(correctionFactor,
                 -_syncOptions.MaxSpeedCorrection,
                 _syncOptions.MaxSpeedCorrection);
 
-            var newRate = 1.0 + correctionFactor;
-            SetTargetPlaybackRate(newRate);
+            SetTargetPlaybackRate(1.0 + correctionFactor);
             _dropEveryNFrames = 0;
             _insertEveryNFrames = 0;
             return;
         }
 
-        // Tier 3: Large errors (>15ms) - use frame drop/insert for faster correction
-        // Reset playback rate to 1.0 since we're using discrete sample correction
+        // Large error: switch from rate adjustment to discrete frame drop/insert.
         SetTargetPlaybackRate(1.0);
 
-        // Calculate desired corrections per second to fix error within target time
-        // Error in frames = error_us * sample_rate / 1,000,000
         var framesError = absError * _sampleRate / 1_000_000.0;
         var desiredCorrectionsPerSec = framesError / _syncOptions.CorrectionTargetSeconds;
-
-        // Calculate frames per second
         var framesPerSecond = (double)_sampleRate;
-
-        // Limit correction rate to max speed adjustment
         var maxCorrectionsPerSec = framesPerSecond * _syncOptions.MaxSpeedCorrection;
         var actualCorrectionsPerSec = Math.Min(desiredCorrectionsPerSec, maxCorrectionsPerSec);
 
-        // Calculate how often to apply a correction (every N frames)
         var correctionInterval = actualCorrectionsPerSec > 0
             ? (int)(framesPerSecond / actualCorrectionsPerSec)
             : 0;
 
-        // Minimum interval to prevent too-aggressive correction
+        // Floor to channels × 10 frames so corrections don't run faster than ~440Hz at 48kHz stereo.
         correctionInterval = Math.Max(correctionInterval, _channels * 10);
 
         if (_smoothedSyncErrorMicroseconds > 0)
         {
-            // Playing too slow - need to drop frames to catch up
             _dropEveryNFrames = correctionInterval;
             _insertEveryNFrames = 0;
             LogCorrectionModeTransition(SyncCorrectionMode.Dropping);
         }
         else
         {
-            // Playing too fast - need to insert frames to slow down
             _dropEveryNFrames = 0;
             _insertEveryNFrames = correctionInterval;
             LogCorrectionModeTransition(SyncCorrectionMode.Inserting);
@@ -1292,36 +1246,16 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     }
 
     /// <summary>
-    /// Sets the target playback rate and raises the change event if different.
-    /// Must be called under lock.
+    /// Sets the target playback rate and raises <see cref="TargetPlaybackRateChanged"/>
+    /// if the value changed. Must be called under lock.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Thread Safety Note:</b> This event is intentionally fired while holding the buffer lock.
-    /// </para>
-    /// <para>
-    /// Deadlock analysis (why this is safe):
-    /// <list type="bullet">
-    /// <item>This event is marked [Obsolete] - new code uses ISyncCorrectionProvider.CorrectionChanged instead</item>
-    /// <item>No active subscribers exist in the current codebase</item>
-    /// <item>Even when subscribers existed, they only stored the value (no callback into buffer)</item>
-    /// <item>Firing outside the lock would require Task.Run allocation on every rate change (~100Hz)</item>
-    /// </list>
-    /// </para>
-    /// <para>
-    /// If you add a subscriber, ensure it does NOT call any TimedAudioBuffer methods or you will deadlock.
-    /// </para>
-    /// </remarks>
     private void SetTargetPlaybackRate(double rate)
     {
         if (Math.Abs(TargetPlaybackRate - rate) > 0.0001)
         {
             TargetPlaybackRate = rate;
-
-            // Fire event inline while holding lock. This is safe because:
-            // 1. The event is [Obsolete] with no active subscribers
-            // 2. Any future subscriber must be lightweight (just store value, no callbacks)
-            // 3. Firing via Task.Run would add allocation overhead on every rate change
+            // The event is [Obsolete] and any subscriber must be lightweight (no callback
+            // back into TimedAudioBuffer). Firing under lock avoids per-rate-change allocation.
             TargetPlaybackRateChanged?.Invoke(rate);
         }
     }

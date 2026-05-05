@@ -38,30 +38,33 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private const int MaxEarlyChunks = 100;
 
-    #region Time Sync Configuration
-
-    /// <summary>
-    /// Number of time sync messages to send in a burst.
-    /// The measurement with the smallest round-trip time is used for best accuracy.
-    /// </summary>
-    /// <remarks>
-    /// Sending multiple messages allows us to identify network jitter and select
-    /// the cleanest measurement. A burst of 8 typically yields at least one
-    /// measurement with minimal queuing delay.
-    /// </remarks>
+    // 8 probes lets us pick the lowest-RTT sample and still complete a burst quickly.
     private const int BurstSize = 8;
 
-    /// <summary>
-    /// Interval in milliseconds between burst messages.
-    /// Short enough for quick bursts, long enough to avoid packet queuing.
-    /// </summary>
+    // 50 ms between probes — short enough for fast bursts, long enough to avoid TCP queuing.
     private const int BurstIntervalMs = 50;
 
-    #endregion
+    /// <summary>
+    /// Per-probe timeout for time sync responses.
+    /// Matches the JS reference player and aborts a burst if any probe stalls.
+    /// </summary>
+    private const int ProbeTimeoutMs = 2000;
 
+    // Sequential burst tracking: at most one probe is in flight at any time.
+    // _burstInFlight is the awaiter for that probe's reply; _burstInFlightT1
+    // is the T1 used to match the incoming server/time response.
     private readonly object _burstLock = new();
-    private readonly List<(long t1, long t2, long t3, long t4, double rtt)> _burstResults = new();
-    private readonly HashSet<long> _pendingBurstTimestamps = new();
+    private TaskCompletionSource<TimeSyncSample>? _burstInFlight;
+    private long _burstInFlightT1;
+
+    // Guards the burst loop against concurrent invocation. The continuous time-sync
+    // loop and the smart-sync trigger in HandleStreamStart both call
+    // SendTimeSyncBurstAsync; without this flag, two overlapping bursts would
+    // overwrite each other's _burstInFlight slot and both abort.
+    // Matches the timeSyncBurstActive guard in the JS reference player.
+    private int _burstRunning;
+
+    private readonly record struct TimeSyncSample(long T1, long T2, long T3, long T4, double Rtt);
 
     public ConnectionState ConnectionState => _connection.State;
     public string? ServerId { get; private set; }
@@ -109,14 +112,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
 
-        // Initialize player state from capabilities
         _playerState = new PlayerState
         {
             Volume = Math.Clamp(_capabilities.InitialVolume, 0, 100),
             Muted = _capabilities.InitialMuted
         };
 
-        // Subscribe to connection events
         _connection.StateChanged += OnConnectionStateChanged;
         _connection.TextMessageReceived += OnTextMessageReceived;
         _connection.BinaryMessageReceived += OnBinaryMessageReceived;
@@ -127,10 +128,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         _logger.LogInformation("Connecting to {Uri}", serverUri);
 
-        // Connect WebSocket
         await _connection.ConnectAsync(serverUri, cancellationToken);
-
-        // Perform handshake (send client hello, wait for server hello)
         await SendHandshakeAsync(cancellationToken);
     }
 
@@ -252,7 +250,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Disconnecting: {Reason}", reason);
 
-        // Stop time sync loop
         StopTimeSyncLoop();
 
         await _connection.DisconnectAsync(reason);
@@ -484,14 +481,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void StartTimeSyncLoop()
     {
-        // Stop existing loop if any
         StopTimeSyncLoop();
-
         _timeSyncCts = new CancellationTokenSource();
-
-        // Fire-and-forget with proper exception handling
         TimeSyncLoopAsync(_timeSyncCts.Token).SafeFireAndForget(_logger);
-
         _logger.LogDebug("Time sync loop started (adaptive intervals)");
     }
 
@@ -546,7 +538,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     intervalMs,
                     _clockSynchronizer.GetStatus().OffsetUncertaintyMicroseconds / 1000.0);
 
-                // Wait for the interval before next burst
                 await Task.Delay(intervalMs, cancellationToken);
             }
         }
@@ -561,95 +552,142 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Sends a burst of time sync messages and waits for responses.
-    /// Only the measurement with the smallest RTT is used (best quality).
+    /// Sends a burst of NTP-style time-sync probes sequentially and feeds the
+    /// lowest-RTT sample into the clock synchronizer. Each probe is awaited with
+    /// a per-probe timeout; if any probe times out the remainder of the burst
+    /// is abandoned (matches the JS reference player, since TCP head-of-line
+    /// blocking means later probes likely face the same delay).
     /// </summary>
-    private async Task SendTimeSyncBurstAsync(CancellationToken cancellationToken)
+    /// <remarks>
+    /// Marked <c>internal</c> for direct invocation from concurrent-burst regression tests;
+    /// production callers reach this via <see cref="StartTimeSyncLoop"/> or
+    /// <see cref="HandleStreamStartAsync"/>'s smart-sync trigger.
+    /// </remarks>
+    internal async Task SendTimeSyncBurstAsync(CancellationToken cancellationToken)
     {
         if (_connection.State != ConnectionState.Connected)
             return;
 
+        // Skip if another burst is already in flight (e.g., the continuous loop is mid-burst
+        // and the smart-sync trigger fires). The single-slot TCS design can't safely interleave.
+        if (Interlocked.CompareExchange(ref _burstRunning, 1, 0) != 0)
+        {
+            _logger.LogTrace("Time sync burst already in flight; skipping concurrent request");
+            return;
+        }
+
+        var samples = new List<TimeSyncSample>(BurstSize);
+
         try
         {
-            // Clear previous burst results
-            lock (_burstLock)
-            {
-                _burstResults.Clear();
-                _pendingBurstTimestamps.Clear();
-            }
-
-            // Send burst of messages
             for (int i = 0; i < BurstSize; i++)
             {
                 if (cancellationToken.IsCancellationRequested || _connection.State != ConnectionState.Connected)
                     break;
 
-                var timeMessage = ClientTimeMessage.CreateNow();
+                var sample = await SendSingleProbeAsync(i + 1, cancellationToken).ConfigureAwait(false);
+                if (sample is null)
+                    break; // probe timed out or aborted; stop the burst
 
-                lock (_burstLock)
-                {
-                    _pendingBurstTimestamps.Add(timeMessage.ClientTransmitted);
-                }
+                samples.Add(sample.Value);
 
-                await _connection.SendMessageAsync(timeMessage, cancellationToken);
-                _logger.LogTrace("Sent burst message {Index}/{Total}: T1={T1}", i + 1, BurstSize, timeMessage.ClientTransmitted);
-
-                // Wait between burst messages (except after last one)
+                // Pace probes so a fast localhost burst doesn't saturate the wire.
                 if (i < BurstSize - 1)
-                {
-                    await Task.Delay(BurstIntervalMs, cancellationToken);
-                }
+                    await Task.Delay(BurstIntervalMs, cancellationToken).ConfigureAwait(false);
             }
-
-            // Wait for responses to arrive (give extra time after last send)
-            await Task.Delay(BurstIntervalMs * 2, cancellationToken);
-
-            // Process the best result from the burst
-            ProcessBurstResults();
         }
         catch (OperationCanceledException)
         {
-            // Ignore cancellation
+            // Cancellation is expected on disconnect; just exit.
+            return;
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to send time sync burst");
+            _logger.LogWarning(ex, "Time sync burst aborted");
+        }
+        finally
+        {
+            lock (_burstLock)
+            {
+                _burstInFlight = null;
+                _burstInFlightT1 = 0;
+            }
+            Interlocked.Exchange(ref _burstRunning, 0);
+        }
+
+        if (samples.Count > 0)
+            ApplyBestSample(samples);
+    }
+
+    /// <summary>
+    /// Sends one client/time message and awaits its server/time reply.
+    /// Returns null if the reply doesn't arrive within ProbeTimeoutMs.
+    /// </summary>
+    private async Task<TimeSyncSample?> SendSingleProbeAsync(int index, CancellationToken cancellationToken)
+    {
+        var tcs = new TaskCompletionSource<TimeSyncSample>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timeMessage = ClientTimeMessage.CreateNow();
+        var t1 = timeMessage.ClientTransmitted;
+
+        lock (_burstLock)
+        {
+            _burstInFlight = tcs;
+            _burstInFlightT1 = t1;
+        }
+
+        try
+        {
+            await _connection.SendMessageAsync(timeMessage, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            lock (_burstLock)
+            {
+                if (ReferenceEquals(_burstInFlight, tcs))
+                    _burstInFlight = null;
+            }
+            throw;
+        }
+
+        _logger.LogTrace("Sent probe {Index}/{Total}: T1={T1}", index, BurstSize, t1);
+
+        try
+        {
+            return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(ProbeTimeoutMs), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("Time sync probe {Index}/{Total} timed out (T1={T1})", index, BurstSize, t1);
+            return null;
+        }
+        finally
+        {
+            lock (_burstLock)
+            {
+                if (ReferenceEquals(_burstInFlight, tcs))
+                    _burstInFlight = null;
+            }
         }
     }
 
     /// <summary>
-    /// Processes collected burst results and feeds the best measurement to the Kalman filter.
+    /// Picks the lowest-RTT sample from a completed burst and feeds it to the synchronizer.
     /// </summary>
-    private void ProcessBurstResults()
+    private void ApplyBestSample(IReadOnlyList<TimeSyncSample> samples)
     {
-        (long t1, long t2, long t3, long t4, double rtt) bestResult;
-        int totalResults;
-
-        lock (_burstLock)
+        var best = samples[0];
+        for (int i = 1; i < samples.Count; i++)
         {
-            totalResults = _burstResults.Count;
-            if (totalResults == 0)
-            {
-                _logger.LogDebug("No burst results to process");
-                return;
-            }
-
-            // Find the measurement with smallest RTT (best quality)
-            bestResult = _burstResults.OrderBy(r => r.rtt).First();
-            _burstResults.Clear();
-            _pendingBurstTimestamps.Clear();
+            if (samples[i].Rtt < best.Rtt)
+                best = samples[i];
         }
 
-        _logger.LogDebug("Processing best of {Count} burst results: RTT={RTT:F0}μs",
-            totalResults, bestResult.rtt);
+        _logger.LogDebug("Processing best of {Count} burst results: RTT={RTT:F0}μs", samples.Count, best.Rtt);
 
-        // Track if we were already converged before this measurement
         bool wasConverged = _clockSynchronizer.IsConverged;
+        _clockSynchronizer.ProcessMeasurement(best.T1, best.T2, best.T3, best.T4);
 
-        // Feed only the best measurement to the Kalman filter
-        _clockSynchronizer.ProcessMeasurement(bestResult.t1, bestResult.t2, bestResult.t3, bestResult.t4);
-
-        // Log the sync status periodically
         var status = _clockSynchronizer.GetStatus();
         if (status.MeasurementCount <= 10 || status.MeasurementCount % 10 == 0)
         {
@@ -662,7 +700,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 status.IsDriftReliable);
         }
 
-        // Notify when first converged
         if (!wasConverged && _clockSynchronizer.IsConverged)
         {
             _logger.LogInformation("[ClockSync] Converged after {Count} measurements", status.MeasurementCount);
@@ -675,34 +712,34 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<ServerTimeMessage>(json);
         if (message is null) return;
 
-        // Record receive time (T4)
         var t4 = ClientTimeMessage.GetCurrentTimestampMicroseconds();
-
-        // NTP timestamps: T1=client sent, T2=server received, T3=server sent, T4=client received
         var t1 = message.ClientTransmitted;
         var t2 = message.ServerReceived;
         var t3 = message.ServerTransmitted;
-
-        // Calculate RTT: (T4 - T1) - (T3 - T2) = network round-trip excluding server processing
         double rtt = (t4 - t1) - (t3 - t2);
 
+        TaskCompletionSource<TimeSyncSample>? tcs = null;
         lock (_burstLock)
         {
-            // Check if this is a response to a burst message we sent
-            if (_pendingBurstTimestamps.Contains(t1))
+            if (_burstInFlight is not null && _burstInFlightT1 == t1)
             {
-                // Collect this result for later processing
-                _burstResults.Add((t1, t2, t3, t4, rtt));
-                _pendingBurstTimestamps.Remove(t1);
-                _logger.LogTrace("Collected burst response: RTT={RTT:F0}μs ({Count} collected)",
-                    rtt, _burstResults.Count);
-                return;
+                tcs = _burstInFlight;
+                _burstInFlight = null;
+                _burstInFlightT1 = 0;
             }
         }
 
-        // If not part of a burst (shouldn't happen normally), process immediately
-        _logger.LogDebug("Processing non-burst time response: RTT={RTT:F0}μs", rtt);
-        _clockSynchronizer.ProcessMeasurement(t1, t2, t3, t4);
+        if (tcs is not null)
+        {
+            tcs.TrySetResult(new TimeSyncSample(t1, t2, t3, t4, rtt));
+            return;
+        }
+
+        // Unmatched response. Could be a duplicate, a reply for a probe that already
+        // timed out, or a server-initiated message. We deliberately do NOT fall back to
+        // ProcessMeasurement — that would feed an unselected sample to the filter and
+        // bypass burst-best selection. JS and cpp reference players also discard.
+        _logger.LogTrace("Discarding unmatched server/time response (T1={T1}, RTT={RTT:F0}μs)", t1, rtt);
     }
 
     private void HandleGroupUpdate(string json)
@@ -710,7 +747,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<GroupUpdateMessage>(json);
         if (message is null) return;
 
-        // Create group state if needed
         _currentGroup ??= new GroupState();
 
         var previousGroupId = _currentGroup.GroupId;
@@ -782,7 +818,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 Shuffle = meta.Shuffle ?? existing.Shuffle
             };
 
-            // Update group-level shuffle/repeat from metadata
             if (meta.Shuffle.HasValue)
                 _currentGroup.Shuffle = meta.Shuffle.Value;
             if (meta.Repeat is not null)
@@ -836,8 +871,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogDebug("server/command: {Command}", player.Command);
 
-        // Apply volume change - update player state and audio pipeline
-        // Note: This updates _playerState (THIS player's volume), not _currentGroup (group average)
+        // Updates _playerState (this player's volume), not _currentGroup (group average).
         if (player.Volume.HasValue)
         {
             _playerState.Volume = player.Volume.Value;
@@ -847,7 +881,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Volume.Value);
         }
 
-        // Apply mute change - update player state and audio pipeline
         if (player.Mute.HasValue)
         {
             _playerState.Muted = player.Mute.Value;
@@ -859,10 +892,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (changed)
         {
-            // Notify listeners of player state change
             PlayerStateChanged?.Invoke(this, _playerState);
 
-            // ACK: send client/state to confirm applied state back to server.
+            // Per spec: send client/state to confirm the applied state back to the server.
             SendPlayerStateAckAsync().SafeFireAndForget(_logger);
         }
     }
@@ -938,7 +970,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
-        // Clear any stale chunks from previous streams
         while (_earlyChunkQueue.TryDequeue(out _))
         {
         }
@@ -994,7 +1025,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
         _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
 
-        // Clear any queued chunks from this stream
         while (_earlyChunkQueue.TryDequeue(out _))
         {
         }
@@ -1011,7 +1041,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
         }
 
-        // Update playback state to reflect stream ended
         if (_currentGroup != null)
         {
             _currentGroup.PlaybackState = PlaybackState.Idle;
@@ -1079,7 +1108,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 break;
 
             case BinaryMessageCategory.Visualizer:
-                // TODO: Handle visualizer data
                 break;
         }
     }

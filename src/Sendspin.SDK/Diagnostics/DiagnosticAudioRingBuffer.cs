@@ -5,33 +5,19 @@
 namespace Sendspin.SDK.Diagnostics;
 
 /// <summary>
-/// Lock-free single-producer single-consumer (SPSC) circular buffer for audio samples.
-/// Designed for minimal overhead on the audio thread.
+/// Lock-free single-producer single-consumer ring buffer for diagnostic audio
+/// capture. The audio thread writes (must never block) and a background save
+/// thread reads. When full, old samples are overwritten.
 /// </summary>
-/// <remarks>
-/// <para>
-/// This buffer is specifically designed for diagnostic audio capture where:
-/// <list type="bullet">
-/// <item>Audio thread writes samples (producer) - must never block</item>
-/// <item>Save thread reads samples (consumer) - can take its time</item>
-/// </list>
-/// </para>
-/// <para>
-/// The buffer uses a power-of-2 size for efficient modulo operations and
-/// <see cref="Volatile"/> read/write for thread safety without locks.
-/// When the buffer is full, old samples are overwritten (circular behavior).
-/// </para>
-/// </remarks>
 public sealed class DiagnosticAudioRingBuffer
 {
     private readonly float[] _buffer;
     private readonly int _capacity;
     private readonly int _mask;
 
-    // Write index - only modified by producer (audio thread)
+    // Only modified by the producer (audio thread).
     private long _writeIndex;
 
-    // Sample rate and channel info for WAV output
     private readonly int _sampleRate;
     private readonly int _channels;
 
@@ -93,24 +79,15 @@ public sealed class DiagnosticAudioRingBuffer
     }
 
     /// <summary>
-    /// Writes samples to the buffer. Called from the audio thread.
+    /// Writes samples to the buffer. Called from the audio thread; never blocks.
+    /// When full, the oldest samples are overwritten.
     /// </summary>
-    /// <remarks>
-    /// This method is designed to be as fast as possible:
-    /// <list type="bullet">
-    /// <item>No locks</item>
-    /// <item>No allocations</item>
-    /// <item>No branches in the hot path (except the loop)</item>
-    /// </list>
-    /// When the buffer is full, old samples are overwritten.
-    /// </remarks>
     /// <param name="samples">The samples to write.</param>
     public void Write(ReadOnlySpan<float> samples)
     {
         var writeIdx = Volatile.Read(ref _writeIndex);
 
-        // Copy samples to buffer using mask for wrap-around
-        // This is the hot path - keep it simple
+        // Hot path: write index masked to capacity for wrap-around (capacity is a power of 2).
         foreach (var sample in samples)
         {
             _buffer[writeIdx & _mask] = sample;
@@ -121,34 +98,19 @@ public sealed class DiagnosticAudioRingBuffer
     }
 
     /// <summary>
-    /// Captures a snapshot of the current buffer contents.
-    /// Called from the save thread (not audio thread).
+    /// Captures a snapshot of the current buffer contents. Allocates a new array;
+    /// must be called from a background thread (not the audio thread). Returns
+    /// (samples, startIndex) where startIndex is the cumulative sample index of
+    /// the first returned sample, useful for correlating with
+    /// <see cref="SyncMetricSnapshot.SamplePosition"/>.
     /// </summary>
-    /// <returns>
-    /// A tuple containing:
-    /// <list type="bullet">
-    /// <item>samples: Array of captured audio samples</item>
-    /// <item>startIndex: The cumulative sample index of the first sample in the array</item>
-    /// </list>
-    /// </returns>
-    /// <remarks>
-    /// This method allocates a new array and copies the buffer contents.
-    /// It should only be called from a background thread, not the audio thread.
-    /// The returned startIndex can be used to correlate with <see cref="SyncMetricSnapshot.SamplePosition"/>.
-    /// </remarks>
     public (float[] Samples, long StartIndex) CaptureSnapshot()
     {
-        // Read the current write position
         var writeIdx = Volatile.Read(ref _writeIndex);
-
-        // Calculate how many samples we have (up to capacity)
         var samplesAvailable = (int)Math.Min(writeIdx, _capacity);
         var startIdx = writeIdx - samplesAvailable;
 
-        // Allocate result array
         var result = new float[samplesAvailable];
-
-        // Copy samples in correct order
         for (var i = 0; i < samplesAvailable; i++)
         {
             result[i] = _buffer[(startIdx + i) & _mask];
@@ -158,20 +120,16 @@ public sealed class DiagnosticAudioRingBuffer
     }
 
     /// <summary>
-    /// Resets the buffer to empty state.
+    /// Resets the buffer to an empty state. Must only be called when the
+    /// audio thread is not writing.
     /// </summary>
-    /// <remarks>
-    /// This should only be called when the audio thread is not writing.
-    /// </remarks>
     public void Clear()
     {
         Volatile.Write(ref _writeIndex, 0);
         Array.Clear(_buffer);
     }
 
-    /// <summary>
-    /// Rounds a value up to the next power of 2.
-    /// </summary>
+    /// <summary>Rounds a value up to the next power of 2.</summary>
     private static int RoundUpToPowerOfTwo(int value)
     {
         if (value <= 0)
@@ -179,17 +137,14 @@ public sealed class DiagnosticAudioRingBuffer
             return 1;
         }
 
-        // Subtract 1 to handle exact powers of 2
+        // Standard bit-smearing idiom: decrement, OR-shift to fill all lower bits
+        // with the highest set bit, then increment to land on the next power of 2.
         value--;
-
-        // Spread the highest bit to all lower positions
         value |= value >> 1;
         value |= value >> 2;
         value |= value >> 4;
         value |= value >> 8;
         value |= value >> 16;
-
-        // Add 1 to get the next power of 2
         return value + 1;
     }
 }

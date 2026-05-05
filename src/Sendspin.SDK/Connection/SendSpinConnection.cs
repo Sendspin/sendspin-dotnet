@@ -84,7 +84,6 @@ public sealed class SendspinConnection : ISendspinConnection
 
         try
         {
-            // Clean up previous connection
             await CleanupWebSocketAsync();
 
             _webSocket = new ClientWebSocket();
@@ -99,7 +98,6 @@ public sealed class SendspinConnection : ISendspinConnection
             _logger.LogInformation("Connected to {Uri}", _serverUri);
             _reconnectAttempt = 0;
 
-            // Start receive loop
             _receiveCts = new CancellationTokenSource();
             _receiveTask = ReceiveLoopAsync(_receiveCts.Token);
 
