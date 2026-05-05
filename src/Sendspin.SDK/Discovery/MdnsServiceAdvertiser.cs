@@ -102,16 +102,13 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
                 throw new InvalidOperationException("No valid network addresses found for mDNS advertising");
             }
 
-            // Create the service profile
-            // Service type: _sendspin._tcp.local.
-            // Instance name: client ID
+            // Service type _sendspin._tcp.local., instance name = client ID.
             _serviceProfile = new ServiceProfile(
                 instanceName: _options.ClientId,
                 serviceName: "_sendspin._tcp",
                 port: (ushort)_options.Port,
                 addresses: addresses);
 
-            // Add TXT records
             if (!string.IsNullOrEmpty(_options.PlayerName))
             {
                 _serviceProfile.AddProperty("name", _options.PlayerName);
@@ -119,7 +116,6 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
 
             _serviceProfile.AddProperty("path", _options.Path);
 
-            // Log the service profile details
             _logger.LogInformation(
                 "mDNS Service Profile: FullName={FullName}, ServiceName={Service}, HostName={Host}, Port={Port}",
                 _serviceProfile.FullyQualifiedName,
@@ -127,7 +123,6 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
                 _serviceProfile.HostName,
                 _options.Port);
 
-            // Log all resources being advertised
             foreach (var resource in _serviceProfile.Resources)
             {
                 _logger.LogDebug("mDNS Resource: {Type} {Name}",

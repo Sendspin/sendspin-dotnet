@@ -38,26 +38,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private const int MaxEarlyChunks = 100;
 
-    #region Time Sync Configuration
-
-    /// <summary>
-    /// Number of time sync messages to send in a burst.
-    /// The measurement with the smallest round-trip time is used for best accuracy.
-    /// </summary>
-    /// <remarks>
-    /// Sending multiple messages allows us to identify network jitter and select
-    /// the cleanest measurement. A burst of 8 typically yields at least one
-    /// measurement with minimal queuing delay.
-    /// </remarks>
+    // 8 probes lets us pick the lowest-RTT sample and still complete a burst quickly.
     private const int BurstSize = 8;
 
-    /// <summary>
-    /// Interval in milliseconds between burst messages.
-    /// Short enough for quick bursts, long enough to avoid packet queuing.
-    /// </summary>
+    // 50 ms between probes — short enough for fast bursts, long enough to avoid TCP queuing.
     private const int BurstIntervalMs = 50;
-
-    #endregion
 
     /// <summary>
     /// Per-probe timeout for time sync responses.
@@ -127,14 +112,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
 
-        // Initialize player state from capabilities
         _playerState = new PlayerState
         {
             Volume = Math.Clamp(_capabilities.InitialVolume, 0, 100),
             Muted = _capabilities.InitialMuted
         };
 
-        // Subscribe to connection events
         _connection.StateChanged += OnConnectionStateChanged;
         _connection.TextMessageReceived += OnTextMessageReceived;
         _connection.BinaryMessageReceived += OnBinaryMessageReceived;
@@ -145,10 +128,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         _logger.LogInformation("Connecting to {Uri}", serverUri);
 
-        // Connect WebSocket
         await _connection.ConnectAsync(serverUri, cancellationToken);
-
-        // Perform handshake (send client hello, wait for server hello)
         await SendHandshakeAsync(cancellationToken);
     }
 
@@ -270,7 +250,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Disconnecting: {Reason}", reason);
 
-        // Stop time sync loop
         StopTimeSyncLoop();
 
         await _connection.DisconnectAsync(reason);
@@ -502,14 +481,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void StartTimeSyncLoop()
     {
-        // Stop existing loop if any
         StopTimeSyncLoop();
-
         _timeSyncCts = new CancellationTokenSource();
-
-        // Fire-and-forget with proper exception handling
         TimeSyncLoopAsync(_timeSyncCts.Token).SafeFireAndForget(_logger);
-
         _logger.LogDebug("Time sync loop started (adaptive intervals)");
     }
 
@@ -564,7 +538,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     intervalMs,
                     _clockSynchronizer.GetStatus().OffsetUncertaintyMicroseconds / 1000.0);
 
-                // Wait for the interval before next burst
                 await Task.Delay(intervalMs, cancellationToken);
             }
         }
@@ -774,7 +747,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<GroupUpdateMessage>(json);
         if (message is null) return;
 
-        // Create group state if needed
         _currentGroup ??= new GroupState();
 
         var previousGroupId = _currentGroup.GroupId;
@@ -846,7 +818,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 Shuffle = meta.Shuffle ?? existing.Shuffle
             };
 
-            // Update group-level shuffle/repeat from metadata
             if (meta.Shuffle.HasValue)
                 _currentGroup.Shuffle = meta.Shuffle.Value;
             if (meta.Repeat is not null)
@@ -900,8 +871,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogDebug("server/command: {Command}", player.Command);
 
-        // Apply volume change - update player state and audio pipeline
-        // Note: This updates _playerState (THIS player's volume), not _currentGroup (group average)
+        // Updates _playerState (this player's volume), not _currentGroup (group average).
         if (player.Volume.HasValue)
         {
             _playerState.Volume = player.Volume.Value;
@@ -911,7 +881,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Volume.Value);
         }
 
-        // Apply mute change - update player state and audio pipeline
         if (player.Mute.HasValue)
         {
             _playerState.Muted = player.Mute.Value;
@@ -923,10 +892,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (changed)
         {
-            // Notify listeners of player state change
             PlayerStateChanged?.Invoke(this, _playerState);
 
-            // ACK: send client/state to confirm applied state back to server.
+            // Per spec: send client/state to confirm the applied state back to the server.
             SendPlayerStateAckAsync().SafeFireAndForget(_logger);
         }
     }
@@ -1002,7 +970,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
-        // Clear any stale chunks from previous streams
         while (_earlyChunkQueue.TryDequeue(out _))
         {
         }
@@ -1058,7 +1025,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
         _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
 
-        // Clear any queued chunks from this stream
         while (_earlyChunkQueue.TryDequeue(out _))
         {
         }
@@ -1075,7 +1041,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
         }
 
-        // Update playback state to reflect stream ended
         if (_currentGroup != null)
         {
             _currentGroup.PlaybackState = PlaybackState.Idle;
@@ -1143,7 +1108,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 break;
 
             case BinaryMessageCategory.Visualizer:
-                // TODO: Handle visualizer data
                 break;
         }
     }

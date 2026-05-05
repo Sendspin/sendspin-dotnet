@@ -155,7 +155,6 @@ public sealed class SendspinHostService : IAsyncDisposable
         _clockSynchronizer = clockSynchronizer;
         LastPlayedServerId = lastPlayedServerId;
 
-        // Ensure options are consistent
         var listenOpts = listenerOptions ?? new ListenerOptions();
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
         {
@@ -183,10 +182,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     {
         _logger.LogInformation("Starting Sendspin host service");
 
-        // Start the WebSocket listener first
         await _listener.StartAsync(cancellationToken);
-
-        // Then advertise via mDNS
         await _advertiser.StartAsync(cancellationToken);
 
         _logger.LogInformation("Sendspin host service started - waiting for server connections");
@@ -199,10 +195,8 @@ public sealed class SendspinHostService : IAsyncDisposable
     {
         _logger.LogInformation("Stopping Sendspin host service");
 
-        // Stop advertising first
         await _advertiser.StopAsync();
 
-        // Disconnect all clients
         List<ActiveServerConnection> connectionsToClose;
         lock (_connectionsLock)
         {
@@ -222,7 +216,6 @@ public sealed class SendspinHostService : IAsyncDisposable
             }
         }
 
-        // Stop the listener
         await _listener.StopAsync();
 
         _logger.LogInformation("Sendspin host service stopped");
@@ -311,13 +304,11 @@ public sealed class SendspinHostService : IAsyncDisposable
             }
             connectionId = Guid.NewGuid().ToString("N")[..8];
             _logger.LogInformation("New server connection: {ConnectionId}", connectionId);
-            // Create connection wrapper for WebSocket
             var connection = new IncomingConnection(
                 _loggerFactory.CreateLogger<IncomingConnection>(),
                 webSocket);
 
-            // Create client service to handle the protocol
-            // Use the shared clock synchronizer if provided, otherwise create a per-connection one
+            // Use the shared clock synchronizer if provided, otherwise create a per-connection one.
             var clockSync = _clockSynchronizer
                 ?? new KalmanClockSynchronizer(_loggerFactory.CreateLogger<KalmanClockSynchronizer>());
             client = new SendspinClientService(
@@ -327,10 +318,9 @@ public sealed class SendspinHostService : IAsyncDisposable
                 _capabilities,
                 _audioPipeline);
 
-            // Subscribe to forwarded events (GroupState, PlayerState, Artwork)
             client.GroupStateChanged += (s, g) =>
             {
-                // Track which server last had playback_state "playing"
+                // Track which server last had playback_state "playing".
                 if (g.PlaybackState == PlaybackState.Playing && client.ServerId is not null)
                 {
                     SetLastPlayedServerId(client.ServerId);
@@ -344,13 +334,11 @@ public sealed class SendspinHostService : IAsyncDisposable
             client.ServerHelloReceived += (s, payload) => ServerHelloReceived?.Invoke(this, payload);
             client.StreamStartReceived += (s, payload) => StreamStartReceived?.Invoke(this, payload);
 
-            // Start the connection (begins receive loop)
             await connection.StartAsync();
 
-            // Send client hello - we always send this first per the protocol
+            // client/hello is always sent first per the protocol.
             await SendClientHelloAsync(client, connection);
 
-            // Wait for handshake to complete
             if (!await WaitForHandshakeAsync(client, connection, connectionId))
             {
                 return;

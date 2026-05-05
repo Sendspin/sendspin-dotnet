@@ -5,29 +5,11 @@
 namespace Sendspin.SDK.Audio;
 
 /// <summary>
-/// Calculates sync correction decisions based on sync error values.
+/// Computes sync-correction parameters (playback rate, drop/insert intervals)
+/// from an observed sync error and raises <see cref="CorrectionChanged"/>
+/// when those parameters change. Subscribers are responsible for unsubscribing
+/// before discarding the reference.
 /// </summary>
-/// <remarks>
-/// <para>
-/// This class implements the tiered correction strategy from the CLI:
-/// </para>
-/// <list type="bullet">
-/// <item>Error &lt; deadband (default 1ms): No correction</item>
-/// <item>Error in resampling range (default 1-15ms): Proportional playback rate adjustment</item>
-/// <item>Error &gt; resampling threshold (default 15ms): Frame drop/insert</item>
-/// </list>
-/// <para>
-/// The calculator is stateless per-update and can be used across threads if synchronized externally.
-/// It maintains correction state internally and raises <see cref="CorrectionChanged"/> when parameters change.
-/// </para>
-/// <para>
-/// <strong>Note on IDisposable:</strong> This class intentionally does not implement <see cref="IDisposable"/>.
-/// It holds no unmanaged resources and does not subscribe to external events. While it provides the
-/// <see cref="CorrectionChanged"/> event, subscribers are responsible for unsubscribing in their own
-/// disposal. The owner of this calculator should ensure all subscribers have unsubscribed before
-/// discarding the reference.
-/// </para>
-/// </remarks>
 public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
 {
     private readonly SyncCorrectionOptions _options;
@@ -35,13 +17,11 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
     private readonly int _channels;
     private readonly object _lock = new();
 
-    // Current correction state
     private SyncCorrectionMode _currentMode = SyncCorrectionMode.None;
     private int _dropEveryNFrames;
     private int _insertEveryNFrames;
     private double _targetPlaybackRate = 1.0;
 
-    // Startup tracking
     private long _totalSamplesProcessed;
     private bool _inStartupGracePeriod = true;
 
@@ -245,8 +225,8 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
         }
 
-        // During reconnect stabilization, don't apply corrections
-        // (Kalman filter is re-converging, sync error measurements are unreliable)
+        // While the Kalman filter is re-converging after reconnect, sync error
+        // measurements are unreliable; suppress corrections.
         if (_inReconnectStabilization)
         {
             _currentMode = SyncCorrectionMode.None;
@@ -257,12 +237,9 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         }
 
         var absError = Math.Abs(smoothedMicroseconds);
-
-        // Thresholds from options
         var deadbandThreshold = _options.DeadbandMicroseconds;
         var resamplingThreshold = _options.ResamplingThresholdMicroseconds;
 
-        // Tier 1: Deadband - error is small enough to ignore
         if (absError < deadbandThreshold)
         {
             _currentMode = SyncCorrectionMode.None;
@@ -272,20 +249,16 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
         }
 
-        // Tier 2: Proportional rate correction (small errors)
         if (absError < resamplingThreshold)
         {
             _currentMode = SyncCorrectionMode.Resampling;
             _dropEveryNFrames = 0;
             _insertEveryNFrames = 0;
 
-            // Calculate proportional correction (matching Python CLI approach)
-            // Rate = 1.0 + (error_us / target_seconds / 1,000,000)
+            // Rate = 1 + error / (targetSeconds × 1e6); clamp to MaxSpeedCorrection.
             var correctionFactor = smoothedMicroseconds
                 / _options.CorrectionTargetSeconds
                 / 1_000_000.0;
-
-            // Clamp to configured maximum speed adjustment
             correctionFactor = Math.Clamp(correctionFactor,
                 -_options.MaxSpeedCorrection,
                 _options.MaxSpeedCorrection);
@@ -294,39 +267,29 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
         }
 
-        // Tier 3: Large errors - use frame drop/insert for faster correction
         _targetPlaybackRate = 1.0;
 
-        // Calculate desired corrections per second to fix error within target time
-        // Error in frames = error_us * sample_rate / 1,000,000
         var framesError = absError * _sampleRate / 1_000_000.0;
         var desiredCorrectionsPerSec = framesError / _options.CorrectionTargetSeconds;
-
-        // Calculate frames per second
         var framesPerSecond = (double)_sampleRate;
-
-        // Limit correction rate to max speed adjustment
         var maxCorrectionsPerSec = framesPerSecond * _options.MaxSpeedCorrection;
         var actualCorrectionsPerSec = Math.Min(desiredCorrectionsPerSec, maxCorrectionsPerSec);
 
-        // Calculate how often to apply a correction (every N frames)
         var correctionInterval = actualCorrectionsPerSec > 0
             ? (int)(framesPerSecond / actualCorrectionsPerSec)
             : 0;
 
-        // Minimum interval to prevent too-aggressive correction
+        // Floor to channels × 10 frames so corrections don't run faster than ~440Hz at 48kHz stereo.
         correctionInterval = Math.Max(correctionInterval, _channels * 10);
 
         if (smoothedMicroseconds > 0)
         {
-            // Playing too slow - need to drop frames to catch up
             _currentMode = SyncCorrectionMode.Dropping;
             _dropEveryNFrames = correctionInterval;
             _insertEveryNFrames = 0;
         }
         else
         {
-            // Playing too fast - need to insert frames to slow down
             _currentMode = SyncCorrectionMode.Inserting;
             _dropEveryNFrames = 0;
             _insertEveryNFrames = correctionInterval;

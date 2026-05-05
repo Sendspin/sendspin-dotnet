@@ -122,8 +122,8 @@ public sealed class AudioPipeline : IAudioPipeline
         _waitForConvergence = waitForConvergence;
         _convergenceTimeoutMs = convergenceTimeoutMs;
 
-        // Set up the precision timer, optionally wrapping with monotonic filter for VM resilience
-        // Note: If player provides audio clock, that will be used instead (determined at playback start)
+        // The MonotonicTimer wrapper is used as a fallback when the player has no audio clock.
+        // The audio clock (if available) is selected at playback start.
         var baseTimer = precisionTimer ?? HighPrecisionTimer.Shared;
         if (useMonotonicTimer)
         {
@@ -135,7 +135,6 @@ public sealed class AudioPipeline : IAudioPipeline
             _precisionTimer = baseTimer;
         }
 
-        // Log timer precision at startup
         if (HighPrecisionTimer.IsHighResolution)
         {
             _logger.LogDebug(
@@ -151,7 +150,6 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public async Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
-        // Stop any existing stream first
         if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
         {
             await StopAsync();
@@ -159,9 +157,8 @@ public sealed class AudioPipeline : IAudioPipeline
 
         SetState(AudioPipelineState.Starting);
 
-        // Reset MonotonicTimer state to avoid stale timing from previous session
-        // Without this, a 30s pause causes MonotonicTimer to be 30s behind real time
-        // (forward jump clamping eats the gap), resulting in a 30s delay on resume
+        // Without this, a 30 s pause leaves MonotonicTimer 30 s behind real time
+        // (forward-jump clamping eats the gap), causing a 30 s delay on resume.
         if (_precisionTimer is MonotonicTimer mt)
         {
             mt.Reset();
@@ -171,7 +168,6 @@ public sealed class AudioPipeline : IAudioPipeline
         {
             _currentFormat = format;
 
-            // Create decoder for the stream format
             _decoder = _decoderFactory.Create(format);
             _decodeBuffer = new float[_decoder.MaxSamplesPerFrame];
 
@@ -180,23 +176,19 @@ public sealed class AudioPipeline : IAudioPipeline
                 format.Codec,
                 _decoder.MaxSamplesPerFrame);
 
-            // Create timed buffer
             _buffer = _bufferFactory(format, _clockSync);
 
-            // Subscribe to buffer reanchor event (if buffer supports it)
             if (_buffer is TimedAudioBuffer timedBuffer)
             {
                 timedBuffer.ReanchorRequired += OnReanchorRequired;
             }
 
-            // Create audio player
             _player = _playerFactory();
             await _player.InitializeAsync(format, cancellationToken);
 
-            // Set output latency for diagnostic/logging purposes
             _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
 
-            // Set calibrated startup latency for sync error compensation (push-model backends only)
+            // Used by push-model backends to compensate sync error for the calibrated startup latency.
             _buffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
             if (_player.CalibratedStartupLatencyMs > 0)
             {
@@ -212,9 +204,8 @@ public sealed class AudioPipeline : IAudioPipeline
                     _player.OutputLatencyMs);
             }
 
-            // Determine and log which timing source will be used for sync calculation
             _usingAudioClock = _player.GetAudioClockMicroseconds().HasValue;
-            _lastAudioClockAvailable = _usingAudioClock; // Initialize for transition tracking
+            _lastAudioClockAvailable = _usingAudioClock;
             if (_usingAudioClock)
             {
                 _buffer.TimingSourceName = "audio-clock";
@@ -231,15 +222,12 @@ public sealed class AudioPipeline : IAudioPipeline
                 _logger.LogInformation("[Timing] Using wall clock for sync timing (audio clock not available)");
             }
 
-            // Create sample source bridging buffer to player
             _sampleSource = _sourceFactory(_buffer, GetCurrentLocalTimeMicroseconds);
             _player.SetSampleSource(_sampleSource);
 
-            // Apply volume/mute settings
             _player.Volume = _volume / 100f;
             _player.IsMuted = _muted;
 
-            // Subscribe to player events
             _player.StateChanged += OnPlayerStateChanged;
             _player.ErrorOccurred += OnPlayerError;
 

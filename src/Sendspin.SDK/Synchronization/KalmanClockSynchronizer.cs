@@ -3,57 +3,41 @@ using Microsoft.Extensions.Logging;
 namespace Sendspin.SDK.Synchronization;
 
 /// <summary>
-/// High-precision clock synchronizer using a 2D Kalman filter.
-/// Tracks both clock offset and drift rate for accurate audio synchronization.
-///
-/// The Kalman filter state vector is [offset, drift]:
-/// - offset: difference between server and client clocks (server_time = client_time + offset)
-/// - drift: rate of change of offset (microseconds per second)
-///
-/// This approach handles network jitter by statistically filtering measurements
-/// while also tracking and compensating for clock drift over time.
+/// High-precision clock synchronizer that tracks server-client offset and drift
+/// to convert between time domains for synchronized audio playback.
 /// </summary>
 public sealed class KalmanClockSynchronizer : IClockSynchronizer
 {
     private readonly ILogger<KalmanClockSynchronizer>? _logger;
     private readonly object _lock = new();
 
-    // Kalman filter state
-    private double _offset;           // Estimated offset in microseconds
-    private double _drift;            // Estimated drift in microseconds per second
-    private double _offsetVariance;   // Uncertainty in offset estimate
-    private double _driftVariance;    // Uncertainty in drift estimate
-    private double _covariance;       // Cross-covariance between offset and drift
+    private double _offset;
+    private double _drift;
+    private double _offsetVariance;
+    private double _driftVariance;
+    private double _covariance;
 
-    // Timing
-    private long _lastUpdateTime;     // Last measurement time in microseconds
+    private long _lastUpdateTime;
     private int _measurementCount;
 
-    // Configuration
     private readonly double _processNoiseOffset;
     private readonly double _processNoiseDrift;
     private readonly double _measurementNoiseFloor;
     private readonly double _maxErrorScale;
     private long _staticDelayMicroseconds;
 
-    // Adaptive forgetting configuration (from time-filter reference)
-    private readonly double _forgetVarianceFactor; // forgetFactor^2 - covariance scaling factor
-    private readonly double _adaptiveCutoff;       // Threshold multiplier for triggering forgetting
-    private readonly int _minSamplesForForgetting; // Don't adapt until this many samples collected
-    private int _adaptiveForgettingTriggerCount;   // Diagnostic counter
+    private readonly double _forgetVarianceFactor;
+    private readonly double _adaptiveCutoff;
+    private readonly int _minSamplesForForgetting;
+    private int _adaptiveForgettingTriggerCount;
 
-    // Drift significance gate (z-score / SNR) — see upstream time-filter PR #5.
-    // Drift compensation is applied only when the estimate is statistically
-    // distinguishable from zero, i.e. |drift| / σ_drift ≥ threshold.
-    // Stored squared so the runtime check avoids sqrt and divide-by-zero.
+    // Squared so the SNR check avoids sqrt and divide-by-zero. See upstream PR #5.
     private readonly double _driftSignificanceThresholdSquared;
 
-    // Convergence tracking
     private const int MinMeasurementsForConvergence = 5;
-    private const int MinMeasurementsForPlayback = 2;  // Quick start: 2 measurements like JS/CLI players
-    private const double MaxOffsetUncertaintyForConvergence = 1000.0; // 1ms uncertainty threshold
+    private const int MinMeasurementsForPlayback = 2;
+    private const double MaxOffsetUncertaintyForConvergence = 1000.0;
 
-    // Tracking for drift reliability transition (for diagnostics)
     private bool _driftReliableLogged;
 
     /// <summary>
@@ -107,14 +91,10 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// Whether the synchronizer has enough measurements for playback (at least 2).
-    /// Unlike <see cref="IsConverged"/>, this doesn't require statistical convergence.
-    /// The sync correction system handles any estimation errors during initial playback.
+    /// True after at least two measurements. Allows playback to start before full
+    /// statistical convergence (matches the JS/CLI player). Compare with
+    /// <see cref="IsConverged"/> which also requires low offset uncertainty.
     /// </summary>
-    /// <remarks>
-    /// This matches the JS/CLI player behavior which starts after 2 measurements (~300-500ms)
-    /// rather than waiting for full Kalman filter convergence (5+ measurements, ~1-5 seconds).
-    /// </remarks>
     public bool HasMinimalSync
     {
         get
@@ -127,20 +107,10 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// Whether the drift estimate is statistically significant enough to use for
-    /// time conversions, per the upstream time-filter SNR gate.
+    /// True when the drift estimate is statistically significant (z-score above the
+    /// configured threshold, default 2σ ≈ 95% confidence). When false, time
+    /// conversions skip drift compensation. See upstream time-filter PR #5.
     /// </summary>
-    /// <remarks>
-    /// Returns true when both:
-    /// <list type="bullet">
-    ///   <item>at least <see cref="MinMeasurementsForConvergence"/> measurements have been processed, and</item>
-    ///   <item>the drift estimate's z-score |drift| / σ_drift is strictly greater than the configured
-    ///         <c>driftSignificanceThreshold</c> (default 2.0, ≈95% confidence).</item>
-    /// </list>
-    /// Applying a drift correction whose magnitude is comparable to its uncertainty
-    /// can degrade timestamp accuracy more than no correction at all. See
-    /// <see href="https://github.com/Sendspin/time-filter/pull/5">upstream PR #5</see>.
-    /// </remarks>
     public bool IsDriftReliable
     {
         get
@@ -268,7 +238,6 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                 return;
             }
 
-            // Calculate time delta since last update (in seconds)
             double dt = (t4 - _lastUpdateTime) / 1_000_000.0;
             if (dt <= 0)
             {
@@ -277,8 +246,8 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             }
 
             // Second measurement: bootstrap drift from finite differences.
-            // Propagating the two offset variances through the (z1-z0)/dt operation
-            // gives drift_variance = (R0 + R1) / dt². Matches upstream cpp:64-75.
+            // Propagating the two offset variances through (z1-z0)/dt gives
+            // drift_variance = (R0 + R1) / dt². Matches upstream cpp:64-75.
             if (_measurementCount == 1)
             {
                 _drift = (measuredOffset - _offset) / dt;
@@ -291,27 +260,17 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                 return;
             }
 
-            // ═══════════════════════════════════════════════════════════════════
-            // KALMAN FILTER PREDICT STEP
-            // ═══════════════════════════════════════════════════════════════════
-            // State transition: offset += drift * dt
-            // The drift rate stays the same (random walk model)
+            // Predict step: P = F·P·F^T + Q with F = [1, dt; 0, 1].
             double predictedOffset = _offset + _drift * dt;
             double predictedDrift = _drift;
-
-            // Predict covariance: P = F * P * F' + Q
-            // F = [1, dt; 0, 1] (state transition matrix)
-            // Q = [q_offset, 0; 0, q_drift] * dt (process noise)
             double p00 = _offsetVariance + 2 * _covariance * dt + _driftVariance * dt * dt
                         + _processNoiseOffset * dt;
             double p01 = _covariance + _driftVariance * dt;
             double p11 = _driftVariance + _processNoiseDrift * dt;
 
-            // ═══════════════════════════════════════════════════════════════════
-            // ADAPTIVE FORGETTING (from time-filter reference implementation)
-            // ═══════════════════════════════════════════════════════════════════
-            // When prediction error is large (network disruption, clock adjustment),
-            // scale covariance to "forget" old measurements faster and recover quickly.
+            // Adaptive forgetting: a residual exceeding adaptiveCutoff × max_error
+            // signals network disruption or a clock step; inflate covariance so the
+            // next update weights the measurement more heavily.
             if (_measurementCount >= _minSamplesForForgetting && _forgetVarianceFactor > 1.0)
             {
                 double predictionError = Math.Abs(measuredOffset - predictedOffset);
@@ -334,35 +293,21 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                 }
             }
 
-            // ═══════════════════════════════════════════════════════════════════
-            // KALMAN FILTER UPDATE STEP
-            // ═══════════════════════════════════════════════════════════════════
-            // We only measure the offset directly, H = [1, 0]
-
-            // measurementVariance was computed above so the init branches can use it.
-
-            // Innovation (measurement residual)
+            // Update step (H = [1, 0], so we only observe offset directly).
             double innovation = measuredOffset - predictedOffset;
-
-            // Innovation covariance: S = H * P * H' + R = P[0,0] + R
             double innovationVariance = p00 + measurementVariance;
+            double k0 = p00 / innovationVariance;
+            double k1 = p01 / innovationVariance;
 
-            // Kalman gain: K = P * H' / S = [P[0,0], P[0,1]]' / S
-            double k0 = p00 / innovationVariance;  // Gain for offset
-            double k1 = p01 / innovationVariance;  // Gain for drift
-
-            // Update state estimate
             _offset = predictedOffset + k0 * innovation;
             _drift = predictedDrift + k1 * innovation;
 
-            // Update covariance: P = (I - K * H) * P
             _offsetVariance = (1 - k0) * p00;
             _covariance = (1 - k0) * p01;
             _driftVariance = p11 - k1 * p01;
 
             // Floor to a tiny positive value if FP error pushes the simplified covariance
-            // update below zero. Recovery values are small enough to be effectively invisible
-            // versus typical measurement noise but prevent NaN cascades on subsequent updates.
+            // update below zero. Invisible against measurement noise; prevents NaN cascades.
             const double VarianceFloor = 1e-6;
             if (_offsetVariance < VarianceFloor) _offsetVariance = VarianceFloor;
             if (_driftVariance < VarianceFloor) _driftVariance = VarianceFloor;
@@ -370,7 +315,6 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             _lastUpdateTime = t4;
             _measurementCount++;
 
-            // Log progress
             if (_measurementCount <= 10 || _measurementCount % 10 == 0)
             {
                 _logger?.LogDebug(
@@ -384,7 +328,6 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                     rtt);
             }
 
-            // Log when drift becomes reliable for the first time
             bool driftNowReliable = IsDriftStatisticallySignificantUnsafe();
             if (driftNowReliable && !_driftReliableLogged)
             {

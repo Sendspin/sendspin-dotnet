@@ -6,27 +6,14 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Protocol;
 
 /// <summary>
-/// JSON converter factory for <see cref="Optional{T}"/> that distinguishes
-/// absent fields from explicit nulls.
+/// JSON converter factory for <see cref="Optional{T}"/> that preserves the
+/// distinction between an absent field and one explicitly set to null
+/// (standard C# nullables collapse both into <c>null</c>).
 /// </summary>
 /// <remarks>
-/// <para>
-/// In JSON, a field can be:
-/// <list type="bullet">
-///   <item><description><b>Present with value</b>: <c>{"progress": {...}}</c></description></item>
-///   <item><description><b>Present but null</b>: <c>{"progress": null}</c></description></item>
-///   <item><description><b>Absent</b>: <c>{}</c> (no progress field)</description></item>
-/// </list>
-/// </para>
-/// <para>
-/// Standard C# nullable types collapse the latter two into <c>null</c>.
-/// This converter preserves the distinction using <see cref="Optional{T}"/>.
-/// </para>
-/// <para>
-/// <b>NativeAOT note:</b> Each <c>Optional&lt;T&gt;</c> type used in the protocol must be
-/// registered in <see cref="CreateConverter"/> with an explicit instantiation. The AOT compiler
-/// cannot discover generic types constructed via reflection at runtime.
-/// </para>
+/// NativeAOT: each <c>Optional&lt;T&gt;</c> used in the protocol must be registered
+/// in <see cref="CreateConverter"/> with an explicit instantiation, since the AOT
+/// compiler cannot discover reflection-constructed generic types.
 /// </remarks>
 public sealed class OptionalJsonConverterFactory : JsonConverterFactory
 {
