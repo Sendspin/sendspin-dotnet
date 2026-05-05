@@ -41,14 +41,16 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     private readonly int _minSamplesForForgetting; // Don't adapt until this many samples collected
     private int _adaptiveForgettingTriggerCount;   // Diagnostic counter
 
+    // Drift significance gate (z-score / SNR) — see upstream time-filter PR #5.
+    // Drift compensation is applied only when the estimate is statistically
+    // distinguishable from zero, i.e. |drift| / σ_drift ≥ threshold.
+    // Stored squared so the runtime check avoids sqrt and divide-by-zero.
+    private readonly double _driftSignificanceThresholdSquared;
+
     // Convergence tracking
     private const int MinMeasurementsForConvergence = 5;
     private const int MinMeasurementsForPlayback = 2;  // Quick start: 2 measurements like JS/CLI players
     private const double MaxOffsetUncertaintyForConvergence = 1000.0; // 1ms uncertainty threshold
-
-    // Drift reliability threshold - don't apply drift until uncertainty is below this
-    // At 50 μs/s uncertainty, drift compensation won't cause more than ~50μs error per second
-    private const double MaxDriftUncertaintyForReliable = 50.0; // μs/s
 
     // Tracking for drift reliability transition (for diagnostics)
     private bool _driftReliableLogged;
@@ -124,20 +126,37 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// Whether the drift estimate is reliable enough to use for time conversions.
-    /// Drift estimation requires longer time periods to be accurate, so we don't
-    /// apply drift compensation until the filter is confident in the estimate.
+    /// Whether the drift estimate is statistically significant enough to use for
+    /// time conversions, per the upstream time-filter SNR gate.
     /// </summary>
+    /// <remarks>
+    /// Returns true when both:
+    /// <list type="bullet">
+    ///   <item>at least <see cref="MinMeasurementsForConvergence"/> measurements have been processed, and</item>
+    ///   <item>the drift estimate's z-score |drift| / σ_drift is strictly greater than the configured
+    ///         <c>driftSignificanceThreshold</c> (default 2.0, ≈95% confidence).</item>
+    /// </list>
+    /// Applying a drift correction whose magnitude is comparable to its uncertainty
+    /// can degrade timestamp accuracy more than no correction at all. See
+    /// <see href="https://github.com/Sendspin/time-filter/pull/5">upstream PR #5</see>.
+    /// </remarks>
     public bool IsDriftReliable
     {
         get
         {
             lock (_lock)
             {
-                return _measurementCount >= MinMeasurementsForConvergence
-                       && Math.Sqrt(_driftVariance) < MaxDriftUncertaintyForReliable;
+                return IsDriftStatisticallySignificantUnsafe();
             }
         }
+    }
+
+    // Caller must hold _lock. Squared form avoids sqrt and divide-by-zero on
+    // the equivalent |drift|/σ_drift > k test.
+    private bool IsDriftStatisticallySignificantUnsafe()
+    {
+        return _measurementCount >= MinMeasurementsForConvergence
+               && _drift * _drift > _driftSignificanceThresholdSquared * _driftVariance;
     }
 
     /// <summary>
@@ -154,6 +173,9 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// Forgetting triggers when prediction error exceeds adaptiveCutoff × sqrt(predicted variance).</param>
     /// <param name="minSamplesForForgetting">Minimum measurements before adaptive forgetting activates (default: 100).
     /// Prevents forgetting during initial convergence phase.</param>
+    /// <param name="driftSignificanceThreshold">SNR threshold (in σ) for applying drift compensation (default: 2.0,
+    /// ≈95% confidence). Drift is only used when |drift| ≥ threshold × σ_drift.
+    /// Mirrors <c>drift_significance_threshold</c> in the upstream time-filter reference.</param>
     public KalmanClockSynchronizer(
         ILogger<KalmanClockSynchronizer>? logger = null,
         double processNoiseOffset = 100.0,
@@ -161,7 +183,8 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
         double measurementNoise = 10000.0,
         double forgetFactor = 1.0,
         double adaptiveCutoff = 0.75,
-        int minSamplesForForgetting = 100)
+        int minSamplesForForgetting = 100,
+        double driftSignificanceThreshold = 2.0)
     {
         _logger = logger;
         _processNoiseOffset = processNoiseOffset;
@@ -170,6 +193,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
         _forgetVarianceFactor = forgetFactor * forgetFactor; // Square for covariance scaling
         _adaptiveCutoff = adaptiveCutoff;
         _minSamplesForForgetting = minSamplesForForgetting;
+        _driftSignificanceThresholdSquared = driftSignificanceThreshold * driftSignificanceThreshold;
 
         Reset();
     }
@@ -331,8 +355,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             }
 
             // Log when drift becomes reliable for the first time
-            bool driftNowReliable = _measurementCount >= MinMeasurementsForConvergence
-                                   && Math.Sqrt(_driftVariance) < MaxDriftUncertaintyForReliable;
+            bool driftNowReliable = IsDriftStatisticallySignificantUnsafe();
             if (driftNowReliable && !_driftReliableLogged)
             {
                 _driftReliableLogged = true;
@@ -363,11 +386,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             {
                 double elapsedSeconds = (clientTime - _lastUpdateTime) / 1_000_000.0;
 
-                // Only apply drift compensation when we're confident in the estimate
-                bool driftReliable = _measurementCount >= MinMeasurementsForConvergence
-                                    && Math.Sqrt(_driftVariance) < MaxDriftUncertaintyForReliable;
-
-                double currentOffset = driftReliable
+                double currentOffset = IsDriftStatisticallySignificantUnsafe()
                     ? _offset + _drift * elapsedSeconds
                     : _offset;
 
@@ -407,11 +426,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                 long approxClientTime = serverTime - (long)_offset;
                 double elapsedSeconds = (approxClientTime - _lastUpdateTime) / 1_000_000.0;
 
-                // Only apply drift when we're confident in the estimate
-                bool driftReliable = _measurementCount >= MinMeasurementsForConvergence
-                                    && Math.Sqrt(_driftVariance) < MaxDriftUncertaintyForReliable;
-
-                double currentOffset = driftReliable
+                double currentOffset = IsDriftStatisticallySignificantUnsafe()
                     ? _offset + _drift * elapsedSeconds
                     : _offset;
 
@@ -452,8 +467,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                 MeasurementCount = _measurementCount,
                 IsConverged = _measurementCount >= MinMeasurementsForConvergence
                               && offsetUncertainty < MaxOffsetUncertaintyForConvergence,
-                IsDriftReliable = _measurementCount >= MinMeasurementsForConvergence
-                                  && driftUncertainty < MaxDriftUncertaintyForReliable,
+                IsDriftReliable = IsDriftStatisticallySignificantUnsafe(),
                 AdaptiveForgettingTriggerCount = _adaptiveForgettingTriggerCount
             };
         }

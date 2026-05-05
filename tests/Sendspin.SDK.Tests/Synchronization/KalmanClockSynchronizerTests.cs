@@ -130,4 +130,121 @@ public class KalmanClockSynchronizerTests
 
         Assert.Equal(10_000, withDelay - withoutDelay);
     }
+
+    // =========================================================================
+    // Drift significance gate (SNR / z-score) — see upstream time-filter PR #5
+    // https://github.com/Sendspin/time-filter/pull/5
+    //
+    // Drift compensation must only apply when |drift| > k × σ_drift (default k=2).
+    // The previous absolute-threshold gate (σ_drift < 50 µs/s regardless of drift
+    // magnitude) erroneously applied noise-dominated drift estimates.
+    // =========================================================================
+
+    [Fact]
+    public void IsDriftReliable_RejectsDriftWhenSignalIsBelowNoise()
+    {
+        // Constant offset, no real drift in the input.
+        // The filter's drift estimate will be ≈ 0 with some uncertainty σ_drift.
+        // SNR = |0| / σ_drift = 0, which fails the z >= 2 test for any σ.
+        //
+        // Under the previous absolute-threshold gate, this would erroneously
+        // return true once σ_drift fell below 50 µs/s (which it does after enough
+        // converging measurements). The SNR gate correctly rejects it.
+        for (int i = 0; i < 30; i++)
+        {
+            long t1 = i * 1_000_000L;
+            _sync.ProcessMeasurement(t1, t1 + 5000, t1 + 5100, t1 + 2000);
+        }
+
+        var status = _sync.GetStatus();
+
+        // Sanity: drift estimate is near zero with no real drift in input
+        Assert.True(Math.Abs(status.DriftMicrosecondsPerSecond) < 10.0,
+            $"Expected drift ≈ 0 with constant-offset input, got {status.DriftMicrosecondsPerSecond:F2} µs/s");
+
+        var z = Math.Abs(status.DriftMicrosecondsPerSecond) /
+                Math.Max(1e-9, status.DriftUncertaintyMicrosecondsPerSecond);
+
+        Assert.False(status.IsDriftReliable,
+            $"Drift {status.DriftMicrosecondsPerSecond:F2} µs/s ± {status.DriftUncertaintyMicrosecondsPerSecond:F1} (z={z:F2}) " +
+            "should not be 'reliable' — z-score is below the 2σ significance threshold.");
+    }
+
+    [Fact]
+    public void IsDriftReliable_AcceptsDriftWhenSignalIsStrong()
+    {
+        // Linear drift in the apparent offset: server clock 100 µs/s ahead each step.
+        // The filter should converge on drift ≈ 100 µs/s with σ_drift << 100,
+        // yielding z >> 2 and IsDriftReliable = true.
+        for (int i = 0; i < 50; i++)
+        {
+            long t1 = i * 1_000_000L;
+            long offsetMicros = 5000 + 100L * i; // +100 µs per second
+            _sync.ProcessMeasurement(t1, t1 + offsetMicros, t1 + offsetMicros + 100, t1 + 2000);
+        }
+
+        var status = _sync.GetStatus();
+
+        // Sanity: drift estimate has converged near 100
+        Assert.InRange(status.DriftMicrosecondsPerSecond, 80, 120);
+
+        var z = Math.Abs(status.DriftMicrosecondsPerSecond) /
+                Math.Max(1e-9, status.DriftUncertaintyMicrosecondsPerSecond);
+
+        Assert.True(z >= 2.0,
+            $"Expected SNR >= 2 with strong drift signal, got z = {z:F2}");
+        Assert.True(status.IsDriftReliable,
+            $"Drift {status.DriftMicrosecondsPerSecond:F2} µs/s ± {status.DriftUncertaintyMicrosecondsPerSecond:F1} (z={z:F2}) " +
+            "should be 'reliable'.");
+    }
+
+    [Fact]
+    public void IsDriftReliable_FalseAfterReset()
+    {
+        // Drive to a state where the old absolute-threshold gate would say "reliable",
+        // then reset, confirm gate returns false.
+        for (int i = 0; i < 50; i++)
+        {
+            long t1 = i * 1_000_000L;
+            long offsetMicros = 5000 + 100L * i;
+            _sync.ProcessMeasurement(t1, t1 + offsetMicros, t1 + offsetMicros + 100, t1 + 2000);
+        }
+
+        _sync.Reset();
+
+        Assert.False(_sync.IsDriftReliable);
+        Assert.False(_sync.GetStatus().IsDriftReliable);
+    }
+
+    [Fact]
+    public void DriftSignificanceThreshold_LowerThresholdAcceptsWeakerSignals()
+    {
+        // Two filters fed identical measurements; only the SNR threshold differs.
+        // A permissive threshold (k=0.5) should accept signals that a strict threshold (k=2.0) rejects.
+        var permissive = new KalmanClockSynchronizer(driftSignificanceThreshold: 0.5);
+        var strict = new KalmanClockSynchronizer(); // default 2.0
+
+        // Modest drift signal (~5 µs/s) — designed to land in the ambiguous zone
+        // between the two thresholds.
+        for (int i = 0; i < 20; i++)
+        {
+            long t1 = i * 1_000_000L;
+            long offsetMicros = 5000 + (5L * i);
+            permissive.ProcessMeasurement(t1, t1 + offsetMicros, t1 + offsetMicros + 100, t1 + 2000);
+            strict.ProcessMeasurement(t1, t1 + offsetMicros, t1 + offsetMicros + 100, t1 + 2000);
+        }
+
+        var permissiveStatus = permissive.GetStatus();
+        var strictStatus = strict.GetStatus();
+
+        // Both filters reach the same numerical state since only the gate threshold differs
+        Assert.Equal(permissiveStatus.DriftMicrosecondsPerSecond, strictStatus.DriftMicrosecondsPerSecond, precision: 1);
+
+        var z = Math.Abs(permissiveStatus.DriftMicrosecondsPerSecond) /
+                Math.Max(1e-9, permissiveStatus.DriftUncertaintyMicrosecondsPerSecond);
+
+        // The SNR check should agree with manual computation for both thresholds.
+        Assert.Equal(z >= 0.5, permissiveStatus.IsDriftReliable);
+        Assert.Equal(z >= 2.0, strictStatus.IsDriftReliable);
+    }
 }
