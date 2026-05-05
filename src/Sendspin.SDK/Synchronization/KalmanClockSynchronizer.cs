@@ -30,10 +30,11 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     private int _measurementCount;
 
     // Configuration
-    private readonly double _processNoiseOffset;   // How much offset can change per second
-    private readonly double _processNoiseDrift;    // How much drift rate can change per second
-    private readonly double _measurementNoise;     // Expected measurement noise (RTT variance)
-    private long _staticDelayMicroseconds;         // User-configurable playback delay
+    private readonly double _processNoiseOffset;
+    private readonly double _processNoiseDrift;
+    private readonly double _measurementNoiseFloor;
+    private readonly double _maxErrorScale;
+    private long _staticDelayMicroseconds;
 
     // Adaptive forgetting configuration (from time-filter reference)
     private readonly double _forgetVarianceFactor; // forgetFactor^2 - covariance scaling factor
@@ -160,37 +161,40 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// Creates a new Kalman clock synchronizer with default parameters.
+    /// Creates a new Kalman clock synchronizer.
     /// </summary>
     /// <param name="logger">Optional logger for diagnostics.</param>
-    /// <param name="processNoiseOffset">Process noise for offset (default: 100 μs²/s).</param>
-    /// <param name="processNoiseDrift">Process noise for drift (default: 1 μs²/s²).</param>
-    /// <param name="measurementNoise">Measurement noise variance (default: 10000 μs², ~3ms std dev).</param>
-    /// <param name="forgetFactor">Adaptive forgetting factor (default: 1.0 = disabled, 1.001 = recommended).
-    /// When prediction error exceeds the threshold, covariance is scaled by forgetFactor² to
-    /// "forget" old measurements faster and recover from network disruptions.</param>
-    /// <param name="adaptiveCutoff">Threshold multiplier for triggering adaptive forgetting (default: 0.75).
-    /// Forgetting triggers when prediction error exceeds adaptiveCutoff × sqrt(predicted variance).</param>
-    /// <param name="minSamplesForForgetting">Minimum measurements before adaptive forgetting activates (default: 100).
-    /// Prevents forgetting during initial convergence phase.</param>
-    /// <param name="driftSignificanceThreshold">SNR threshold (in σ) for applying drift compensation (default: 2.0,
-    /// ≈95% confidence). Drift is only used when |drift| ≥ threshold × σ_drift.
-    /// Mirrors <c>drift_significance_threshold</c> in the upstream time-filter reference.</param>
+    /// <param name="processNoiseOffset">Process noise variance for offset (μs²/s).</param>
+    /// <param name="processNoiseDrift">Process noise variance for drift (μs²/s²).</param>
+    /// <param name="measurementNoiseFloor">Optional additive floor on measurement variance (μs²).
+    /// Default 0 matches the upstream time-filter reference; set above 0 to add a fixed
+    /// noise floor on top of the RTT-derived variance.</param>
+    /// <param name="forgetFactor">Adaptive-forgetting covariance inflation factor (must be &gt; 1 to enable).
+    /// Default 2.0 matches upstream; the prior 1.0 silently disabled adaptive forgetting.</param>
+    /// <param name="adaptiveCutoff">Multiple of <c>max_error</c> at which a residual triggers adaptive forgetting.
+    /// Default 3.0 matches upstream (RTT-aware threshold).</param>
+    /// <param name="minSamplesForForgetting">Minimum measurements before adaptive forgetting may fire.</param>
+    /// <param name="driftSignificanceThreshold">SNR threshold (in σ) for applying drift compensation
+    /// (default 2.0, ≈95% confidence). Mirrors <c>drift_significance_threshold</c> upstream.</param>
+    /// <param name="maxErrorScale">Scale applied to <c>max_error</c> before it is used as a 1σ
+    /// measurement-noise estimate. Default 0.5: <c>max_error</c> is a worst-case bound, not a 1σ value.</param>
     public KalmanClockSynchronizer(
         ILogger<KalmanClockSynchronizer>? logger = null,
         double processNoiseOffset = 100.0,
         double processNoiseDrift = 1.0,
-        double measurementNoise = 10000.0,
-        double forgetFactor = 1.0,
-        double adaptiveCutoff = 0.75,
+        double measurementNoiseFloor = 0.0,
+        double forgetFactor = 2.0,
+        double adaptiveCutoff = 3.0,
         int minSamplesForForgetting = 100,
-        double driftSignificanceThreshold = 2.0)
+        double driftSignificanceThreshold = 2.0,
+        double maxErrorScale = 0.5)
     {
         _logger = logger;
         _processNoiseOffset = processNoiseOffset;
         _processNoiseDrift = processNoiseDrift;
-        _measurementNoise = measurementNoise;
-        _forgetVarianceFactor = forgetFactor * forgetFactor; // Square for covariance scaling
+        _measurementNoiseFloor = measurementNoiseFloor;
+        _maxErrorScale = maxErrorScale;
+        _forgetVarianceFactor = forgetFactor * forgetFactor;
         _adaptiveCutoff = adaptiveCutoff;
         _minSamplesForForgetting = minSamplesForForgetting;
         _driftSignificanceThresholdSquared = driftSignificanceThreshold * driftSignificanceThreshold;
@@ -228,16 +232,14 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// <param name="t4">Client receive time (T4) in microseconds.</param>
     public void ProcessMeasurement(long t1, long t2, long t3, long t4)
     {
-        // Calculate offset using NTP formula
-        // offset = ((T2 - T1) + (T3 - T4)) / 2
+        // NTP four-timestamp formulas
         double measuredOffset = ((t2 - t1) + (t3 - t4)) / 2.0;
-
-        // Round-trip time for quality assessment
-        // RTT = (T4 - T1) - (T3 - T2)
         double rtt = (t4 - t1) - (t3 - t2);
 
-        // Server processing time
-        double serverProcessing = t3 - t2;
+        // max_error is half the network round-trip delay; floored to 1µs so
+        // localhost (RTT=0) and pathological clock-skew (RTT<0) don't yield
+        // zero or negative measurement variance / forgetting thresholds.
+        double maxError = Math.Max(rtt / 2.0, 1.0);
 
         lock (_lock)
         {
@@ -286,7 +288,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             if (_measurementCount >= _minSamplesForForgetting && _forgetVarianceFactor > 1.0)
             {
                 double predictionError = Math.Abs(measuredOffset - predictedOffset);
-                double threshold = _adaptiveCutoff * Math.Sqrt(p00);
+                double threshold = _adaptiveCutoff * maxError;
 
                 if (predictionError > threshold)
                 {
@@ -310,15 +312,17 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             // ═══════════════════════════════════════════════════════════════════
             // We only measure the offset directly, H = [1, 0]
 
-            // Adaptive measurement noise based on RTT
-            // Higher RTT = more uncertain measurement
-            double adaptiveMeasurementNoise = _measurementNoise + rtt * rtt / 4.0;
+            // Measurement variance: max_error is a worst-case bound (RTT/2), not
+            // a 1σ estimate; scale it before squaring so we don't over-inflate R
+            // and under-weight new measurements. See upstream PR #6.
+            double measurementStdDev = maxError * _maxErrorScale;
+            double measurementVariance = _measurementNoiseFloor + measurementStdDev * measurementStdDev;
 
             // Innovation (measurement residual)
             double innovation = measuredOffset - predictedOffset;
 
             // Innovation covariance: S = H * P * H' + R = P[0,0] + R
-            double innovationVariance = p00 + adaptiveMeasurementNoise;
+            double innovationVariance = p00 + measurementVariance;
 
             // Kalman gain: K = P * H' / S = [P[0,0], P[0,1]]' / S
             double k0 = p00 / innovationVariance;  // Gain for offset

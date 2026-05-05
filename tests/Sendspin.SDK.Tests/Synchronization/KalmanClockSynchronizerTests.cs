@@ -216,6 +216,95 @@ public class KalmanClockSynchronizerTests
         Assert.False(_sync.GetStatus().IsDriftReliable);
     }
 
+    // =========================================================================
+    // Measurement noise + adaptive forgetting + localhost — see upstream PR #6
+    // https://github.com/Sendspin/time-filter/pull/6
+    //
+    // - Measurement variance: (max_error × maxErrorScale)² (no fixed floor)
+    // - Adaptive forgetting threshold: adaptiveCutoff × max_error (RTT-based)
+    // - max_error floored to 1µs to prevent zero-variance NaN on localhost
+    // =========================================================================
+
+    [Fact]
+    public void Localhost_ZeroRtt_DoesNotProduceNaNOrInfinity()
+    {
+        // Loopback / localhost can produce identical T1=T2=T3=T4 timestamps,
+        // making max_error = 0. The filter must remain numerically stable AND produce
+        // correct values (offset = 0, no drift) for this idealized input.
+        for (int i = 0; i < 10; i++)
+        {
+            long t = i * 1_000_000L;
+            _sync.ProcessMeasurement(t, t, t, t);
+        }
+
+        var status = _sync.GetStatus();
+
+        Assert.False(double.IsNaN(status.OffsetMicroseconds), "OffsetMicroseconds is NaN");
+        Assert.False(double.IsInfinity(status.OffsetMicroseconds), "OffsetMicroseconds is infinite");
+        Assert.False(double.IsNaN(status.OffsetUncertaintyMicroseconds), "OffsetUncertaintyMicroseconds is NaN");
+        Assert.False(double.IsNaN(status.DriftMicrosecondsPerSecond), "DriftMicrosecondsPerSecond is NaN");
+        Assert.False(double.IsNaN(status.DriftUncertaintyMicrosecondsPerSecond), "DriftUncertaintyMicrosecondsPerSecond is NaN");
+
+        // Correctness: with T1=T2=T3=T4, the NTP offset is 0; drift should remain ~0.
+        Assert.Equal(0, status.OffsetMicroseconds, precision: 0);
+        Assert.True(Math.Abs(status.DriftMicrosecondsPerSecond) < 1.0,
+            $"Drift should remain near zero on noise-free localhost input; got {status.DriftMicrosecondsPerSecond:F2} µs/s");
+    }
+
+    [Fact]
+    public void AdaptiveForgetting_FiresOnLargeShockWithDefaultForgetFactor()
+    {
+        // Validates the A1 fix: the *default* forgetFactor (now 2.0) must produce
+        // a forget_variance_factor > 1.0 so the adaptive forgetting gate is live.
+        // minSamplesForForgetting is overridden purely to keep the test fast — the
+        // 100-sample default would dominate runtime without affecting the assertion.
+        var sync = new KalmanClockSynchronizer(minSamplesForForgetting: 5);
+
+        // Phase 1: 20 stable measurements to build up filter state (~5ms offset, ~2ms RTT)
+        for (int i = 0; i < 20; i++)
+        {
+            long t1 = i * 1_000_000L;
+            sync.ProcessMeasurement(t1, t1 + 5000, t1 + 5100, t1 + 2000);
+        }
+
+        var triggersBefore = sync.GetStatus().AdaptiveForgettingTriggerCount;
+
+        // Phase 2: introduce a 100ms clock step (way beyond 3 × max_error ≈ 6ms)
+        long shockBase = 25_000_000L;
+        const long shockOffset = 105_000; // 105ms apparent offset (was 5ms)
+        sync.ProcessMeasurement(shockBase, shockBase + shockOffset, shockBase + shockOffset + 100, shockBase + 2000);
+
+        var triggersAfter = sync.GetStatus().AdaptiveForgettingTriggerCount;
+        Assert.True(triggersAfter > triggersBefore,
+            $"Adaptive forgetting should fire on a 100ms shock (residual >> 3 × max_error). " +
+            $"Before: {triggersBefore}, after: {triggersAfter}.");
+    }
+
+    [Fact]
+    public void Convergence_IsTighterThanOldNoiseFloor()
+    {
+        // With a very-low-RTT path (e.g., loopback, USB, embedded interconnect),
+        // the upstream measurement variance (max_error × 0.5)² is tiny, so the filter
+        // can trust measurements heavily. The old code's hard 10000 µs² noise floor
+        // would cap uncertainty around 30+ µs even on a perfect path.
+        // 50 µs RTT → max_error = 25 µs → upstream R = 156 µs² → expected σ ≈ 12 µs
+        // Old (with floor): R ≥ 10000 µs² → σ floor around 32 µs.
+        for (int i = 0; i < 100; i++)
+        {
+            long t1 = i * 1_000_000L;
+            _sync.ProcessMeasurement(t1, t1 + 5000, t1 + 5025, t1 + 50);
+        }
+
+        var status = _sync.GetStatus();
+
+        // Threshold sits between the expected post-fix value (around 12) and the
+        // pre-fix floor-bound value (around 32). Failure indicates the old noise
+        // floor has crept back in.
+        Assert.True(status.OffsetUncertaintyMicroseconds < 25.0,
+            $"Expected uncertainty < 25µs on low-RTT path after 100 measurements; got {status.OffsetUncertaintyMicroseconds:F1}µs. " +
+            "If this regressed, check the measurement-variance formula (upstream PR #6).");
+    }
+
     [Fact]
     public void DriftSignificanceThreshold_LowerThresholdAcceptsWeakerSignals()
     {
