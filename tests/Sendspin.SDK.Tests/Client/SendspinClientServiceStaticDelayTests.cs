@@ -174,29 +174,6 @@ public class SendspinClientServiceStaticDelayTests
     }
 
     [Fact]
-    public void SyncOffset_AppliesAndPersistsClampedValue()
-    {
-        var sync = new KalmanClockSynchronizer();
-        var store = new FakeStaticDelayStore();
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            sync,
-            new ClientCapabilities(),
-            audioPipeline: null,
-            staticDelayStore: store);
-
-        // Beyond the +5000 ms clamp; the persisted value must be the clamped one.
-        connection.RaiseTextMessageReceived("""
-            { "type": "client/sync_offset", "payload": { "player_id": "p1", "offset_ms": 9000, "source": "groupsync" } }
-            """);
-
-        Assert.Equal(5000.0, sync.StaticDelayMs);
-        Assert.Equal(new[] { 5000.0 }, store.Saved);
-    }
-
-    [Fact]
     public void ThrowingStore_OnLoad_DoesNotAbortHandshake()
     {
         var sync = new KalmanClockSynchronizer { StaticDelayMs = 12.0 };

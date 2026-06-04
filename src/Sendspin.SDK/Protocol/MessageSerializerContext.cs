@@ -21,8 +21,6 @@ namespace Sendspin.SDK.Protocol;
 [JsonSerializable(typeof(ClientTimeMessage))]
 [JsonSerializable(typeof(ClientCommandMessage))]
 [JsonSerializable(typeof(ClientStateMessage))]
-[JsonSerializable(typeof(ClientSyncOffsetMessage))]
-[JsonSerializable(typeof(ClientSyncOffsetAckMessage))]
 [JsonSerializable(typeof(StreamRequestFormatMessage))]
 [JsonSerializable(typeof(ServerHelloMessage))]
 [JsonSerializable(typeof(ServerTimeMessage))]

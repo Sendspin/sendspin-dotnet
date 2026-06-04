@@ -157,12 +157,6 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<ClockSyncStatus>? ClockSyncConverged;
 
     /// <summary>
-    /// Event raised when a sync offset is applied from external calibration (e.g., GroupSync).
-    /// The offset adjusts the static delay to compensate for speaker/room acoustics.
-    /// </summary>
-    event EventHandler<SyncOffsetEventArgs>? SyncOffsetApplied;
-
-    /// <summary>
     /// Raised when a <c>server/hello</c> message is received and parsed.
     /// Fires once per successful handshake (including reconnects). The payload is the
     /// same object cached on <see cref="LastServerHello"/>.
