@@ -93,6 +93,12 @@ public interface ISendspinClient : IAsyncDisposable
     Task SetVolumeAsync(int volume);
 
     /// <summary>
+    /// Sets the group mute state via a controller <c>mute</c> command.
+    /// </summary>
+    /// <param name="muted">True to mute, false to unmute.</param>
+    Task SetMuteAsync(bool muted);
+
+    /// <summary>
     /// Sends the current player state (volume, muted) to the server.
     /// This is used to report local state changes to Music Assistant.
     /// </summary>

@@ -290,7 +290,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 volume = vol;
             }
 
-            if (parameters.TryGetValue("muted", out var muteObj) && muteObj is bool m)
+            // Accept "mute" (matches the wire/command name) or legacy "muted".
+            if ((parameters.TryGetValue("mute", out var muteObj) || parameters.TryGetValue("muted", out muteObj))
+                && muteObj is bool m)
             {
                 mute = m;
             }
@@ -308,6 +310,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(Commands.Volume, volume: clampedVolume);
 
         _logger.LogDebug("Setting volume to {Volume}", clampedVolume);
+        await _connection.SendMessageAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task SetMuteAsync(bool muted)
+    {
+        var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
+
+        _logger.LogDebug("Setting mute to {Muted}", muted);
         await _connection.SendMessageAsync(message);
     }
 
@@ -883,6 +894,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _currentGroup.Repeat = payload.Controller.Repeat;
             if (payload.Controller.Shuffle.HasValue)
                 _currentGroup.Shuffle = payload.Controller.Shuffle.Value;
+            if (payload.Controller.SupportedCommands is not null)
+                _currentGroup.SupportedCommands = payload.Controller.SupportedCommands;
         }
 
         _logger.LogDebug("server/state [{Player}]: Volume={Volume}, Muted={Muted}, Track={Track} by {Artist}",
