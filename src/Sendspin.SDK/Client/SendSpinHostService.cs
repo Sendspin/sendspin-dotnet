@@ -443,7 +443,8 @@ public sealed class SendspinHostService : IAsyncDisposable
             {
                 ProductName = _capabilities.ProductName,
                 Manufacturer = _capabilities.Manufacturer,
-                SoftwareVersion = _capabilities.SoftwareVersion
+                SoftwareVersion = _capabilities.SoftwareVersion,
+                MacAddress = _capabilities.MacAddress
             }
         );
 

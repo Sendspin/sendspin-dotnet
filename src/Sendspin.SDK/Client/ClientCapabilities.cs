@@ -75,6 +75,13 @@ public sealed class ClientCapabilities
     public string? SoftwareVersion { get; set; }
 
     /// <summary>
+    /// MAC address of the network interface used for the connection, reported to the server in the
+    /// device info. Use lowercase colon-separated form (e.g., "aa:bb:cc:dd:ee:ff"). If null, it is
+    /// omitted from the device info.
+    /// </summary>
+    public string? MacAddress { get; set; }
+
+    /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.
     /// This is sent in the initial client/state message after handshake.
     /// Default is 100 for backwards compatibility.

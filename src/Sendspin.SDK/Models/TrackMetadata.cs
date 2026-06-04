@@ -71,18 +71,6 @@ public sealed class TrackMetadata
     public PlaybackProgress? Progress { get; set; }
 
     /// <summary>
-    /// Repeat mode ("off", "one", "all").
-    /// </summary>
-    [JsonPropertyName("repeat")]
-    public string? Repeat { get; set; }
-
-    /// <summary>
-    /// Whether shuffle is enabled.
-    /// </summary>
-    [JsonPropertyName("shuffle")]
-    public bool? Shuffle { get; set; }
-
-    /// <summary>
     /// Track duration in seconds (computed from Progress.TrackDuration).
     /// </summary>
     /// <remarks>

@@ -204,4 +204,12 @@ public sealed class DeviceInfo
     [JsonPropertyName("software_version")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SoftwareVersion { get; init; }
+
+    /// <summary>
+    /// MAC address of the network interface the connection is opened on, in lowercase
+    /// colon-separated form (e.g., "aa:bb:cc:dd:ee:ff"). Optional.
+    /// </summary>
+    [JsonPropertyName("mac_address")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MacAddress { get; init; }
 }
