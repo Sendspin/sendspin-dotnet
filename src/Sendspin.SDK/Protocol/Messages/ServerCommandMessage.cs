@@ -34,7 +34,7 @@ public sealed class ServerCommandPayload
 public sealed class PlayerCommand
 {
     /// <summary>
-    /// The command type (e.g., "volume", "mute").
+    /// The command type: "volume", "mute", or "set_static_delay".
     /// </summary>
     [JsonPropertyName("command")]
     public string? Command { get; init; }
@@ -50,4 +50,11 @@ public sealed class PlayerCommand
     /// </summary>
     [JsonPropertyName("mute")]
     public bool? Mute { get; init; }
+
+    /// <summary>
+    /// Static delay in milliseconds (0-5000). Only set when <see cref="Command"/> is
+    /// "set_static_delay". Null otherwise.
+    /// </summary>
+    [JsonPropertyName("static_delay_ms")]
+    public int? StaticDelayMs { get; init; }
 }

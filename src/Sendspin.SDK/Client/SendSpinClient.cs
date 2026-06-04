@@ -20,12 +20,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly ClientCapabilities _capabilities;
     private readonly IClockSynchronizer _clockSynchronizer;
     private readonly IAudioPipeline? _audioPipeline;
+    private readonly IStaticDelayStore? _staticDelayStore;
 
     private TaskCompletionSource<bool>? _handshakeTcs;
     private GroupState? _currentGroup;
     private PlayerState _playerState;
     private CancellationTokenSource? _timeSyncCts;
     private bool _disposed;
+
+    // Player timing parameters reported in client/state. Seeded from capabilities and updatable
+    // at runtime via UpdateTimingAsync (e.g. after measuring lead time or a link-type change).
+    private int _requiredLeadTimeMs;
+    private int _minBufferMs;
+
+    // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
+    // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
+    private const double MinStaticDelayMs = -5000.0;
+    private const double MaxStaticDelayMs = 5000.0;
 
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
@@ -104,13 +115,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ISendspinConnection connection,
         IClockSynchronizer? clockSynchronizer = null,
         ClientCapabilities? capabilities = null,
-        IAudioPipeline? audioPipeline = null)
+        IAudioPipeline? audioPipeline = null,
+        IStaticDelayStore? staticDelayStore = null)
     {
         _logger = logger;
         _connection = connection;
         _clockSynchronizer = clockSynchronizer ?? new KalmanClockSynchronizer();
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
+        _staticDelayStore = staticDelayStore;
+
+        _requiredLeadTimeMs = Math.Max(0, _capabilities.RequiredLeadTimeMs);
+        _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
 
         _playerState = new PlayerState
         {
@@ -298,12 +314,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public async Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0)
     {
         var clampedVolume = Math.Clamp(volume, 0, 100);
-        var stateMessage = ClientStateMessage.CreateSynchronized(clampedVolume, muted, staticDelayMs);
+        var stateMessage = ClientStateMessage.CreateSynchronized(
+            clampedVolume, muted, staticDelayMs,
+            _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
 
-        _logger.LogDebug("Sending player state: Volume={Volume}, Muted={Muted}, StaticDelay={StaticDelay}ms",
-            clampedVolume, muted, staticDelayMs);
+        _logger.LogDebug(
+            "Sending player state: Volume={Volume}, Muted={Muted}, StaticDelay={StaticDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
+            clampedVolume, muted, staticDelayMs, _requiredLeadTimeMs, _minBufferMs);
         await _connection.SendMessageAsync(stateMessage);
     }
+
+    /// <inheritdoc/>
+    public async Task UpdateTimingAsync(int requiredLeadTimeMs, int minBufferMs)
+    {
+        _requiredLeadTimeMs = Math.Max(0, requiredLeadTimeMs);
+        _minBufferMs = Math.Max(0, minBufferMs);
+
+        _logger.LogDebug("Updating player timing: LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
+            _requiredLeadTimeMs, _minBufferMs);
+
+        // Re-report the player state so the server picks up the new timing for subsequent playback.
+        // Callers should debounce updates locally per spec; the SDK reports each call verbatim.
+        if (_connection.State == ConnectionState.Connected)
+        {
+            await SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.StaticDelayMs);
+        }
+    }
+
+    /// <summary>
+    /// Builds the player <c>supported_commands</c> list reported in client/state, or null when
+    /// none apply. Currently advertises 'set_static_delay' when the client accepts that command.
+    /// </summary>
+    private List<string>? GetPlayerSupportedCommands()
+        => _capabilities.SupportsSetStaticDelay ? new List<string> { Commands.SetStaticDelay } : null;
 
     /// <inheritdoc/>
     public void ClearAudioBuffer()
@@ -437,6 +480,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // and NotifyReconnect on null buffer/player is a no-op.
         _audioPipeline?.NotifyReconnect();
 
+        // Restore any persisted static_delay_ms before reporting initial state, so the server
+        // sees the calibrated delay immediately on (re)connect. No-op when no store is configured.
+        LoadPersistedStaticDelay();
+
         // Send initial client state (required by protocol after server/hello)
         // This tells the server we're synchronized and ready
         SendInitialClientStateAsync().SafeFireAndForget(_logger);
@@ -464,7 +511,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             var stateMessage = ClientStateMessage.CreateSynchronized(
                 volume: _playerState.Volume,
                 muted: _playerState.Muted,
-                staticDelayMs: _clockSynchronizer.StaticDelayMs);
+                staticDelayMs: _clockSynchronizer.StaticDelayMs,
+                requiredLeadTimeMs: _requiredLeadTimeMs,
+                minBufferMs: _minBufferMs,
+                supportedCommands: GetPlayerSupportedCommands());
             var stateJson = MessageSerializer.Serialize(stateMessage);
             _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
             await _connection.SendMessageAsync(stateMessage);
@@ -890,6 +940,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Mute.Value);
         }
 
+        // Apply set_static_delay only when advertised as supported and a value is present.
+        // Per spec the value is 0-5000 ms (negatives are not supported), so we clamp to that range.
+        if (player.Command == Commands.SetStaticDelay
+            && _capabilities.SupportsSetStaticDelay
+            && player.StaticDelayMs.HasValue)
+        {
+            var clamped = Math.Clamp(player.StaticDelayMs.Value, 0, 5000);
+            if (clamped != player.StaticDelayMs.Value)
+            {
+                _logger.LogWarning("server/command [{Player}]: static_delay_ms clamped from {Requested}ms to {Clamped}ms",
+                    _capabilities.ClientName, player.StaticDelayMs.Value, clamped);
+            }
+
+            _clockSynchronizer.StaticDelayMs = clamped;
+            TrySaveStaticDelay(clamped);
+            changed = true;
+            _logger.LogInformation("server/command [{Player}]: Applied static_delay {Delay}ms",
+                _capabilities.ClientName, clamped);
+        }
+
         if (changed)
         {
             PlayerStateChanged?.Invoke(this, _playerState);
@@ -928,9 +998,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             payload.Source ?? "unknown");
 
         // Clamp offset to reasonable range (-5000 to +5000 ms)
-        const double MinOffset = -5000.0;
-        const double MaxOffset = 5000.0;
-        var clampedOffset = Math.Clamp(payload.OffsetMs, MinOffset, MaxOffset);
+        var clampedOffset = Math.Clamp(payload.OffsetMs, MinStaticDelayMs, MaxStaticDelayMs);
 
         if (Math.Abs(clampedOffset - payload.OffsetMs) > 0.001)
         {
@@ -942,11 +1010,77 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Apply the offset to the clock synchronizer
         _clockSynchronizer.StaticDelayMs = clampedOffset;
+        TrySaveStaticDelay(clampedOffset);
 
         _logger.LogDebug("[ClockSync] Static delay set to {Delay:+0.0;-0.0}ms", clampedOffset);
 
         // Raise event for UI notification
         SyncOffsetApplied?.Invoke(this, new SyncOffsetEventArgs(payload.PlayerId, clampedOffset, payload.Source));
+    }
+
+    /// <summary>
+    /// Restores the persisted static delay (if a store is configured and a value exists) into the
+    /// clock synchronizer. Called on each handshake before the initial client/state is reported.
+    /// </summary>
+    /// <remarks>
+    /// Best-effort: a throwing or out-of-range store must not abort the handshake (the initial
+    /// client/state and time-sync loop run after this). On failure we log and continue without the
+    /// persisted delay. The loaded value is clamped to the same range as the GroupSync offset path,
+    /// since that is the broadest legitimate source of a persisted delay (negatives allowed).
+    /// </remarks>
+    private void LoadPersistedStaticDelay()
+    {
+        if (_staticDelayStore is null)
+        {
+            return;
+        }
+
+        double? stored;
+        try
+        {
+            stored = _staticDelayStore.Load();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "IStaticDelayStore.Load() threw; continuing without persisted static delay");
+            return;
+        }
+
+        if (!stored.HasValue)
+        {
+            return;
+        }
+
+        if (!double.IsFinite(stored.Value))
+        {
+            _logger.LogWarning("Persisted static delay was not finite ({Delay}); ignoring", stored.Value);
+            return;
+        }
+
+        var clamped = Math.Clamp(stored.Value, MinStaticDelayMs, MaxStaticDelayMs);
+        _clockSynchronizer.StaticDelayMs = clamped;
+        _logger.LogDebug("Restored persisted static delay: {Delay:+0.0;-0.0}ms", clamped);
+    }
+
+    /// <summary>
+    /// Best-effort persistence of <c>static_delay_ms</c>. A throwing store must never break command
+    /// or sync-offset handling — log and continue so the in-memory delay, state event, and ack still flow.
+    /// </summary>
+    private void TrySaveStaticDelay(double staticDelayMs)
+    {
+        if (_staticDelayStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _staticDelayStore.Save(staticDelayMs);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "IStaticDelayStore.Save({Delay}ms) threw; static delay applied in-memory but not persisted", staticDelayMs);
+        }
     }
 
     private async Task HandleStreamStartAsync(string json)
