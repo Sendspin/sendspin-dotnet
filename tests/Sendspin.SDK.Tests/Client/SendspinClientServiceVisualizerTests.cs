@@ -150,6 +150,58 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
+    public async Task DefaultCapabilities_DoNotAdvertiseVisualizer()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection); // default capabilities: no VisualizerSupport, no visualizer@v1 role
+
+        var connectTask = client.ConnectAsync(new Uri("ws://test"));
+        connection.RaiseTextMessageReceived(ServerHelloJson);
+        await connectTask;
+
+        var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
+        Assert.Null(hello.Payload.VisualizerV1Support);
+        Assert.DoesNotContain("visualizer@v1", hello.Payload.SupportedRoles);
+
+        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(hello);
+        Assert.DoesNotContain("visualizer@v1_support", json);
+    }
+
+    [Fact]
+    public void SpectrumFrame_BeforeStreamStart_IsDropped()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = VisualizerClient(connection);
+
+        var fired = false;
+        client.VisualizationReceived += (_, _) => fired = true;
+
+        // No stream/start yet, so no negotiated bin count: the spectrum frame cannot be decoded.
+        var bins = Enumerable.Range(0, 4).SelectMany(i => U16((ushort)i)).ToArray();
+        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.VisualizerSpectrum, 1, bins));
+
+        Assert.False(fired);
+    }
+
+    [Fact]
+    public void BeatFrame_DispatchedEndToEnd()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = VisualizerClient(connection);
+
+        VisualizerFrame? frame = null;
+        client.VisualizationReceived += (_, f) => frame = f;
+
+        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.VisualizerBeat, 700, new byte[] { 0b0000_0001 }));
+
+        Assert.NotNull(frame);
+        Assert.Equal(700, frame.Timestamp);
+        Assert.True(frame.IsDownbeat);
+    }
+
+    [Fact]
     public async Task RequestVisualizerFormatAsync_SendsRequestFormat()
     {
         var connection = new FakeSendspinConnection();

@@ -27,6 +27,21 @@ public static class VisualizerTypes
 }
 
 /// <summary>
+/// Spectrum bin-spacing scales for the visualizer role.
+/// </summary>
+public static class VisualizerScales
+{
+    /// <summary>Linear frequency spacing.</summary>
+    public const string Linear = "lin";
+
+    /// <summary>Logarithmic frequency spacing.</summary>
+    public const string Logarithmic = "log";
+
+    /// <summary>Mel (perceptual) frequency spacing.</summary>
+    public const string Mel = "mel";
+}
+
+/// <summary>
 /// Spectrum display configuration for the visualizer role. Required when <c>spectrum</c> is among
 /// the requested types.
 /// </summary>
@@ -36,7 +51,7 @@ public sealed class VisualizerSpectrum
     [JsonPropertyName("n_disp_bins")]
     public int NDispBins { get; init; }
 
-    /// <summary>Bin spacing: "lin", "log", or "mel".</summary>
+    /// <summary>Bin spacing. See <see cref="VisualizerScales"/> ("lin", "log", or "mel").</summary>
     [JsonPropertyName("scale")]
     required public string Scale { get; init; }
 

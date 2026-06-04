@@ -1277,7 +1277,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     data.Span, LastStreamStart?.Visualizer?.Spectrum?.NDispBins);
                 if (frame is not null)
                 {
+                    _logger.LogTrace("Visualizer frame: type {Type} @ {Timestamp}", type, timestamp);
                     VisualizationReceived?.Invoke(this, frame);
+                }
+                else
+                {
+                    // Trace (not warn): at up to rate_max/sec this would spam, but it makes a dead
+                    // visualizer diagnosable — e.g. a spectrum frame before any negotiated bin count.
+                    _logger.LogTrace(
+                        "Dropped visualizer frame: type {Type}, {Length} payload bytes, negotiated bins {Bins}",
+                        type, payload.Length, LastStreamStart?.Visualizer?.Spectrum?.NDispBins);
                 }
                 break;
         }
