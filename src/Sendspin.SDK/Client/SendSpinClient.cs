@@ -1399,8 +1399,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             case AudioPipelineState.Playing when _clientErrorReported:
                 _clientErrorReported = false;
-                _logger.LogInformation("Audio pipeline recovered; reporting client/state: synchronized");
-                SendPlayerStateAckAsync().SafeFireAndForget(_logger);
+
+                // Guard on connection state symmetrically with ReportClientErrorAsync: a recovery
+                // that lands while disconnected/reconnecting would otherwise hit a closed socket.
+                // The reconnect handshake re-reports synchronized via SendInitialClientStateAsync.
+                if (_connection.State == ConnectionState.Connected)
+                {
+                    _logger.LogInformation("Audio pipeline recovered; reporting client/state: synchronized");
+                    SendPlayerStateAckAsync().SafeFireAndForget(_logger);
+                }
+
                 break;
         }
     }

@@ -63,6 +63,22 @@ public class SendspinClientServiceErrorStateTests
     }
 
     [Fact]
+    public async Task RecoveryWhileDisconnected_DoesNotReportSynchronized()
+    {
+        var (conn, pipe, client) = await ConnectedClientAsync();
+        using (client)
+        {
+            pipe.RaiseError();                          // error reported while connected
+            await conn.DisconnectAsync();               // connection drops
+            pipe.SetState(AudioPipelineState.Playing);  // pipeline recovers while disconnected
+
+            // The recovery report is guarded on connection state, like the error path; the
+            // reconnect handshake would re-report synchronized.
+            Assert.DoesNotContain("synchronized", StatesSent(conn));
+        }
+    }
+
+    [Fact]
     public async Task PlayingWithoutPriorError_DoesNotReportSynchronized()
     {
         var (conn, pipe, client) = await ConnectedClientAsync();
