@@ -56,6 +56,10 @@ public sealed class ClientCapabilities
     /// a channel the client does not currently want streamed. Entries beyond the first four are
     /// ignored. Remove <c>"artwork@v1"</c> from <see cref="Roles"/> to opt out of artwork entirely.
     /// </summary>
+    /// <remarks>
+    /// Deliberately reuses the wire type <see cref="ArtworkChannelSpec"/> as config: the capability
+    /// and hello shapes are identical today. Introduce a separate config type only if they diverge.
+    /// </remarks>
     public List<ArtworkChannelSpec> ArtworkChannels { get; set; } = new()
     {
         new ArtworkChannelSpec { Source = "album", Format = "jpeg", MediaWidth = 512, MediaHeight = 512 }

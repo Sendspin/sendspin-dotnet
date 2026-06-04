@@ -53,9 +53,57 @@ public class SendspinClientServiceArtworkTests
         Assert.Equal(256, channels[1].MediaWidth);
     }
 
+    [Fact]
+    public async Task ClientHello_DefaultCapabilities_AdvertisesSingleAlbumChannel()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection); // default capabilities
+
+        var connectTask = client.ConnectAsync(new Uri("ws://test"));
+        connection.RaiseTextMessageReceived(ServerHelloJson);
+        await connectTask;
+
+        var channels = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.ArtworkV1Support?.Channels;
+        Assert.NotNull(channels);
+        var only = Assert.Single(channels);
+        Assert.Equal(ArtworkSources.Album, only.Source);
+        Assert.Equal("jpeg", only.Format);
+        Assert.Equal(512, only.MediaWidth);
+        Assert.Equal(512, only.MediaHeight);
+    }
+
+    [Fact]
+    public async Task ClientHello_CapsAdvertisedChannelsAtFour()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection,
+            capabilities: new ClientCapabilities
+            {
+                ArtworkChannels = Enumerable.Range(0, 6)
+                    .Select(i => new ArtworkChannelSpec { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = i, MediaHeight = i })
+                    .ToList(),
+            });
+
+        var connectTask = client.ConnectAsync(new Uri("ws://test"));
+        connection.RaiseTextMessageReceived(ServerHelloJson);
+        await connectTask;
+
+        var channels = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.ArtworkV1Support?.Channels;
+        Assert.NotNull(channels);
+        Assert.Equal(4, channels.Count);
+        // The first four are kept, in order.
+        Assert.Equal(0, channels[0].MediaWidth);
+        Assert.Equal(3, channels[3].MediaWidth);
+    }
+
     [Theory]
     [InlineData(BinaryMessageTypes.Artwork0, 0)]
     [InlineData(BinaryMessageTypes.Artwork1, 1)]
+    [InlineData(BinaryMessageTypes.Artwork2, 2)]
     [InlineData(BinaryMessageTypes.Artwork3, 3)]
     public void ArtworkBinary_RaisesReceivedWithChannelAndTimestamp(byte type, int expectedChannel)
     {
@@ -67,13 +115,34 @@ public class SendspinClientServiceArtworkTests
         ArtworkReceivedEventArgs? received = null;
         client.ArtworkReceived += (_, e) => received = e;
 
+        // A timestamp with every byte distinct so a little-endian regression can't pass.
+        const long timestamp = 0x0102030405060708;
         var image = new byte[] { 1, 2, 3, 4 };
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(type, 123456, image));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(type, timestamp, image));
 
         Assert.NotNull(received);
         Assert.Equal(expectedChannel, received.Channel);
-        Assert.Equal(123456, received.Timestamp);
+        Assert.Equal(timestamp, received.Timestamp);
         Assert.Equal(image, received.ImageData);
+    }
+
+    [Fact]
+    public void MalformedArtworkBinary_RaisesNoEvent()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        var fired = false;
+        client.ArtworkReceived += (_, _) => fired = true;
+        client.ArtworkCleared += (_, _) => fired = true;
+
+        // Shorter than the 9-byte header (type + 8-byte timestamp): not a valid frame, and
+        // distinct from a valid empty (clear) frame which is exactly 9 bytes.
+        connection.RaiseBinaryMessageReceived(new byte[] { BinaryMessageTypes.Artwork0, 1, 2, 3 });
+
+        Assert.False(fired);
     }
 
     [Fact]

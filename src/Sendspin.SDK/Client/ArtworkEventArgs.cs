@@ -43,7 +43,7 @@ public sealed class ArtworkClearedEventArgs : EventArgs
     public int Channel { get; }
 
     /// <summary>
-    /// Server clock timestamp in microseconds for when the channel should be cleared.
+    /// Server clock timestamp in microseconds carried by the clear message.
     /// </summary>
     public long Timestamp { get; }
 

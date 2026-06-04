@@ -189,6 +189,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
+        if (_capabilities.ArtworkChannels.Count > 4)
+        {
+            _logger.LogWarning("ArtworkChannels has {Count} entries; only the first 4 are advertised (spec maximum).",
+                _capabilities.ArtworkChannels.Count);
+        }
+
         return ClientHelloMessage.Create(
             clientId: _capabilities.ClientId,
             name: _capabilities.ClientName,

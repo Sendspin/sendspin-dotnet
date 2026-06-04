@@ -407,6 +407,12 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     private async Task SendClientHelloAsync(SendspinClientService client, IncomingConnection connection)
     {
+        if (_capabilities.ArtworkChannels.Count > 4)
+        {
+            _logger.LogWarning("ArtworkChannels has {Count} entries; only the first 4 are advertised (spec maximum).",
+                _capabilities.ArtworkChannels.Count);
+        }
+
         // Use audio formats from capabilities (order matters - server picks first supported)
         var hello = ClientHelloMessage.Create(
             clientId: _capabilities.ClientId,
