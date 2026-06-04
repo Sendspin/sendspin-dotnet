@@ -29,6 +29,9 @@ public readonly struct RgbColor : IEquatable<RgbColor>
         B = b;
     }
 
+    /// <summary>Deconstructs the color into its channels: <c>var (r, g, b) = color;</c>.</summary>
+    public void Deconstruct(out byte r, out byte g, out byte b) => (r, g, b) = (R, G, B);
+
     /// <inheritdoc/>
     public bool Equals(RgbColor other) => R == other.R && G == other.G && B == other.B;
 
@@ -55,35 +58,55 @@ public sealed class RgbColorJsonConverter : JsonConverter<RgbColor>
     /// <inheritdoc/>
     public override RgbColor Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
+        if (reader.TokenType == JsonTokenType.StartArray && TryReadRgb(ref reader, out var color))
+        {
+            return color;
+        }
+
+        throw new JsonException($"Expected a 3-element [R,G,B] array for {nameof(RgbColor)}.");
+    }
+
+    /// <summary>
+    /// Reads an <c>[R, G, B]</c> array (clamping channels to 0-255). Returns false on any malformed
+    /// shape (not an array, non-numeric channel, or not exactly three elements) without throwing.
+    /// When called on a <see cref="JsonTokenType.StartArray"/>, the array is fully consumed either
+    /// way, leaving the reader at the matching <see cref="JsonTokenType.EndArray"/>.
+    /// </summary>
+    internal static bool TryReadRgb(ref Utf8JsonReader reader, out RgbColor color)
+    {
+        color = default;
         if (reader.TokenType != JsonTokenType.StartArray)
         {
-            throw new JsonException($"Expected an [R,G,B] array for {nameof(RgbColor)}, got {reader.TokenType}.");
+            return false;
         }
 
         Span<byte> channels = stackalloc byte[3];
         var count = 0;
+        var valid = true;
         while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
         {
-            if (reader.TokenType != JsonTokenType.Number)
+            if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var value))
             {
-                throw new JsonException($"Expected a numeric color channel for {nameof(RgbColor)}.");
+                if (count < 3)
+                {
+                    channels[count] = (byte)Math.Clamp(value, 0, 255);
+                }
             }
-
-            var value = Math.Clamp(reader.GetInt32(), 0, 255);
-            if (count < 3)
+            else
             {
-                channels[count] = (byte)value;
+                valid = false;
             }
 
             count++;
         }
 
-        if (count != 3)
+        if (!valid || count != 3)
         {
-            throw new JsonException($"Expected exactly 3 channels for {nameof(RgbColor)}, got {count}.");
+            return false;
         }
 
-        return new RgbColor(channels[0], channels[1], channels[2]);
+        color = new RgbColor(channels[0], channels[1], channels[2]);
+        return true;
     }
 
     /// <inheritdoc/>

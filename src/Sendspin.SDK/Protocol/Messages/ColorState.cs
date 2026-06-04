@@ -9,8 +9,10 @@ namespace Sendspin.SDK.Protocol.Messages;
 /// <remarks>
 /// Each color is an <see cref="Optional{T}"/> of a nullable <see cref="RgbColor"/> so the three
 /// <c>server/state</c> delta states are distinguishable: absent (no change), present-and-null
-/// (clear), and present-with-value (update). The server guarantees WCAG contrast ratios between
-/// these colors; clients consume them as-is.
+/// (clear), and present-with-value (update). Per the spec the server guarantees a minimum WCAG
+/// contrast ratio (4.5:1) for the background/on-color pairs (e.g. <c>on_dark</c> vs
+/// <c>background_dark</c>); <c>primary</c> and <c>accent</c> are raw and not contrast-adjusted.
+/// Clients consume all colors as-is and do no contrast math.
 /// </remarks>
 public sealed class ColorState
 {

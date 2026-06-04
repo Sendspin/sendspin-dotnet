@@ -68,6 +68,42 @@ public class SendspinClientServiceColorTests
     }
 
     [Fact]
+    public void MalformedColor_DoesNotDropSiblingControllerUpdate()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        // One bad color channel must not abort the whole server/state and lose the volume update.
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "controller": { "volume": 55 }, "color": { "primary": [1, 2] } } }
+            """);
+
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Equal(55, client.CurrentGroup.Volume);     // sibling applied
+        Assert.Null(client.CurrentGroup.Colors.Primary);  // malformed color left unset
+    }
+
+    [Fact]
+    public void ColorTimestamp_KeptWhenLaterUpdateOmitsIt()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "color": { "timestamp": 100, "primary": [1, 1, 1] } } }
+            """);
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "color": { "accent": [2, 2, 2] } } }
+            """);
+
+        Assert.Equal(100, client.CurrentGroup!.Colors.Timestamp); // retained when omitted
+    }
+
+    [Fact]
     public void ServerState_WithoutColor_DoesNotRaiseColorChanged()
     {
         var connection = new FakeSendspinConnection();

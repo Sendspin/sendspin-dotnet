@@ -171,8 +171,9 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
 
     /// <summary>
-    /// Event raised when the group's color palette changes (the <c>color</c> role). Carries the
-    /// current merged <see cref="ColorPalette"/>, also available on <see cref="GroupState"/>.
+    /// Event raised whenever a <c>server/state</c> carries a <c>color</c> object (the <c>color</c>
+    /// role) — including updates that leave the resolved values unchanged. Carries the current
+    /// merged <see cref="ColorPalette"/>, also available as <see cref="GroupState.Colors"/>.
     /// </summary>
     event EventHandler<ColorPalette>? ColorChanged;
 

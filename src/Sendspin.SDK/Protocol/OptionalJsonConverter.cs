@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
+using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Protocol;
@@ -36,7 +37,7 @@ public sealed class OptionalJsonConverterFactory : JsonConverterFactory
 
         if (valueType == typeof(Sendspin.SDK.Models.RgbColor?))
         {
-            return new OptionalJsonConverter<Sendspin.SDK.Models.RgbColor?>();
+            return new OptionalRgbColorJsonConverter();
         }
 
         throw new NotSupportedException(
@@ -87,6 +88,55 @@ internal sealed class OptionalJsonConverter<T> : JsonConverter<Optional<T>>
         else
         {
             JsonSerializer.Serialize(writer, value.Value, options);
+        }
+    }
+}
+
+/// <summary>
+/// Converter for <see cref="Optional{T}"/> of a nullable <see cref="RgbColor"/> on the <c>color</c>
+/// object. Unlike the generic converter, a malformed color value degrades to
+/// <see cref="Optional{T}.Absent"/> (treated as "no change") instead of throwing — so one bad color
+/// from the server cannot abort the whole <c>server/state</c> message and drop co-resident
+/// metadata/controller updates. An explicit JSON <c>null</c> is preserved as a "clear" instruction.
+/// </summary>
+internal sealed class OptionalRgbColorJsonConverter : JsonConverter<Optional<RgbColor?>>
+{
+    /// <inheritdoc />
+    public override Optional<RgbColor?> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return Optional<RgbColor?>.Present(null);
+        }
+
+        if (reader.TokenType == JsonTokenType.StartArray)
+        {
+            // TryReadRgb fully consumes the array (to EndArray) whether or not it is well-formed.
+            return RgbColorJsonConverter.TryReadRgb(ref reader, out var color)
+                ? Optional<RgbColor?>.Present(color)
+                : Optional<RgbColor?>.Absent();
+        }
+
+        // Some other token (object/number/string): consume it and treat as no change.
+        reader.Skip();
+        return Optional<RgbColor?>.Absent();
+    }
+
+    /// <inheritdoc />
+    public override void Write(Utf8JsonWriter writer, Optional<RgbColor?> value, JsonSerializerOptions options)
+    {
+        if (value.IsAbsent)
+        {
+            return;
+        }
+
+        if (value.Value is null)
+        {
+            writer.WriteNullValue();
+        }
+        else
+        {
+            JsonSerializer.Serialize(writer, value.Value.Value, options);
         }
     }
 }
