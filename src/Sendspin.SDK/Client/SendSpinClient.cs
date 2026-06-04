@@ -323,6 +323,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <inheritdoc/>
+    public async Task RequestPlayerFormatAsync(
+        string? codec = null, int? sampleRate = null, int? channels = null, int? bitDepth = null)
+    {
+        var message = StreamRequestFormatMessage.ForPlayer(new PlayerRequestFormat
+        {
+            Codec = codec,
+            SampleRate = sampleRate,
+            Channels = channels,
+            BitDepth = bitDepth
+        });
+
+        _logger.LogDebug("Requesting player format change (codec={Codec}, sample_rate={SampleRate}, channels={Channels}, bit_depth={BitDepth})",
+            codec ?? "unchanged", sampleRate, channels, bitDepth);
+        await _connection.SendMessageAsync(message);
+    }
+
+    /// <inheritdoc/>
     public async Task RequestArtworkFormatAsync(
         int channel, string? source = null, string? format = null, int? mediaWidth = null, int? mediaHeight = null)
     {

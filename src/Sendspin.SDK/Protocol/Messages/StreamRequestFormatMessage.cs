@@ -16,6 +16,12 @@ public sealed class StreamRequestFormatMessage : IMessageWithPayload<StreamReque
     required public StreamRequestFormatPayload Payload { get; init; }
 
     /// <summary>
+    /// Creates a stream/request-format message carrying a player audio-format change.
+    /// </summary>
+    public static StreamRequestFormatMessage ForPlayer(PlayerRequestFormat player) =>
+        new() { Payload = new StreamRequestFormatPayload { Player = player } };
+
+    /// <summary>
     /// Creates a stream/request-format message carrying an artwork channel change.
     /// </summary>
     public static StreamRequestFormatMessage ForArtwork(ArtworkRequestFormat artwork) =>
@@ -34,6 +40,13 @@ public sealed class StreamRequestFormatMessage : IMessageWithPayload<StreamReque
 public sealed class StreamRequestFormatPayload
 {
     /// <summary>
+    /// Player audio-format change. Only for clients with the player role.
+    /// </summary>
+    [JsonPropertyName("player")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PlayerRequestFormat? Player { get; init; }
+
+    /// <summary>
     /// Artwork channel format change. Only for clients with the artwork role.
     /// </summary>
     [JsonPropertyName("artwork")]
@@ -46,6 +59,34 @@ public sealed class StreamRequestFormatPayload
     [JsonPropertyName("visualizer")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public VisualizerRequestFormat? Visualizer { get; init; }
+}
+
+/// <summary>
+/// Requests a different player audio format (e.g. to adapt to changing network or CPU conditions).
+/// All fields are optional; omit a field to leave it to the server. The server responds with a
+/// <c>stream/start</c> for the player role carrying the new format.
+/// </summary>
+public sealed class PlayerRequestFormat
+{
+    /// <summary>Requested codec: "opus", "flac", or "pcm".</summary>
+    [JsonPropertyName("codec")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Codec { get; init; }
+
+    /// <summary>Requested number of channels (e.g. 1 = mono, 2 = stereo).</summary>
+    [JsonPropertyName("channels")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Channels { get; init; }
+
+    /// <summary>Requested sample rate in Hz (e.g. 44100, 48000).</summary>
+    [JsonPropertyName("sample_rate")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? SampleRate { get; init; }
+
+    /// <summary>Requested bit depth (e.g. 16, 24).</summary>
+    [JsonPropertyName("bit_depth")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? BitDepth { get; init; }
 }
 
 /// <summary>
