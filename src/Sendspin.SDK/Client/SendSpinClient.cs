@@ -33,6 +33,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _requiredLeadTimeMs;
     private int _minBufferMs;
 
+    // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
+    // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
+    private const double MinStaticDelayMs = -5000.0;
+    private const double MaxStaticDelayMs = 5000.0;
+
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
@@ -949,7 +954,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
 
             _clockSynchronizer.StaticDelayMs = clamped;
-            _staticDelayStore?.Save(clamped);
+            TrySaveStaticDelay(clamped);
             changed = true;
             _logger.LogInformation("server/command [{Player}]: Applied static_delay {Delay}ms",
                 _capabilities.ClientName, clamped);
@@ -993,9 +998,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             payload.Source ?? "unknown");
 
         // Clamp offset to reasonable range (-5000 to +5000 ms)
-        const double MinOffset = -5000.0;
-        const double MaxOffset = 5000.0;
-        var clampedOffset = Math.Clamp(payload.OffsetMs, MinOffset, MaxOffset);
+        var clampedOffset = Math.Clamp(payload.OffsetMs, MinStaticDelayMs, MaxStaticDelayMs);
 
         if (Math.Abs(clampedOffset - payload.OffsetMs) > 0.001)
         {
@@ -1007,7 +1010,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Apply the offset to the clock synchronizer
         _clockSynchronizer.StaticDelayMs = clampedOffset;
-        _staticDelayStore?.Save(clampedOffset);
+        TrySaveStaticDelay(clampedOffset);
 
         _logger.LogDebug("[ClockSync] Static delay set to {Delay:+0.0;-0.0}ms", clampedOffset);
 
@@ -1019,6 +1022,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Restores the persisted static delay (if a store is configured and a value exists) into the
     /// clock synchronizer. Called on each handshake before the initial client/state is reported.
     /// </summary>
+    /// <remarks>
+    /// Best-effort: a throwing or out-of-range store must not abort the handshake (the initial
+    /// client/state and time-sync loop run after this). On failure we log and continue without the
+    /// persisted delay. The loaded value is clamped to the same range as the GroupSync offset path,
+    /// since that is the broadest legitimate source of a persisted delay (negatives allowed).
+    /// </remarks>
     private void LoadPersistedStaticDelay()
     {
         if (_staticDelayStore is null)
@@ -1026,11 +1035,51 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        var stored = _staticDelayStore.Load();
-        if (stored.HasValue)
+        double? stored;
+        try
         {
-            _clockSynchronizer.StaticDelayMs = stored.Value;
-            _logger.LogDebug("Restored persisted static delay: {Delay:+0.0;-0.0}ms", stored.Value);
+            stored = _staticDelayStore.Load();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "IStaticDelayStore.Load() threw; continuing without persisted static delay");
+            return;
+        }
+
+        if (!stored.HasValue)
+        {
+            return;
+        }
+
+        if (!double.IsFinite(stored.Value))
+        {
+            _logger.LogWarning("Persisted static delay was not finite ({Delay}); ignoring", stored.Value);
+            return;
+        }
+
+        var clamped = Math.Clamp(stored.Value, MinStaticDelayMs, MaxStaticDelayMs);
+        _clockSynchronizer.StaticDelayMs = clamped;
+        _logger.LogDebug("Restored persisted static delay: {Delay:+0.0;-0.0}ms", clamped);
+    }
+
+    /// <summary>
+    /// Best-effort persistence of <c>static_delay_ms</c>. A throwing store must never break command
+    /// or sync-offset handling — log and continue so the in-memory delay, state event, and ack still flow.
+    /// </summary>
+    private void TrySaveStaticDelay(double staticDelayMs)
+    {
+        if (_staticDelayStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _staticDelayStore.Save(staticDelayMs);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "IStaticDelayStore.Save({Delay}ms) threw; static delay applied in-memory but not persisted", staticDelayMs);
         }
     }
 

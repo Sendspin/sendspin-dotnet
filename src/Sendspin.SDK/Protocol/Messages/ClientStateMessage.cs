@@ -143,9 +143,9 @@ public sealed class PlayerStatePayload
 
     /// <summary>
     /// Minimum startup lead time in milliseconds: codec init, decode warmup, audio
-    /// backend buffering, and DAC latency. Measured from the server transmit time of the
-    /// start/restart trigger to the first audio chunk's timestamp. Always required for players,
-    /// so it is serialized unconditionally even when zero.
+    /// backend buffering, and DAC latency. The server schedules the first audio chunk at least
+    /// this far after the start/restart trigger (stream/start or stream/clear). Always required
+    /// for players, so it is serialized unconditionally even when zero.
     /// </summary>
     [JsonPropertyName("required_lead_time_ms")]
     public int RequiredLeadTimeMs { get; init; }

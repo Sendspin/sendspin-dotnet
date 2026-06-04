@@ -27,6 +27,10 @@ public interface IStaticDelayStore
     /// Persists the static delay in milliseconds. Called whenever the delay changes (e.g. an
     /// inbound <c>set_static_delay</c> command or a GroupSync calibration offset).
     /// </summary>
-    /// <param name="staticDelayMs">The static delay to persist, in milliseconds.</param>
+    /// <param name="staticDelayMs">
+    /// The static delay to persist, in milliseconds. May be negative when sourced from a GroupSync
+    /// calibration offset (which schedules audio later); the <c>set_static_delay</c> command path is
+    /// always non-negative. Store and round-trip the value as-is.
+    /// </param>
     void Save(double staticDelayMs);
 }

@@ -299,8 +299,13 @@ loads on connect (before the first `client/state`) and saves whenever the delay 
 ```csharp
 public sealed class FileStaticDelayStore : IStaticDelayStore
 {
-    public double? Load() => File.Exists(path) ? double.Parse(File.ReadAllText(path)) : null;
-    public void Save(double staticDelayMs) => File.WriteAllText(path, staticDelayMs.ToString());
+    // Use InvariantCulture so the value round-trips regardless of the host's locale.
+    public double? Load() => File.Exists(path)
+        ? double.Parse(File.ReadAllText(path), CultureInfo.InvariantCulture)
+        : null;
+
+    public void Save(double staticDelayMs)
+        => File.WriteAllText(path, staticDelayMs.ToString(CultureInfo.InvariantCulture));
 }
 
 var client = new SendspinClientService(
