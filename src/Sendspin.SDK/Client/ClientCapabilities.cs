@@ -80,6 +80,35 @@ public sealed class ClientCapabilities
     /// omitted from the device info.
     /// </summary>
     public string? MacAddress { get; set; }
+    /// Minimum startup lead time in milliseconds reported to the server (codec init, decode
+    /// warmup, audio backend buffering, DAC latency). The server schedules the first audio chunk
+    /// at least this far ahead after a stream start/restart, preventing start-of-stream truncation.
+    /// <para>
+    /// Default (200 ms) is a conservative LAN starting point. Tune per device/network: report the
+    /// lowest value that reliably avoids truncation for the lowest latency. Do NOT include
+    /// <c>static_delay_ms</c> here — the server applies that separately. For empirical tuning, the
+    /// audio pipeline exposes measured output/startup latency (e.g. DetectedOutputLatencyMs).
+    /// </para>
+    /// </summary>
+    public int RequiredLeadTimeMs { get; set; } = 200;
+
+    /// <summary>
+    /// Requested minimum ongoing buffer duration in milliseconds reported to the server, used to
+    /// absorb network jitter and decode/playback timing variance (primarily for live streams,
+    /// where the queue cannot grow after playback begins).
+    /// <para>
+    /// Default (150 ms) is a conservative LAN starting point. Tune per network: larger for remote
+    /// or high-latency links, smaller for stable LAN. Do NOT include <c>static_delay_ms</c> here.
+    /// </para>
+    /// </summary>
+    public int MinBufferMs { get; set; } = 150;
+
+    /// <summary>
+    /// Whether this client accepts the server's <c>set_static_delay</c> command. When true, the
+    /// client advertises 'set_static_delay' in the client/state player object and applies inbound
+    /// set_static_delay commands to its static delay. Default is true.
+    /// </summary>
+    public bool SupportsSetStaticDelay { get; set; } = true;
 
     /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.

@@ -254,6 +254,69 @@ var capabilities = new ClientCapabilities
 
 All fields are optional and omitted from the protocol if null.
 
+## Player Timing & Static Delay
+
+Players report timing requirements so the server can schedule audio far enough ahead to avoid
+buffer underruns and start-of-stream truncation (per the Sendspin spec's player timing
+capabilities). These are advertised in every `client/state` message:
+
+```csharp
+var capabilities = new ClientCapabilities
+{
+    // Minimum startup lead time: codec init, decode warmup, backend buffering, DAC latency.
+    // The server schedules the first chunk at least this far ahead after a stream start/restart.
+    RequiredLeadTimeMs = 200,   // default: 200 ms (conservative LAN starting point)
+
+    // Minimum ongoing buffer to absorb network jitter (primarily for live streams).
+    MinBufferMs = 150,          // default: 150 ms
+
+    // Whether to accept the server's set_static_delay command (advertised in client/state).
+    SupportsSetStaticDelay = true,
+};
+```
+
+Report the **lowest** values that reliably avoid truncation/underruns for your device and network —
+larger for remote or high-latency links, smaller for stable LAN. Do **not** fold `static_delay_ms`
+into these values; the server applies static delay separately. For empirical tuning, the audio
+pipeline exposes measured latency (e.g. `AudioPipeline.DetectedOutputLatencyMs`).
+
+If conditions change at runtime (e.g. a link-type change, or a measured lead time after warmup),
+update the values and the SDK re-reports `client/state`:
+
+```csharp
+await client.UpdateTimingAsync(requiredLeadTimeMs: 120, minBufferMs: 80);
+```
+
+Debounce these updates yourself — report only sustained changes, not transient fluctuations.
+
+### Persisting static delay across restarts
+
+`static_delay_ms` compensates for hardware delay beyond the audio port (external speakers,
+amplifiers) and must persist across reboots and reconnections. Because the SDK is a library and
+cannot choose where to store it, implement `IStaticDelayStore` and pass it to the client. The SDK
+loads on connect (before the first `client/state`) and saves whenever the delay changes (via a
+`set_static_delay` command or a GroupSync offset):
+
+```csharp
+public sealed class FileStaticDelayStore : IStaticDelayStore
+{
+    // Use InvariantCulture so the value round-trips regardless of the host's locale.
+    public double? Load() => File.Exists(path)
+        ? double.Parse(File.ReadAllText(path), CultureInfo.InvariantCulture)
+        : null;
+
+    public void Save(double staticDelayMs)
+        => File.WriteAllText(path, staticDelayMs.ToString(CultureInfo.InvariantCulture));
+}
+
+var client = new SendspinClientService(
+    logger, connection, clockSync, capabilities,
+    audioPipeline: pipeline,
+    staticDelayStore: new FileStaticDelayStore());
+```
+
+When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
+
 ## NativeAOT Support
 
 Since v7.0.0, the SDK is fully compatible with [NativeAOT deployment](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/) and IL trimming. This means you can publish your Sendspin player as a single native executable with no .NET runtime dependency — ideal for embedded devices, containers, or minimal Linux installations.
