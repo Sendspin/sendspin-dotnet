@@ -27,7 +27,8 @@ public sealed class ClientCapabilities
         "controller@v1",
         "player@v1",
         "metadata@v1",
-        "artwork@v1"
+        "artwork@v1",
+        "color@v1"
     };
 
     /// <summary>

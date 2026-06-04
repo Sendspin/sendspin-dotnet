@@ -354,6 +354,23 @@ await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.Artist
 await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.None);
 ```
 
+## Color
+
+Clients with the `color` role receive a palette derived from the current audio — useful for ambient lighting, screen backgrounds, or UI theming. Colors arrive via `server/state` and are merged onto `GroupState.Colors`; subscribe to `ColorChanged` to react:
+
+```csharp
+client.ColorChanged += (_, palette) =>
+{
+    // RgbColor? per role; null until the server provides it (or after it clears it).
+    if (palette.BackgroundDark is { } bg) lights.SetBackground(bg.R, bg.G, bg.B);
+    if (palette.Primary is { } primary) ui.Accent = primary;
+};
+```
+
+Available colors: `BackgroundDark`, `BackgroundLight`, `Primary`, `Accent`, `OnDark`, `OnLight`, plus a `Timestamp` (server clock, µs). The server guarantees WCAG 4.5:1 contrast ratios between the background/on-color pairs — clients use the values directly and do no contrast math.
+
+Updates are deltas: a color absent from an update is left unchanged, an explicit `null` clears it, and a value updates it. The role is enabled by default (`color@v1` in `ClientCapabilities.Roles`); remove it to opt out.
+
 ## NativeAOT Support
 
 Since v7.0.0, the SDK is fully compatible with [NativeAOT deployment](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/) and IL trimming. This means you can publish your Sendspin player as a single native executable with no .NET runtime dependency — ideal for embedded devices, containers, or minimal Linux installations.

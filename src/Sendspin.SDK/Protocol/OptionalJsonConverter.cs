@@ -34,6 +34,11 @@ public sealed class OptionalJsonConverterFactory : JsonConverterFactory
             return new OptionalJsonConverter<PlaybackProgress?>();
         }
 
+        if (valueType == typeof(Sendspin.SDK.Models.RgbColor?))
+        {
+            return new OptionalJsonConverter<Sendspin.SDK.Models.RgbColor?>();
+        }
+
         throw new NotSupportedException(
             $"No AOT-safe converter registered for Optional<{valueType.Name}>. " +
             $"Add an explicit case in {nameof(OptionalJsonConverterFactory)}.{nameof(CreateConverter)}().");
