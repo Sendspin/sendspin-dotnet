@@ -1228,6 +1228,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         var category = BinaryMessageParser.GetCategory(type);
 
+        // Isolate decode/dispatch so one bad binary message — or a throwing event subscriber
+        // (likely while the visualizer wire is still maturing) — cannot tear down the receive
+        // loop and stop audio/artwork. Mirrors OnTextMessageReceived's catch-all.
+        try
+        {
+            DispatchBinaryMessage(category, type, timestamp, payload, data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing binary message (type {Type})", type);
+        }
+    }
+
+    private void DispatchBinaryMessage(
+        BinaryMessageCategory category, byte type, long timestamp, ReadOnlySpan<byte> payload, ReadOnlyMemory<byte> data)
+    {
         switch (category)
         {
             case BinaryMessageCategory.PlayerAudio:
