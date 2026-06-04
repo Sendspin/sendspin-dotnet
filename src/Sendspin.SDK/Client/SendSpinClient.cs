@@ -388,6 +388,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
+    /// <inheritdoc/>
+    public bool IsExternalSource { get; private set; }
+
+    /// <inheritdoc/>
+    public async Task EnterExternalSourceAsync()
+    {
+        // Notify the server first; only flip local state if it succeeds (rollback on failure).
+        await _connection.SendMessageAsync(ClientStateMessage.CreateState("external_source"));
+        IsExternalSource = true;
+        _logger.LogInformation("Entered external_source");
+    }
+
+    /// <inheritdoc/>
+    public async Task ExitExternalSourceAsync()
+    {
+        await _connection.SendMessageAsync(ClientStateMessage.CreateState("synchronized"));
+        IsExternalSource = false;
+        _logger.LogInformation("Exited external_source (synchronized)");
+    }
+
     /// <summary>
     /// Builds the player <c>supported_commands</c> list reported in client/state, or null when
     /// none apply. Currently advertises 'set_static_delay' when the client accepts that command.
