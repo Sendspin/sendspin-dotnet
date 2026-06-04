@@ -52,20 +52,28 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
     }
 
     /// <summary>
-    /// Creates an error state message.
+    /// Creates a client/state message carrying only the operational <paramref name="state"/>, with
+    /// no player object. Per the spec, subsequent client/state updates should include only the
+    /// fields that changed — so a pure operational-state change ("error", "synchronized",
+    /// "external_source") is sent without re-sending the (full) player object.
     /// </summary>
-    /// <param name="errorMessage">Optional error message (SDK extension).</param>
-    public static ClientStateMessage CreateError(string? errorMessage = null)
+    /// <param name="state">Operational state: "synchronized", "error", or "external_source".</param>
+    public static ClientStateMessage CreateState(string state)
     {
         return new ClientStateMessage
         {
-            Payload = new ClientStatePayload
-            {
-                State = "error",
-                Player = errorMessage != null ? new PlayerStatePayload { Error = errorMessage } : null
-            }
+            Payload = new ClientStatePayload { State = state }
         };
     }
+
+    /// <summary>
+    /// Creates an error state message (<c>{ "state": "error" }</c>), with no player object.
+    /// </summary>
+    /// <param name="errorMessage">
+    /// Optional error detail for the caller's own logging. It is NOT sent on the wire — the spec
+    /// defines no error-detail field, and a state-only delta must not carry the player object.
+    /// </param>
+    public static ClientStateMessage CreateError(string? errorMessage = null) => CreateState("error");
 }
 
 /// <summary>
