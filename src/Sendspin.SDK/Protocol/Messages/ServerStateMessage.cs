@@ -34,6 +34,13 @@ public sealed class ServerStatePayload
     [JsonPropertyName("controller")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ControllerState? Controller { get; init; }
+
+    /// <summary>
+    /// Color palette derived from the current audio. Only sent to clients with the <c>color</c> role.
+    /// </summary>
+    [JsonPropertyName("color")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ColorState? Color { get; init; }
 }
 
 /// <summary>

@@ -104,6 +104,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<PlayerState>? PlayerStateChanged;
     public event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
     public event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
+    public event EventHandler<ColorPalette>? ColorChanged;
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
     public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
@@ -909,6 +910,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _currentGroup.SupportedCommands = payload.Controller.SupportedCommands;
         }
 
+        // Merge color deltas (color role). Each field is Optional: absent keeps the existing color,
+        // present-null clears it, present-with-value updates it.
+        var colorChanged = false;
+        if (payload.Color is not null)
+        {
+            var c = payload.Color;
+            var colors = _currentGroup.Colors;
+
+            colors.Timestamp = c.Timestamp ?? colors.Timestamp;
+            if (c.BackgroundDark.IsPresent) colors.BackgroundDark = c.BackgroundDark.Value;
+            if (c.BackgroundLight.IsPresent) colors.BackgroundLight = c.BackgroundLight.Value;
+            if (c.Primary.IsPresent) colors.Primary = c.Primary.Value;
+            if (c.Accent.IsPresent) colors.Accent = c.Accent.Value;
+            if (c.OnDark.IsPresent) colors.OnDark = c.OnDark.Value;
+            if (c.OnLight.IsPresent) colors.OnLight = c.OnLight.Value;
+
+            colorChanged = true;
+        }
+
         _logger.LogDebug("server/state [{Player}]: Volume={Volume}, Muted={Muted}, Track={Track} by {Artist}",
             _capabilities.ClientName,
             _currentGroup.Volume,
@@ -917,6 +937,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _currentGroup.Metadata?.Artist ?? "unknown");
 
         GroupStateChanged?.Invoke(this, _currentGroup);
+
+        if (colorChanged)
+        {
+            ColorChanged?.Invoke(this, _currentGroup.Colors);
+        }
     }
 
     /// <summary>

@@ -99,6 +99,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
 
     /// <summary>
+    /// Raised when the group's color palette changes (the <c>color</c> role).
+    /// </summary>
+    public event EventHandler<ColorPalette>? ColorChanged;
+
+    /// <summary>
     /// Raised when any connected client receives a <c>server/hello</c>.
     /// Fires once per server handshake (including reconnects). Multiple concurrent
     /// connections will each raise this event independently — consumers that care
@@ -331,6 +336,7 @@ public sealed class SendspinHostService : IAsyncDisposable
             client.PlayerStateChanged += (s, p) => PlayerStateChanged?.Invoke(this, p);
             client.ArtworkReceived += (s, e) => ArtworkReceived?.Invoke(this, e);
             client.ArtworkCleared += (s, e) => ArtworkCleared?.Invoke(this, e);
+            client.ColorChanged += (s, e) => ColorChanged?.Invoke(this, e);
             client.ServerHelloReceived += (s, payload) => ServerHelloReceived?.Invoke(this, payload);
             client.StreamStartReceived += (s, payload) => StreamStartReceived?.Invoke(this, payload);
 

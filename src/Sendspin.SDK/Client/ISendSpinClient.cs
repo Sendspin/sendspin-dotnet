@@ -171,6 +171,13 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
 
     /// <summary>
+    /// Event raised whenever a <c>server/state</c> carries a <c>color</c> object (the <c>color</c>
+    /// role) — including updates that leave the resolved values unchanged. Carries the current
+    /// merged <see cref="ColorPalette"/>, also available as <see cref="GroupState.Colors"/>.
+    /// </summary>
+    event EventHandler<ColorPalette>? ColorChanged;
+
+    /// <summary>
     /// Event raised when the clock synchronizer first converges to a stable estimate.
     /// This indicates that the client is ready for sample-accurate synchronized playback.
     /// </summary>
