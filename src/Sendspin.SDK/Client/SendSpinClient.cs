@@ -102,8 +102,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
     public event EventHandler<GroupState>? GroupStateChanged;
     public event EventHandler<PlayerState>? PlayerStateChanged;
-    public event EventHandler<byte[]>? ArtworkReceived;
-    public event EventHandler? ArtworkCleared;
+    public event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
+    public event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
     public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
@@ -188,6 +188,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
+        if (_capabilities.ArtworkChannels.Count > 4)
+        {
+            _logger.LogWarning("ArtworkChannels has {Count} entries; only the first 4 are advertised (spec maximum).",
+                _capabilities.ArtworkChannels.Count);
+        }
+
         return ClientHelloMessage.Create(
             clientId: _capabilities.ClientId,
             name: _capabilities.ClientName,
@@ -208,16 +214,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             },
             artworkSupport: new ArtworkSupport
             {
-                Channels = new List<ArtworkChannelSpec>
-                {
-                    new ArtworkChannelSpec
-                    {
-                        Source = "album",
-                        Format = _capabilities.ArtworkFormats.FirstOrDefault() ?? "jpeg",
-                        MediaWidth = _capabilities.ArtworkMaxSize,
-                        MediaHeight = _capabilities.ArtworkMaxSize
-                    }
-                }
+                // Spec allows 1-4 channels (array index = channel number).
+                Channels = _capabilities.ArtworkChannels.Take(4).ToList()
             },
             deviceInfo: new DeviceInfo
             {
@@ -318,6 +316,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
 
         _logger.LogDebug("Setting mute to {Muted}", muted);
+        await _connection.SendMessageAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task RequestArtworkFormatAsync(
+        int channel, string? source = null, string? format = null, int? mediaWidth = null, int? mediaHeight = null)
+    {
+        var message = StreamRequestFormatMessage.ForArtwork(new ArtworkRequestFormat
+        {
+            Channel = channel,
+            Source = source,
+            Format = format,
+            MediaWidth = mediaWidth,
+            MediaHeight = mediaHeight
+        });
+
+        _logger.LogDebug("Requesting artwork format for channel {Channel} (source={Source}, format={Format})",
+            channel, source ?? "unchanged", format ?? "unchanged");
         await _connection.SendMessageAsync(message);
     }
 
@@ -1198,13 +1214,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     if (artwork.ImageData.Length == 0)
                     {
-                        _logger.LogDebug("Artwork cleared (empty payload)");
-                        ArtworkCleared?.Invoke(this, EventArgs.Empty);
+                        _logger.LogDebug("Artwork cleared on channel {Channel}", artwork.Channel);
+                        ArtworkCleared?.Invoke(this, new ArtworkClearedEventArgs(artwork.Channel, artwork.Timestamp));
                     }
                     else
                     {
-                        _logger.LogDebug("Artwork received: {Length} bytes", artwork.ImageData.Length);
-                        ArtworkReceived?.Invoke(this, artwork.ImageData);
+                        _logger.LogDebug("Artwork received on channel {Channel}: {Length} bytes",
+                            artwork.Channel, artwork.ImageData.Length);
+                        ArtworkReceived?.Invoke(this, new ArtworkReceivedEventArgs(artwork.Channel, artwork.Timestamp, artwork.ImageData));
                     }
                 }
                 break;

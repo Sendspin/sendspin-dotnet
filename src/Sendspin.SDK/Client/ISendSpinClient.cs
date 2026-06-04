@@ -99,6 +99,19 @@ public interface ISendspinClient : IAsyncDisposable
     Task SetMuteAsync(bool muted);
 
     /// <summary>
+    /// Requests a format/source change for a single artwork channel via <c>stream/request-format</c>.
+    /// Omitted parameters are left unchanged by the server. Set <paramref name="source"/> to
+    /// <c>"none"</c> to disable the channel, or back to <c>"album"</c>/<c>"artist"</c> to re-enable it,
+    /// without reconnecting. The server responds with a <c>stream/start</c> for the artwork role.
+    /// </summary>
+    /// <param name="channel">Artwork channel number (0-3).</param>
+    /// <param name="source">Artwork source ("album", "artist", "none"), or null to leave unchanged.</param>
+    /// <param name="format">Image format ("jpeg", "png", "bmp"), or null to leave unchanged.</param>
+    /// <param name="mediaWidth">Maximum width in pixels, or null to leave unchanged.</param>
+    /// <param name="mediaHeight">Maximum height in pixels, or null to leave unchanged.</param>
+    Task RequestArtworkFormatAsync(int channel, string? source = null, string? format = null, int? mediaWidth = null, int? mediaHeight = null);
+
+    /// <summary>
     /// Sends the current player state (volume, muted) to the server.
     /// This is used to report local state changes to Music Assistant.
     /// </summary>
@@ -146,15 +159,16 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<PlayerState>? PlayerStateChanged;
 
     /// <summary>
-    /// Event raised when artwork is received.
+    /// Event raised when an artwork image is received on a channel (0-3). Carries the channel,
+    /// display timestamp, and encoded image bytes.
     /// </summary>
-    event EventHandler<byte[]>? ArtworkReceived;
+    event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
 
     /// <summary>
-    /// Event raised when artwork is cleared (empty artwork binary message).
-    /// The server sends an empty payload to signal "no artwork available".
+    /// Event raised when a single artwork channel is cleared (an empty artwork binary message).
+    /// Carries the channel that was cleared.
     /// </summary>
-    event EventHandler? ArtworkCleared;
+    event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
 
     /// <summary>
     /// Event raised when the clock synchronizer first converges to a stable estimate.

@@ -1,4 +1,5 @@
 using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Client;
 
@@ -20,7 +21,6 @@ public sealed class ClientCapabilities
 
     /// <summary>
     /// Roles this client supports, in priority order.
-    /// Matches reference implementation: controller, player, metadata (no artwork for now).
     /// </summary>
     public List<string> Roles { get; set; } = new()
     {
@@ -49,14 +49,21 @@ public sealed class ClientCapabilities
     public int BufferCapacity { get; set; } = 32_000_000;
 
     /// <summary>
-    /// Preferred artwork formats.
+    /// Artwork channels this client can display, advertised in <c>client/hello</c>. The Sendspin
+    /// spec allows 1-4 independent channels (array index = channel number), each with its own
+    /// source, format, and maximum dimensions. The default is a single album/jpeg channel at
+    /// 512x512. Set a channel's <see cref="ArtworkChannelSpec.Source"/> to <c>"none"</c> to advertise
+    /// a channel the client does not currently want streamed. Entries beyond the first four are
+    /// ignored. Remove <c>"artwork@v1"</c> from <see cref="Roles"/> to opt out of artwork entirely.
     /// </summary>
-    public List<string> ArtworkFormats { get; set; } = new() { "jpeg", "png" };
-
-    /// <summary>
-    /// Maximum artwork dimension.
-    /// </summary>
-    public int ArtworkMaxSize { get; set; } = 512;
+    /// <remarks>
+    /// Deliberately reuses the wire type <see cref="ArtworkChannelSpec"/> as config: the capability
+    /// and hello shapes are identical today. Introduce a separate config type only if they diverge.
+    /// </remarks>
+    public List<ArtworkChannelSpec> ArtworkChannels { get; set; } = new()
+    {
+        new ArtworkChannelSpec { Source = "album", Format = "jpeg", MediaWidth = 512, MediaHeight = 512 }
+    };
 
     /// <summary>
     /// Product name reported to the server (e.g., "Sendspin Windows Client", "My Custom Player").

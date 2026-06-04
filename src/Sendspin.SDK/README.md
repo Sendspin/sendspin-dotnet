@@ -317,6 +317,43 @@ var client = new SendspinClientService(
 
 When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
 
+## Artwork
+
+Artwork clients support **1–4 independent channels** (e.g. album art on one display, artist photos on another). Each channel has its own source, format, and maximum size. Configure them in capabilities:
+
+```csharp
+var capabilities = new ClientCapabilities
+{
+    ArtworkChannels = new()
+    {
+        new() { Source = ArtworkSources.Album,  Format = "jpeg", MediaWidth = 512, MediaHeight = 512 }, // channel 0
+        new() { Source = ArtworkSources.Artist, Format = "png",  MediaWidth = 256, MediaHeight = 256 }, // channel 1
+    }
+};
+```
+
+Images arrive per channel, with the display timestamp and channel number:
+
+```csharp
+client.ArtworkReceived += (_, e) =>
+{
+    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png/bmp bytes)
+    displays[e.Channel].Show(e.ImageData);
+};
+
+client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // empty binary message = clear that channel
+```
+
+Change or disable a channel at runtime without reconnecting (server replies with a new `stream/start`):
+
+```csharp
+// Switch channel 1 to artist art at a new size:
+await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.Artist, mediaWidth: 400, mediaHeight: 400);
+
+// Disable channel 1 (server stops sending it); re-enable later by requesting a real source again:
+await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.None);
+```
+
 ## NativeAOT Support
 
 Since v7.0.0, the SDK is fully compatible with [NativeAOT deployment](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/) and IL trimming. This means you can publish your Sendspin player as a single native executable with no .NET runtime dependency — ideal for embedded devices, containers, or minimal Linux installations.
