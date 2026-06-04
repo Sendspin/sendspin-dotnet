@@ -244,10 +244,11 @@ Identify your player to servers:
 ```csharp
 var capabilities = new ClientCapabilities
 {
-    ClientName = "Living Room",           // Display name
-    ProductName = "MySpeaker Pro",        // Product identifier
-    Manufacturer = "Acme Audio",          // Your company
-    SoftwareVersion = "2.1.0"             // App version
+    ClientName = "Living Room",              // Display name
+    ProductName = "MySpeaker Pro",           // Product identifier
+    Manufacturer = "Acme Audio",             // Your company
+    SoftwareVersion = "2.1.0",               // App version
+    MacAddress = "aa:bb:cc:dd:ee:ff"         // NIC MAC, lowercase colon-separated
 };
 ```
 

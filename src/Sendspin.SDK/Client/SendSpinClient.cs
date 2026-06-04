@@ -224,7 +224,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 ProductName = _capabilities.ProductName,
                 Manufacturer = _capabilities.Manufacturer,
-                SoftwareVersion = _capabilities.SoftwareVersion
+                SoftwareVersion = _capabilities.SoftwareVersion,
+                MacAddress = _capabilities.MacAddress
             }
         );
     }
@@ -863,27 +864,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 ArtworkUrl = meta.ArtworkUrl ?? existing.ArtworkUrl,
                 Year = meta.Year ?? existing.Year,
                 Track = meta.Track ?? existing.Track,
-                Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress,
-                Repeat = meta.Repeat ?? existing.Repeat,
-                Shuffle = meta.Shuffle ?? existing.Shuffle
+                Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
             };
-
-            if (meta.Shuffle.HasValue)
-                _currentGroup.Shuffle = meta.Shuffle.Value;
-            if (meta.Repeat is not null)
-                _currentGroup.Repeat = meta.Repeat;
         }
 
-        // Update controller state (volume, mute) for UI display only.
-        // Do NOT apply to audio pipeline - server/state contains GROUP volume.
+        // Update controller state for UI display only.
+        // Do NOT apply volume to the audio pipeline - server/state contains GROUP volume.
         // The server sends server/command with player-specific volume when it wants
         // to change THIS player's output.
+        // Per the Sendspin spec, repeat/shuffle live in the controller object (not metadata).
         if (payload.Controller is not null)
         {
             if (payload.Controller.Volume.HasValue)
                 _currentGroup.Volume = payload.Controller.Volume.Value;
             if (payload.Controller.Muted.HasValue)
                 _currentGroup.Muted = payload.Controller.Muted.Value;
+            if (payload.Controller.Repeat is not null)
+                _currentGroup.Repeat = payload.Controller.Repeat;
+            if (payload.Controller.Shuffle.HasValue)
+                _currentGroup.Shuffle = payload.Controller.Shuffle.Value;
         }
 
         _logger.LogDebug("server/state [{Player}]: Volume={Volume}, Muted={Muted}, Track={Track} by {Artist}",

@@ -75,6 +75,11 @@ public sealed class ClientCapabilities
     public string? SoftwareVersion { get; set; }
 
     /// <summary>
+    /// MAC address of the network interface used for the connection, reported to the server in the
+    /// device info. Use lowercase colon-separated form (e.g., "aa:bb:cc:dd:ee:ff"). If null, it is
+    /// omitted from the device info.
+    /// </summary>
+    public string? MacAddress { get; set; }
     /// Minimum startup lead time in milliseconds reported to the server (codec init, decode
     /// warmup, audio backend buffering, DAC latency). The server schedules the first audio chunk
     /// at least this far ahead after a stream start/restart, preventing start-of-stream truncation.

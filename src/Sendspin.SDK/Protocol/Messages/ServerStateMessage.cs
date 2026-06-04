@@ -73,12 +73,6 @@ public sealed class ServerMetadata
     [JsonPropertyName("progress")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public Optional<PlaybackProgress?> Progress { get; init; } = Optional<PlaybackProgress?>.Absent();
-
-    [JsonPropertyName("repeat")]
-    public string? Repeat { get; init; }
-
-    [JsonPropertyName("shuffle")]
-    public bool? Shuffle { get; init; }
 }
 
 /// <summary>
@@ -122,4 +116,18 @@ public sealed class ControllerState
 
     [JsonPropertyName("muted")]
     public bool? Muted { get; init; }
+
+    /// <summary>
+    /// Repeat mode: "off", "one", or "all". Per the Sendspin spec, repeat state is carried in the
+    /// controller object (moved here from the metadata object).
+    /// </summary>
+    [JsonPropertyName("repeat")]
+    public string? Repeat { get; init; }
+
+    /// <summary>
+    /// Whether shuffle is enabled. Per the Sendspin spec, shuffle state is carried in the controller
+    /// object (moved here from the metadata object).
+    /// </summary>
+    [JsonPropertyName("shuffle")]
+    public bool? Shuffle { get; init; }
 }
