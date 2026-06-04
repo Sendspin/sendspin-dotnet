@@ -105,6 +105,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
     public event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
     public event EventHandler<ColorPalette>? ColorChanged;
+    public event EventHandler<VisualizerFrame>? VisualizationReceived;
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
     public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
@@ -224,7 +225,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 Manufacturer = _capabilities.Manufacturer,
                 SoftwareVersion = _capabilities.SoftwareVersion,
                 MacAddress = _capabilities.MacAddress
-            }
+            },
+            visualizerSupport: _capabilities.VisualizerSupport
         );
     }
 
@@ -335,6 +337,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogDebug("Requesting artwork format for channel {Channel} (source={Source}, format={Format})",
             channel, source ?? "unchanged", format ?? "unchanged");
+        await _connection.SendMessageAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task RequestVisualizerFormatAsync(
+        List<string>? types = null, int? rateMax = null, int? bufferCapacity = null, VisualizerSpectrum? spectrum = null)
+    {
+        var message = StreamRequestFormatMessage.ForVisualizer(new VisualizerRequestFormat
+        {
+            Types = types,
+            RateMax = rateMax,
+            BufferCapacity = bufferCapacity,
+            Spectrum = spectrum
+        });
+
+        _logger.LogDebug("Requesting visualizer format change (types={Types}, rate_max={RateMax})",
+            types is null ? "unchanged" : string.Join(",", types), rateMax);
         await _connection.SendMessageAsync(message);
     }
 
@@ -1252,6 +1271,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 break;
 
             case BinaryMessageCategory.Visualizer:
+                // Spectrum frames are validated against the negotiated bin count from the last
+                // stream/start. A malformed frame parses to null and is dropped.
+                var frame = BinaryMessageParser.ParseVisualizerFrame(
+                    data.Span, LastStreamStart?.Visualizer?.Spectrum?.NDispBins);
+                if (frame is not null)
+                {
+                    _logger.LogTrace("Visualizer frame: type {Type} @ {Timestamp}", type, timestamp);
+                    VisualizationReceived?.Invoke(this, frame);
+                }
+                else
+                {
+                    // Trace (not warn): at up to rate_max/sec this would spam, but it makes a dead
+                    // visualizer diagnosable — e.g. a spectrum frame before any negotiated bin count.
+                    _logger.LogTrace(
+                        "Dropped visualizer frame: type {Type}, {Length} payload bytes, negotiated bins {Bins}",
+                        type, payload.Length, LastStreamStart?.Visualizer?.Spectrum?.NDispBins);
+                }
                 break;
         }
     }

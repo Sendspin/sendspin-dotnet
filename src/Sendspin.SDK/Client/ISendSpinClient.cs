@@ -112,6 +112,17 @@ public interface ISendspinClient : IAsyncDisposable
     Task RequestArtworkFormatAsync(int channel, string? source = null, string? format = null, int? mediaWidth = null, int? mediaHeight = null);
 
     /// <summary>
+    /// Renegotiates the visualizer stream via <c>stream/request-format</c> (the <c>visualizer@v1</c>
+    /// role). Omitted parameters keep their prior value. The server responds with a
+    /// <c>stream/start</c> carrying the new visualizer config.
+    /// </summary>
+    /// <param name="types">Requested feature types (subset of loudness/f_peak/spectrum/beat/peak/pitch), or null to leave unchanged.</param>
+    /// <param name="rateMax">Requested maximum frame rate, or null to leave unchanged.</param>
+    /// <param name="bufferCapacity">Requested buffer capacity in bytes, or null to leave unchanged.</param>
+    /// <param name="spectrum">Requested spectrum configuration, or null to leave unchanged.</param>
+    Task RequestVisualizerFormatAsync(List<string>? types = null, int? rateMax = null, int? bufferCapacity = null, VisualizerSpectrum? spectrum = null);
+
+    /// <summary>
     /// Sends the current player state (volume, muted) to the server.
     /// This is used to report local state changes to Music Assistant.
     /// </summary>
@@ -176,6 +187,13 @@ public interface ISendspinClient : IAsyncDisposable
     /// merged <see cref="ColorPalette"/>, also available as <see cref="GroupState.Colors"/>.
     /// </summary>
     event EventHandler<ColorPalette>? ColorChanged;
+
+    /// <summary>
+    /// Event raised for each decoded visualizer feature frame (the <c>visualizer@v1</c> role). Each
+    /// <see cref="VisualizerFrame"/> carries one feature type (loudness, f_peak, spectrum, beat,
+    /// peak, or pitch). Malformed frames are dropped and do not raise the event.
+    /// </summary>
+    event EventHandler<VisualizerFrame>? VisualizationReceived;
 
     /// <summary>
     /// Event raised when the clock synchronizer first converges to a stable estimate.

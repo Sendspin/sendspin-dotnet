@@ -104,6 +104,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<ColorPalette>? ColorChanged;
 
     /// <summary>
+    /// Raised for each decoded visualizer feature frame (the <c>visualizer@v1</c> role).
+    /// </summary>
+    public event EventHandler<VisualizerFrame>? VisualizationReceived;
+
+    /// <summary>
     /// Raised when any connected client receives a <c>server/hello</c>.
     /// Fires once per server handshake (including reconnects). Multiple concurrent
     /// connections will each raise this event independently — consumers that care
@@ -337,6 +342,7 @@ public sealed class SendspinHostService : IAsyncDisposable
             client.ArtworkReceived += (s, e) => ArtworkReceived?.Invoke(this, e);
             client.ArtworkCleared += (s, e) => ArtworkCleared?.Invoke(this, e);
             client.ColorChanged += (s, e) => ColorChanged?.Invoke(this, e);
+            client.VisualizationReceived += (s, e) => VisualizationReceived?.Invoke(this, e);
             client.ServerHelloReceived += (s, payload) => ServerHelloReceived?.Invoke(this, payload);
             client.StreamStartReceived += (s, payload) => StreamStartReceived?.Invoke(this, payload);
 
@@ -449,7 +455,8 @@ public sealed class SendspinHostService : IAsyncDisposable
                 Manufacturer = _capabilities.Manufacturer,
                 SoftwareVersion = _capabilities.SoftwareVersion,
                 MacAddress = _capabilities.MacAddress
-            }
+            },
+            visualizerSupport: _capabilities.VisualizerSupport
         );
 
         var helloJson = MessageSerializer.Serialize(hello);

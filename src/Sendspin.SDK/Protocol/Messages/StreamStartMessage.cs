@@ -45,4 +45,11 @@ public sealed class StreamStartPayload
     /// </summary>
     [JsonPropertyName("artwork")]
     public StreamStartArtwork? Artwork { get; set; }
+
+    /// <summary>
+    /// Gets or sets the negotiated visualizer stream configuration (types, rate, spectrum).
+    /// Null when the stream/start does not carry visualizer info.
+    /// </summary>
+    [JsonPropertyName("visualizer")]
+    public StreamStartVisualizer? Visualizer { get; set; }
 }

@@ -20,6 +20,12 @@ public sealed class StreamRequestFormatMessage : IMessageWithPayload<StreamReque
     /// </summary>
     public static StreamRequestFormatMessage ForArtwork(ArtworkRequestFormat artwork) =>
         new() { Payload = new StreamRequestFormatPayload { Artwork = artwork } };
+
+    /// <summary>
+    /// Creates a stream/request-format message carrying a visualizer renegotiation.
+    /// </summary>
+    public static StreamRequestFormatMessage ForVisualizer(VisualizerRequestFormat visualizer) =>
+        new() { Payload = new StreamRequestFormatPayload { Visualizer = visualizer } };
 }
 
 /// <summary>
@@ -33,6 +39,40 @@ public sealed class StreamRequestFormatPayload
     [JsonPropertyName("artwork")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ArtworkRequestFormat? Artwork { get; init; }
+
+    /// <summary>
+    /// Visualizer renegotiation. Only for clients with the visualizer role.
+    /// </summary>
+    [JsonPropertyName("visualizer")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public VisualizerRequestFormat? Visualizer { get; init; }
+}
+
+/// <summary>
+/// Renegotiates the visualizer stream. All fields are optional; omitted fields keep their prior
+/// value. The server responds with a <c>stream/start</c> carrying the new visualizer config.
+/// </summary>
+public sealed class VisualizerRequestFormat
+{
+    /// <summary>Requested feature types (subset of <see cref="VisualizerTypes"/>).</summary>
+    [JsonPropertyName("types")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Types { get; init; }
+
+    /// <summary>Requested maximum frame rate.</summary>
+    [JsonPropertyName("rate_max")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? RateMax { get; init; }
+
+    /// <summary>Requested buffer capacity in bytes.</summary>
+    [JsonPropertyName("buffer_capacity")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? BufferCapacity { get; init; }
+
+    /// <summary>Requested spectrum configuration.</summary>
+    [JsonPropertyName("spectrum")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public VisualizerSpectrum? Spectrum { get; init; }
 }
 
 /// <summary>

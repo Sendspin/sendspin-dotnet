@@ -24,7 +24,8 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
         List<string> supportedRoles,
         PlayerSupport? playerSupport = null,
         ArtworkSupport? artworkSupport = null,
-        DeviceInfo? deviceInfo = null)
+        DeviceInfo? deviceInfo = null,
+        VisualizerSupport? visualizerSupport = null)
     {
         return new ClientHelloMessage
         {
@@ -36,6 +37,7 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
                 SupportedRoles = supportedRoles,
                 PlayerV1Support = playerSupport,
                 ArtworkV1Support = artworkSupport,
+                VisualizerV1Support = visualizerSupport,
                 DeviceInfo = deviceInfo
             }
         };
@@ -85,6 +87,13 @@ public sealed class ClientHelloPayload
     [JsonPropertyName("artwork@v1_support")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ArtworkSupport? ArtworkV1Support { get; init; }
+
+    /// <summary>
+    /// Visualizer role support details (types, rate, spectrum config).
+    /// </summary>
+    [JsonPropertyName("visualizer@v1_support")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public VisualizerSupport? VisualizerV1Support { get; init; }
 
     /// <summary>
     /// Device information.

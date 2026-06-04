@@ -371,6 +371,41 @@ Available colors: `BackgroundDark`, `BackgroundLight`, `Primary`, `Accent`, `OnD
 
 Updates are deltas: a color absent from an update is left unchanged, an explicit `null` clears it, and a value updates it. The role is enabled by default (`color@v1` in `ClientCapabilities.Roles`); remove it to opt out.
 
+## Visualizer
+
+Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Six feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, **`peak`** (energy onsets), and **`pitch`**. The role is **opt-in** — set `VisualizerSupport` *and* add `visualizer@v1` to `Roles`:
+
+```csharp
+var capabilities = new ClientCapabilities
+{
+    Roles = { "player@v1", "visualizer@v1" },
+    VisualizerSupport = new VisualizerSupport
+    {
+        BufferCapacity = 65536,
+        RateMax = 30, // max frames/sec
+        Types = new() { VisualizerTypes.Loudness, VisualizerTypes.Spectrum, VisualizerTypes.Beat },
+        // Required when Spectrum is requested:
+        Spectrum = new VisualizerSpectrum { NDispBins = 32, Scale = "log", FMin = 20, FMax = 16000 },
+    },
+};
+```
+
+Each binary message carries one feature type; subscribe to `VisualizationReceived` and read the populated field:
+
+```csharp
+client.VisualizationReceived += (_, frame) =>
+{
+    if (frame.Loudness is { } loud)      meter.Level = loud / 65535.0;
+    if (frame.Spectrum is { } bins)      bars.Update(bins);          // NDispBins values
+    if (frame.IsDownbeat is { } down)    pulse.Beat(strong: down);
+    if (frame.PitchMidi is { } note)     label.Text = $"MIDI {note:F1}"; // pitch is Q8.8 → fractional MIDI
+};
+```
+
+`Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Renegotiate at runtime with `RequestVisualizerFormatAsync(...)`.
+
+> **Note:** `visualizer@v1` follows the [aiosendspin](https://github.com/Sendspin/aiosendspin) reference implementation, which is ahead of the formal protocol spec. The wire format may still evolve.
+
 ## NativeAOT Support
 
 Since v7.0.0, the SDK is fully compatible with [NativeAOT deployment](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/) and IL trimming. This means you can publish your Sendspin player as a single native executable with no .NET runtime dependency — ideal for embedded devices, containers, or minimal Linux installations.
