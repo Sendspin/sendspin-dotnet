@@ -67,6 +67,14 @@ public sealed class ClientCapabilities
     };
 
     /// <summary>
+    /// Visualizer support advertised in <c>client/hello</c> (types, rate, spectrum config). Opt-in:
+    /// null by default, and the <c>visualizer@v1</c> role is not advertised unless this is set. To
+    /// enable, set this AND add <c>"visualizer@v1"</c> to <see cref="Roles"/>. The client must be
+    /// able to render the feature types it lists; subscribe to visualization frames to consume them.
+    /// </summary>
+    public VisualizerSupport? VisualizerSupport { get; set; }
+
+    /// <summary>
     /// Product name reported to the server (e.g., "Sendspin Windows Client", "My Custom Player").
     /// </summary>
     public string? ProductName { get; set; }
