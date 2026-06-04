@@ -49,7 +49,7 @@ public class SendspinClientServiceControllerTests
     }
 
     [Fact]
-    public async Task SendCommandAsync_PlaintCommand_NestsUnderController()
+    public async Task SendCommandAsync_PlainCommand_NestsUnderController()
     {
         var connection = new FakeSendspinConnection();
         using var client = NewClient(connection);
