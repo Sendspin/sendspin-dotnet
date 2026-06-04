@@ -261,7 +261,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    public async Task DisconnectAsync(string reason = "user_request")
+    public async Task DisconnectAsync(string reason = "restart")
     {
         if (_disposed) return;
 

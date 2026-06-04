@@ -80,7 +80,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Disconnects from the server.
     /// </summary>
-    Task DisconnectAsync(string reason = "user_request");
+    Task DisconnectAsync(string reason = "restart");
 
     /// <summary>
     /// Sends a playback command.

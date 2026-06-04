@@ -118,7 +118,7 @@ public sealed class SendspinConnection : ISendspinConnection
         }
     }
 
-    public async Task DisconnectAsync(string reason = "user_request", CancellationToken cancellationToken = default)
+    public async Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default)
     {
         if (State == ConnectionState.Disconnected)
             return;
