@@ -102,6 +102,19 @@ public interface ISendspinClient : IAsyncDisposable
     Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0);
 
     /// <summary>
+    /// Updates the player timing parameters reported to the server and re-sends client/state.
+    /// </summary>
+    /// <remarks>
+    /// Use this when measured conditions change (e.g. empirically measured lead time after warmup,
+    /// or a link-type change). Per the Sendspin spec, callers should debounce updates locally and
+    /// report only sustained changes — the SDK sends each call verbatim. No-op on the wire when the
+    /// client is not currently connected; the new values are still applied to subsequent state sends.
+    /// </remarks>
+    /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds.</param>
+    /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds.</param>
+    Task UpdateTimingAsync(int requiredLeadTimeMs, int minBufferMs);
+
+    /// <summary>
     /// Clears the audio buffer, causing the pipeline to restart buffering.
     /// Use this when audio sync parameters change and you want immediate effect.
     /// </summary>
