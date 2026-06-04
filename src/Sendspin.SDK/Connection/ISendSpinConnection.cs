@@ -29,7 +29,7 @@ public interface ISendspinConnection : IAsyncDisposable
     /// </summary>
     /// <param name="reason">Reason for disconnection</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task DisconnectAsync(string reason = "user_request", CancellationToken cancellationToken = default);
+    Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends a JSON protocol message.

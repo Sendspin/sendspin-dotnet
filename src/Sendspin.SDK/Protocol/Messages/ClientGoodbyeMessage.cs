@@ -17,7 +17,7 @@ public sealed class ClientGoodbyeMessage : IMessageWithPayload<ClientGoodbyePayl
     /// <summary>
     /// Creates a ClientGoodbyeMessage with the specified reason.
     /// </summary>
-    public static ClientGoodbyeMessage Create(string reason = "user_request")
+    public static ClientGoodbyeMessage Create(string reason = "restart")
     {
         return new ClientGoodbyeMessage
         {
@@ -35,5 +35,5 @@ public sealed class ClientGoodbyePayload
     /// Reason for disconnection.
     /// </summary>
     [JsonPropertyName("reason")]
-    public string Reason { get; init; } = "user_request";
+    public string Reason { get; init; } = "restart";
 }

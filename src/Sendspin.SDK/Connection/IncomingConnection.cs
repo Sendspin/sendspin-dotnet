@@ -74,7 +74,7 @@ public sealed class IncomingConnection : ISendspinConnection
             "Use SendspinConnection for client-initiated connections.");
     }
 
-    public async Task DisconnectAsync(string reason = "user_request", CancellationToken cancellationToken = default)
+    public async Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default)
     {
         if (_state == ConnectionState.Disconnected || !_isOpen)
             return;
