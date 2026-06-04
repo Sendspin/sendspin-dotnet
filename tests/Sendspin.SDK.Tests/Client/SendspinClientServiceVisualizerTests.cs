@@ -202,6 +202,28 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
+    public void ThrowingVisualizationHandler_DoesNotBreakReceiveLoop()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = VisualizerClient(connection);
+
+        var calls = 0;
+        client.VisualizationReceived += (_, _) =>
+        {
+            calls++;
+            throw new InvalidOperationException("subscriber boom");
+        };
+
+        // A throwing subscriber must be isolated so the binary receive loop survives — otherwise a
+        // buggy visualizer handler would also tear down audio/artwork. Neither raise should throw,
+        // and the second frame must still dispatch.
+        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.VisualizerLoudness, 1, U16(100)));
+        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.VisualizerLoudness, 2, U16(200)));
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
     public async Task RequestVisualizerFormatAsync_SendsRequestFormat()
     {
         var connection = new FakeSendspinConnection();
