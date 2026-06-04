@@ -93,6 +93,12 @@ public interface ISendspinClient : IAsyncDisposable
     Task SetVolumeAsync(int volume);
 
     /// <summary>
+    /// Sets the group mute state via a controller <c>mute</c> command.
+    /// </summary>
+    /// <param name="muted">True to mute, false to unmute.</param>
+    Task SetMuteAsync(bool muted);
+
+    /// <summary>
     /// Requests a format/source change for a single artwork channel via <c>stream/request-format</c>.
     /// Omitted parameters are left unchanged by the server. Set <paramref name="source"/> to
     /// <c>"none"</c> to disable the channel, or back to <c>"album"</c>/<c>"artist"</c> to re-enable it,
@@ -169,12 +175,6 @@ public interface ISendspinClient : IAsyncDisposable
     /// This indicates that the client is ready for sample-accurate synchronized playback.
     /// </summary>
     event EventHandler<ClockSyncStatus>? ClockSyncConverged;
-
-    /// <summary>
-    /// Event raised when a sync offset is applied from external calibration (e.g., GroupSync).
-    /// The offset adjusts the static delay to compensate for speaker/room acoustics.
-    /// </summary>
-    event EventHandler<SyncOffsetEventArgs>? SyncOffsetApplied;
 
     /// <summary>
     /// Raised when a <c>server/hello</c> message is received and parsed.

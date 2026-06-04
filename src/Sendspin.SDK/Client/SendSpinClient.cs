@@ -105,7 +105,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
     public event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
-    public event EventHandler<SyncOffsetEventArgs>? SyncOffsetApplied;
     public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
@@ -288,7 +287,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 volume = vol;
             }
 
-            if (parameters.TryGetValue("muted", out var muteObj) && muteObj is bool m)
+            // Accept "mute" (matches the wire/command name) or legacy "muted".
+            if ((parameters.TryGetValue("mute", out var muteObj) || parameters.TryGetValue("muted", out muteObj))
+                && muteObj is bool m)
             {
                 mute = m;
             }
@@ -306,6 +307,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(Commands.Volume, volume: clampedVolume);
 
         _logger.LogDebug("Setting volume to {Volume}", clampedVolume);
+        await _connection.SendMessageAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task SetMuteAsync(bool muted)
+    {
+        var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
+
+        _logger.LogDebug("Setting mute to {Muted}", muted);
         await _connection.SendMessageAsync(message);
     }
 
@@ -442,10 +452,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 case MessageTypes.ServerCommand:
                     HandleServerCommand(json);
-                    break;
-
-                case MessageTypes.ClientSyncOffset:
-                    HandleSyncOffset(json);
                     break;
 
                 default:
@@ -899,6 +905,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _currentGroup.Repeat = payload.Controller.Repeat;
             if (payload.Controller.Shuffle.HasValue)
                 _currentGroup.Shuffle = payload.Controller.Shuffle.Value;
+            if (payload.Controller.SupportedCommands is not null)
+                _currentGroup.SupportedCommands = payload.Controller.SupportedCommands;
         }
 
         _logger.LogDebug("server/state [{Player}]: Volume={Volume}, Muted={Muted}, Track={Track} by {Artist}",
@@ -993,45 +1001,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         await SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.StaticDelayMs);
     }
 
-    /// <summary>
-    /// Handles client/sync_offset messages from GroupSync calibration tool.
-    /// Applies the calculated offset to the static delay for speaker synchronization.
-    /// </summary>
-    private void HandleSyncOffset(string json)
-    {
-        var message = MessageSerializer.Deserialize<ClientSyncOffsetMessage>(json);
-        if (message?.Payload is null)
-        {
-            _logger.LogWarning("client/sync_offset: Invalid message format");
-            return;
-        }
-
-        var payload = message.Payload;
-        _logger.LogInformation(
-            "client/sync_offset: Applying offset {Offset}ms from {Source}",
-            payload.OffsetMs,
-            payload.Source ?? "unknown");
-
-        // Clamp offset to reasonable range (-5000 to +5000 ms)
-        var clampedOffset = Math.Clamp(payload.OffsetMs, MinStaticDelayMs, MaxStaticDelayMs);
-
-        if (Math.Abs(clampedOffset - payload.OffsetMs) > 0.001)
-        {
-            _logger.LogWarning(
-                "[ClockSync] sync_offset: Offset clamped from {Original}ms to {Clamped}ms",
-                payload.OffsetMs,
-                clampedOffset);
-        }
-
-        // Apply the offset to the clock synchronizer
-        _clockSynchronizer.StaticDelayMs = clampedOffset;
-        TrySaveStaticDelay(clampedOffset);
-
-        _logger.LogDebug("[ClockSync] Static delay set to {Delay:+0.0;-0.0}ms", clampedOffset);
-
-        // Raise event for UI notification
-        SyncOffsetApplied?.Invoke(this, new SyncOffsetEventArgs(payload.PlayerId, clampedOffset, payload.Source));
-    }
 
     /// <summary>
     /// Restores the persisted static delay (if a store is configured and a value exists) into the
