@@ -145,6 +145,28 @@ public interface ISendspinClient : IAsyncDisposable
     Task UpdateTimingAsync(int requiredLeadTimeMs, int minBufferMs);
 
     /// <summary>
+    /// Whether the client has entered the <c>external_source</c> state (its output is in use by an
+    /// external system and it is not currently participating in Sendspin playback).
+    /// </summary>
+    bool IsExternalSource { get; }
+
+    /// <summary>
+    /// Enters the <c>external_source</c> state: tells the server this client's output is in use by an
+    /// external system (HDMI input, local media, a different audio source) and is not participating
+    /// in Sendspin playback. The server moves the client to a solo, stopped group and ends its
+    /// streams. Notifies the server first; <see cref="IsExternalSource"/> only flips if the
+    /// notification succeeds (rollback on failure), so a throw leaves the client in its prior state.
+    /// </summary>
+    Task EnterExternalSourceAsync();
+
+    /// <summary>
+    /// Leaves the <c>external_source</c> state, reporting <c>synchronized</c> so the client can
+    /// resume participating in Sendspin playback. <see cref="IsExternalSource"/> only clears if the
+    /// notification succeeds.
+    /// </summary>
+    Task ExitExternalSourceAsync();
+
+    /// <summary>
     /// Clears the audio buffer, causing the pipeline to restart buffering.
     /// Use this when audio sync parameters change and you want immediate effect.
     /// </summary>
