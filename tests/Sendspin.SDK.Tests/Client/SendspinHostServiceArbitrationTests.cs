@@ -25,7 +25,7 @@ public class SendspinHostServiceArbitrationTests
         return host;
     }
 
-    private static Task WaitForServerConnectedAsync(SendspinHostService host, string serverId)
+    private static async Task WaitForServerConnectedAsync(SendspinHostService host, string serverId)
     {
         var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -38,14 +38,20 @@ public class SendspinHostServiceArbitrationTests
         }
 
         host.ServerConnected += Handler;
-
-        // Cover the race where it connected before we subscribed.
-        if (host.ConnectedServers.Any(c => c.ServerId == serverId))
+        try
         {
-            tcs.TrySetResult();
-        }
+            // Cover the race where it connected before we subscribed.
+            if (host.ConnectedServers.Any(c => c.ServerId == serverId))
+            {
+                tcs.TrySetResult();
+            }
 
-        return tcs.Task.WaitAsync(Timeout);
+            await tcs.Task.WaitAsync(Timeout);
+        }
+        finally
+        {
+            host.ServerConnected -= Handler;
+        }
     }
 
     [Fact]

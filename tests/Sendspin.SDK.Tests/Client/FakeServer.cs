@@ -13,6 +13,7 @@ namespace Sendspin.SDK.Tests.Client;
 internal sealed class FakeServer : IAsyncDisposable
 {
     private readonly ClientWebSocket _ws = new();
+    private readonly CancellationTokenSource _cts = new();
     private readonly string _serverId;
     private readonly string _connectionReason;
     private readonly TaskCompletionSource<string> _goodbye =
@@ -27,7 +28,7 @@ internal sealed class FakeServer : IAsyncDisposable
 
     internal async Task ConnectAsync(int port)
     {
-        await _ws.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/sendspin"), CancellationToken.None);
+        await _ws.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/sendspin"), _cts.Token);
         _receiveLoop = Task.Run(ReceiveLoopAsync);
     }
 
@@ -40,12 +41,14 @@ internal sealed class FakeServer : IAsyncDisposable
 
     private async Task ReceiveLoopAsync()
     {
+        // Loopback WebSocket: all control messages are single-frame and well within 8 KB,
+        // so EndOfMessage is not checked. This is intentional for a test double.
         var buffer = new byte[8192];
         try
         {
             while (_ws.State == WebSocketState.Open)
             {
-                var result = await _ws.ReceiveAsync(buffer, CancellationToken.None);
+                var result = await _ws.ReceiveAsync(buffer, _cts.Token);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     break;
@@ -71,6 +74,7 @@ internal sealed class FakeServer : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
+            // Disposal cancelled the receive loop.
         }
     }
 
@@ -93,6 +97,8 @@ internal sealed class FakeServer : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _cts.Cancel();
+
         try
         {
             if (_ws.State == WebSocketState.Open)
@@ -106,5 +112,12 @@ internal sealed class FakeServer : IAsyncDisposable
         }
 
         _ws.Dispose();
+
+        if (_receiveLoop is not null)
+        {
+            await _receiveLoop.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
+
+        _cts.Dispose();
     }
 }
