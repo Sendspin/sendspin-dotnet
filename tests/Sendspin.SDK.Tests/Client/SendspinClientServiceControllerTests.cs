@@ -49,6 +49,19 @@ public class SendspinClientServiceControllerTests
     }
 
     [Fact]
+    public async Task SetVolumeAsync_WhenDisconnected_ThrowsLikeRealConnection()
+    {
+        // SetVolumeAsync sends directly with no connection-state guard, relying on the transport
+        // to reject the send when there's no live socket. EnforceConnectionState makes the fake
+        // throw "WebSocket is not connected" like SendspinConnection does while disconnected.
+        var connection = new FakeSendspinConnection { EnforceConnectionState = true };
+        using var client = NewClient(connection);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.SetVolumeAsync(50));
+        Assert.Empty(connection.SentMessages);
+    }
+
+    [Fact]
     public async Task SendCommandAsync_PlaintCommand_NestsUnderController()
     {
         var connection = new FakeSendspinConnection();
