@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Sendspin.SDK</PackageId>
-    <Version>8.0.0</Version>
+    <Version>9.0.0</Version>
     <Authors>Sendspin Contributors</Authors>
     <Company>Sendspin</Company>
     <Product>Sendspin SDK</Product>
@@ -20,6 +20,44 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
+v9.0.0 - Full Role Coverage and Spec Conformance:
+
+This release completes every Sendspin protocol role and closes a cross-SDK
+conformance audit. All six roles are now implemented: player, controller,
+metadata, artwork, color, and visualizer.
+
+NEW ROLES AND FEATURES:
+- Color role (color@v1): receives the audio-derived palette on GroupState.Colors
+  with a ColorChanged event (RgbColor, spec delta semantics).
+- Visualizer role (visualizer@v1): six feature types (loudness, f_peak, spectrum,
+  beat, peak, pitch) via VisualizationReceived; opt-in. Mirrors the aiosendspin
+  reference, which is ahead of the formal spec and may still evolve.
+- Artwork role completed: 1-4 independent channels, channel/timestamp-aware
+  events, stream/request-format, source "none".
+- Controller role completed: GroupState.SupportedCommands, SetMuteAsync.
+- Player timing capabilities: required_lead_time_ms, min_buffer_ms, the
+  set_static_delay command, and IStaticDelayStore for cross-restart persistence.
+- repeat/shuffle now read from the controller state object; mac_address in
+  device_info; perceptual volume curve; client/state error/synchronized on
+  pipeline error/recovery; player/artwork/visualizer stream/request-format emit;
+  delta client/state; external_source enter/exit API.
+
+BREAKING CHANGES:
+- Removed the non-spec client/sync_offset message and the SyncOffsetApplied
+  event / SyncOffsetEventArgs. Use the server/command set_static_delay path.
+- ArtworkReceived is now EventHandler&lt;ArtworkReceivedEventArgs&gt; and
+  ArtworkCleared is EventHandler&lt;ArtworkClearedEventArgs&gt; (both carry the
+  channel and timestamp).
+- ClientCapabilities.ArtworkFormats / ArtworkMaxSize removed in favor of
+  ArtworkChannels (1-4 per-channel specs).
+- StreamRequestFormatMessage reshaped to the spec payload envelope.
+- repeat/shuffle removed from the TrackMetadata model (now on GroupState).
+- The default client/goodbye reason changed from "user_request" to "restart"
+  so an unexplained disconnect is reconnectable; pass an explicit reason to
+  opt out.
+
+----
+
 v8.0.0 - Time-Filter Spec Conformance:
 
 This release brings KalmanClockSynchronizer into alignment with the upstream
