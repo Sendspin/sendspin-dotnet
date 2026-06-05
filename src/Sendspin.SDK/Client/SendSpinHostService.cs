@@ -565,11 +565,10 @@ public sealed class SendspinHostService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Arbitrates whether a newly handshaked server should become the active connection.
-    /// Only one server can be active at a time. Priority rules:
-    /// 1. "playback" connection_reason beats "discovery"
-    /// 2. If tied, the last-played server wins
-    /// 3. If still tied (or LastPlayedServerId is null), the existing server wins
+    /// Arbitrates whether a newly handshaked server should become the active connection
+    /// (only one server is active at a time). The priority rules live in and are documented by
+    /// <see cref="ServerArbitration.Decide"/>; this method applies that decision by disconnecting
+    /// the losing connection with the returned client/goodbye reason.
     /// </summary>
     /// <param name="newClient">The new client that just completed handshake.</param>
     /// <param name="newConnection">The new connection to disconnect if rejected.</param>
