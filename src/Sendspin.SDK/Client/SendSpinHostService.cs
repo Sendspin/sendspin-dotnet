@@ -47,6 +47,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     public string ClientId => _advertiser.ClientId;
 
     /// <summary>
+    /// The actual port the listener is bound to (resolves an OS-assigned port when configured as 0).
+    /// </summary>
+    public int ListeningPort => _listener.BoundPort;
+
+    /// <summary>
     /// Currently connected servers.
     /// </summary>
     public IReadOnlyList<ConnectedServerInfo> ConnectedServers

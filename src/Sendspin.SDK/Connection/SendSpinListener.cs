@@ -30,6 +30,12 @@ public sealed class SendspinListener : IAsyncDisposable
     /// </summary>
     public int Port => _options.Port;
 
+    /// <summary>
+    /// The actual bound port. Differs from <see cref="Port"/> when the configured port is 0
+    /// (OS-assigned). Falls back to the configured port before the server has started.
+    /// </summary>
+    public int BoundPort => _server?.Port ?? _options.Port;
+
     public SendspinListener(ILogger<SendspinListener> logger, ListenerOptions? options = null)
     {
         _logger = logger;
