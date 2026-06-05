@@ -225,7 +225,7 @@ public sealed class AudioPipeline : IAudioPipeline
             _sampleSource = _sourceFactory(_buffer, GetCurrentLocalTimeMicroseconds);
             _player.SetSampleSource(_sampleSource);
 
-            _player.Volume = _volume / 100f;
+            _player.Volume = PerceivedVolumeToAmplitude(_volume);
             _player.IsMuted = _muted;
 
             _player.StateChanged += OnPlayerStateChanged;
@@ -347,11 +347,19 @@ public sealed class AudioPipeline : IAudioPipeline
         _volume = Math.Clamp(volume, 0, 100);
         if (_player != null)
         {
-            _player.Volume = _volume / 100f;
+            _player.Volume = PerceivedVolumeToAmplitude(_volume);
         }
 
         _logger.LogDebug("Volume set to {Volume}%", _volume);
     }
+
+    /// <summary>
+    /// Converts a perceived-loudness volume (0-100) to a linear amplitude (0.0-1.0) using the
+    /// perceptual curve <c>(volume/100)^1.5</c>. Per the Sendspin spec, volume values represent
+    /// perceived loudness, not linear amplitude (e.g. volume 50 should sound half as loud as 100).
+    /// </summary>
+    internal static float PerceivedVolumeToAmplitude(int volume) =>
+        (float)Math.Pow(Math.Clamp(volume, 0, 100) / 100.0, 1.5);
 
     /// <inheritdoc/>
     public void SetMuted(bool muted)

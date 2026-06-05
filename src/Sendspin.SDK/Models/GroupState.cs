@@ -39,4 +39,19 @@ public sealed class GroupState
     /// <summary>Repeat mode ("off", "one", "all").</summary>
     [JsonPropertyName("repeat")]
     public string? Repeat { get; set; }
+
+    /// <summary>
+    /// Controller commands the server currently accepts for this group, from the
+    /// <c>server/state</c> controller object. Lets an embedder enable/disable controls and avoid
+    /// sending commands the server would ignore. Null until the server reports it.
+    /// </summary>
+    [JsonPropertyName("supported_commands")]
+    public List<string>? SupportedCommands { get; set; }
+
+    /// <summary>
+    /// Current color palette derived from the audio (the <c>color</c> role). Populated from
+    /// <c>server/state</c> color updates; individual colors are null until the server provides them.
+    /// </summary>
+    [JsonPropertyName("color")]
+    public ColorPalette Colors { get; set; } = new();
 }

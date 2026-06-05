@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Protocol;
@@ -21,8 +22,6 @@ namespace Sendspin.SDK.Protocol;
 [JsonSerializable(typeof(ClientTimeMessage))]
 [JsonSerializable(typeof(ClientCommandMessage))]
 [JsonSerializable(typeof(ClientStateMessage))]
-[JsonSerializable(typeof(ClientSyncOffsetMessage))]
-[JsonSerializable(typeof(ClientSyncOffsetAckMessage))]
 [JsonSerializable(typeof(StreamRequestFormatMessage))]
 [JsonSerializable(typeof(ServerHelloMessage))]
 [JsonSerializable(typeof(ServerTimeMessage))]
@@ -32,6 +31,8 @@ namespace Sendspin.SDK.Protocol;
 [JsonSerializable(typeof(GroupUpdateMessage))]
 [JsonSerializable(typeof(ServerCommandMessage))]
 [JsonSerializable(typeof(ServerStateMessage))]
+[JsonSerializable(typeof(RgbColor))]
+[JsonSerializable(typeof(RgbColor?))]
 internal partial class MessageSerializerContext : JsonSerializerContext
 {
 }

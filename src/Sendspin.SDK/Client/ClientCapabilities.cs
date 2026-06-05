@@ -1,4 +1,5 @@
 using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Client;
 
@@ -20,14 +21,14 @@ public sealed class ClientCapabilities
 
     /// <summary>
     /// Roles this client supports, in priority order.
-    /// Matches reference implementation: controller, player, metadata (no artwork for now).
     /// </summary>
     public List<string> Roles { get; set; } = new()
     {
         "controller@v1",
         "player@v1",
         "metadata@v1",
-        "artwork@v1"
+        "artwork@v1",
+        "color@v1"
     };
 
     /// <summary>
@@ -49,14 +50,29 @@ public sealed class ClientCapabilities
     public int BufferCapacity { get; set; } = 32_000_000;
 
     /// <summary>
-    /// Preferred artwork formats.
+    /// Artwork channels this client can display, advertised in <c>client/hello</c>. The Sendspin
+    /// spec allows 1-4 independent channels (array index = channel number), each with its own
+    /// source, format, and maximum dimensions. The default is a single album/jpeg channel at
+    /// 512x512. Set a channel's <see cref="ArtworkChannelSpec.Source"/> to <c>"none"</c> to advertise
+    /// a channel the client does not currently want streamed. Entries beyond the first four are
+    /// ignored. Remove <c>"artwork@v1"</c> from <see cref="Roles"/> to opt out of artwork entirely.
     /// </summary>
-    public List<string> ArtworkFormats { get; set; } = new() { "jpeg", "png" };
+    /// <remarks>
+    /// Deliberately reuses the wire type <see cref="ArtworkChannelSpec"/> as config: the capability
+    /// and hello shapes are identical today. Introduce a separate config type only if they diverge.
+    /// </remarks>
+    public List<ArtworkChannelSpec> ArtworkChannels { get; set; } = new()
+    {
+        new ArtworkChannelSpec { Source = "album", Format = "jpeg", MediaWidth = 512, MediaHeight = 512 }
+    };
 
     /// <summary>
-    /// Maximum artwork dimension.
+    /// Visualizer support advertised in <c>client/hello</c> (types, rate, spectrum config). Opt-in:
+    /// null by default, and the <c>visualizer@v1</c> role is not advertised unless this is set. To
+    /// enable, set this AND add <c>"visualizer@v1"</c> to <see cref="Roles"/>. The client must be
+    /// able to render the feature types it lists; subscribe to visualization frames to consume them.
     /// </summary>
-    public int ArtworkMaxSize { get; set; } = 512;
+    public VisualizerSupport? VisualizerSupport { get; set; }
 
     /// <summary>
     /// Product name reported to the server (e.g., "Sendspin Windows Client", "My Custom Player").
@@ -73,6 +89,42 @@ public sealed class ClientCapabilities
     /// If null, will not be included in the device info.
     /// </summary>
     public string? SoftwareVersion { get; set; }
+
+    /// <summary>
+    /// MAC address of the network interface used for the connection, reported to the server in the
+    /// device info. Use lowercase colon-separated form (e.g., "aa:bb:cc:dd:ee:ff"). If null, it is
+    /// omitted from the device info.
+    /// </summary>
+    public string? MacAddress { get; set; }
+    /// Minimum startup lead time in milliseconds reported to the server (codec init, decode
+    /// warmup, audio backend buffering, DAC latency). The server schedules the first audio chunk
+    /// at least this far ahead after a stream start/restart, preventing start-of-stream truncation.
+    /// <para>
+    /// Default (200 ms) is a conservative LAN starting point. Tune per device/network: report the
+    /// lowest value that reliably avoids truncation for the lowest latency. Do NOT include
+    /// <c>static_delay_ms</c> here — the server applies that separately. For empirical tuning, the
+    /// audio pipeline exposes measured output/startup latency (e.g. DetectedOutputLatencyMs).
+    /// </para>
+    /// </summary>
+    public int RequiredLeadTimeMs { get; set; } = 200;
+
+    /// <summary>
+    /// Requested minimum ongoing buffer duration in milliseconds reported to the server, used to
+    /// absorb network jitter and decode/playback timing variance (primarily for live streams,
+    /// where the queue cannot grow after playback begins).
+    /// <para>
+    /// Default (150 ms) is a conservative LAN starting point. Tune per network: larger for remote
+    /// or high-latency links, smaller for stable LAN. Do NOT include <c>static_delay_ms</c> here.
+    /// </para>
+    /// </summary>
+    public int MinBufferMs { get; set; } = 150;
+
+    /// <summary>
+    /// Whether this client accepts the server's <c>set_static_delay</c> command. When true, the
+    /// client advertises 'set_static_delay' in the client/state player object and applies inbound
+    /// set_static_delay commands to its static delay. Default is true.
+    /// </summary>
+    public bool SupportsSetStaticDelay { get; set; } = true;
 
     /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.

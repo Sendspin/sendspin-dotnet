@@ -244,14 +244,167 @@ Identify your player to servers:
 ```csharp
 var capabilities = new ClientCapabilities
 {
-    ClientName = "Living Room",           // Display name
-    ProductName = "MySpeaker Pro",        // Product identifier
-    Manufacturer = "Acme Audio",          // Your company
-    SoftwareVersion = "2.1.0"             // App version
+    ClientName = "Living Room",              // Display name
+    ProductName = "MySpeaker Pro",           // Product identifier
+    Manufacturer = "Acme Audio",             // Your company
+    SoftwareVersion = "2.1.0",               // App version
+    MacAddress = "aa:bb:cc:dd:ee:ff"         // NIC MAC, lowercase colon-separated
 };
 ```
 
 All fields are optional and omitted from the protocol if null.
+
+## Player Timing & Static Delay
+
+Players report timing requirements so the server can schedule audio far enough ahead to avoid
+buffer underruns and start-of-stream truncation (per the Sendspin spec's player timing
+capabilities). These are advertised in every `client/state` message:
+
+```csharp
+var capabilities = new ClientCapabilities
+{
+    // Minimum startup lead time: codec init, decode warmup, backend buffering, DAC latency.
+    // The server schedules the first chunk at least this far ahead after a stream start/restart.
+    RequiredLeadTimeMs = 200,   // default: 200 ms (conservative LAN starting point)
+
+    // Minimum ongoing buffer to absorb network jitter (primarily for live streams).
+    MinBufferMs = 150,          // default: 150 ms
+
+    // Whether to accept the server's set_static_delay command (advertised in client/state).
+    SupportsSetStaticDelay = true,
+};
+```
+
+Report the **lowest** values that reliably avoid truncation/underruns for your device and network —
+larger for remote or high-latency links, smaller for stable LAN. Do **not** fold `static_delay_ms`
+into these values; the server applies static delay separately. For empirical tuning, the audio
+pipeline exposes measured latency (e.g. `AudioPipeline.DetectedOutputLatencyMs`).
+
+If conditions change at runtime (e.g. a link-type change, or a measured lead time after warmup),
+update the values and the SDK re-reports `client/state`:
+
+```csharp
+await client.UpdateTimingAsync(requiredLeadTimeMs: 120, minBufferMs: 80);
+```
+
+Debounce these updates yourself — report only sustained changes, not transient fluctuations.
+
+### Persisting static delay across restarts
+
+`static_delay_ms` compensates for hardware delay beyond the audio port (external speakers,
+amplifiers) and must persist across reboots and reconnections. Because the SDK is a library and
+cannot choose where to store it, implement `IStaticDelayStore` and pass it to the client. The SDK
+loads on connect (before the first `client/state`) and saves whenever the delay changes (via a
+`set_static_delay` command or a GroupSync offset):
+
+```csharp
+public sealed class FileStaticDelayStore : IStaticDelayStore
+{
+    // Use InvariantCulture so the value round-trips regardless of the host's locale.
+    public double? Load() => File.Exists(path)
+        ? double.Parse(File.ReadAllText(path), CultureInfo.InvariantCulture)
+        : null;
+
+    public void Save(double staticDelayMs)
+        => File.WriteAllText(path, staticDelayMs.ToString(CultureInfo.InvariantCulture));
+}
+
+var client = new SendspinClientService(
+    logger, connection, clockSync, capabilities,
+    audioPipeline: pipeline,
+    staticDelayStore: new FileStaticDelayStore());
+```
+
+When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
+
+## Artwork
+
+Artwork clients support **1–4 independent channels** (e.g. album art on one display, artist photos on another). Each channel has its own source, format, and maximum size. Configure them in capabilities:
+
+```csharp
+var capabilities = new ClientCapabilities
+{
+    ArtworkChannels = new()
+    {
+        new() { Source = ArtworkSources.Album,  Format = "jpeg", MediaWidth = 512, MediaHeight = 512 }, // channel 0
+        new() { Source = ArtworkSources.Artist, Format = "png",  MediaWidth = 256, MediaHeight = 256 }, // channel 1
+    }
+};
+```
+
+Images arrive per channel, with the display timestamp and channel number:
+
+```csharp
+client.ArtworkReceived += (_, e) =>
+{
+    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png/bmp bytes)
+    displays[e.Channel].Show(e.ImageData);
+};
+
+client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // empty binary message = clear that channel
+```
+
+Change or disable a channel at runtime without reconnecting (server replies with a new `stream/start`):
+
+```csharp
+// Switch channel 1 to artist art at a new size:
+await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.Artist, mediaWidth: 400, mediaHeight: 400);
+
+// Disable channel 1 (server stops sending it); re-enable later by requesting a real source again:
+await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.None);
+```
+
+## Color
+
+Clients with the `color` role receive a palette derived from the current audio — useful for ambient lighting, screen backgrounds, or UI theming. Colors arrive via `server/state` and are merged onto `GroupState.Colors`; subscribe to `ColorChanged` to react:
+
+```csharp
+client.ColorChanged += (_, palette) =>
+{
+    // RgbColor? per role; null until the server provides it (or after it clears it).
+    if (palette.BackgroundDark is { } bg) lights.SetBackground(bg.R, bg.G, bg.B);
+    if (palette.Primary is { } primary) ui.Accent = primary;
+};
+```
+
+Available colors: `BackgroundDark`, `BackgroundLight`, `Primary`, `Accent`, `OnDark`, `OnLight`, plus a `Timestamp` (server clock, µs). The server guarantees WCAG 4.5:1 contrast ratios between the background/on-color pairs — clients use the values directly and do no contrast math.
+
+Updates are deltas: a color absent from an update is left unchanged, an explicit `null` clears it, and a value updates it. The role is enabled by default (`color@v1` in `ClientCapabilities.Roles`); remove it to opt out.
+
+## Visualizer
+
+Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Six feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, **`peak`** (energy onsets), and **`pitch`**. The role is **opt-in** — set `VisualizerSupport` *and* add `visualizer@v1` to `Roles`:
+
+```csharp
+var capabilities = new ClientCapabilities
+{
+    Roles = { "player@v1", "visualizer@v1" },
+    VisualizerSupport = new VisualizerSupport
+    {
+        BufferCapacity = 65536,
+        RateMax = 30, // max frames/sec
+        Types = new() { VisualizerTypes.Loudness, VisualizerTypes.Spectrum, VisualizerTypes.Beat },
+        // Required when Spectrum is requested:
+        Spectrum = new VisualizerSpectrum { NDispBins = 32, Scale = "log", FMin = 20, FMax = 16000 },
+    },
+};
+```
+
+Each binary message carries one feature type; subscribe to `VisualizationReceived` and read the populated field:
+
+```csharp
+client.VisualizationReceived += (_, frame) =>
+{
+    if (frame.Loudness is { } loud)      meter.Level = loud / 65535.0;
+    if (frame.Spectrum is { } bins)      bars.Update(bins);          // NDispBins values
+    if (frame.IsDownbeat is { } down)    pulse.Beat(strong: down);
+    if (frame.PitchMidi is { } note)     label.Text = $"MIDI {note:F1}"; // pitch is Q8.8 → fractional MIDI
+};
+```
+
+`Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Renegotiate at runtime with `RequestVisualizerFormatAsync(...)`.
+
+> **Note:** `visualizer@v1` follows the [aiosendspin](https://github.com/Sendspin/aiosendspin) reference implementation, which is ahead of the formal protocol spec. The wire format may still evolve. The role degrades gracefully while it matures: it is **opt-in** (off by default), frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
 
 ## NativeAOT Support
 

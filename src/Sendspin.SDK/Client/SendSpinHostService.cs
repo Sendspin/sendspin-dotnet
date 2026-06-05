@@ -89,14 +89,24 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<PlayerState>? PlayerStateChanged;
 
     /// <summary>
-    /// Raised when artwork is received.
+    /// Raised when an artwork image is received on a channel (0-3).
     /// </summary>
-    public event EventHandler<byte[]>? ArtworkReceived;
+    public event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
 
     /// <summary>
-    /// Raised when artwork is cleared (empty artwork binary message from server).
+    /// Raised when a single artwork channel is cleared (empty artwork binary message from server).
     /// </summary>
-    public event EventHandler? ArtworkCleared;
+    public event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
+
+    /// <summary>
+    /// Raised when the group's color palette changes (the <c>color</c> role).
+    /// </summary>
+    public event EventHandler<ColorPalette>? ColorChanged;
+
+    /// <summary>
+    /// Raised for each decoded visualizer feature frame (the <c>visualizer@v1</c> role).
+    /// </summary>
+    public event EventHandler<VisualizerFrame>? VisualizationReceived;
 
     /// <summary>
     /// Raised when any connected client receives a <c>server/hello</c>.
@@ -329,8 +339,10 @@ public sealed class SendspinHostService : IAsyncDisposable
                 GroupStateChanged?.Invoke(this, g);
             };
             client.PlayerStateChanged += (s, p) => PlayerStateChanged?.Invoke(this, p);
-            client.ArtworkReceived += (s, data) => ArtworkReceived?.Invoke(this, data);
-            client.ArtworkCleared += (s, e) => ArtworkCleared?.Invoke(this, EventArgs.Empty);
+            client.ArtworkReceived += (s, e) => ArtworkReceived?.Invoke(this, e);
+            client.ArtworkCleared += (s, e) => ArtworkCleared?.Invoke(this, e);
+            client.ColorChanged += (s, e) => ColorChanged?.Invoke(this, e);
+            client.VisualizationReceived += (s, e) => VisualizationReceived?.Invoke(this, e);
             client.ServerHelloReceived += (s, payload) => ServerHelloReceived?.Invoke(this, payload);
             client.StreamStartReceived += (s, payload) => StreamStartReceived?.Invoke(this, payload);
 
@@ -407,6 +419,12 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     private async Task SendClientHelloAsync(SendspinClientService client, IncomingConnection connection)
     {
+        if (_capabilities.ArtworkChannels.Count > 4)
+        {
+            _logger.LogWarning("ArtworkChannels has {Count} entries; only the first 4 are advertised (spec maximum).",
+                _capabilities.ArtworkChannels.Count);
+        }
+
         // Use audio formats from capabilities (order matters - server picks first supported)
         var hello = ClientHelloMessage.Create(
             clientId: _capabilities.ClientId,
@@ -428,23 +446,17 @@ public sealed class SendspinHostService : IAsyncDisposable
             },
             artworkSupport: new ArtworkSupport
             {
-                Channels = new List<ArtworkChannelSpec>
-                {
-                    new ArtworkChannelSpec
-                    {
-                        Source = "album",
-                        Format = _capabilities.ArtworkFormats.FirstOrDefault() ?? "jpeg",
-                        MediaWidth = _capabilities.ArtworkMaxSize,
-                        MediaHeight = _capabilities.ArtworkMaxSize
-                    }
-                }
+                // Spec allows 1-4 channels (array index = channel number).
+                Channels = _capabilities.ArtworkChannels.Take(4).ToList()
             },
             deviceInfo: new DeviceInfo
             {
                 ProductName = _capabilities.ProductName,
                 Manufacturer = _capabilities.Manufacturer,
-                SoftwareVersion = _capabilities.SoftwareVersion
-            }
+                SoftwareVersion = _capabilities.SoftwareVersion,
+                MacAddress = _capabilities.MacAddress
+            },
+            visualizerSupport: _capabilities.VisualizerSupport
         );
 
         var helloJson = MessageSerializer.Serialize(hello);

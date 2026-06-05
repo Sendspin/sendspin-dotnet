@@ -29,10 +29,6 @@ public static class MessageTypes
     public const string ServerCommand = "server/command";
     public const string ClientState = "client/state";
     public const string ServerState = "server/state";
-
-    // Sync offset (GroupSync calibration)
-    public const string ClientSyncOffset = "client/sync_offset";
-    public const string ClientSyncOffsetAck = "client/sync_offset_ack";
 }
 
 /// <summary>
@@ -52,9 +48,13 @@ public static class BinaryMessageTypes
     public const byte Artwork2 = 10;
     public const byte Artwork3 = 11;
 
-    // Visualizer (role 4, slots 0-7)
-    public const byte Visualizer0 = 16;
-    // ... through Visualizer7 = 23
+    // Visualizer (role 4, slots 0-7). Each binary carries one feature type.
+    public const byte VisualizerLoudness = 16; // slot 0 (also the legacy draft_r1 data blob)
+    public const byte VisualizerBeat = 17;     // slot 1
+    public const byte VisualizerFPeak = 18;    // slot 2
+    public const byte VisualizerSpectrum = 19; // slot 3
+    public const byte VisualizerPeak = 20;     // slot 4
+    public const byte VisualizerPitch = 21;    // slot 5
 
     public static bool IsPlayerAudio(byte type) => type >= 4 && type <= 7;
     public static bool IsArtwork(byte type) => type >= 8 && type <= 11;

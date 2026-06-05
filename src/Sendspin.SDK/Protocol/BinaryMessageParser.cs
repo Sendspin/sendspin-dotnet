@@ -90,6 +90,77 @@ public static class BinaryMessageParser
     }
 
     /// <summary>
+    /// Parses a binary visualizer message into a <see cref="Sendspin.SDK.Models.VisualizerFrame"/>.
+    /// Each visualizer binary carries exactly one feature type; the payload width is fixed per type
+    /// (and, for spectrum, derived from the negotiated bin count). Returns null for a non-visualizer
+    /// type or any malformed/wrong-length payload, so a bad frame is dropped rather than throwing.
+    /// </summary>
+    /// <param name="data">Raw binary message data (including the 9-byte header).</param>
+    /// <param name="spectrumBinCount">The negotiated spectrum display-bin count, or null if spectrum was not negotiated.</param>
+    public static Sendspin.SDK.Models.VisualizerFrame? ParseVisualizerFrame(ReadOnlySpan<byte> data, int? spectrumBinCount)
+    {
+        if (!TryParse(data, out var type, out var timestamp, out var payload))
+        {
+            return null;
+        }
+
+        switch (type)
+        {
+            case BinaryMessageTypes.VisualizerLoudness:
+                return payload.Length == 2
+                    ? new Sendspin.SDK.Models.VisualizerFrame { Timestamp = timestamp, Loudness = BinaryPrimitives.ReadUInt16BigEndian(payload) }
+                    : null;
+
+            case BinaryMessageTypes.VisualizerBeat:
+                return payload.Length == 1
+                    ? new Sendspin.SDK.Models.VisualizerFrame { Timestamp = timestamp, IsDownbeat = (payload[0] & 0x01) != 0 }
+                    : null;
+
+            case BinaryMessageTypes.VisualizerFPeak:
+                return payload.Length == 4
+                    ? new Sendspin.SDK.Models.VisualizerFrame
+                    {
+                        Timestamp = timestamp,
+                        FPeakFrequency = BinaryPrimitives.ReadUInt16BigEndian(payload),
+                        FPeakAmplitude = BinaryPrimitives.ReadUInt16BigEndian(payload.Slice(2, 2))
+                    }
+                    : null;
+
+            case BinaryMessageTypes.VisualizerSpectrum:
+                if (spectrumBinCount is not int bins || bins <= 0 || payload.Length != bins * 2)
+                {
+                    return null;
+                }
+
+                var spectrum = new int[bins];
+                for (var i = 0; i < bins; i++)
+                {
+                    spectrum[i] = BinaryPrimitives.ReadUInt16BigEndian(payload.Slice(i * 2, 2));
+                }
+
+                return new Sendspin.SDK.Models.VisualizerFrame { Timestamp = timestamp, Spectrum = spectrum };
+
+            case BinaryMessageTypes.VisualizerPeak:
+                return payload.Length == 1
+                    ? new Sendspin.SDK.Models.VisualizerFrame { Timestamp = timestamp, PeakStrength = payload[0] }
+                    : null;
+
+            case BinaryMessageTypes.VisualizerPitch:
+                return payload.Length == 3
+                    ? new Sendspin.SDK.Models.VisualizerFrame
+                    {
+                        Timestamp = timestamp,
+                        PitchMidiQ88 = BinaryPrimitives.ReadUInt16BigEndian(payload),
+                        PitchConfidence = payload[2]
+                    }
+                    : null;
+
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
     /// Gets the message category from a binary message type byte.
     /// </summary>
     public static BinaryMessageCategory GetCategory(byte messageType)

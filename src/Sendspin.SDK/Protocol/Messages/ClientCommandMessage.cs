@@ -90,4 +90,9 @@ public static class Commands
     public const string RepeatOne = "repeat_one";
     public const string RepeatAll = "repeat_all";
     public const string Switch = "switch";
+
+    /// <summary>
+    /// Player command: set the player's static delay (server/command player object).
+    /// </summary>
+    public const string SetStaticDelay = "set_static_delay";
 }

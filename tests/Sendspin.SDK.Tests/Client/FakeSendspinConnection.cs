@@ -14,6 +14,9 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public Uri? ServerUri { get; private set; }
     public List<IMessage> SentMessages { get; } = new();
 
+    /// <summary>When true, <see cref="SendMessageAsync"/> throws — used to exercise send failures.</summary>
+    public bool ThrowOnSend { get; set; }
+
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
@@ -34,6 +37,11 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default)
         where T : IMessage
     {
+        if (ThrowOnSend)
+        {
+            throw new InvalidOperationException("send failed");
+        }
+
         SentMessages.Add(message);
         return Task.CompletedTask;
     }
