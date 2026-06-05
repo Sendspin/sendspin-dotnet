@@ -109,4 +109,18 @@ public class SendspinHostServiceArbitrationTests
 
         Assert.Equal("another_server", await existing.WaitForGoodbyeAsync(Timeout));
     }
+
+    [Fact]
+    public async Task SameServerReconnect_SendsUserRequestToStaleConnection()
+    {
+        await using var host = await StartHostAsync();
+        await using var first = new FakeServer("srv-1", "discovery");
+        await first.ConnectAsync(host.ListeningPort);
+        await WaitForServerConnectedAsync(host, "srv-1");
+
+        await using var second = new FakeServer("srv-1", "discovery"); // same server_id reconnecting
+        await second.ConnectAsync(host.ListeningPort);
+
+        Assert.Equal("user_request", await first.WaitForGoodbyeAsync(Timeout));
+    }
 }

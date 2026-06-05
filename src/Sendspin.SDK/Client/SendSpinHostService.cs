@@ -580,109 +580,50 @@ public sealed class SendspinHostService : IAsyncDisposable
         IncomingConnection newConnection,
         string newServerId)
     {
-        ActiveServerConnection? existingConnection = null;
-
+        ActiveServerConnection? existingConnection;
         lock (_connectionsLock)
         {
-            // Find the current active connection (there should be at most one)
+            // There is at most one active connection.
             existingConnection = _connections.Values.FirstOrDefault();
         }
 
-        // No existing server - accept the new one unconditionally
-        if (existingConnection is null)
-        {
-            _logger.LogInformation(
-                "Arbitration: Accepting {NewServerId} (no existing connection)",
-                newServerId);
-            return true;
-        }
-
-        var existingServerId = existingConnection.ServerId;
-
-        // If the same server is reconnecting, accept it (replace the stale entry)
-        if (string.Equals(newServerId, existingServerId, StringComparison.Ordinal))
-        {
-            _logger.LogInformation(
-                "Arbitration: Accepting {NewServerId} (same server reconnecting)",
-                newServerId);
-
-            // Disconnect the old connection cleanly
-            await DisconnectExistingAsync(existingConnection, "reconnecting");
-            return true;
-        }
-
-        // Normalize connection reasons: null is treated as "discovery"
-        var newReason = newClient.ConnectionReason ?? "discovery";
-        var existingReason = existingConnection.Client.ConnectionReason ?? "discovery";
-
-        bool newWins;
-        string decision;
-
-        if (string.Equals(newReason, "playback", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(existingReason, "playback", StringComparison.OrdinalIgnoreCase))
-        {
-            // New server has playback reason, existing does not - new wins
-            newWins = true;
-            decision = "new server has playback reason";
-        }
-        else if (string.Equals(existingReason, "playback", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(newReason, "playback", StringComparison.OrdinalIgnoreCase))
-        {
-            // Existing server has playback reason, new does not - existing wins
-            newWins = false;
-            decision = "existing server has playback reason";
-        }
-        else
-        {
-            // Tie: both have same reason - check LastPlayedServerId
-            if (LastPlayedServerId is not null
-                && string.Equals(newServerId, LastPlayedServerId, StringComparison.Ordinal))
-            {
-                newWins = true;
-                decision = "new server matches LastPlayedServerId (tie-break)";
-            }
-            else
-            {
-                // Existing wins by default (including when LastPlayedServerId is null)
-                newWins = false;
-                decision = LastPlayedServerId is not null
-                    ? "existing server wins tie-break (new server is not LastPlayedServerId)"
-                    : "existing server wins tie-break (no LastPlayedServerId set)";
-            }
-        }
+        var result = ServerArbitration.Decide(
+            newServerId,
+            newClient.ConnectionReason,
+            existingConnection?.ServerId,
+            existingConnection?.Client.ConnectionReason,
+            LastPlayedServerId);
 
         _logger.LogInformation(
-            "Arbitration: {Winner} wins. New={NewServerId} (reason={NewReason}), " +
-            "Existing={ExistingServerId} (reason={ExistingReason}). Decision: {Decision}",
-            newWins ? newServerId : existingServerId,
-            newServerId, newReason,
-            existingServerId, existingReason,
-            decision);
+            "Arbitration: {Rationale}. New={NewServerId} (reason={NewReason}), Existing={ExistingServerId}",
+            result.Rationale,
+            newServerId,
+            newClient.ConnectionReason ?? "discovery",
+            existingConnection?.ServerId ?? "(none)");
 
-        if (newWins)
+        if (result.AcceptNew)
         {
-            // Disconnect the existing server
-            await DisconnectExistingAsync(existingConnection, "another_server");
+            if (existingConnection is not null)
+            {
+                // LoserGoodbyeReason is non-null whenever there is an existing connection to drop.
+                await DisconnectExistingAsync(existingConnection, result.LoserGoodbyeReason!);
+            }
+
             return true;
         }
-        else
+
+        // New server rejected (an existing connection always exists on this path).
+        _logger.LogInformation("Arbitration: Rejecting {NewServerId}, sending goodbye", newServerId);
+        try
         {
-            // Reject the new server
-            _logger.LogInformation(
-                "Arbitration: Rejecting {NewServerId}, sending goodbye",
-                newServerId);
-
-            try
-            {
-                await newConnection.DisconnectAsync("another_server");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error disconnecting rejected server {ServerId}", newServerId);
-            }
-
-            return false;
+            await newConnection.DisconnectAsync(result.LoserGoodbyeReason!);
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error disconnecting rejected server {ServerId}", newServerId);
+        }
+
+        return false;
     }
 
     /// <summary>
