@@ -28,6 +28,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private CancellationTokenSource? _timeSyncCts;
     private bool _disposed;
 
+    // Whether we have reported client/state: 'error' to the server and are awaiting recovery.
+    // Guards against duplicate error reports and gates the synchronized report on actual recovery.
+    private bool _clientErrorReported;
+
     // Player timing parameters reported in client/state. Seeded from capabilities and updatable
     // at runtime via UpdateTimingAsync (e.g. after measuring lead time or a link-type change).
     private int _requiredLeadTimeMs;
@@ -138,6 +142,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _connection.StateChanged += OnConnectionStateChanged;
         _connection.TextMessageReceived += OnTextMessageReceived;
         _connection.BinaryMessageReceived += OnBinaryMessageReceived;
+
+        if (_audioPipeline is not null)
+        {
+            _audioPipeline.ErrorOccurred += OnPipelineError;
+            _audioPipeline.StateChanged += OnPipelineStateChanged;
+        }
     }
 
     public async Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
@@ -1365,5 +1375,71 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _connection.StateChanged -= OnConnectionStateChanged;
         _connection.TextMessageReceived -= OnTextMessageReceived;
         _connection.BinaryMessageReceived -= OnBinaryMessageReceived;
+
+        if (_audioPipeline is not null)
+        {
+            _audioPipeline.ErrorOccurred -= OnPipelineError;
+            _audioPipeline.StateChanged -= OnPipelineStateChanged;
+        }
+    }
+
+    /// <summary>
+    /// Reports <c>client/state: 'error'</c> when the audio pipeline raises an error (e.g. a buffer
+    /// underrun or sync failure), so the server knows this player cannot keep up. Per the spec the
+    /// player then buffers and reports <c>'synchronized'</c> once it recovers (see
+    /// <see cref="OnPipelineStateChanged"/>).
+    /// </summary>
+    private void OnPipelineError(object? sender, AudioPipelineError error)
+    {
+        if (_clientErrorReported)
+        {
+            return;
+        }
+
+        _clientErrorReported = true;
+        _logger.LogWarning("Audio pipeline error; reporting client/state: error ({Message})", error.Message);
+        ReportClientErrorAsync(error.Message).SafeFireAndForget(_logger);
+    }
+
+    /// <summary>
+    /// Tracks pipeline state to drive the error -&gt; synchronized recovery transition: once the
+    /// pipeline returns to <see cref="AudioPipelineState.Playing"/> after an error, report
+    /// <c>client/state: 'synchronized'</c>. The Error state itself is also reported here for
+    /// pipelines that surface underruns via state changes rather than <see cref="OnPipelineError"/>.
+    /// </summary>
+    private void OnPipelineStateChanged(object? sender, AudioPipelineState state)
+    {
+        switch (state)
+        {
+            case AudioPipelineState.Error when !_clientErrorReported:
+                _clientErrorReported = true;
+                _logger.LogWarning("Audio pipeline entered Error state; reporting client/state: error");
+                ReportClientErrorAsync(null).SafeFireAndForget(_logger);
+                break;
+
+            case AudioPipelineState.Playing when _clientErrorReported:
+                _clientErrorReported = false;
+
+                // Guard on connection state symmetrically with ReportClientErrorAsync: a recovery
+                // that lands while disconnected/reconnecting would otherwise hit a closed socket.
+                // The reconnect handshake re-reports synchronized via SendInitialClientStateAsync.
+                if (_connection.State == ConnectionState.Connected)
+                {
+                    _logger.LogInformation("Audio pipeline recovered; reporting client/state: synchronized");
+                    SendPlayerStateAckAsync().SafeFireAndForget(_logger);
+                }
+
+                break;
+        }
+    }
+
+    private async Task ReportClientErrorAsync(string? message)
+    {
+        if (_connection.State != ConnectionState.Connected)
+        {
+            return;
+        }
+
+        await _connection.SendMessageAsync(ClientStateMessage.CreateError(message));
     }
 }
