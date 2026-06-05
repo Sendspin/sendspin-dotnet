@@ -14,8 +14,13 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public Uri? ServerUri { get; private set; }
     public List<IMessage> SentMessages { get; } = new();
 
-    /// <summary>When true, <see cref="SendMessageAsync"/> throws — used to exercise send failures.</summary>
-    public bool ThrowOnSend { get; set; }
+    /// <summary>
+    /// When true, <see cref="SendMessageAsync"/> throws <see cref="InvalidOperationException"/> like the
+    /// real <see cref="SendspinConnection"/> when <see cref="State"/> is not
+    /// <see cref="ConnectionState.Connected"/>. Off by default so the many tests that drive the client
+    /// without connecting keep recording sent messages.
+    /// </summary>
+    public bool EnforceConnectionState { get; set; }
 
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
@@ -37,9 +42,9 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default)
         where T : IMessage
     {
-        if (ThrowOnSend)
+        if (EnforceConnectionState && State != ConnectionState.Connected)
         {
-            throw new InvalidOperationException("send failed");
+            throw new InvalidOperationException("WebSocket is not connected");
         }
 
         SentMessages.Add(message);
