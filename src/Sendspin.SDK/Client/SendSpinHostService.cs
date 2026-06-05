@@ -26,6 +26,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly ClientCapabilities _capabilities;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IClockSynchronizer? _clockSynchronizer;
+    private readonly ILastPlayedServerStore? _lastPlayedServerStore;
 
     private readonly Dictionary<string, ActiveServerConnection> _connections = new();
     private readonly object _connectionsLock = new();
@@ -145,8 +146,44 @@ public sealed class SendspinHostService : IAsyncDisposable
             return;
 
         LastPlayedServerId = serverId;
+        TrySaveLastPlayed(serverId);
         _logger.LogInformation("Last played server updated: {ServerId}", serverId);
         LastPlayedServerIdChanged?.Invoke(this, serverId);
+    }
+
+    private string? TryLoadLastPlayed()
+    {
+        if (_lastPlayedServerStore is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _lastPlayedServerStore.Load();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ILastPlayedServerStore.Load() threw; continuing without persisted last-played server");
+            return null;
+        }
+    }
+
+    private void TrySaveLastPlayed(string serverId)
+    {
+        if (_lastPlayedServerStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _lastPlayedServerStore.Save(serverId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ILastPlayedServerStore.Save({ServerId}) threw; last-played applied in-memory but not persisted", serverId);
+        }
     }
 
     public SendspinHostService(
@@ -156,14 +193,18 @@ public sealed class SendspinHostService : IAsyncDisposable
         AdvertiserOptions? advertiserOptions = null,
         IAudioPipeline? audioPipeline = null,
         IClockSynchronizer? clockSynchronizer = null,
-        string? lastPlayedServerId = null)
+        string? lastPlayedServerId = null,
+        ILastPlayedServerStore? lastPlayedServerStore = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
         _clockSynchronizer = clockSynchronizer;
-        LastPlayedServerId = lastPlayedServerId;
+        _lastPlayedServerStore = lastPlayedServerStore;
+
+        // Explicit seed wins; otherwise fall back to the store (best-effort).
+        LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();
 
         var listenOpts = listenerOptions ?? new ListenerOptions();
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
