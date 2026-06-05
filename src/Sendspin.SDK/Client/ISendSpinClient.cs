@@ -99,6 +99,17 @@ public interface ISendspinClient : IAsyncDisposable
     Task SetMuteAsync(bool muted);
 
     /// <summary>
+    /// Requests a different player audio format via <c>stream/request-format</c> — use this to adapt
+    /// to changing network or CPU conditions (e.g. downgrade codec/sample rate). Omitted parameters
+    /// are left to the server, which responds with a <c>stream/start</c> for the player role.
+    /// </summary>
+    /// <param name="codec">Requested codec ("opus", "flac", "pcm"), or null to leave unchanged.</param>
+    /// <param name="sampleRate">Requested sample rate in Hz, or null to leave unchanged.</param>
+    /// <param name="channels">Requested channel count, or null to leave unchanged.</param>
+    /// <param name="bitDepth">Requested bit depth, or null to leave unchanged.</param>
+    Task RequestPlayerFormatAsync(string? codec = null, int? sampleRate = null, int? channels = null, int? bitDepth = null);
+
+    /// <summary>
     /// Requests a format/source change for a single artwork channel via <c>stream/request-format</c>.
     /// Omitted parameters are left unchanged by the server. Set <paramref name="source"/> to
     /// <c>"none"</c> to disable the channel, or back to <c>"album"</c>/<c>"artist"</c> to re-enable it,
