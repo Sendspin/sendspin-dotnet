@@ -34,6 +34,8 @@ public class ServerArbitrationTests
     [InlineData("b", "playback", "a", "playback", "b", true, "another_server")]    // E1 both playback, lp = new
     [InlineData("b", "playback", "a", "playback", "a", false, "another_server")]   // E1 both playback, lp = existing
     [InlineData("b", null, "a", "playback", null, false, "another_server")]        // null reason = discovery
+    [InlineData("b", null, "a", null, null, false, "another_server")]              // both null = discovery tie, keep existing
+    [InlineData("b", null, "a", null, "b", true, "another_server")]                // both null = discovery tie, lp = new
     [InlineData("b", "PLAYBACK", "a", "discovery", null, true, "another_server")]  // case-insensitive
     public void DecisionTable(
         string newId,
