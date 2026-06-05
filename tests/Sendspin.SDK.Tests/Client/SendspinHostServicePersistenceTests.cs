@@ -54,6 +54,23 @@ public class SendspinHostServicePersistenceTests
         Assert.Equal("srv-z", host.LastPlayedServerId);
     }
 
+    [Fact]
+    public async Task SetLastPlayedServerId_CalledTwiceWithSameId_PersistsOnce()
+    {
+        var store = new FakeLastPlayedServerStore();
+        await using var host = NewHost(store: store);
+        host.SetLastPlayedServerId("srv-dup");
+        host.SetLastPlayedServerId("srv-dup"); // same id: early-return guard skips the second save
+        Assert.Equal(new[] { "srv-dup" }, store.Saved);
+    }
+
+    [Fact]
+    public async Task NoStoreNoSeed_LastPlayedIsNull()
+    {
+        await using var host = NewHost();
+        Assert.Null(host.LastPlayedServerId);
+    }
+
     private sealed class FakeLastPlayedServerStore : ILastPlayedServerStore
     {
         public string? Stored { get; set; }

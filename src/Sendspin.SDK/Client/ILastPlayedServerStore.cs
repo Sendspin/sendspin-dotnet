@@ -22,7 +22,10 @@ public interface ILastPlayedServerStore
     string? Load();
 
     /// <summary>
-    /// Persists the last-played server_id. Called when a server transitions to playback_state 'playing'.
+    /// Persists the last-played server_id. Called whenever the last-played server changes — when a
+    /// server transitions to playback_state 'playing', or when the embedder calls
+    /// <see cref="SendspinHostService.SetLastPlayedServerId"/> directly.
     /// </summary>
+    /// <param name="serverId">The server_id to persist as the last-played server.</param>
     void Save(string serverId);
 }
