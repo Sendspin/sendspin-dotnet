@@ -60,6 +60,38 @@ await client.SetVolumeAsync(75);
 
 You provide the audio output by implementing `IAudioPlayer` for your platform (WASAPI, PulseAudio, CoreAudio, SDL2, etc.). See the [NuGet package README](src/Sendspin.SDK/README.md) for the full API reference, sync correction system, and migration guides.
 
+## Multi-server arbitration & last-played persistence
+
+When multiple servers can reach a player (server-initiated mode), `SendspinHostService` arbitrates
+which one is active, completing each server's handshake first and then applying the spec's decision:
+
+- a new `connection_reason: playback` server takes over from a `discovery` one;
+- a `discovery` server cannot displace a `playback` one;
+- when both are equal, the **last-played** server wins, else the existing connection stays.
+
+The loser is sent `client/goodbye` with reason `another_server`; a same-server reconnect drops the
+stale socket with `user_request`.
+
+To let the tie-break survive restarts, supply an `ILastPlayedServerStore`:
+
+```csharp
+public sealed class FileLastPlayedServerStore : ILastPlayedServerStore
+{
+    private readonly string _path;
+    public FileLastPlayedServerStore(string path) => _path = path;
+    public string? Load() => File.Exists(_path) ? File.ReadAllText(_path) : null;
+    public void Save(string serverId) => File.WriteAllText(_path, serverId);
+}
+
+await using var host = new SendspinHostService(
+    loggerFactory,
+    lastPlayedServerStore: new FileLastPlayedServerStore("last-played.txt"));
+```
+
+The store is optional and best-effort: a throwing implementation is logged and never breaks
+arbitration. The existing `LastPlayedServerIdChanged` event and `lastPlayedServerId` seed parameter
+continue to work (the seed wins over the store when both are supplied).
+
 ## Example Projects
 
 | Project | Platform | Audio Backend |
