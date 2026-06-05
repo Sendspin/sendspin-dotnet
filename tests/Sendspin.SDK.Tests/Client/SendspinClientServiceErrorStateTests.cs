@@ -90,4 +90,20 @@ public class SendspinClientServiceErrorStateTests
             Assert.DoesNotContain("synchronized", StatesSent(conn));
         }
     }
+
+    [Fact]
+    public async Task PipelineErrorWhileDisconnected_DoesNotReportError()
+    {
+        var (conn, pipe, client) = await ConnectedClientAsync();
+        using (client)
+        {
+            await conn.DisconnectAsync();           // connection drops before the pipeline fails
+            pipe.RaiseError("buffer underrun");     // error surfaces while disconnected
+
+            // ReportClientErrorAsync guards on connection state, so the error report is skipped.
+            // The default (non-throwing) fake is deliberate: a removed guard would record the
+            // message and fail this assertion, rather than being masked by an enforced throw.
+            Assert.DoesNotContain("error", StatesSent(conn));
+        }
+    }
 }

@@ -44,7 +44,9 @@ public class SendspinClientServiceExternalSourceTests
     [Fact]
     public async Task EnterExternalSource_RollsBackWhenNotificationFails()
     {
-        var connection = new FakeSendspinConnection { ThrowOnSend = true };
+        // A disconnected connection rejects the send, like the real transport would. The enter
+        // notification is unguarded, so the throw must propagate and roll back the local flag.
+        var connection = new FakeSendspinConnection { EnforceConnectionState = true };
         using var client = NewClient(connection);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.EnterExternalSourceAsync());

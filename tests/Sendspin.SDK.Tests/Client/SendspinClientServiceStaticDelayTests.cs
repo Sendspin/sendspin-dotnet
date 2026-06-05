@@ -174,6 +174,28 @@ public class SendspinClientServiceStaticDelayTests
     }
 
     [Fact]
+    public async Task UpdateTimingAsync_WhenDisconnected_AppliesValuesWithoutSending()
+    {
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection,
+            capabilities: new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 });
+
+        // Never connected: the re-report is guarded on connection state, so nothing hits the wire...
+        await client.UpdateTimingAsync(requiredLeadTimeMs: 70, minBufferMs: 30);
+        Assert.Empty(connection.SentMessages);
+
+        // ...but the new values were still applied: a later connect re-reports them in the initial state.
+        await connection.ConnectAsync(new Uri("ws://test"));
+        connection.RaiseTextMessageReceived(HelloJson);
+
+        var player = await WaitForPlayerStateAsync(connection);
+        Assert.Equal(70, player.RequiredLeadTimeMs);
+        Assert.Equal(30, player.MinBufferMs);
+    }
+
+    [Fact]
     public void ThrowingStore_OnLoad_DoesNotAbortHandshake()
     {
         var sync = new KalmanClockSynchronizer { StaticDelayMs = 12.0 };
