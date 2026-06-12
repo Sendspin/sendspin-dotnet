@@ -79,6 +79,13 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private long _droppedSamples;
     private long _totalWritten;
     private long _totalRead;
+    private long _reanchorCount;
+
+    // Rolling 1-second minimum buffer depth (exposes transient dips between polls)
+    private double _minBufferedMsWindow = double.MaxValue;
+    private long _minWindowResetTick;
+    private double _minBufferedMsRecent;
+    private const long MinBufferedWindowMs = 1_000;
 
     // Scheduled start: when playback should begin (supports static delay feature)
     // The first segment's LocalPlaybackTime includes any static delay from IClockSynchronizer.
@@ -434,6 +441,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     {
                         _lastReanchorTimeMicroseconds = currentLocalTime;
                         _needsReanchor = true;
+                        _reanchorCount++;
                     }
                     else if (currentLocalTime - _lastReanchorCooldownLogTime >= UnderrunLogIntervalMicroseconds)
                     {
@@ -576,6 +584,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     {
                         _lastReanchorTimeMicroseconds = currentLocalTime;
                         _needsReanchor = true;
+                        _reanchorCount++;
                     }
                     else if (currentLocalTime - _lastReanchorCooldownLogTime >= UnderrunLogIntervalMicroseconds)
                     {
@@ -783,9 +792,26 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             else
                 correctionMode = SyncCorrectionMode.None;
 
+            var currentBufferedMs = _count / (double)_samplesPerMs;
+
+            // Update rolling 1s minimum buffer depth
+            var nowTick = Environment.TickCount64;
+            if (_minWindowResetTick == 0 || nowTick - _minWindowResetTick >= MinBufferedWindowMs)
+            {
+                _minBufferedMsRecent = _minBufferedMsWindow == double.MaxValue
+                    ? currentBufferedMs
+                    : _minBufferedMsWindow;
+                _minBufferedMsWindow = currentBufferedMs;
+                _minWindowResetTick = nowTick;
+            }
+            else
+            {
+                _minBufferedMsWindow = Math.Min(_minBufferedMsWindow, currentBufferedMs);
+            }
+
             return new AudioBufferStats
             {
-                BufferedMs = _count / (double)_samplesPerMs,
+                BufferedMs = currentBufferedMs,
                 TargetMs = TargetBufferMilliseconds,
                 UnderrunCount = _underrunCount,
                 OverrunCount = _overrunCount,
@@ -803,6 +829,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 SamplesOutputSinceStart = _samplesOutputSinceStart,
                 ElapsedSinceStartMs = _lastElapsedMicroseconds / 1000.0,
                 TimingSourceName = TimingSourceName,
+                ReanchorCount = _reanchorCount,
+                MinBufferedMsRecent = _minBufferedMsRecent,
             };
         }
     }

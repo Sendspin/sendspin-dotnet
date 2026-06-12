@@ -64,6 +64,19 @@ public sealed class AudioPipeline : IAudioPipeline
     private long _bufferReadyTime;
     private bool _loggedSyncWaiting;
 
+    // Chunk arrival tracking for network diagnostics
+    private readonly object _chunkStatsLock = new();
+    private long _chunksReceived;
+    private long _bytesReceived;
+    private long _lastChunkArrivalMs;   // Environment.TickCount64 at last chunk arrival
+    private double _avgInterArrivalMs;  // EWMA of inter-arrival time
+    private double _chunkJitterMs;      // EWMA of |inter-arrival - avg|
+    private readonly List<(long TickMs, double GapMs)> _recentGaps = [];
+    private double _maxChunkGapMs;
+
+    private const double ChunkEwmaAlpha = 0.1;
+    private const long ChunkGapWindowMs = 10_000;
+
     /// <inheritdoc/>
     public AudioPipelineState State { get; private set; } = AudioPipelineState.Idle;
 
@@ -71,7 +84,37 @@ public sealed class AudioPipeline : IAudioPipeline
     public bool IsReady => _decoder != null && _buffer != null;
 
     /// <inheritdoc/>
-    public AudioBufferStats? BufferStats => _buffer?.GetStats();
+    public AudioBufferStats? BufferStats
+    {
+        get
+        {
+            var stats = _buffer?.GetStats();
+            if (stats == null)
+                return null;
+
+            long chunksReceived, bytesReceived;
+            double lastChunkAgeMs, maxChunkGapMs, chunkJitterMs;
+            lock (_chunkStatsLock)
+            {
+                chunksReceived = _chunksReceived;
+                bytesReceived = _bytesReceived;
+                lastChunkAgeMs = _lastChunkArrivalMs != 0
+                    ? Environment.TickCount64 - _lastChunkArrivalMs
+                    : 0;
+                maxChunkGapMs = _maxChunkGapMs;
+                chunkJitterMs = _chunkJitterMs;
+            }
+
+            return stats with
+            {
+                ChunksReceived = chunksReceived,
+                BytesReceived = bytesReceived,
+                LastChunkAgeMs = lastChunkAgeMs,
+                MaxChunkGapMs = maxChunkGapMs,
+                ChunkJitterMs = chunkJitterMs,
+            };
+        }
+    }
 
     /// <inheritdoc/>
     public AudioFormat? CurrentFormat => _currentFormat;
@@ -156,6 +199,16 @@ public sealed class AudioPipeline : IAudioPipeline
         }
 
         SetState(AudioPipelineState.Starting);
+
+        // Reset chunk timing state for the new session (monotonic counters are kept)
+        lock (_chunkStatsLock)
+        {
+            _lastChunkArrivalMs = 0;
+            _avgInterArrivalMs = 0;
+            _chunkJitterMs = 0;
+            _recentGaps.Clear();
+            _maxChunkGapMs = 0;
+        }
 
         // Without this, a 30 s pause leaves MonotonicTimer 30 s behind real time
         // (forward-jump clamping eats the gap), causing a 30 s delay on resume.
@@ -302,6 +355,8 @@ public sealed class AudioPipeline : IAudioPipeline
             _logger.LogWarning("Received audio chunk but pipeline not started");
             return;
         }
+
+        TrackChunkArrival(chunk.EncodedData.Length);
 
         try
         {
@@ -457,6 +512,37 @@ public sealed class AudioPipeline : IAudioPipeline
     /// audio device's crystal oscillator, not the hypervisor's timer.
     /// </para>
     /// </remarks>
+    private void TrackChunkArrival(int encodedBytes)
+    {
+        var nowMs = Environment.TickCount64;
+        lock (_chunkStatsLock)
+        {
+            _chunksReceived++;
+            _bytesReceived += encodedBytes;
+
+            if (_lastChunkArrivalMs != 0)
+            {
+                double interArrivalMs = nowMs - _lastChunkArrivalMs;
+                if (_avgInterArrivalMs == 0)
+                {
+                    _avgInterArrivalMs = interArrivalMs;
+                }
+                else
+                {
+                    double delta = Math.Abs(interArrivalMs - _avgInterArrivalMs);
+                    _chunkJitterMs = ChunkEwmaAlpha * delta + (1 - ChunkEwmaAlpha) * _chunkJitterMs;
+                    _avgInterArrivalMs = ChunkEwmaAlpha * interArrivalMs + (1 - ChunkEwmaAlpha) * _avgInterArrivalMs;
+                }
+
+                _recentGaps.Add((nowMs, interArrivalMs));
+                _recentGaps.RemoveAll(g => nowMs - g.TickMs > ChunkGapWindowMs);
+                _maxChunkGapMs = _recentGaps.Count > 0 ? _recentGaps.Max(g => g.GapMs) : 0;
+            }
+
+            _lastChunkArrivalMs = nowMs;
+        }
+    }
+
     private long GetCurrentLocalTimeMicroseconds()
     {
         // Try audio hardware clock first (VM-immune)
