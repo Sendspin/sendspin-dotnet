@@ -938,21 +938,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             var meta = payload.Metadata;
             var existing = _currentGroup.Metadata ?? new TrackMetadata();
 
-            // Only update fields that are present in the message
-            // For Progress, we use Optional<T> to distinguish between:
-            //   - Absent: keep existing value (partial update)
-            //   - Present but null: clear progress (track ended)
-            //   - Present with value: update progress
+            // All fields use Optional<T>: absent = keep existing, present-null = clear, present-with-value = update.
             _currentGroup.Metadata = new TrackMetadata
             {
-                Timestamp = meta.Timestamp ?? existing.Timestamp,
-                Title = meta.Title ?? existing.Title,
-                Artist = meta.Artist ?? existing.Artist,
-                AlbumArtist = meta.AlbumArtist ?? existing.AlbumArtist,
-                Album = meta.Album ?? existing.Album,
-                ArtworkUrl = meta.ArtworkUrl ?? existing.ArtworkUrl,
-                Year = meta.Year ?? existing.Year,
-                Track = meta.Track ?? existing.Track,
+                Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
+                Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
+                Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
+                AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
+                Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
+                ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
+                Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
+                Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
                 Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
             };
         }
