@@ -53,20 +53,27 @@ public interface ITimedAudioBuffer : IDisposable
     long OutputLatencyMicroseconds { get; set; }
 
     /// <summary>
-    /// Gets or sets the calibrated startup latency in microseconds for push-model audio backends.
+    /// Gets or sets the calibrated startup latency in microseconds.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// This value compensates for audio pre-filled in the output buffer on push-model
-    /// backends (like ALSA) where the application must fill the buffer before playback starts.
-    /// Without compensation, this prefill causes a constant negative sync error.
+    /// This value compensates for audio consumed to pre-fill the output buffer before
+    /// playback starts. Push-model backends (like ALSA) fill the buffer explicitly;
+    /// pull-model backends can gulp their full buffer on the first callback (WASAPI
+    /// reads its entire ~100ms buffer at Play()). Either way the prefill causes a
+    /// constant negative sync error if uncompensated.
     /// </para>
     /// <para>
-    /// Set this value only when the audio player has measured/calibrated the actual startup
-    /// latency. Pull-model backends (like WASAPI) should leave this at 0.
+    /// This property is an immediate seed for backends that have measured their startup
+    /// latency. Any residual constant offset (undeclared prefill, engine overhead,
+    /// resampler priming) is self-measured at the end of the startup grace period and
+    /// subtracted automatically, so leaving this at 0 no longer causes an audible
+    /// correction phase — it only delays accurate error reporting until the baseline
+    /// snapshot is taken.
     /// </para>
     /// <para>
-    /// Formula: syncError = elapsed - samplesReadTime + CalibratedStartupLatencyMicroseconds
+    /// Implementation: the playback anchor is backdated by this value at start, i.e.
+    /// syncError = (elapsed - CalibratedStartupLatency) - samplesReadTime - selfMeasuredBaseline.
     /// </para>
     /// </remarks>
     long CalibratedStartupLatencyMicroseconds { get; set; }

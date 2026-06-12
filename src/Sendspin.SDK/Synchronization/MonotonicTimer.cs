@@ -20,7 +20,7 @@ namespace Sendspin.SDK.Synchronization;
 /// <para>
 /// This wrapper filters these anomalies while preserving the ability to detect
 /// real DAC clock drift. Real drift accumulates slowly (~50ppm = 3ms/minute),
-/// so clamping per-callback deltas to 50ms doesn't hide actual sync issues.
+/// so clamping per-poll deltas to 500ms doesn't hide actual sync issues.
 /// </para>
 /// </remarks>
 public sealed class MonotonicTimer : IHighPrecisionTimer
@@ -80,10 +80,13 @@ public sealed class MonotonicTimer : IHighPrecisionTimer
     /// Maximum allowed time advance per call in microseconds.
     /// </summary>
     /// <remarks>
-    /// Audio callbacks are typically 10-20ms with ±5ms jitter.
-    /// 50ms allows for worst-case scheduling while filtering VM timer jumps.
+    /// This timer may be polled as infrequently as once per audio chunk
+    /// (~100ms gaps at 10Hz), so the threshold must sit well above the normal
+    /// polling interval — otherwise every routine poll trips the clamp and the
+    /// returned timeline runs slower than real time. 500ms passes any normal
+    /// polling gap while still filtering genuine VM pauses (typically seconds).
     /// </remarks>
-    public long MaxDeltaMicroseconds { get; set; } = 50_000; // 50ms
+    public long MaxDeltaMicroseconds { get; set; } = 500_000; // 500ms
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MonotonicTimer"/> class.

@@ -31,9 +31,16 @@ public sealed class SyncCorrectionOptions
 
     /// <summary>
     /// Below this error magnitude the correction is a smooth rate adjustment;
-    /// above it the correction switches to frame drop/insert. Default 15 ms.
+    /// above it the correction switches to frame drop/insert. Default 100 ms.
     /// </summary>
-    public long ResamplingThresholdMicroseconds { get; set; } = 15_000;
+    /// <remarks>
+    /// Rate adjustment is inaudible (bounded by <see cref="MaxSpeedCorrection"/>),
+    /// while frame drop/insert is audible as stutter. Moderate errors should
+    /// therefore route through resampling: at the default 2% max correction a
+    /// 100 ms error closes in ~5 s without a perceptible pitch change. Reserve
+    /// drop/insert for errors rate correction cannot close in reasonable time.
+    /// </remarks>
+    public long ResamplingThresholdMicroseconds { get; set; } = 100_000;
 
     /// <summary>
     /// Above this error magnitude the buffer is cleared and sync is restarted.
