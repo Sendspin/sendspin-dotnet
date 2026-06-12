@@ -340,6 +340,57 @@ public record AudioBufferStats
     /// Gets the active timing source name ("audio-clock", "monotonic", or "wall-clock").
     /// </summary>
     public string? TimingSourceName { get; init; }
+
+    // ── Network / chunk-arrival diagnostics ────────────────────────────────
+
+    /// <summary>
+    /// Gets the total number of encoded audio chunks received from the network since the pipeline was started.
+    /// Monotonic counter — does not reset on re-anchor or buffer clear.
+    /// </summary>
+    public long ChunksReceived { get; init; }
+
+    /// <summary>
+    /// Gets the total bytes of encoded audio data received from the network since the pipeline was started.
+    /// Monotonic counter — clients can derive bitrate from the delta over a sampling window.
+    /// </summary>
+    public long BytesReceived { get; init; }
+
+    /// <summary>
+    /// Gets the time in milliseconds since the most recent audio chunk arrived.
+    /// Zero when no chunk has been received yet in the current session.
+    /// A growing value while playback is active indicates a network stall.
+    /// </summary>
+    public double LastChunkAgeMs { get; init; }
+
+    /// <summary>
+    /// Gets the maximum inter-chunk arrival gap observed over a rolling ~10-second window.
+    /// A large spike here indicates a burst/stall event that may explain subsequent underruns.
+    /// </summary>
+    public double MaxChunkGapMs { get; init; }
+
+    /// <summary>
+    /// Gets the chunk arrival jitter: EWMA of |inter-arrival − average inter-arrival| (ms).
+    /// Elevated values indicate irregular network delivery independent of average throughput.
+    /// </summary>
+    public double ChunkJitterMs { get; init; }
+
+    // ── Re-anchor / severity ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Gets the total number of re-anchor events fired since the pipeline was started.
+    /// Each event represents a sync error exceeding threshold that triggered a buffer clear.
+    /// Monotonic counter — a poller cannot miss events by polling too slowly.
+    /// </summary>
+    public long ReanchorCount { get; init; }
+
+    // ── Buffer depth ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Gets the minimum buffer depth in milliseconds observed over the most recent ~1-second window.
+    /// A 10 Hz poller can miss transient dips between samples; this low-water mark exposes them.
+    /// Zero until the first stats poll after pipeline start.
+    /// </summary>
+    public double MinBufferedMsRecent { get; init; }
 }
 
 /// <summary>

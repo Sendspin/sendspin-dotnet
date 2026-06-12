@@ -40,6 +40,12 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
 
     private bool _driftReliableLogged;
 
+    // RTT tracking for clock-sync diagnostics
+    private double _lastRttMicroseconds;
+    private double _avgRttMicroseconds;
+    private double _rttJitterMicroseconds;
+    private const double RttEwmaAlpha = 0.2;
+
     /// <summary>
     /// Current estimated clock offset in microseconds.
     /// server_time = client_time + Offset
@@ -191,6 +197,9 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             _measurementCount = 0;
             _driftReliableLogged = false;
             _adaptiveForgettingTriggerCount = 0;
+            _lastRttMicroseconds = 0;
+            _avgRttMicroseconds = 0;
+            _rttJitterMicroseconds = 0;
         }
 
         _logger?.LogDebug("Clock synchronizer reset");
@@ -220,6 +229,20 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
 
         lock (_lock)
         {
+            // Update RTT stats for every measurement regardless of Kalman state
+            if (_measurementCount == 0)
+            {
+                _avgRttMicroseconds = rtt;
+                _rttJitterMicroseconds = 0;
+            }
+            else
+            {
+                double rttDelta = Math.Abs(rtt - _avgRttMicroseconds);
+                _rttJitterMicroseconds = RttEwmaAlpha * rttDelta + (1 - RttEwmaAlpha) * _rttJitterMicroseconds;
+                _avgRttMicroseconds = RttEwmaAlpha * rtt + (1 - RttEwmaAlpha) * _avgRttMicroseconds;
+            }
+            _lastRttMicroseconds = rtt;
+
             // First measurement: seed offset directly from the measurement; defer drift
             // estimation until the next measurement provides a finite-difference baseline.
             if (_measurementCount == 0)
@@ -432,7 +455,10 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
                 IsConverged = _measurementCount >= MinMeasurementsForConvergence
                               && offsetUncertainty < MaxOffsetUncertaintyForConvergence,
                 IsDriftReliable = IsDriftStatisticallySignificantUnsafe(),
-                AdaptiveForgettingTriggerCount = _adaptiveForgettingTriggerCount
+                AdaptiveForgettingTriggerCount = _adaptiveForgettingTriggerCount,
+                LastRttMicroseconds = _lastRttMicroseconds,
+                AvgRttMicroseconds = _avgRttMicroseconds,
+                RttJitterMicroseconds = _rttJitterMicroseconds,
             };
         }
     }
@@ -539,4 +565,24 @@ public record ClockSyncStatus
     /// Offset in milliseconds for display.
     /// </summary>
     public double OffsetMilliseconds => OffsetMicroseconds / 1000.0;
+
+    // ── RTT diagnostics ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// RTT of the most recent time exchange measurement in microseconds.
+    /// </summary>
+    public double LastRttMicroseconds { get; init; }
+
+    /// <summary>
+    /// EWMA of recent RTT measurements in microseconds.
+    /// </summary>
+    public double AvgRttMicroseconds { get; init; }
+
+    /// <summary>
+    /// EWMA of |ΔRTT| between consecutive measurements in microseconds.
+    /// High values indicate WiFi jitter causing unstable clock offset estimation;
+    /// pairs with <see cref="AdaptiveForgettingTriggerCount"/> to distinguish
+    /// one-shot disruption from sustained instability.
+    /// </summary>
+    public double RttJitterMicroseconds { get; init; }
 }
