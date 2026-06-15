@@ -88,6 +88,22 @@ public sealed class SendspinConnection : ISendspinConnection
 
             _webSocket = new ClientWebSocket();
             _webSocket.Options.KeepAliveInterval = TimeSpan.FromMilliseconds(_options.KeepAliveIntervalMs);
+#if NET9_0_OR_GREATER
+            // PING/PONG keep-alive: abort the socket if no PONG arrives in time, so a
+            // half-open connection (frozen peer / network drop without a TCP FIN) surfaces
+            // as a faulted ReceiveAsync instead of blocking forever. .NET 9+ only.
+            if (_options.KeepAliveTimeoutMs > 0)
+            {
+                _webSocket.Options.KeepAliveTimeout = TimeSpan.FromMilliseconds(_options.KeepAliveTimeoutMs);
+            }
+#else
+            if (_options.KeepAliveTimeoutMs > 0)
+            {
+                _logger.LogDebug(
+                    "KeepAliveTimeoutMs is set but has no effect on this runtime (requires .NET 9+); " +
+                    "half-open connections are detected only by the OS TCP timeout.");
+            }
+#endif
 
             using var timeoutCts = new CancellationTokenSource(_options.ConnectTimeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
@@ -239,6 +255,12 @@ public sealed class SendspinConnection : ISendspinConnection
                     {
                         _logger.LogInformation("Server closed connection: {Status} - {Description}",
                             result.CloseStatus, result.CloseStatusDescription);
+
+                        // A server-initiated close (graceful restart/update) must flow into the
+                        // reconnect path, not silently exit the loop. HandleConnectionLostAsync
+                        // no-ops when State is Disconnecting or the object is disposed, so an
+                        // intentional local disconnect still won't trigger a reconnect.
+                        await HandleConnectionLostAsync();
                         return;
                     }
 
@@ -261,9 +283,17 @@ public sealed class SendspinConnection : ISendspinConnection
                 }
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Normal cancellation
+            // Normal cancellation - a local disconnect/cleanup cancelled our receive token.
+        }
+        catch (OperationCanceledException ex)
+        {
+            // Our token was NOT cancelled, so this is an involuntary abort - most commonly
+            // the .NET 9+ keep-alive timeout firing on a half-open connection (the PONG never
+            // arrived). Treat it as a lost connection so the reconnect path runs.
+            _logger.LogWarning(ex, "Receive aborted without local cancellation (keep-alive timeout?)");
+            await HandleConnectionLostAsync();
         }
         catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
         {
