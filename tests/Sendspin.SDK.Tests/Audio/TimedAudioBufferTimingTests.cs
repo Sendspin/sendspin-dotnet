@@ -131,6 +131,36 @@ public class TimedAudioBufferTimingTests
         return (buffer, wallTime);
     }
 
+    /// <summary>
+    /// Same WASAPI-style startup as <see cref="RunPrefillStartup"/>, but drives the buffer through the
+    /// external-correction <c>ReadRaw</c> path instead of <c>Read</c> — so the ReadRaw baseline capture
+    /// (the host-resampler path the Windows client uses) is what's exercised.
+    /// </summary>
+    private static (TimedAudioBuffer Buffer, long WallTime) RunPrefillStartupRaw(
+        FakeClockSynchronizer clockSync)
+    {
+        var buffer = CreateBuffer(clockSync);
+
+        clockSync.OffsetMicroseconds = LocalNow - ServerT0;
+        clockSync.IsConverged = true;
+        clockSync.HasMinimalSync = true;
+
+        EnqueueBurst(buffer, 80);
+
+        var gulp = new float[100 * SamplesPerMs];
+        buffer.ReadRaw(gulp, LocalNow);
+
+        var callback = new float[10 * SamplesPerMs];
+        long wallTime = LocalNow;
+        for (var k = 1; k <= 80; k++)
+        {
+            wallTime = LocalNow + (k * 10_000L);
+            buffer.ReadRaw(callback, wallTime);
+        }
+
+        return (buffer, wallTime);
+    }
+
     [Fact]
     public void PrefillGulp_BaselineSelfZeroes_NoAudibleCorrections()
     {
@@ -147,6 +177,71 @@ public class TimedAudioBufferTimingTests
             Assert.Equal(0, stats.SamplesInsertedForSync);
             Assert.Equal(0, stats.SamplesDroppedForSync);
             Assert.Equal(SyncCorrectionMode.None, stats.CurrentCorrectionMode);
+        }
+    }
+
+    [Fact]
+    public void PrefillGulp_RawPath_BaselineSelfZeroes()
+    {
+        var clockSync = new FakeClockSynchronizer();
+        var (buffer, _) = RunPrefillStartupRaw(clockSync);
+        using (buffer)
+        {
+            // The external-correction (ReadRaw) path must subtract the constant 100ms prefill
+            // baseline just like the internal Read path, so the reported error settles to ~zero.
+            // Without the ReadRaw baseline capture this reads ~-100ms and the external resampler
+            // would grind it out — guards that the ReadRaw startup-baseline block isn't deleted.
+            Assert.InRange(Math.Abs(buffer.GetStats().SyncErrorMs), 0, 5);
+        }
+    }
+
+    [Fact]
+    public void Reconnect_RawPath_ReCapturesBaseline_AbsorbsNewPrefill()
+    {
+        var clockSync = new FakeClockSynchronizer();
+
+        // Larger buffer/burst so the full 2s reconnect-stabilization window runs via ReadRaw.
+        var buffer = new TimedAudioBuffer(Format, clockSync, bufferCapacityMs: 8000);
+        using (buffer)
+        {
+            clockSync.OffsetMicroseconds = LocalNow - ServerT0;
+            clockSync.IsConverged = true;
+            clockSync.HasMinimalSync = true;
+
+            var chunk = new float[ChunkSamples];
+            for (var i = 0; i < 300; i++) // ~6s of audio
+            {
+                buffer.Write(chunk, ServerT0 + (i * ChunkMs * 1000L));
+            }
+
+            // Startup via ReadRaw past the 500ms grace: baseline captured, error ~0.
+            var gulp = new float[100 * SamplesPerMs];
+            buffer.ReadRaw(gulp, LocalNow);
+            var cb = new float[10 * SamplesPerMs];
+            long wall = LocalNow;
+            for (var k = 1; k <= 80; k++)
+            {
+                wall = LocalNow + (k * 10_000L);
+                buffer.ReadRaw(cb, wall);
+            }
+
+            Assert.InRange(Math.Abs(buffer.GetStats().SyncErrorMs), 0, 5);
+
+            // Reconnect, then the backend re-primes (another 100ms gulp). Without the ReadRaw
+            // reconnect re-capture this leaks as a persistent ~-100ms error after stabilization
+            // — the same prefill bug relocated to the reconnect case.
+            buffer.NotifyReconnect();
+            buffer.ReadRaw(gulp, wall);
+
+            // Run past the 2s reconnect-stabilization window.
+            for (var k = 0; k < 230; k++)
+            {
+                wall += 10_000L;
+                buffer.ReadRaw(cb, wall);
+            }
+
+            // Re-capture must have absorbed the new prefill: error back to ~0.
+            Assert.InRange(Math.Abs(buffer.GetStats().SyncErrorMs), 0, 5);
         }
     }
 

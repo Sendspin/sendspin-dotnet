@@ -610,6 +610,24 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     CaptureSyncErrorBaseline("startup (raw)");
                 }
 
+                // Reconnect stabilization just ended: re-capture the baseline so the re-converged
+                // clock's new constant offset is absorbed rather than ground out by the external
+                // corrector — the same prefill bug, relocated to the reconnect case. This mirrors
+                // UpdateCorrectionRate, except we do NOT suppress corrections here: the external
+                // corrector already suppresses its own during the window via
+                // ISyncCorrectionProvider.NotifyReconnect.
+                if (_inReconnectStabilization)
+                {
+                    var samplesSinceReconnect = _samplesOutputSinceStart - _reconnectStabilizationStartOutput;
+                    var elapsedSinceReconnect = (long)(samplesSinceReconnect * _microsecondsPerSample);
+                    if (elapsedSinceReconnect >= _syncOptions.ReconnectStabilizationMicroseconds)
+                    {
+                        _inReconnectStabilization = false;
+                        CaptureSyncErrorBaseline("reconnect (raw)");
+                        _logger.LogInformation("[Correction] Reconnect stabilization ended (raw path), baseline re-captured");
+                    }
+                }
+
                 // Check re-anchor threshold
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
