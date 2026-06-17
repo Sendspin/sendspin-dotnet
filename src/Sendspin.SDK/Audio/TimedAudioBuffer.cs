@@ -145,6 +145,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <inheritdoc/>
     public double TargetPlaybackRate { get; private set; } = 1.0;
 
+    // Rate an external corrector (app-side resampler) reports it's applying. The internal
+    // corrector uses TargetPlaybackRate; only one path is active at a time. Surfaced via GetStats.
+    private double _externalPlaybackRate = 1.0;
+
     /// <inheritdoc/>
     public event Action<double>? TargetPlaybackRateChanged;
 
@@ -591,11 +595,22 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
                 CalculateSyncError(currentLocalTime);
 
-                // NOTE: We do NOT call UpdateCorrectionRate() here.
-                // The caller is responsible for correction via ISyncCorrectionProvider.
+                // NOTE: We do NOT call UpdateCorrectionRate() here — the caller applies
+                // correction via ISyncCorrectionProvider. But we MUST still capture the
+                // startup baseline, exactly as UpdateCorrectionRate does for the internal
+                // path. Without it, the constant backend prefill (WASAPI gulps its full
+                // ~100ms output buffer at Play()) leaks into SyncErrorMicroseconds as a
+                // persistent ~-100ms error, and the external corrector grinds it out
+                // forever (pinning the resampler at its max slow rate). See
+                // CaptureSyncErrorBaseline.
+                var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
+                if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
+                    && !_syncErrorBaselineCaptured)
+                {
+                    CaptureSyncErrorBaseline("startup (raw)");
+                }
 
                 // Check re-anchor threshold
-                var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
                 {
@@ -678,6 +693,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     }
 
     /// <inheritdoc/>
+    public void ReportExternalPlaybackRate(double rate)
+    {
+        lock (_lock)
+        {
+            _externalPlaybackRate = rate;
+        }
+    }
+
+    /// <inheritdoc/>
     public void NotifyReconnect()
     {
         lock (_lock)
@@ -736,6 +760,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             Interlocked.Exchange(ref _reanchorEventPending, 0);
             _lastOutputFrame = null;
             TargetPlaybackRate = 1.0;
+            _externalPlaybackRate = 1.0;
 
             // Note: Don't reset _samplesDroppedForSync/_samplesInsertedForSync - these are cumulative stats
             // Note: Don't reset _lastReanchorTimeMicroseconds - reanchor itself calls Clear(),
@@ -791,6 +816,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             Interlocked.Exchange(ref _reanchorEventPending, 0);
             _lastOutputFrame = null;
             TargetPlaybackRate = 1.0;
+            _externalPlaybackRate = 1.0;
 
             // Reset correction mode transition tracking (avoids stale logging after reset)
             _previousCorrectionMode = SyncCorrectionMode.None;
@@ -805,12 +831,18 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     {
         lock (_lock)
         {
+            // Internal and external correctors are mutually exclusive (the idle one stays at 1.0),
+            // so surface whichever is actually applying a rate.
+            var effectivePlaybackRate = Math.Abs(_externalPlaybackRate - 1.0) > 0.0001
+                ? _externalPlaybackRate
+                : TargetPlaybackRate;
+
             SyncCorrectionMode correctionMode;
             if (_dropEveryNFrames > 0)
                 correctionMode = SyncCorrectionMode.Dropping;
             else if (_insertEveryNFrames > 0)
                 correctionMode = SyncCorrectionMode.Inserting;
-            else if (Math.Abs(TargetPlaybackRate - 1.0) > 0.0001)
+            else if (Math.Abs(effectivePlaybackRate - 1.0) > 0.0001)
                 correctionMode = SyncCorrectionMode.Resampling;
             else
                 correctionMode = SyncCorrectionMode.None;
@@ -847,7 +879,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 SamplesDroppedForSync = _samplesDroppedForSync,
                 SamplesInsertedForSync = _samplesInsertedForSync,
                 CurrentCorrectionMode = correctionMode,
-                TargetPlaybackRate = TargetPlaybackRate,
+                TargetPlaybackRate = effectivePlaybackRate,
                 SamplesReadSinceStart = _samplesReadSinceStart,
                 SamplesOutputSinceStart = _samplesOutputSinceStart,
                 ElapsedSinceStartMs = _lastElapsedMicroseconds / 1000.0,
