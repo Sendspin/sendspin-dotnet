@@ -239,6 +239,19 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _microsecondsPerSample = 1_000_000.0 / (_sampleRate * _channels);
     }
 
+    /// <summary>
+    /// Local time at which to begin emitting the sample carrying <paramref name="serverTimestamp"/>.
+    /// </summary>
+    /// <remarks>
+    /// The clock conversion (which already applies <see cref="IClockSynchronizer.StaticDelayMs"/>) is
+    /// pre-rolled by <see cref="OutputLatencyMicroseconds"/> so the sample is handed to the output that
+    /// much earlier and reaches the speaker at the server's intended time. This is what keeps outputs
+    /// of different latencies (each reporting its own) aligned in a multi-room group without a manual
+    /// per-device offset.
+    /// </remarks>
+    private long ScheduledLocalTimeFor(long serverTimestamp)
+        => _clockSync.ServerToClientTime(serverTimestamp) - OutputLatencyMicroseconds;
+
     /// <inheritdoc/>
     public void Write(ReadOnlySpan<float> samples, long serverTimestamp)
     {
@@ -330,7 +343,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 // rather than once at enqueue: segments written before clock sync
                 // converged would otherwise carry a meaningless conversion (offset 0)
                 // and the entire pre-sync burst would be discarded as "stale".
-                _scheduledStartLocalTime = _clockSync.ServerToClientTime(firstSegment.ServerTimestamp);
+                _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
                 _waitingForScheduledStart = true;
                 _nextExpectedPlaybackTime = _scheduledStartLocalTime;
 
@@ -498,7 +511,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             {
                 var firstSegment = _segments.Peek();
 
-                _scheduledStartLocalTime = _clockSync.ServerToClientTime(firstSegment.ServerTimestamp);
+                _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
                 _waitingForScheduledStart = true;
                 _nextExpectedPlaybackTime = _scheduledStartLocalTime;
 
@@ -989,7 +1002,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             if (_segments.Count > 0)
             {
                 var newFirst = _segments.Peek();
-                _scheduledStartLocalTime = _clockSync.ServerToClientTime(newFirst.ServerTimestamp);
+                _scheduledStartLocalTime = ScheduledLocalTimeFor(newFirst.ServerTimestamp);
                 _nextExpectedPlaybackTime = _scheduledStartLocalTime;
             }
         }
