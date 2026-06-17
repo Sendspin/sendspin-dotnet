@@ -836,6 +836,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             TargetPlaybackRate = 1.0;
             _externalPlaybackRate = 1.0;
 
+            // Reset the reconnect-stabilization window too (Clear() resets the flag for the same
+            // reason). _samplesOutputSinceStart is zeroed above, so leaving
+            // _reconnectStabilizationStartOutput at its old (larger) value would make
+            // samplesSinceReconnect go negative and the 2s window never close — silently suppressing
+            // corrections (internal path) / blocking the reconnect re-capture (ReadRaw path) if a
+            // device switch lands inside the window.
+            _inReconnectStabilization = false;
+            _reconnectStabilizationStartOutput = 0;
+
             // Reset correction mode transition tracking (avoids stale logging after reset)
             _previousCorrectionMode = SyncCorrectionMode.None;
             _correctionStartTimeUs = 0;
