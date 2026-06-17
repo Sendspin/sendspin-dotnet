@@ -202,6 +202,20 @@ public interface ITimedAudioBuffer : IDisposable
     void NotifyExternalCorrection(int samplesDropped, int samplesInserted);
 
     /// <summary>
+    /// Reports the playback rate an external corrector is currently applying, so it appears in
+    /// <see cref="GetStats"/> (and thus the stats UI).
+    /// </summary>
+    /// <remarks>
+    /// The internal corrector sets <see cref="TargetPlaybackRate"/> directly; external correctors
+    /// (e.g. an app-side resampler driven by <see cref="ISyncCorrectionProvider"/>) apply the rate
+    /// outside the buffer, so without this call the reported rate would always read 1.0 even while
+    /// the audio is being resampled. The two paths are mutually exclusive — whichever is idle stays
+    /// at 1.0 — so <see cref="GetStats"/> surfaces whichever is actually correcting.
+    /// </remarks>
+    /// <param name="rate">The applied playback rate (1.0 = no correction).</param>
+    void ReportExternalPlaybackRate(double rate);
+
+    /// <summary>
     /// Notifies the buffer that a WebSocket reconnect occurred.
     /// </summary>
     /// <remarks>
