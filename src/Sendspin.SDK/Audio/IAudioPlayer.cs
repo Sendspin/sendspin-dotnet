@@ -27,12 +27,23 @@ public interface IAudioPlayer : IAsyncDisposable
     bool IsMuted { get; set; }
 
     /// <summary>
-    /// Gets the detected output latency in milliseconds.
-    /// This represents the buffer latency of the audio output device.
+    /// Gets the detected output latency in milliseconds: the delay between handing a sample to the
+    /// output and it reaching the speaker (output buffer + engine).
     /// </summary>
     /// <remarks>
-    /// This value is available after <see cref="InitializeAsync"/> completes.
-    /// It can be used for informational/diagnostic purposes.
+    /// <para>
+    /// Since 9.0.6 this is <b>applied to the playback schedule</b> - the buffer pre-rolls the scheduled
+    /// start by this amount (see <see cref="ITimedAudioBuffer.OutputLatencyMicroseconds"/>) so audio
+    /// reaches the speaker on the server's clock. An implementation that reports a real latency therefore
+    /// keeps multi-room alignment automatically and must NOT also compensate it via StaticDelay. Return
+    /// 0 if the latency is unknown or already accounted for elsewhere.
+    /// </para>
+    /// <para>
+    /// The value should be stable by the time playback starts. Some backends (e.g. WASAPI) can only
+    /// measure their real latency once the audio client is started; the pipeline re-reads this after the
+    /// sample source is attached, so reporting an estimate from <see cref="InitializeAsync"/> and the
+    /// measured value thereafter is supported.
+    /// </para>
     /// </remarks>
     int OutputLatencyMs { get; }
 

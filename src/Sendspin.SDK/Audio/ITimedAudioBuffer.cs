@@ -41,14 +41,20 @@ public interface ITimedAudioBuffer : IDisposable
     bool IsReadyForPlayback { get; }
 
     /// <summary>
-    /// Gets or sets the output latency in microseconds (informational).
-    /// This is the delay between when samples are read from the buffer
-    /// and when they actually play through the speakers (audio output buffer latency).
+    /// Gets or sets the output latency in microseconds: the delay between when samples are read from
+    /// the buffer and when they actually play through the speakers (output buffer + engine latency).
     /// </summary>
     /// <remarks>
-    /// This value is stored for diagnostic/logging purposes. For sync error compensation,
-    /// use <see cref="CalibratedStartupLatencyMicroseconds"/> which is specifically for
-    /// push-model backends that pre-fill their output buffer.
+    /// <para>
+    /// Since 9.0.6 this is <b>subtracted from the scheduled start</b> (pre-roll): the buffer hands
+    /// samples to the output this much earlier so they reach the speaker at the server's intended time.
+    /// That is what keeps outputs of different latencies aligned in a multi-room group without a manual
+    /// per-device offset. Defaults to 0 (no shift).
+    /// </para>
+    /// <para>
+    /// Distinct from <see cref="CalibratedStartupLatencyMicroseconds"/>, which trims the constant
+    /// sync-error baseline introduced by push-model prefill rather than shifting the absolute schedule.
+    /// </para>
     /// </remarks>
     long OutputLatencyMicroseconds { get; set; }
 
