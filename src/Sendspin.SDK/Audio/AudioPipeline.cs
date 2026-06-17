@@ -278,6 +278,13 @@ public sealed class AudioPipeline : IAudioPipeline
             _sampleSource = _sourceFactory(_buffer, GetCurrentLocalTimeMicroseconds);
             _player.SetSampleSource(_sampleSource);
 
+            // Re-read output latency now that SetSampleSource has initialized the output: some backends
+            // (e.g. WASAPI) can only measure their real device latency once the audio client is started,
+            // and report an estimate beforehand. The buffer subtracts this from the scheduled start so
+            // playback is pre-rolled by the output latency and reaches the speaker on the server's clock.
+            _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+            _logger.LogDebug("[Playback] Output latency after attach: {OutputMs}ms", _player.OutputLatencyMs);
+
             _player.Volume = PerceivedVolumeToAmplitude(_volume);
             _player.IsMuted = _muted;
 

@@ -178,4 +178,28 @@ public class TimedAudioBufferTimingTests
                 $"expected speed-up rate > 1.0, got {stats.TargetPlaybackRate}");
         }
     }
+
+    [Fact]
+    public void OutputLatency_PreRollsScheduledStart_StartsAudioThatWouldOtherwiseWait()
+    {
+        // Same setup as MidTrackJoin_BurstMapsToFuture: the first segment maps 100ms into the future,
+        // so a latency-free buffer waits silently (that test asserts read == 0). A 100ms output latency
+        // must pre-roll the scheduled start to "now" — the buffer has to hand the sample to the device
+        // 100ms early so it reaches the speaker on the server's clock — so playback begins immediately.
+        var clockSync = new FakeClockSynchronizer
+        {
+            OffsetMicroseconds = LocalNow + 100_000 - ServerT0,
+            IsConverged = true,
+            HasMinimalSync = true,
+        };
+        using var buffer = CreateBuffer(clockSync);
+        buffer.OutputLatencyMicroseconds = 100_000;
+
+        EnqueueBurst(buffer, 80);
+
+        var output = new float[ChunkSamples];
+        var read = buffer.Read(output, LocalNow);
+
+        Assert.True(read > 0, "output latency should pre-roll the scheduled start so playback begins now");
+    }
 }
