@@ -206,11 +206,17 @@ public interface ITimedAudioBuffer : IDisposable
     /// <see cref="GetStats"/> (and thus the stats UI).
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The internal corrector sets <see cref="TargetPlaybackRate"/> directly; external correctors
     /// (e.g. an app-side resampler driven by <see cref="ISyncCorrectionProvider"/>) apply the rate
     /// outside the buffer, so without this call the reported rate would always read 1.0 even while
     /// the audio is being resampled. The two paths are mutually exclusive — whichever is idle stays
     /// at 1.0 — so <see cref="GetStats"/> surfaces whichever is actually correcting.
+    /// </para>
+    /// <para>
+    /// The caller is responsible for reporting EVERY rate change, including the reset back to 1.0
+    /// when correction stops; otherwise the stats would latch on the last reported value.
+    /// </para>
     /// </remarks>
     /// <param name="rate">The applied playback rate (1.0 = no correction).</param>
     void ReportExternalPlaybackRate(double rate);
