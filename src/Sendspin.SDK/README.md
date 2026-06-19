@@ -317,6 +317,38 @@ var client = new SendspinClientService(
 
 When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
 
+## Multi-server arbitration & last-played persistence
+
+When multiple servers can reach a player (server-initiated mode via `SendspinHostService`), the host
+arbitrates which one is active. It completes each server's `client/hello` ↔ `server/hello` handshake
+first, then applies the spec's decision:
+
+- a new `connection_reason: playback` server takes over from a `discovery` one;
+- a `discovery` server cannot displace a `playback` one;
+- when both are equal, the **last-played** server wins, else the existing connection stays.
+
+The loser is sent `client/goodbye` with reason `another_server`; a same-server reconnect drops the
+stale socket with `user_request`.
+
+So the last-played tie-break survives restarts, implement `ILastPlayedServerStore` (the host loads it
+once at construction and saves whenever a server becomes the last-played one):
+
+```csharp
+public sealed class FileLastPlayedServerStore : ILastPlayedServerStore
+{
+    public string? Load() => File.Exists(path) ? File.ReadAllText(path) : null;
+    public void Save(string serverId) => File.WriteAllText(path, serverId);
+}
+
+await using var host = new SendspinHostService(
+    loggerFactory,
+    lastPlayedServerStore: new FileLastPlayedServerStore());
+```
+
+The store is optional and best-effort: a throwing implementation is logged and never breaks
+arbitration. The existing `LastPlayedServerIdChanged` event and `lastPlayedServerId` seed parameter
+continue to work (the seed wins over the store when both are supplied).
+
 ## Artwork
 
 Artwork clients support **1–4 independent channels** (e.g. album art on one display, artist photos on another). Each channel has its own source, format, and maximum size. Configure them in capabilities:
