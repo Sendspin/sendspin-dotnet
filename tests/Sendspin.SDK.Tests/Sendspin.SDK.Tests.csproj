@@ -22,4 +22,8 @@
     <ProjectReference Include="..\..\src\Sendspin.SDK\Sendspin.SDK.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Connection\cpace-kats.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
