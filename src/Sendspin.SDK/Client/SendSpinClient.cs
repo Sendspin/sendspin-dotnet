@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
+using Sendspin.SDK.Connection.Noise.Pairing;
 using Sendspin.SDK.Extensions;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol;
@@ -26,6 +27,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool _activateReceived;
     private readonly IPairingRecordStore? _pairingStore;
     private byte[]? _pendingPairingPsk;
+    private readonly IPinLockoutStore? _pinLockoutStore;
+    private PinPairingState? _pinState;
+    private int _pairingCounter;
 
     private TaskCompletionSource<bool>? _handshakeTcs;
     private GroupState? _currentGroup;
@@ -147,12 +151,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         IAudioPipeline? audioPipeline = null,
         IStaticDelayStore? staticDelayStore = null,
         INoiseSessionInfo? noiseSession = null,
-        IPairingRecordStore? pairingRecordStore = null)
+        IPairingRecordStore? pairingRecordStore = null,
+        IPinLockoutStore? pinLockoutStore = null)
     {
         _logger = logger;
         _connection = connection;
         _noiseSession = noiseSession;
         _pairingStore = pairingRecordStore;
+        _pinLockoutStore = pinLockoutStore;
         _clockSynchronizer = clockSynchronizer ?? new KalmanClockSynchronizer();
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
@@ -280,7 +286,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             visualizerSupport: _capabilities.VisualizerSupport,
             trustLevel: !encrypted ? null
                 : _noiseSession?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
-            supportedPairMethods: encrypted ? [new PairMethodDescriptor()] : null,
+            supportedPairMethods: encrypted ? BuildPairMethods() : null,
             unpairedAccess: encrypted
                 ? new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
                 : null
@@ -552,6 +558,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandlePairAbort(json);
                     break;
 
+                case MessageTypes.ServerPairInit:
+                    HandleServerPairInit(json);
+                    break;
+
+                case MessageTypes.ServerPairAuth:
+                    HandleServerPairAuth(json);
+                    break;
+
+                case MessageTypes.ServerPairConfirm:
+                    HandleServerPairConfirm(json);
+                    break;
+
                 case MessageTypes.ManagementListRecords:
                 case MessageTypes.ManagementAddRecord:
                 case MessageTypes.ManagementRemoveRecord:
@@ -789,30 +807,225 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// pairing activity. Only the (client-mandatory) Pairing PSK method is implemented:
     /// the client generates the long-term PSK and delivers it in client/pair-finalize.
     /// </summary>
+    /// <summary>
+    /// Builds the supported_pair_methods list for the encrypted client/hello: the
+    /// mandatory Pairing PSK plus any configured PIN methods with their descriptors,
+    /// including current lockout state.
+    /// </summary>
+    private List<PairMethodDescriptor> BuildPairMethods()
+    {
+        var methods = new List<PairMethodDescriptor> { new() { Method = "pairing_psk" } };
+        if (_capabilities.PinPairingMethods.Contains("dynamic_pin"))
+        {
+            methods.Add(new PairMethodDescriptor
+            {
+                Method = "dynamic_pin",
+                OutChannels = _capabilities.PinOutChannels,
+                MinPinLength = _capabilities.MinPinLength,
+                LockedOut = IsPinMethodLockedOut("dynamic_pin"),
+            });
+        }
+
+        if (_capabilities.PinPairingMethods.Contains("static_pin"))
+        {
+            methods.Add(new PairMethodDescriptor
+            {
+                Method = "static_pin",
+                LockedOut = IsPinMethodLockedOut("static_pin"),
+            });
+        }
+
+        return methods;
+    }
+
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
-        if (payload.SelectedPairMethod != "pairing_psk")
+        _pinState = null;
+        _pairingCounter++;
+
+        switch (payload.SelectedPairMethod)
         {
-            _logger.LogWarning("Server selected unsupported pair method {Method}; aborting",
-                payload.SelectedPairMethod);
+            case "pairing_psk":
+                _pendingPairingPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+                _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
+                _connection.SendMessageAsync(new ClientPairFinalizeMessage
+                {
+                    Payload = new ClientPairFinalizePayload { LongTermPsk = B64Url(_pendingPairingPsk) },
+                }).SafeFireAndForget(_logger);
+                break;
+
+            case "dynamic_pin" when _capabilities.PinPairingMethods.Contains("dynamic_pin"):
+                StartPinAttempt(dynamic: true);
+                break;
+
+            case "static_pin" when _capabilities.PinPairingMethods.Contains("static_pin"):
+                StartPinAttempt(dynamic: false);
+                break;
+
+            default:
+                _logger.LogWarning("Server selected unsupported pair method {Method}; aborting",
+                    payload.SelectedPairMethod);
+                _connection.SendMessageAsync(new PairAbortMessage
+                {
+                    Payload = new PairAbortPayload { Reason = "method_not_supported" },
+                }).SafeFireAndForget(_logger);
+                DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Begins a PIN-pairing attempt by sending client/pair-init. For dynamic PIN it
+    /// includes commit_B over a fresh nonce_B; for static PIN the operator gesture that
+    /// opens the pairing window is assumed to have occurred (the SDK sends init
+    /// immediately — hosts gate this via their own gesture handling if required).
+    /// </summary>
+    private void StartPinAttempt(bool dynamic)
+    {
+        var method = dynamic ? "dynamic_pin" : "static_pin";
+        if (IsPinMethodLockedOut(method))
+        {
             _connection.SendMessageAsync(new PairAbortMessage
             {
-                Payload = new PairAbortPayload { Reason = "method_not_supported" },
+                Payload = new PairAbortPayload { Reason = "locked_out" },
             }).SafeFireAndForget(_logger);
-            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
             return;
         }
 
-        _pendingPairingPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-        _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
+        var state = new PinPairingState { Dynamic = dynamic, Method = method };
+        var init = new ClientPairInitMessage
+        {
+            Payload = new ClientPairInitPayload { PairingIndex = _pairingCounter },
+        };
+        if (dynamic)
+        {
+            state.NonceB = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            init.Payload.CommitB = B64Url(PinPairing.CommitB(state.NonceB));
+        }
+
+        _pinState = state;
+        _logger.LogInformation("PIN pairing ({Method}): starting attempt", method);
+        _connection.SendMessageAsync(init).SafeFireAndForget(_logger);
+    }
+
+    private void HandleServerPairInit(string json)
+    {
+        var msg = MessageSerializer.Deserialize<ServerPairInitMessage>(json);
+        if (msg is null || _pinState is not { Dynamic: true } state)
+            return;
+
+        int pinLength = msg.Payload.PinLength;
+        if (pinLength < _capabilities.MinPinLength || pinLength > 12)
+        {
+            AbortPin("pin_length_unacceptable");
+            return;
+        }
+
+        state.NonceA = PinPairing.DecodeB64Url(msg.Payload.NonceA);
+        var h = _noiseSession!.HandshakeHash!.Value.ToArray();
+        string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, pinLength);
+
+        // Emit the PIN via the app's out-channel for the operator to enter into the server.
+        _capabilities.EmitPin?.Invoke(pin);
+        state.Pin = pin;
+        // The PAKE begins when server/pair-auth arrives (server has the PIN by then).
+    }
+
+    private void HandleServerPairAuth(string json)
+    {
+        var msg = MessageSerializer.Deserialize<ServerPairAuthMessage>(json);
+        if (msg is null || _pinState is not { } state)
+            return;
+
+        // Static PIN: the PIN is device-printed and known from the start.
+        string pin = state.Dynamic ? state.Pin! : (_capabilities.StaticPin ?? string.Empty);
+        var h = _noiseSession!.HandshakeHash!.Value.ToArray();
+        byte[] sid = PinPairing.BuildSid(h, (uint)_pairingCounter);
+
+        var cpace = CPace.Start(
+            CPaceRole.Responder,
+            System.Text.Encoding.ASCII.GetBytes(pin),
+            sid,
+            ad: PinPairing.AdClient);
+        state.CPace = cpace;
+        state.Sid = sid;
+        cpace.Derive(PinPairing.DecodeB64Url(msg.Payload.PakeMsg1), PinPairing.AdServer);
+
+        _connection.SendMessageAsync(new ClientPairAuthMessage
+        {
+            Payload = new ClientPairAuthPayload { PakeMsg2 = B64Url(cpace.PublicShare) },
+        }).SafeFireAndForget(_logger);
+    }
+
+    private void HandleServerPairConfirm(string json)
+    {
+        var msg = MessageSerializer.Deserialize<ServerPairConfirmMessage>(json);
+        if (msg is null || _pinState is not { CPace: { } cpace } state)
+            return;
+
+        if (!cpace.Verify(PinPairing.DecodeB64Url(msg.Payload.ServerKc)))
+        {
+            RecordPinFailure(state.Method);
+            AbortPin("pin_mismatch");
+            return;
+        }
+
+        // Send client/pair-confirm then client/pair-finalize (wrapped PSK) back-to-back.
+        var confirm = new ClientPairConfirmMessage
+        {
+            Payload = new ClientPairConfirmPayload { ClientKc = B64Url(cpace.Tag()) },
+        };
+        if (state.Dynamic)
+        {
+            confirm.Payload.NonceB = B64Url(state.NonceB!);
+        }
+
+        _connection.SendMessageAsync(confirm).SafeFireAndForget(_logger);
+
+        byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        _pendingPairingPsk = psk;
+        var suite = NoiseCipherSuite.ChaChaPoly;
+        byte[] wrapped = PinPairing.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
         _connection.SendMessageAsync(new ClientPairFinalizeMessage
         {
-            Payload = new ClientPairFinalizePayload
-            {
-                LongTermPsk = Convert.ToBase64String(_pendingPairingPsk)
-                    .TrimEnd('=').Replace('+', '-').Replace('/', '_'),
-            },
+            Payload = new ClientPairFinalizePayload { WrappedPsk = B64Url(wrapped) },
         }).SafeFireAndForget(_logger);
+
+        // Success resets the method's failure counter.
+        _pinLockoutStore?.SetFailures(state.Method, 0);
+    }
+
+    private void AbortPin(string reason)
+    {
+        _pinState = null;
+        _connection.SendMessageAsync(new PairAbortMessage
+        {
+            Payload = new PairAbortPayload { Reason = reason },
+        }).SafeFireAndForget(_logger);
+    }
+
+    private bool IsPinMethodLockedOut(string method)
+        => (_pinLockoutStore?.GetFailures(method) ?? 0) >= 10;
+
+    private void RecordPinFailure(string method)
+    {
+        if (_pinLockoutStore is null)
+            return;
+        _pinLockoutStore.SetFailures(method, _pinLockoutStore.GetFailures(method) + 1);
+    }
+
+    private static string B64Url(byte[] data)
+        => Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private sealed class PinPairingState
+    {
+        public bool Dynamic;
+        public string Method = string.Empty;
+        public byte[]? NonceA;
+        public byte[]? NonceB;
+        public string? Pin;
+        public byte[]? Sid;
+        public CPace? CPace;
     }
 
     /// <summary>
@@ -1031,6 +1244,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<PairAbortMessage>(json);
         _logger.LogWarning("Pairing aborted: {Reason}", message?.Payload.Reason ?? "unknown");
         _pendingPairingPsk = null;
+        _pinState = null;
     }
 
     /// <summary>

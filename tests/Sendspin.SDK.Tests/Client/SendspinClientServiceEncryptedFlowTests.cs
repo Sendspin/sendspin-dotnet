@@ -19,8 +19,8 @@ public class SendspinClientServiceEncryptedFlowTests
     private sealed class FakeNoiseSession : INoiseSessionInfo
     {
         public string? ServerId { get; set; } = FakeServerId;
-        public NoisePsk? MatchedPsk { get; set; } =
-            new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Sentinel);
+        public NoisePsk? MatchedPsk { get; set; }
+        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
     }
 
     private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session)

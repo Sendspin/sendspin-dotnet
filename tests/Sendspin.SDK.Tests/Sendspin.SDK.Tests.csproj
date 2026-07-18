@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <None Include="Connection\cpace-kats.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Connection\pin-kats.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
