@@ -135,7 +135,40 @@ CPace PAKE implementation (or vetted library), dynamic-PIN out-channel plumbing 
 5. **Windows client impact** (windowsSpin): identity persistence, pairing UX (QR display), unpaired-access toggle, and — for line-in — a WASAPI capture implementation are app-side work items to schedule alongside Phases 1–4.
 6. **Open upstream question worth filing:** the spec is silent on how a *client-initiated* connection learns it should retry after `pairing_required`; and lyrics PR #80's binary-ID collision with source confirms IDs 12–15 shouldn't be assumed stable until 1.0.
 
-## 6. Phase 0 spike — COMPLETED (2026-07-18)
+## 6. Optional: version gating & downgrade (decision pending — NOT committed to)
+
+How does a new-SDK client behave against a pre-encryption (aiosendspin < 7.0.0) server? Two options; **no decision made yet**, and the default assumption is Option A unless real-world migration pain forces Option B.
+
+**Groundwork facts (measured against real servers):**
+
+- There is **no in-band version negotiation**: mDNS TXT carries only `name`/`path`, and the spec's `version` field only exists inside the new protocol. The presence or absence of a `server/init` reply *is* the version signal.
+- A pre-7 server that receives `client/init` **closes the WebSocket immediately** (verified against aiosendspin 6.1.1: unknown-type deserialization error → close code 1000, no reply; `tools/probe_legacy_server.py`). Detection is therefore fast and deterministic — one throwaway connection, ~one RTT.
+- The reference client does not fall back: aiosendspin 7.0.0's client is encrypted-only. Only its **server** dual-stacks (first-message sniffing behind an operator `allow_unencrypted` flag) — which means old *clients* keep working against new servers, but not the reverse.
+
+### Option A — clean break (baseline assumption)
+
+SDK vX+ (the encryption release) speaks only the encrypted protocol. Connecting to a pre-7 server fails with a clear, documented error ("server does not support Sendspin encryption; upgrade the server or stay on SDK v9.x"). Consumers pinned to old servers stay on the v9.x line (kept on security-fix support for a defined window).
+
+- Pros: matches the reference implementation's posture; zero downgrade-attack surface; no dual-stack maintenance; the spec itself has no downgrade story to conform to.
+- Cons: hard cutover for apps whose users control the server version (e.g., MA installs that lag); support burden shifts to "which SDK line do I need?"
+- Cost: near zero — this is what Phase 1 produces naturally. Requires only a good error message (distinguish "closed during handshake" → probable legacy server) and README compatibility matrix.
+
+### Option B — probe-first with policy-controlled fallback (only if needed)
+
+Open every connection with `client/init`; on close/timeout before `server/init`, reconnect speaking the legacy plaintext protocol, governed by `ConnectionOptions.EncryptionMode`:
+
+- `Required` (long-term default) — never fall back.
+- `Preferred` (migration default) — fall back with a loud warning.
+- `Legacy` — plaintext only, for pinned old deployments.
+
+Plus two **non-configurable** anti-downgrade rules: (1) any endpoint that has ever completed a Noise handshake never falls back again (persisted per endpoint); (2) a server with a pairing record is always `Required`. Wrinkle: on server-initiated connections the client speaks first blind, so fallback there needs per-remote alternation across the old server's retry loop — workable but ugly.
+
+- Pros: seamless migration window; auto-promotes when the server upgrades (always-probe-first is cheap).
+- Cons: dual-stack maintenance for a full major cycle; downgrade-attack surface that must be actively defended; extra state (per-endpoint protocol memory); more test matrix.
+
+**Decision trigger:** revisit at Phase 1 exit. If MA's stable channel is already shipping a 7.x-line server by then (their server keeps `allow_unencrypted` for old clients, so upgrade pressure is one-directional), Option A stands. Option B only earns its complexity if a significant consumer base demonstrably cannot upgrade servers on our timeline.
+
+## 7. Phase 0 spike — COMPLETED (2026-07-18)
 
 Ran against a real `aiosendspin[server]==7.0.0` instance (`spike_noise_handshake.py`), with the client side built **only from raw primitives** (X25519 + a Noise KKpsk2 state machine + hand-built JSON — no aiosendspin client code), i.e., the exact layering the .NET implementation will use. All checks passed first try:
 
@@ -146,7 +179,7 @@ Ran against a real `aiosendspin[server]==7.0.0` instance (`spike_noise_handshake
 
 Remaining Phase 0 item: the .NET-side library evaluation (Metalnem Noise vs. in-repo state machine) — not runnable in this session (no .NET SDK available in the sandbox), but the wire contract above is now fully de-risked and the spike script doubles as the reference test harness.
 
-## 7. Suggested immediate next steps
+## 8. Suggested immediate next steps
 
 1. Phase 0 spike: clone-and-test a Noise `KKpsk2` handshake against `aiosendspin`; validate sentinel constants. (~1–2 days)
 2. Land the framing-layer refactor behind the current protocol (pure refactor PR, no wire change).
