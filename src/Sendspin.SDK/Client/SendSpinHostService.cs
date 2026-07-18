@@ -23,6 +23,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly SendspinListener _listener;
     private readonly MdnsServiceAdvertiser _advertiser;
+    private readonly AdvertiserOptions _advertiserOptions;
     private readonly ClientCapabilities _capabilities;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IClockSynchronizer? _clockSynchronizer;
@@ -34,7 +35,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <summary>
     /// Whether the host is running (listening and advertising).
     /// </summary>
-    public bool IsRunning => _listener.IsListening && _advertiser.IsAdvertising;
+    public bool IsRunning => _listener.IsListening && (!_advertiserOptions.Enabled || _advertiser.IsAdvertising);
 
     /// <summary>
     /// Whether the service is currently being advertised via mDNS.
@@ -224,6 +225,7 @@ public sealed class SendspinHostService : IAsyncDisposable
             loggerFactory.CreateLogger<SendspinListener>(),
             listenOpts);
 
+        _advertiserOptions = advertiseOpts;
         _advertiser = new MdnsServiceAdvertiser(
             loggerFactory.CreateLogger<MdnsServiceAdvertiser>(),
             advertiseOpts);
@@ -239,7 +241,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         _logger.LogInformation("Starting Sendspin host service");
 
         await _listener.StartAsync(cancellationToken);
-        await _advertiser.StartAsync(cancellationToken);
+        if (_advertiserOptions.Enabled)
+        {
+            await _advertiser.StartAsync(cancellationToken);
+        }
+        else
+        {
+            _logger.LogInformation("mDNS advertising disabled by options");
+        }
 
         _logger.LogInformation("Sendspin host service started - waiting for server connections");
     }
@@ -308,7 +317,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
 
         _logger.LogInformation("Resuming mDNS advertisement");
-        await _advertiser.StartAsync(cancellationToken);
+        if (_advertiserOptions.Enabled)
+        {
+            await _advertiser.StartAsync(cancellationToken);
+        }
+        else
+        {
+            _logger.LogInformation("mDNS advertising disabled by options");
+        }
     }
 
     /// <summary>
@@ -588,9 +604,9 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         var result = ServerArbitration.Decide(
             newServerId,
-            newClient.ConnectionReason,
+            ServerArbitration.FromConnectionReason(newClient.ConnectionReason),
             existingConnection?.ServerId,
-            existingConnection?.Client.ConnectionReason,
+            ServerArbitration.FromConnectionReason(existingConnection?.Client.ConnectionReason),
             LastPlayedServerId);
 
         _logger.LogInformation(

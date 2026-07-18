@@ -1,29 +1,63 @@
 namespace Sendspin.SDK.Client;
 
 /// <summary>
-/// Pure, side-effect-free multi-server arbitration decision used by <see cref="SendspinHostService"/>.
-/// Extracted so the spec's decision table can be unit-tested exhaustively without connection/socket I/O.
+/// The priority class of a server connection for multi-server arbitration, per the
+/// spec's "Multiple servers" section: connections rank by their highest declared
+/// activity — management &gt; playback &gt; pairing &gt; empty.
+/// </summary>
+public enum ConnectionPriority
+{
+    /// <summary>Empty activity set (legacy connection_reason 'discovery' or absent).</summary>
+    Empty = 0,
+
+    /// <summary>A pairing attempt.</summary>
+    Pairing = 1,
+
+    /// <summary>Playback (legacy connection_reason 'playback').</summary>
+    Playback = 2,
+
+    /// <summary>Management.</summary>
+    Management = 3,
+}
+
+/// <summary>
+/// Pure, side-effect-free multi-server arbitration decision used by
+/// <see cref="SendspinHostService"/>. Implements the spec's decision table:
+/// the incoming connection is accepted when its priority is higher than or equal to
+/// the current holder's, with two exceptions — a pairing attempt is not displaced by
+/// incoming playback or pairing, and an empty-vs-empty tie admits the incoming
+/// connection only when it is the persisted last-playback server. A displaced holder
+/// receives goodbye 'another_server'; a rejected incoming receives
+/// 'concurrent_attempt'.
 /// </summary>
 internal static class ServerArbitration
 {
-    private const string Playback = "playback";
-    private const string Discovery = "discovery";
     private const string AnotherServer = "another_server";
     private const string UserRequest = "user_request";
+    private const string ConcurrentAttempt = "concurrent_attempt";
+
+    /// <summary>
+    /// Maps a legacy connection_reason to its priority class: 'playback' ranks as
+    /// playback; anything else (including 'discovery' and absent) as empty.
+    /// </summary>
+    internal static ConnectionPriority FromConnectionReason(string? reason)
+        => string.Equals(reason ?? "discovery", "playback", StringComparison.OrdinalIgnoreCase)
+            ? ConnectionPriority.Playback
+            : ConnectionPriority.Empty;
 
     /// <summary>
     /// Decides whether a newly-handshaked server should become the active connection.
     /// </summary>
     /// <param name="newServerId">server_id of the newly connected server.</param>
-    /// <param name="newReason">connection_reason of the new server (null treated as discovery).</param>
-    /// <param name="existingServerId">server_id of the current active server, or null if none.</param>
-    /// <param name="existingReason">connection_reason of the existing server (null treated as discovery).</param>
-    /// <param name="lastPlayedServerId">Persisted last-played server_id, or null.</param>
+    /// <param name="newPriority">The incoming connection's priority class.</param>
+    /// <param name="existingServerId">server_id of the current holder, or null if none.</param>
+    /// <param name="existingPriority">The current holder's priority class.</param>
+    /// <param name="lastPlayedServerId">Persisted last-playback server_id, or null.</param>
     internal static ArbitrationResult Decide(
         string newServerId,
-        string? newReason,
+        ConnectionPriority newPriority,
         string? existingServerId,
-        string? existingReason,
+        ConnectionPriority existingPriority,
         string? lastPlayedServerId)
     {
         // No existing connection — accept unconditionally.
@@ -40,36 +74,36 @@ internal static class ServerArbitration
             return new ArbitrationResult(true, UserRequest, "same server reconnecting");
         }
 
-        var newIsPlayback = IsPlayback(newReason);
-        var existingIsPlayback = IsPlayback(existingReason);
-
-        if (newIsPlayback && !existingIsPlayback)
+        // Exception 1: a pairing attempt is not displaced by incoming playback or pairing.
+        if (existingPriority == ConnectionPriority.Pairing
+            && newPriority is ConnectionPriority.Playback or ConnectionPriority.Pairing)
         {
-            return new ArbitrationResult(true, AnotherServer, "new server has playback reason");
+            return new ArbitrationResult(false, ConcurrentAttempt, "pairing attempt is not displaced");
         }
 
-        if (existingIsPlayback && !newIsPlayback)
+        // Exception 2: empty-vs-empty tie admits the incoming connection only when it is
+        // the persisted last-playback server.
+        if (newPriority == ConnectionPriority.Empty && existingPriority == ConnectionPriority.Empty)
         {
-            return new ArbitrationResult(false, AnotherServer, "existing server has playback reason");
+            if (lastPlayedServerId is not null
+                && string.Equals(newServerId, lastPlayedServerId, StringComparison.Ordinal))
+            {
+                return new ArbitrationResult(true, AnotherServer, "new server matches last-playback (empty tie)");
+            }
+
+            return new ArbitrationResult(false, ConcurrentAttempt, "existing holder kept (empty tie)");
         }
 
-        // Tie (both playback or both discovery): prefer the last-played server, else keep existing.
-        if (lastPlayedServerId is not null
-            && string.Equals(newServerId, lastPlayedServerId, StringComparison.Ordinal))
+        // General rule: higher or equal priority is accepted, lower is rejected.
+        if (newPriority >= existingPriority)
         {
-            return new ArbitrationResult(true, AnotherServer, "new server matches last-played (tie-break)");
+            return new ArbitrationResult(true, AnotherServer,
+                $"incoming priority {newPriority} >= holder {existingPriority}");
         }
 
-        return new ArbitrationResult(
-            false,
-            AnotherServer,
-            lastPlayedServerId is not null
-                ? "existing server wins tie-break (new is not last-played)"
-                : "existing server wins tie-break (no last-played set)");
+        return new ArbitrationResult(false, ConcurrentAttempt,
+            $"incoming priority {newPriority} < holder {existingPriority}");
     }
-
-    private static bool IsPlayback(string? reason)
-        => string.Equals(reason ?? Discovery, Playback, StringComparison.OrdinalIgnoreCase);
 }
 
 /// <summary>

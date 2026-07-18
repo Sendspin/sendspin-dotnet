@@ -323,14 +323,17 @@ When multiple servers can reach a player (server-initiated mode via `SendspinHos
 arbitrates which one is active. It completes each server's `client/hello` ↔ `server/hello` handshake
 first, then applies the spec's decision:
 
-- a new `connection_reason: playback` server takes over from a `discovery` one;
-- a `discovery` server cannot displace a `playback` one;
-- when both are equal, the **last-played** server wins, else the existing connection stays.
+- connections rank by priority class (spec activity ranking): `management` > `playback` >
+  `pairing` > empty. On the legacy wire, `connection_reason: playback` maps to the playback class
+  and `discovery`/absent to empty;
+- the incoming server is accepted when its priority is **higher than or equal to** the holder's,
+  with two exceptions: a pairing attempt is never displaced by incoming playback/pairing, and an
+  empty-vs-empty tie admits the incoming server only when it is the persisted **last-playback**
+  server;
+- a displaced holder is sent `client/goodbye` reason `another_server`; a rejected incoming server
+  gets `concurrent_attempt`; a same-server reconnect drops the stale socket with `user_request`.
 
-The loser is sent `client/goodbye` with reason `another_server`; a same-server reconnect drops the
-stale socket with `user_request`.
-
-So the last-played tie-break survives restarts, implement `ILastPlayedServerStore` (the host loads it
+So the last-playback tie-break survives restarts, implement `ILastPlayedServerStore` (the host loads it
 once at construction and saves whenever a server becomes the last-played one):
 
 ```csharp

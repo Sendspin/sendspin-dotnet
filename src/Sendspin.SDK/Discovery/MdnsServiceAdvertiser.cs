@@ -243,6 +243,13 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
 public sealed class AdvertiserOptions
 {
     /// <summary>
+    /// Whether to advertise via mDNS at all. Disable for environments without
+    /// multicast support (containers, some CI) or when discovery is handled externally.
+    /// Default: true.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
     /// Unique client identifier.
     /// Default: sendspin-windows-{hostname}
     /// </summary>

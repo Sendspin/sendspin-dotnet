@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Discovery;
 using Sendspin.SDK.Connection;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -18,10 +19,10 @@ public class SendspinHostServiceArbitrationTests
         var host = new SendspinHostService(
             NullLoggerFactory.Instance,
             listenerOptions: new ListenerOptions { Port = 0 },
+            advertiserOptions: new AdvertiserOptions { Enabled = false },
             lastPlayedServerId: seed);
 
-        await host.StartAsync();
-        await host.StopAdvertisingAsync(); // prevent real network servers from racing into arbitration
+        await host.StartAsync(); // prevent real network servers from racing into arbitration
         return host;
     }
 
@@ -83,7 +84,7 @@ public class SendspinHostServiceArbitrationTests
     }
 
     [Fact]
-    public async Task NewDiscoveryServer_AgainstPlaybackExisting_IsRejectedWithAnotherServer()
+    public async Task NewDiscoveryServer_AgainstPlaybackExisting_IsRejectedWithConcurrentAttempt()
     {
         await using var host = await StartHostAsync();
         await using var existing = new FakeServer("srv-existing", "playback");
@@ -93,7 +94,7 @@ public class SendspinHostServiceArbitrationTests
         await using var incoming = new FakeServer("srv-new", "discovery");
         await incoming.ConnectAsync(host.ListeningPort);
 
-        Assert.Equal("another_server", await incoming.WaitForGoodbyeAsync(Timeout));
+        Assert.Equal("concurrent_attempt", await incoming.WaitForGoodbyeAsync(Timeout));
     }
 
     [Fact]
