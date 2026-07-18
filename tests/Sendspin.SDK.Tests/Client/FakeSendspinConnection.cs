@@ -33,8 +33,12 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         return Task.CompletedTask;
     }
 
+    /// <summary>The reason passed to the most recent <see cref="DisconnectAsync"/> call.</summary>
+    public string? LastDisconnectReason { get; private set; }
+
     public Task DisconnectAsync(string reason = "user_request", CancellationToken cancellationToken = default)
     {
+        LastDisconnectReason = reason;
         SetState(ConnectionState.Disconnected);
         return Task.CompletedTask;
     }

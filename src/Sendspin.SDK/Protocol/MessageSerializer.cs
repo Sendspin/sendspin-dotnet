@@ -47,6 +47,7 @@ public static class MessageSerializer
         return messageType switch
         {
             MessageTypes.ServerHello => JsonSerializer.Deserialize(json, s_context.ServerHelloMessage),
+            MessageTypes.ServerActivate => JsonSerializer.Deserialize(json, s_context.ServerActivateMessage),
             MessageTypes.ServerTime => JsonSerializer.Deserialize(json, s_context.ServerTimeMessage),
             MessageTypes.StreamStart => JsonSerializer.Deserialize(json, s_context.StreamStartMessage),
             MessageTypes.StreamEnd => JsonSerializer.Deserialize(json, s_context.StreamEndMessage),
