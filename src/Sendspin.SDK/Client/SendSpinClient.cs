@@ -24,6 +24,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IStaticDelayStore? _staticDelayStore;
     private readonly INoiseSessionInfo? _noiseSession;
     private bool _activateReceived;
+    private readonly IPairingRecordStore? _pairingStore;
+    private byte[]? _pendingPairingPsk;
 
     private TaskCompletionSource<bool>? _handshakeTcs;
     private GroupState? _currentGroup;
@@ -129,6 +131,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public event EventHandler<ServerActivatePayload>? ServerActivateReceived;
 
+    /// <summary>
+    /// Raised when a Pairing PSK exchange completes and the long-term record has been
+    /// persisted (argument: the paired server id).
+    /// </summary>
+    public event EventHandler<string>? PairingCompleted;
+
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
     public SendspinClientService(
@@ -138,11 +146,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ClientCapabilities? capabilities = null,
         IAudioPipeline? audioPipeline = null,
         IStaticDelayStore? staticDelayStore = null,
-        INoiseSessionInfo? noiseSession = null)
+        INoiseSessionInfo? noiseSession = null,
+        IPairingRecordStore? pairingRecordStore = null)
     {
         _logger = logger;
         _connection = connection;
         _noiseSession = noiseSession;
+        _pairingStore = pairingRecordStore;
         _clockSynchronizer = clockSynchronizer ?? new KalmanClockSynchronizer();
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
@@ -268,7 +278,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 MacAddress = _capabilities.MacAddress
             },
             visualizerSupport: _capabilities.VisualizerSupport,
-            trustLevel: encrypted ? "none" : null,
+            trustLevel: !encrypted ? null
+                : _noiseSession?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
+            supportedPairMethods: encrypted ? [new PairMethodDescriptor()] : null,
             unpairedAccess: encrypted
                 ? new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
                 : null
@@ -532,6 +544,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandleServerActivate(json);
                     break;
 
+                case MessageTypes.ServerPairFinalize:
+                    HandleServerPairFinalize();
+                    break;
+
+                case MessageTypes.PairAbort:
+                    HandlePairAbort(json);
+                    break;
+
                 case MessageTypes.ServerTime:
                     HandleServerTime(json);
                     break;
@@ -658,6 +678,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             string.Join(", ", payload.ActivitiesList),
             string.Join(", ", payload.ActiveRoles ?? LastServerHello?.ActiveRoles ?? []));
 
+        if (payload.ActivitiesList.Contains(Activities.Pairing))
+        {
+            HandlePairingActivate(payload);
+        }
+
         bool first = !_activateReceived;
         _activateReceived = true;
 
@@ -745,6 +770,71 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             ? activities
             : [.. activities, Activities.Playback];
         return AllowedSet(withPlayback);
+    }
+
+    /// <summary>
+    /// Starts the client side of a pairing attempt when server/activate declares the
+    /// pairing activity. Only the (client-mandatory) Pairing PSK method is implemented:
+    /// the client generates the long-term PSK and delivers it in client/pair-finalize.
+    /// </summary>
+    private void HandlePairingActivate(ServerActivatePayload payload)
+    {
+        if (payload.SelectedPairMethod != "pairing_psk")
+        {
+            _logger.LogWarning("Server selected unsupported pair method {Method}; aborting",
+                payload.SelectedPairMethod);
+            _connection.SendMessageAsync(new PairAbortMessage
+            {
+                Payload = new PairAbortPayload { Reason = "method_not_supported" },
+            }).SafeFireAndForget(_logger);
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+            return;
+        }
+
+        _pendingPairingPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
+        _connection.SendMessageAsync(new ClientPairFinalizeMessage
+        {
+            Payload = new ClientPairFinalizePayload
+            {
+                LongTermPsk = Convert.ToBase64String(_pendingPairingPsk)
+                    .TrimEnd('=').Replace('+', '-').Replace('/', '_'),
+            },
+        }).SafeFireAndForget(_logger);
+    }
+
+    /// <summary>
+    /// The server persisted the pairing record; persist ours. The server will follow
+    /// with an in-band re-handshake to the new PSK (handled by the Noise framing).
+    /// </summary>
+    private void HandleServerPairFinalize()
+    {
+        if (_pendingPairingPsk is null)
+        {
+            _logger.LogWarning("server/pair-finalize with no pairing attempt in flight; ignoring");
+            return;
+        }
+
+        if (_pairingStore is not null && ServerId is not null)
+        {
+            _pairingStore.Upsert(new PairingRecord(
+                _pendingPairingPsk, PskCategory.LongTerm, ServerId));
+            _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
+        }
+        else
+        {
+            _logger.LogWarning("Pairing completed but no record store configured; record NOT persisted");
+        }
+
+        _pendingPairingPsk = null;
+        PairingCompleted?.Invoke(this, ServerId ?? string.Empty);
+    }
+
+    private void HandlePairAbort(string json)
+    {
+        var message = MessageSerializer.Deserialize<PairAbortMessage>(json);
+        _logger.LogWarning("Pairing aborted: {Reason}", message?.Payload.Reason ?? "unknown");
+        _pendingPairingPsk = null;
     }
 
     /// <summary>

@@ -198,6 +198,42 @@ public class NoiseWireFramingTests
         Assert.NotNull(result.FatalReason);
     }
 
+    [Fact]
+    public void Rehandshake_SwapsKeys_AndTrafficContinues()
+    {
+        var identity = SendspinIdentity.Generate();
+        var store = new InMemoryPairingRecordStore();
+        byte[] newPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        store.Upsert(new PairingRecord(newPsk, PskCategory.LongTerm));
+        var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
+        var server = new TestNoiseServer(identity, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var hs = framing.ProcessInbound(WireFrame.FromText(msg1));
+        server.CompleteHandshake(Assert.Single(hs.Replies!).PayloadAsText());
+        Assert.Equal(PskCategory.Sentinel, framing.MatchedPsk!.Category);
+
+        // Server initiates re-handshake to the long-term PSK inside the channel.
+        byte[] rehsMsg1 = server.StartRehandshake(newPsk);
+        var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, rehsMsg1));
+
+        Assert.Null(result.FatalReason);
+        Assert.Null(result.Text); // consumed by the framing, never surfaced
+        var reply = Assert.Single(result.Replies!);
+        server.CompleteRehandshake(reply.Payload.ToArray());
+        Assert.Equal(PskCategory.LongTerm, framing.MatchedPsk!.Category);
+
+        // Traffic continues under the NEW keys in both directions.
+        const string json = """{"type":"server/hello","payload":{"name":"again"}}""";
+        var inbound = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary,
+            server.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)])));
+        Assert.Equal(json, inbound.Text);
+        var outFrame = Assert.Single(framing.EncodeText(json).ToList());
+        Assert.Equal(json, Encoding.UTF8.GetString(server.DecryptFrame(outFrame.Payload.ToArray())[1..]));
+    }
+
     // --- Harness ---
 
     private static (NoiseWireFraming Framing, TestNoiseServer Server) CompleteHandshake()
@@ -273,15 +309,50 @@ public class NoiseWireFramingTests
             return (serverInitText, msg1Text);
         }
 
+        public byte[]? HandshakeHash { get; private set; }
+
         public void CompleteHandshake(string msg2Text)
         {
             using var doc = JsonDocument.Parse(msg2Text);
             byte[] msg2 = Base64Url.DecodeFromChars(
                 doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
             var buf = new byte[NoiseProtocol.MaxMessageLength];
-            var (_, _, transport) = _state!.ReadMessage(msg2, buf);
+            var (_, hash, transport) = _state!.ReadMessage(msg2, buf);
             _transport = transport ?? throw new InvalidOperationException("handshake incomplete");
+            HandshakeHash = hash;
             _state.Dispose();
+        }
+
+        /// <summary>Initiates an in-band re-handshake to a new PSK; returns the encrypted msg1 frame.</summary>
+        public byte[] StartRehandshake(byte[] newPsk)
+        {
+            var protocol = NoiseProtocol.Parse("Noise_KKpsk2_25519_ChaChaPoly_SHA256".AsSpan());
+            _state = protocol.Create(
+                initiator: true, prologue: HandshakeHash!,
+                s: (byte[])_keys.PrivateKey.Clone(),
+                rs: _clientIdentity.PublicKey.ToArray(),
+                psks: [newPsk]);
+            string payload = JsonSerializer.Serialize(new Dictionary<string, string>
+            {
+                ["psk_id"] = NoiseConstants.DerivePskId(newPsk),
+            });
+            var buf = new byte[NoiseProtocol.MaxMessageLength];
+            var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(payload), buf);
+            string msg1Text = JsonSerializer.Serialize(new Dictionary<string, object>
+            {
+                ["type"] = "noise/handshake",
+                ["payload"] = new Dictionary<string, object> { ["data"] = Base64Url.EncodeToString(buf.AsSpan(0, len)) },
+            });
+            byte[] plain = [0, .. Encoding.UTF8.GetBytes(msg1Text)];
+            return EncryptFrame(plain);
+        }
+
+        /// <summary>Completes the re-handshake from the client's encrypted msg2 reply (old keys).</summary>
+        public void CompleteRehandshake(byte[] encryptedReply)
+        {
+            byte[] plain = DecryptFrame(encryptedReply);
+            Assert.Equal(0, plain[0]);
+            CompleteHandshake(Encoding.UTF8.GetString(plain[1..]));
         }
 
         public byte[] EncryptFrame(byte[] plaintext)
