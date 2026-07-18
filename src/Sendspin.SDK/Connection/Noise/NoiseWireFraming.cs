@@ -186,6 +186,18 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
 
         byte[] prologue = Encoding.UTF8.GetBytes(_clientInitText + _serverInitText);
+        return RunResponderExchange(msg1, prologue, out _);
+
+    }
+
+    /// <summary>
+    /// Runs the responder side of one KKpsk2 exchange (initial handshake or in-band
+    /// re-handshake): resolves the psk_id from message 1, completes the handshake, and
+    /// installs the new transport keys. Outputs the noise/handshake reply JSON.
+    /// </summary>
+    private InboundFrameResult RunResponderExchange(byte[] msg1, byte[] prologue, out string replyJson)
+    {
+        replyJson = string.Empty;
         byte[] serverPub = SendspinIdentity.DecodePeerId(_serverId!);
         var protocol = NoiseProtocol.Parse(_suite.ToProtocolName().AsSpan());
 
@@ -224,17 +236,36 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (transport is null)
             return Fail("handshake did not complete after message 2");
 
+        var previousTransport = _transport;
         _transport = transport;
         _handshakeHash = handshakeHash;
         _matchedPsk = resolved;
         _phase = HandshakePhase.TransportMode;
 
-        string reply = JsonSerializer.Serialize(new Dictionary<string, object>
+        replyJson = JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["type"] = "noise/handshake",
             ["payload"] = new Dictionary<string, object> { ["data"] = Base64UrlText.Encode(buf.AsSpan(0, msg2Len)) },
         });
-        return new InboundFrameResult { Replies = [WireFrame.FromText(reply)] };
+
+        if (previousTransport is null)
+        {
+            // Initial handshake: the reply travels as a cleartext text frame.
+            return new InboundFrameResult { Replies = [WireFrame.FromText(replyJson)] };
+        }
+
+        // Re-handshake: the reply travels encrypted under the OLD session keys; the new
+        // keys take effect for all traffic after it.
+        byte[] replyPlain = new byte[1 + Encoding.UTF8.GetByteCount(replyJson)];
+        replyPlain[0] = NoiseConstants.MessageTypeJsonBody;
+        Encoding.UTF8.GetBytes(replyJson, replyPlain.AsSpan(1));
+        var ciphertext = new byte[replyPlain.Length + 16];
+        int written = previousTransport.WriteMessage(replyPlain, ciphertext);
+        previousTransport.Dispose();
+        return new InboundFrameResult
+        {
+            Replies = [new WireFrame(WireFrameKind.Binary, ciphertext.AsMemory(0, written))],
+        };
     }
 
     // --- Transport mode ---
@@ -291,10 +322,37 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         return DispatchMessage(origType, assembled);
     }
 
+    /// <summary>
+    /// Handles a server-initiated in-band re-handshake (key rotation / post-pairing
+    /// promotion): the new exchange's prologue is the prior handshake's hash, keys and
+    /// suite carry over, and the reply travels encrypted under the old session keys.
+    /// The framing consumes these messages; they never surface to the application.
+    /// </summary>
+    private InboundFrameResult HandleRehandshakeMessage(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.GetProperty("type").GetString() != "noise/handshake")
+            return InboundFrameResult.ForText(json);
+
+        byte[] msg1 = Base64UrlText.Decode(
+            doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
+        byte[] prologue = _handshakeHash
+            ?? throw new InvalidOperationException("re-handshake before initial handshake");
+        return RunResponderExchange(msg1, prologue, out _);
+    }
+
     private InboundFrameResult DispatchMessage(byte type, ReadOnlyMemory<byte> payload)
     {
         if (type == NoiseConstants.MessageTypeJsonBody)
-            return InboundFrameResult.ForText(Encoding.UTF8.GetString(payload.Span));
+        {
+            string json = Encoding.UTF8.GetString(payload.Span);
+            if (json.Contains("\"noise/handshake\"", StringComparison.Ordinal))
+            {
+                return HandleRehandshakeMessage(json);
+            }
+
+            return InboundFrameResult.ForText(json);
+        }
 
         // Non-JSON application binary: surface in the SDK's existing binary message
         // shape ([type][payload]) so BinaryMessageParser sees what it always has.
