@@ -46,36 +46,48 @@ public sealed class ServerStatePayload
 /// <summary>
 /// Track metadata from server/state message.
 /// </summary>
+/// <remarks>
+/// All fields use <see cref="Optional{T}"/> to distinguish "absent" (partial update; keep existing)
+/// from "present but null" (explicit clear; e.g. artless track or <c>cleared_update()</c> on stop)
+/// and "present with value" (update). This matches <c>UndefinedField</c> in aiosendspin.
+/// </remarks>
 public sealed class ServerMetadata
 {
     [JsonPropertyName("timestamp")]
-    public long? Timestamp { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<long?> Timestamp { get; init; } = Optional<long?>.Absent();
 
     [JsonPropertyName("title")]
-    public string? Title { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<string?> Title { get; init; } = Optional<string?>.Absent();
 
     [JsonPropertyName("artist")]
-    public string? Artist { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<string?> Artist { get; init; } = Optional<string?>.Absent();
 
     [JsonPropertyName("album_artist")]
-    public string? AlbumArtist { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<string?> AlbumArtist { get; init; } = Optional<string?>.Absent();
 
     [JsonPropertyName("album")]
-    public string? Album { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<string?> Album { get; init; } = Optional<string?>.Absent();
 
     [JsonPropertyName("artwork_url")]
-    public string? ArtworkUrl { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<string?> ArtworkUrl { get; init; } = Optional<string?>.Absent();
 
     [JsonPropertyName("year")]
-    public int? Year { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<int?> Year { get; init; } = Optional<int?>.Absent();
 
     [JsonPropertyName("track")]
-    public int? Track { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<int?> Track { get; init; } = Optional<int?>.Absent();
 
     /// <summary>
-    /// Playback progress. <see cref="Optional{T}"/> distinguishes "absent"
-    /// (no update; keep existing) from "present but null" (track ended; clear)
-    /// and "present with value" (update).
+    /// Playback progress. Absent = keep existing, present-null = track ended (clear),
+    /// present-with-value = update.
     /// </summary>
     [JsonPropertyName("progress")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]

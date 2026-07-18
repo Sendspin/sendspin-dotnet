@@ -40,6 +40,23 @@ public sealed class OptionalJsonConverterFactory : JsonConverterFactory
             return new OptionalRgbColorJsonConverter();
         }
 
+        // ServerMetadata fields: string? (reference type — typeof(string?) == typeof(string) at runtime),
+        // int? and long? (value types — each is a distinct Nullable<T> at runtime).
+        if (valueType == typeof(string))
+        {
+            return new OptionalJsonConverter<string?>();
+        }
+
+        if (valueType == typeof(int?))
+        {
+            return new OptionalJsonConverter<int?>();
+        }
+
+        if (valueType == typeof(long?))
+        {
+            return new OptionalJsonConverter<long?>();
+        }
+
         throw new NotSupportedException(
             $"No AOT-safe converter registered for Optional<{valueType.Name}>. " +
             $"Add an explicit case in {nameof(OptionalJsonConverterFactory)}.{nameof(CreateConverter)}().");

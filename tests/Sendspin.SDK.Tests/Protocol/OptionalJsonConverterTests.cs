@@ -93,7 +93,7 @@ public class OptionalJsonConverterTests
             {
                 Metadata = new ServerMetadata
                 {
-                    Title = "Round Trip",
+                    Title = Optional<string?>.Present("Round Trip"),
                     Progress = Optional<PlaybackProgress?>.Present(new PlaybackProgress
                     {
                         TrackProgress = 5000,
@@ -121,7 +121,7 @@ public class OptionalJsonConverterTests
             {
                 Metadata = new ServerMetadata
                 {
-                    Title = "Null Progress",
+                    Title = Optional<string?>.Present("Null Progress"),
                     Progress = Optional<PlaybackProgress?>.Present(null),
                 }
             }
@@ -145,7 +145,7 @@ public class OptionalJsonConverterTests
             {
                 Metadata = new ServerMetadata
                 {
-                    Title = "No Progress",
+                    Title = Optional<string?>.Present("No Progress"),
                     Progress = Optional<PlaybackProgress?>.Absent(),
                 }
             }
@@ -164,16 +164,17 @@ public class OptionalJsonConverterTests
     [Fact]
     public void CreateConverter_UnregisteredType_ThrowsDirectly()
     {
-        // Calling the factory directly with an unregistered Optional<T> type
+        // Calling the factory directly with an unregistered Optional<T> type.
+        // double is not used in any protocol message, so it is not registered.
         var factory = new OptionalJsonConverterFactory();
-        var unregisteredType = typeof(Optional<string>);
+        var unregisteredType = typeof(Optional<double>);
 
         Assert.True(factory.CanConvert(unregisteredType));
 
         var ex = Assert.Throws<NotSupportedException>(
             () => factory.CreateConverter(unregisteredType, new JsonSerializerOptions()));
 
-        Assert.Contains("Optional<String>", ex.Message);
+        Assert.Contains("Optional<Double>", ex.Message);
         Assert.Contains(nameof(OptionalJsonConverterFactory), ex.Message);
     }
 
@@ -187,7 +188,7 @@ public class OptionalJsonConverterTests
             Converters = { new OptionalJsonConverterFactory() },
         };
 
-        var value = Optional<string>.Present("oops");
+        var value = Optional<double>.Present(3.14);
 
         Assert.Throws<NotSupportedException>(
             () => JsonSerializer.Serialize(value, options));

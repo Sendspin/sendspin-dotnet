@@ -79,9 +79,17 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private long _droppedSamples;
     private long _totalWritten;
     private long _totalRead;
+    private long _reanchorCount;
+
+    // Rolling 1-second minimum buffer depth (exposes transient dips between polls)
+    private double _minBufferedMsWindow = double.MaxValue;
+    private long _minWindowResetTick;
+    private double _minBufferedMsRecent;
+    private const long MinBufferedWindowMs = 1_000;
 
     // Scheduled start: when playback should begin (supports static delay feature)
-    // The first segment's LocalPlaybackTime includes any static delay from IClockSynchronizer.
+    // Derived from the first segment's raw server timestamp via the CURRENT sync state
+    // on every pre-start poll (includes any static delay from IClockSynchronizer).
     // We wait until this time arrives before outputting audio.
     private long _scheduledStartLocalTime;      // Target local time when playback should start (μs)
     private bool _waitingForScheduledStart;     // True while waiting for scheduled start time
@@ -94,6 +102,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private long _lastElapsedMicroseconds;      // Last calculated elapsed time (for stats)
     private long _currentSyncErrorMicroseconds; // Positive = behind (need DROP), Negative = ahead (need INSERT)
     private double _smoothedSyncErrorMicroseconds; // EMA-filtered sync error for stable correction decisions
+
+    // Self-measured startup baseline: constant read-pointer-vs-DAC plumbing offset
+    // (e.g. WASAPI prefilling its output buffer at Play()) snapshot at the end of
+    // the startup grace / reconnect stabilization window and subtracted thereafter.
+    // Constant offsets in a pace metric are artifacts by definition (absolute
+    // position is the anchor's job); genuine stalls keep growing after the
+    // snapshot and still get corrected. See CaptureSyncErrorBaseline.
+    private double _syncErrorBaselineMicroseconds;
+    private bool _syncErrorBaselineCaptured;
     private long _samplesReadSinceStart;        // Total samples READ (consumed) since playback started
     private long _samplesOutputSinceStart;      // Total samples OUTPUT since playback started (for stats)
     private double _microsecondsPerSample;      // Duration of one sample in microseconds
@@ -127,6 +144,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
     /// <inheritdoc/>
     public double TargetPlaybackRate { get; private set; } = 1.0;
+
+    // Rate an external corrector (app-side resampler) reports it's applying. The internal
+    // corrector uses TargetPlaybackRate; only one path is active at a time. Surfaced via GetStats.
+    private double _externalPlaybackRate = 1.0;
 
     /// <inheritdoc/>
     public event Action<double>? TargetPlaybackRateChanged;
@@ -222,6 +243,19 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _microsecondsPerSample = 1_000_000.0 / (_sampleRate * _channels);
     }
 
+    /// <summary>
+    /// Local time at which to begin emitting the sample carrying <paramref name="serverTimestamp"/>.
+    /// </summary>
+    /// <remarks>
+    /// The clock conversion (which already applies <see cref="IClockSynchronizer.StaticDelayMs"/>) is
+    /// pre-rolled by <see cref="OutputLatencyMicroseconds"/> so the sample is handed to the output that
+    /// much earlier and reaches the speaker at the server's intended time. This is what keeps outputs
+    /// of different latencies (each reporting its own) aligned in a multi-room group without a manual
+    /// per-device offset.
+    /// </remarks>
+    private long ScheduledLocalTimeFor(long serverTimestamp)
+        => _clockSync.ServerToClientTime(serverTimestamp) - OutputLatencyMicroseconds;
+
     /// <inheritdoc/>
     public void Write(ReadOnlySpan<float> samples, long serverTimestamp)
     {
@@ -234,9 +268,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         lock (_lock)
         {
-            // Convert server timestamp to local playback time
-            var localPlaybackTime = _clockSync.ServerToClientTime(serverTimestamp);
-
             // Check for overrun
             if (_count + samples.Length > _buffer.Length)
             {
@@ -274,8 +305,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             // Write samples to circular buffer
             WriteSamplesToBuffer(samples);
 
-            // Track this segment's timestamp
-            _segments.Enqueue(new TimestampedSegment(localPlaybackTime, samples.Length));
+            // Track this segment's raw server timestamp; conversion to local time
+            // happens at read time so pre-sync segments self-heal once sync converges.
+            _segments.Enqueue(new TimestampedSegment(serverTimestamp, samples.Length));
             _count += samples.Length;
             _totalWritten += samples.Length;
         }
@@ -302,8 +334,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
-            // Scheduled start: wait for the first segment's LocalPlaybackTime before emitting audio.
-            // LocalPlaybackTime already has StaticDelayMs applied by IClockSynchronizer.ServerToClientTime
+            // Scheduled start: wait for the first segment's playback time before emitting audio.
+            // The conversion already has StaticDelayMs applied by IClockSynchronizer.ServerToClientTime
             // (subtracted per spec, so positive static_delay schedules earlier). Without this wait,
             // we'd start immediately and the static delay would only affect sync error calculation,
             // which can't handle large offsets (exceeds re-anchor threshold).
@@ -311,13 +343,13 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             {
                 var firstSegment = _segments.Peek();
 
-                // First time seeing audio: capture the scheduled start time
-                if (!_waitingForScheduledStart)
-                {
-                    _scheduledStartLocalTime = firstSegment.LocalPlaybackTime;
-                    _waitingForScheduledStart = true;
-                    _nextExpectedPlaybackTime = firstSegment.LocalPlaybackTime;
-                }
+                // Derive playback time from the raw server timestamp on every poll
+                // rather than once at enqueue: segments written before clock sync
+                // converged would otherwise carry a meaningless conversion (offset 0)
+                // and the entire pre-sync burst would be discarded as "stale".
+                _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
+                _waitingForScheduledStart = true;
+                _nextExpectedPlaybackTime = _scheduledStartLocalTime;
 
                 // Check if we've reached the scheduled start time (with grace window)
                 var timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
@@ -434,6 +466,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     {
                         _lastReanchorTimeMicroseconds = currentLocalTime;
                         _needsReanchor = true;
+                        _reanchorCount++;
                     }
                     else if (currentLocalTime - _lastReanchorCooldownLogTime >= UnderrunLogIntervalMicroseconds)
                     {
@@ -476,17 +509,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
-            // Scheduled start logic (same as Read)
+            // Scheduled start logic (same as Read): derive playback time from the
+            // raw server timestamp on every poll so pre-sync segments self-heal.
             if (_segments.Count > 0 && !_playbackStarted)
             {
                 var firstSegment = _segments.Peek();
 
-                if (!_waitingForScheduledStart)
-                {
-                    _scheduledStartLocalTime = firstSegment.LocalPlaybackTime;
-                    _waitingForScheduledStart = true;
-                    _nextExpectedPlaybackTime = firstSegment.LocalPlaybackTime;
-                }
+                _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
+                _waitingForScheduledStart = true;
+                _nextExpectedPlaybackTime = _scheduledStartLocalTime;
 
                 var timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
                 if (timeUntilStart > _syncOptions.ScheduledStartGraceWindowMicroseconds)
@@ -564,11 +595,40 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
                 CalculateSyncError(currentLocalTime);
 
-                // NOTE: We do NOT call UpdateCorrectionRate() here.
-                // The caller is responsible for correction via ISyncCorrectionProvider.
+                // NOTE: We do NOT call UpdateCorrectionRate() here — the caller applies
+                // correction via ISyncCorrectionProvider. But we MUST still capture the
+                // startup baseline, exactly as UpdateCorrectionRate does for the internal
+                // path. Without it, the constant backend prefill (WASAPI gulps its full
+                // ~100ms output buffer at Play()) leaks into SyncErrorMicroseconds as a
+                // persistent ~-100ms error, and the external corrector grinds it out
+                // forever (pinning the resampler at its max slow rate). See
+                // CaptureSyncErrorBaseline.
+                var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
+                if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
+                    && !_syncErrorBaselineCaptured)
+                {
+                    CaptureSyncErrorBaseline("startup (raw)");
+                }
+
+                // Reconnect stabilization just ended: re-capture the baseline so the re-converged
+                // clock's new constant offset is absorbed rather than ground out by the external
+                // corrector — the same prefill bug, relocated to the reconnect case. This mirrors
+                // UpdateCorrectionRate, except we do NOT suppress corrections here: the external
+                // corrector already suppresses its own during the window via
+                // ISyncCorrectionProvider.NotifyReconnect.
+                if (_inReconnectStabilization)
+                {
+                    var samplesSinceReconnect = _samplesOutputSinceStart - _reconnectStabilizationStartOutput;
+                    var elapsedSinceReconnect = (long)(samplesSinceReconnect * _microsecondsPerSample);
+                    if (elapsedSinceReconnect >= _syncOptions.ReconnectStabilizationMicroseconds)
+                    {
+                        _inReconnectStabilization = false;
+                        CaptureSyncErrorBaseline("reconnect (raw)");
+                        _logger.LogInformation("[Correction] Reconnect stabilization ended (raw path), baseline re-captured");
+                    }
+                }
 
                 // Check re-anchor threshold
-                var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
                 {
@@ -576,6 +636,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     {
                         _lastReanchorTimeMicroseconds = currentLocalTime;
                         _needsReanchor = true;
+                        _reanchorCount++;
                     }
                     else if (currentLocalTime - _lastReanchorCooldownLogTime >= UnderrunLogIntervalMicroseconds)
                     {
@@ -650,6 +711,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     }
 
     /// <inheritdoc/>
+    public void ReportExternalPlaybackRate(double rate)
+    {
+        lock (_lock)
+        {
+            _externalPlaybackRate = rate;
+        }
+    }
+
+    /// <inheritdoc/>
     public void NotifyReconnect()
     {
         lock (_lock)
@@ -697,6 +767,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _samplesOutputSinceStart = 0;
             _currentSyncErrorMicroseconds = 0;
             _smoothedSyncErrorMicroseconds = 0;
+            _syncErrorBaselineMicroseconds = 0;
+            _syncErrorBaselineCaptured = false;
 
             // Reset sync correction state
             _dropEveryNFrames = 0;
@@ -706,6 +778,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             Interlocked.Exchange(ref _reanchorEventPending, 0);
             _lastOutputFrame = null;
             TargetPlaybackRate = 1.0;
+            _externalPlaybackRate = 1.0;
 
             // Note: Don't reset _samplesDroppedForSync/_samplesInsertedForSync - these are cumulative stats
             // Note: Don't reset _lastReanchorTimeMicroseconds - reanchor itself calls Clear(),
@@ -750,6 +823,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _samplesOutputSinceStart = 0;
             _currentSyncErrorMicroseconds = 0;
             _smoothedSyncErrorMicroseconds = 0;
+            _syncErrorBaselineMicroseconds = 0;
+            _syncErrorBaselineCaptured = false;
 
             // Reset sync correction state
             _dropEveryNFrames = 0;
@@ -759,6 +834,16 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             Interlocked.Exchange(ref _reanchorEventPending, 0);
             _lastOutputFrame = null;
             TargetPlaybackRate = 1.0;
+            _externalPlaybackRate = 1.0;
+
+            // Reset the reconnect-stabilization window too (Clear() resets the flag for the same
+            // reason). _samplesOutputSinceStart is zeroed above, so leaving
+            // _reconnectStabilizationStartOutput at its old (larger) value would make
+            // samplesSinceReconnect go negative and the 2s window never close — silently suppressing
+            // corrections (internal path) / blocking the reconnect re-capture (ReadRaw path) if a
+            // device switch lands inside the window.
+            _inReconnectStabilization = false;
+            _reconnectStabilizationStartOutput = 0;
 
             // Reset correction mode transition tracking (avoids stale logging after reset)
             _previousCorrectionMode = SyncCorrectionMode.None;
@@ -773,19 +858,42 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     {
         lock (_lock)
         {
+            // Internal and external correctors are mutually exclusive (the idle one stays at 1.0),
+            // so surface whichever is actually applying a rate.
+            var effectivePlaybackRate = Math.Abs(_externalPlaybackRate - 1.0) > 0.0001
+                ? _externalPlaybackRate
+                : TargetPlaybackRate;
+
             SyncCorrectionMode correctionMode;
             if (_dropEveryNFrames > 0)
                 correctionMode = SyncCorrectionMode.Dropping;
             else if (_insertEveryNFrames > 0)
                 correctionMode = SyncCorrectionMode.Inserting;
-            else if (Math.Abs(TargetPlaybackRate - 1.0) > 0.0001)
+            else if (Math.Abs(effectivePlaybackRate - 1.0) > 0.0001)
                 correctionMode = SyncCorrectionMode.Resampling;
             else
                 correctionMode = SyncCorrectionMode.None;
 
+            var currentBufferedMs = _count / (double)_samplesPerMs;
+
+            // Update rolling 1s minimum buffer depth
+            var nowTick = Environment.TickCount64;
+            if (_minWindowResetTick == 0 || nowTick - _minWindowResetTick >= MinBufferedWindowMs)
+            {
+                _minBufferedMsRecent = _minBufferedMsWindow == double.MaxValue
+                    ? currentBufferedMs
+                    : _minBufferedMsWindow;
+                _minBufferedMsWindow = currentBufferedMs;
+                _minWindowResetTick = nowTick;
+            }
+            else
+            {
+                _minBufferedMsWindow = Math.Min(_minBufferedMsWindow, currentBufferedMs);
+            }
+
             return new AudioBufferStats
             {
-                BufferedMs = _count / (double)_samplesPerMs,
+                BufferedMs = currentBufferedMs,
                 TargetMs = TargetBufferMilliseconds,
                 UnderrunCount = _underrunCount,
                 OverrunCount = _overrunCount,
@@ -798,11 +906,13 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 SamplesDroppedForSync = _samplesDroppedForSync,
                 SamplesInsertedForSync = _samplesInsertedForSync,
                 CurrentCorrectionMode = correctionMode,
-                TargetPlaybackRate = TargetPlaybackRate,
+                TargetPlaybackRate = effectivePlaybackRate,
                 SamplesReadSinceStart = _samplesReadSinceStart,
                 SamplesOutputSinceStart = _samplesOutputSinceStart,
                 ElapsedSinceStartMs = _lastElapsedMicroseconds / 1000.0,
                 TimingSourceName = TimingSourceName,
+                ReanchorCount = _reanchorCount,
+                MinBufferedMsRecent = _minBufferedMsRecent,
             };
         }
     }
@@ -924,8 +1034,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             var segment = _segments.Peek();
 
             // Stop skipping once we reach audio that's near-current or in the future.
-            // Use the grace window as tolerance (default 10ms).
-            if (segment.LocalPlaybackTime >= currentLocalTime - _syncOptions.ScheduledStartGraceWindowMicroseconds)
+            // Use the grace window as tolerance (default 10ms). Playback time is
+            // derived from the raw server timestamp using the CURRENT sync state —
+            // never a conversion cached before sync converged.
+            var segmentPlaybackTime = _clockSync.ServerToClientTime(segment.ServerTimestamp);
+            if (segmentPlaybackTime >= currentLocalTime - _syncOptions.ScheduledStartGraceWindowMicroseconds)
                 break;
 
             // This segment is stale — skip it
@@ -948,8 +1061,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             if (_segments.Count > 0)
             {
                 var newFirst = _segments.Peek();
-                _scheduledStartLocalTime = newFirst.LocalPlaybackTime;
-                _nextExpectedPlaybackTime = newFirst.LocalPlaybackTime;
+                _scheduledStartLocalTime = ScheduledLocalTimeFor(newFirst.ServerTimestamp);
+                _nextExpectedPlaybackTime = _scheduledStartLocalTime;
             }
         }
 
@@ -1043,9 +1156,12 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // Negative = we've read too much (ahead) = need to INSERT (slow down)
         //
         // Note: For push-model backends (ALSA), the static buffer pre-fill time is handled
-        // by backdating _playbackStartLocalTime when playback starts. This keeps the sync
-        // error formula clean and focused on drift/fluctuations only.
-        _currentSyncErrorMicroseconds = elapsedTimeMicroseconds - samplesReadTimeMicroseconds;
+        // by backdating _playbackStartLocalTime when playback starts (CalibratedStartup-
+        // LatencyMicroseconds, an immediate seed). The self-measured baseline then trims
+        // any residual constant offset (engine overhead, resampler priming, undeclared
+        // prefill) so the error reflects drift/fluctuations only.
+        _currentSyncErrorMicroseconds = elapsedTimeMicroseconds - samplesReadTimeMicroseconds
+            - (long)_syncErrorBaselineMicroseconds;
 
         // Apply EMA smoothing to filter measurement jitter.
         // This prevents rapid correction changes from noisy measurements while still
@@ -1061,6 +1177,33 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         {
             _smoothedSyncErrorMicroseconds = SyncErrorSmoothingAlpha * _currentSyncErrorMicroseconds
                 + (1 - SyncErrorSmoothingAlpha) * _smoothedSyncErrorMicroseconds;
+        }
+    }
+
+    /// <summary>
+    /// Snapshots the current smoothed sync error as the constant startup baseline
+    /// and rebases the error trackers to zero. Called at the end of a stabilization
+    /// window (startup grace or reconnect), where corrections have been suppressed
+    /// and the smoothed error has settled on whatever constant plumbing offset the
+    /// output backend introduced (e.g. WASAPI's 100ms buffer prefill at Play()).
+    /// Must be called under lock.
+    /// </summary>
+    /// <param name="reason">Window that just ended, for diagnostics.</param>
+    private void CaptureSyncErrorBaseline(string reason)
+    {
+        var delta = _smoothedSyncErrorMicroseconds;
+        _syncErrorBaselineMicroseconds += delta;
+        _smoothedSyncErrorMicroseconds = 0;
+        _currentSyncErrorMicroseconds -= (long)delta;
+        _syncErrorBaselineCaptured = true;
+
+        if (Math.Abs(delta) >= 1_000)
+        {
+            _logger.LogInformation(
+                "[Correction] Captured {Reason} sync-error baseline: {BaselineMs:F1}ms (total {TotalMs:F1}ms) — constant offset will not be corrected",
+                reason,
+                delta / 1000.0,
+                _syncErrorBaselineMicroseconds / 1000.0);
         }
     }
 
@@ -1081,6 +1224,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             return;
         }
 
+        // Grace period just ended: zero out the constant startup offset before
+        // the corrector ever sees it. Without this, an undeclared backend prefill
+        // (WASAPI gulps its full output buffer at Play()) reads as a persistent
+        // ~-100ms error and is audibly ground out via drop/insert on every start.
+        if (!_syncErrorBaselineCaptured)
+        {
+            CaptureSyncErrorBaseline("startup");
+        }
+
         // Suppress corrections while the Kalman filter re-converges after reconnect.
         if (_inReconnectStabilization)
         {
@@ -1089,6 +1241,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             if (elapsedSinceReconnect >= _syncOptions.ReconnectStabilizationMicroseconds)
             {
                 _inReconnectStabilization = false;
+                CaptureSyncErrorBaseline("reconnect");
                 _logger.LogInformation("[Correction] Reconnect stabilization ended, resuming corrections");
             }
             else
@@ -1469,7 +1622,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <summary>
     /// Represents a segment of samples with its target playback time.
     /// </summary>
-    /// <param name="LocalPlaybackTime">Local time (microseconds) when this segment should play.</param>
+    /// <param name="ServerTimestamp">Raw server timestamp (microseconds) for this segment.
+    /// Stored unconverted: clock sync may not have converged when the segment was enqueued
+    /// (e.g. the initial burst on a mid-track join arrives before the first time-sync round
+    /// completes), so local playback time must be derived at read time via
+    /// <see cref="IClockSynchronizer.ServerToClientTime"/> using the current sync state.</param>
     /// <param name="SampleCount">Number of interleaved samples in this segment.</param>
-    private readonly record struct TimestampedSegment(long LocalPlaybackTime, int SampleCount);
+    private readonly record struct TimestampedSegment(long ServerTimestamp, int SampleCount);
 }

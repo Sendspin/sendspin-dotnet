@@ -1,7 +1,7 @@
 using System.Buffers;
 using System.Net.WebSockets;
-using System.Text;
 using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -15,6 +15,7 @@ public sealed class SendspinConnection : ISendspinConnection
 {
     private readonly ILogger<SendspinConnection> _logger;
     private readonly ConnectionOptions _options;
+    private readonly IWireFraming _framing;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     private ClientWebSocket? _webSocket;
@@ -33,10 +34,14 @@ public sealed class SendspinConnection : ISendspinConnection
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
 
-    public SendspinConnection(ILogger<SendspinConnection> logger, ConnectionOptions? options = null)
+    public SendspinConnection(
+        ILogger<SendspinConnection> logger,
+        ConnectionOptions? options = null,
+        IWireFraming? framing = null)
     {
         _logger = logger;
         _options = options ?? new ConnectionOptions();
+        _framing = framing ?? PlaintextWireFraming.Instance;
     }
 
     public async Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
@@ -88,6 +93,22 @@ public sealed class SendspinConnection : ISendspinConnection
 
             _webSocket = new ClientWebSocket();
             _webSocket.Options.KeepAliveInterval = TimeSpan.FromMilliseconds(_options.KeepAliveIntervalMs);
+#if NET9_0_OR_GREATER
+            // PING/PONG keep-alive: abort the socket if no PONG arrives in time, so a
+            // half-open connection (frozen peer / network drop without a TCP FIN) surfaces
+            // as a faulted ReceiveAsync instead of blocking forever. .NET 9+ only.
+            if (_options.KeepAliveTimeoutMs > 0)
+            {
+                _webSocket.Options.KeepAliveTimeout = TimeSpan.FromMilliseconds(_options.KeepAliveTimeoutMs);
+            }
+#else
+            if (_options.KeepAliveTimeoutMs > 0)
+            {
+                _logger.LogDebug(
+                    "KeepAliveTimeoutMs is set but has no effect on this runtime (requires .NET 9+); " +
+                    "half-open connections are detected only by the OS TCP timeout.");
+            }
+#endif
 
             using var timeoutCts = new CancellationTokenSource(_options.ConnectTimeoutMs);
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
@@ -97,6 +118,13 @@ public sealed class SendspinConnection : ISendspinConnection
 
             _logger.LogInformation("Connected to {Uri}", _serverUri);
             _reconnectAttempt = 0;
+
+            _framing.Reset();
+            var startFrames = _framing.Start();
+            if (startFrames.Count > 0)
+            {
+                await SendWireFramesAsync(startFrames, linkedCts.Token);
+            }
 
             _receiveCts = new CancellationTokenSource();
             _receiveTask = ReceiveLoopAsync(_receiveCts.Token);
@@ -170,22 +198,8 @@ public sealed class SendspinConnection : ISendspinConnection
         }
 
         var json = MessageSerializer.Serialize(message);
-        var bytes = Encoding.UTF8.GetBytes(json);
-
-        await _sendLock.WaitAsync(cancellationToken);
-        try
-        {
-            _logger.LogDebug("Sending: {Message}", json);
-            await _webSocket.SendAsync(
-                new ArraySegment<byte>(bytes),
-                WebSocketMessageType.Text,
-                endOfMessage: true,
-                cancellationToken);
-        }
-        finally
-        {
-            _sendLock.Release();
-        }
+        _logger.LogDebug("Sending: {Message}", json);
+        await SendWireFramesAsync(_framing.EncodeText(json), cancellationToken);
     }
 
     public async Task SendBinaryAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
@@ -202,14 +216,22 @@ public sealed class SendspinConnection : ISendspinConnection
             throw new InvalidOperationException("WebSocket is not connected");
         }
 
+        await SendWireFramesAsync(_framing.EncodeBinary(data), cancellationToken);
+    }
+
+    private async Task SendWireFramesAsync(IEnumerable<WireFrame> frames, CancellationToken cancellationToken)
+    {
         await _sendLock.WaitAsync(cancellationToken);
         try
         {
-            await _webSocket.SendAsync(
-                data,
-                WebSocketMessageType.Binary,
-                endOfMessage: true,
-                cancellationToken);
+            foreach (var frame in frames)
+            {
+                await _webSocket!.SendAsync(
+                    frame.Payload,
+                    frame.Kind == WireFrameKind.Text ? WebSocketMessageType.Text : WebSocketMessageType.Binary,
+                    endOfMessage: true,
+                    cancellationToken);
+            }
         }
         finally
         {
@@ -239,6 +261,12 @@ public sealed class SendspinConnection : ISendspinConnection
                     {
                         _logger.LogInformation("Server closed connection: {Status} - {Description}",
                             result.CloseStatus, result.CloseStatusDescription);
+
+                        // A server-initiated close (graceful restart/update) must flow into the
+                        // reconnect path, not silently exit the loop. HandleConnectionLostAsync
+                        // no-ops when State is Disconnecting or the object is disposed, so an
+                        // intentional local disconnect still won't trigger a reconnect.
+                        await HandleConnectionLostAsync();
                         return;
                     }
 
@@ -248,22 +276,48 @@ public sealed class SendspinConnection : ISendspinConnection
 
                 var messageData = messageBuffer.ToArray();
 
-                if (result.MessageType == WebSocketMessageType.Text)
+                var frame = new WireFrame(
+                    result.MessageType == WebSocketMessageType.Text ? WireFrameKind.Text : WireFrameKind.Binary,
+                    messageData);
+                var inbound = _framing.ProcessInbound(frame);
+
+                if (inbound.FatalReason is { } fatal)
                 {
-                    var text = Encoding.UTF8.GetString(messageData);
+                    // Per spec: close without sending an application-level error message.
+                    _logger.LogWarning("Wire framing failure: {Reason}; closing connection", fatal);
+                    await HandleConnectionLostAsync();
+                    return;
+                }
+
+                if (inbound.Replies is { Count: > 0 })
+                {
+                    await SendWireFramesAsync(inbound.Replies, cancellationToken);
+                }
+
+                if (inbound.Text is { } text)
+                {
                     _logger.LogDebug("Received text: {Message}", text.Length > 500 ? text[..500] + "..." : text);
                     TextMessageReceived?.Invoke(this, text);
                 }
-                else if (result.MessageType == WebSocketMessageType.Binary)
+
+                if (inbound.Binary is { } binary)
                 {
-                    _logger.LogTrace("Received binary: {Length} bytes", messageData.Length);
-                    BinaryMessageReceived?.Invoke(this, messageData);
+                    _logger.LogTrace("Received binary: {Length} bytes", binary.Length);
+                    BinaryMessageReceived?.Invoke(this, binary);
                 }
             }
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Normal cancellation
+            // Normal cancellation - a local disconnect/cleanup cancelled our receive token.
+        }
+        catch (OperationCanceledException ex)
+        {
+            // Our token was NOT cancelled, so this is an involuntary abort - most commonly
+            // the .NET 9+ keep-alive timeout firing on a half-open connection (the PONG never
+            // arrived). Treat it as a lost connection so the reconnect path runs.
+            _logger.LogWarning(ex, "Receive aborted without local cancellation (keep-alive timeout?)");
+            await HandleConnectionLostAsync();
         }
         catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
         {

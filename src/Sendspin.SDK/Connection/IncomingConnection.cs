@@ -1,5 +1,5 @@
-using System.Text;
 using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -13,6 +13,7 @@ public sealed class IncomingConnection : ISendspinConnection
 {
     private readonly ILogger<IncomingConnection> _logger;
     private readonly WebSocketClientConnection _socket;
+    private readonly IWireFraming _framing;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     private ConnectionState _state = ConnectionState.Disconnected;
@@ -28,10 +29,12 @@ public sealed class IncomingConnection : ISendspinConnection
 
     public IncomingConnection(
         ILogger<IncomingConnection> logger,
-        WebSocketClientConnection socket)
+        WebSocketClientConnection socket,
+        IWireFraming? framing = null)
     {
         _logger = logger;
         _socket = socket;
+        _framing = framing ?? PlaintextWireFraming.Instance;
 
         // Get server address from connection info
         var clientIp = socket.ClientIpAddress;
@@ -49,7 +52,7 @@ public sealed class IncomingConnection : ISendspinConnection
     /// Starts processing messages on this connection.
     /// For incoming connections, this just marks the connection as ready.
     /// </summary>
-    public Task StartAsync(CancellationToken cancellationToken = default)
+    public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -59,9 +62,15 @@ public sealed class IncomingConnection : ISendspinConnection
         }
 
         _isOpen = true;
-        SetState(ConnectionState.Handshaking);
 
-        return Task.CompletedTask;
+        _framing.Reset();
+        var startFrames = _framing.Start();
+        if (startFrames.Count > 0)
+        {
+            await SendWireFramesAsync(startFrames, cancellationToken);
+        }
+
+        SetState(ConnectionState.Handshaking);
     }
 
     /// <summary>
@@ -115,17 +124,8 @@ public sealed class IncomingConnection : ISendspinConnection
         }
 
         var json = MessageSerializer.Serialize(message);
-
-        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            _logger.LogDebug("Sending: {Message}", json);
-            await _socket.SendAsync(json).ConfigureAwait(false);
-        }
-        finally
-        {
-            _sendLock.Release();
-        }
+        _logger.LogDebug("Sending: {Message}", json);
+        await SendWireFramesAsync(_framing.EncodeText(json), cancellationToken);
     }
 
     public async Task SendBinaryAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
@@ -137,10 +137,25 @@ public sealed class IncomingConnection : ISendspinConnection
             throw new InvalidOperationException("WebSocket is not connected");
         }
 
+        await SendWireFramesAsync(_framing.EncodeBinary(data), cancellationToken);
+    }
+
+    private async Task SendWireFramesAsync(IEnumerable<WireFrame> frames, CancellationToken cancellationToken)
+    {
         await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _socket.SendAsync(data.ToArray()).ConfigureAwait(false);
+            foreach (var frame in frames)
+            {
+                if (frame.Kind == WireFrameKind.Text)
+                {
+                    await _socket.SendAsync(frame.PayloadAsText()).ConfigureAwait(false);
+                }
+                else
+                {
+                    await _socket.SendAsync(frame.Payload.ToArray()).ConfigureAwait(false);
+                }
+            }
         }
         finally
         {
@@ -159,16 +174,66 @@ public sealed class IncomingConnection : ISendspinConnection
         }
     }
 
-    private void OnTextMessage(string message)
+    private void OnTextMessage(string message) => DispatchInbound(WireFrame.FromText(message));
+
+    private void OnBinaryMessage(byte[] data) => DispatchInbound(new WireFrame(WireFrameKind.Binary, data));
+
+    private void DispatchInbound(WireFrame frame)
     {
-        _logger.LogDebug("Received text: {Message}", message.Length > 500 ? message[..500] + "..." : message);
-        TextMessageReceived?.Invoke(this, message);
+        var inbound = _framing.ProcessInbound(frame);
+
+        if (inbound.FatalReason is { } fatal)
+        {
+            // Per spec: close without sending an application-level error message.
+            _logger.LogWarning("Wire framing failure: {Reason}; closing connection", fatal);
+            _isOpen = false;
+            _ = CloseSocketSafeAsync();
+            SetState(ConnectionState.Disconnected, fatal);
+            return;
+        }
+
+        if (inbound.Replies is { Count: > 0 } replies)
+        {
+            // Replies only occur for handshaking framings; the socket callbacks are
+            // synchronous, so dispatch without blocking the receive path.
+            _ = SendRepliesSafeAsync(replies);
+        }
+
+        if (inbound.Text is { } text)
+        {
+            _logger.LogDebug("Received text: {Message}", text.Length > 500 ? text[..500] + "..." : text);
+            TextMessageReceived?.Invoke(this, text);
+        }
+
+        if (inbound.Binary is { } binary)
+        {
+            _logger.LogTrace("Received binary: {Length} bytes", binary.Length);
+            BinaryMessageReceived?.Invoke(this, binary);
+        }
     }
 
-    private void OnBinaryMessage(byte[] data)
+    private async Task CloseSocketSafeAsync()
     {
-        _logger.LogTrace("Received binary: {Length} bytes", data.Length);
-        BinaryMessageReceived?.Invoke(this, data);
+        try
+        {
+            await _socket.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error closing socket after framing failure");
+        }
+    }
+
+    private async Task SendRepliesSafeAsync(IReadOnlyList<WireFrame> replies)
+    {
+        try
+        {
+            await SendWireFramesAsync(replies, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send framing reply frames");
+        }
     }
 
     private void OnClose()

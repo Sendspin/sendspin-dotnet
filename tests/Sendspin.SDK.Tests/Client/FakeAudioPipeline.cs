@@ -31,6 +31,7 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     public Task StopAsync() => Task.CompletedTask;
     public void NotifyReconnect() { }
     public void Clear(long? newTargetTimestamp = null) { }
+    public void ReanchorTiming() { }
     public void ProcessAudioChunk(AudioChunk chunk) { }
     public void SetVolume(int volume) { }
     public void SetMuted(bool muted) { }

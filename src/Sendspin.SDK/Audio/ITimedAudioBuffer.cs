@@ -53,20 +53,27 @@ public interface ITimedAudioBuffer : IDisposable
     long OutputLatencyMicroseconds { get; set; }
 
     /// <summary>
-    /// Gets or sets the calibrated startup latency in microseconds for push-model audio backends.
+    /// Gets or sets the calibrated startup latency in microseconds.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// This value compensates for audio pre-filled in the output buffer on push-model
-    /// backends (like ALSA) where the application must fill the buffer before playback starts.
-    /// Without compensation, this prefill causes a constant negative sync error.
+    /// This value compensates for audio consumed to pre-fill the output buffer before
+    /// playback starts. Push-model backends (like ALSA) fill the buffer explicitly;
+    /// pull-model backends can gulp their full buffer on the first callback (WASAPI
+    /// reads its entire ~100ms buffer at Play()). Either way the prefill causes a
+    /// constant negative sync error if uncompensated.
     /// </para>
     /// <para>
-    /// Set this value only when the audio player has measured/calibrated the actual startup
-    /// latency. Pull-model backends (like WASAPI) should leave this at 0.
+    /// This property is an immediate seed for backends that have measured their startup
+    /// latency. Any residual constant offset (undeclared prefill, engine overhead,
+    /// resampler priming) is self-measured at the end of the startup grace period and
+    /// subtracted automatically, so leaving this at 0 no longer causes an audible
+    /// correction phase — it only delays accurate error reporting until the baseline
+    /// snapshot is taken.
     /// </para>
     /// <para>
-    /// Formula: syncError = elapsed - samplesReadTime + CalibratedStartupLatencyMicroseconds
+    /// Implementation: the playback anchor is backdated by this value at start, i.e.
+    /// syncError = (elapsed - CalibratedStartupLatency) - samplesReadTime - selfMeasuredBaseline.
     /// </para>
     /// </remarks>
     long CalibratedStartupLatencyMicroseconds { get; set; }
@@ -193,6 +200,26 @@ public interface ITimedAudioBuffer : IDisposable
     /// Thrown when <paramref name="samplesDropped"/> or <paramref name="samplesInserted"/> is negative.
     /// </exception>
     void NotifyExternalCorrection(int samplesDropped, int samplesInserted);
+
+    /// <summary>
+    /// Reports the playback rate an external corrector is currently applying, so it appears in
+    /// <see cref="GetStats"/> (and thus the stats UI).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The internal corrector sets <see cref="TargetPlaybackRate"/> directly; external correctors
+    /// (e.g. an app-side resampler driven by <see cref="ISyncCorrectionProvider"/>) apply the rate
+    /// outside the buffer, so without this call the reported rate would always read 1.0 even while
+    /// the audio is being resampled. The two paths are mutually exclusive — whichever is idle stays
+    /// at 1.0 — so <see cref="GetStats"/> surfaces whichever is actually correcting.
+    /// </para>
+    /// <para>
+    /// The caller is responsible for reporting EVERY rate change, including the reset back to 1.0
+    /// when correction stops; otherwise the stats would latch on the last reported value.
+    /// </para>
+    /// </remarks>
+    /// <param name="rate">The applied playback rate (1.0 = no correction).</param>
+    void ReportExternalPlaybackRate(double rate);
 
     /// <summary>
     /// Notifies the buffer that a WebSocket reconnect occurred.
@@ -340,6 +367,57 @@ public record AudioBufferStats
     /// Gets the active timing source name ("audio-clock", "monotonic", or "wall-clock").
     /// </summary>
     public string? TimingSourceName { get; init; }
+
+    // ── Network / chunk-arrival diagnostics ────────────────────────────────
+
+    /// <summary>
+    /// Gets the total number of encoded audio chunks received from the network since the pipeline was started.
+    /// Monotonic counter — does not reset on re-anchor or buffer clear.
+    /// </summary>
+    public long ChunksReceived { get; init; }
+
+    /// <summary>
+    /// Gets the total bytes of encoded audio data received from the network since the pipeline was started.
+    /// Monotonic counter — clients can derive bitrate from the delta over a sampling window.
+    /// </summary>
+    public long BytesReceived { get; init; }
+
+    /// <summary>
+    /// Gets the time in milliseconds since the most recent audio chunk arrived.
+    /// Zero when no chunk has been received yet in the current session.
+    /// A growing value while playback is active indicates a network stall.
+    /// </summary>
+    public double LastChunkAgeMs { get; init; }
+
+    /// <summary>
+    /// Gets the maximum inter-chunk arrival gap observed over a rolling ~10-second window.
+    /// A large spike here indicates a burst/stall event that may explain subsequent underruns.
+    /// </summary>
+    public double MaxChunkGapMs { get; init; }
+
+    /// <summary>
+    /// Gets the chunk arrival jitter: EWMA of |inter-arrival − average inter-arrival| (ms).
+    /// Elevated values indicate irregular network delivery independent of average throughput.
+    /// </summary>
+    public double ChunkJitterMs { get; init; }
+
+    // ── Re-anchor / severity ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Gets the total number of re-anchor events fired since the pipeline was started.
+    /// Each event represents a sync error exceeding threshold that triggered a buffer clear.
+    /// Monotonic counter — a poller cannot miss events by polling too slowly.
+    /// </summary>
+    public long ReanchorCount { get; init; }
+
+    // ── Buffer depth ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Gets the minimum buffer depth in milliseconds observed over the most recent ~1-second window.
+    /// A 10 Hz poller can miss transient dips between samples; this low-water mark exposes them.
+    /// Zero until the first stats poll after pipeline start.
+    /// </summary>
+    public double MinBufferedMsRecent { get; init; }
 }
 
 /// <summary>

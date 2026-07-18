@@ -127,6 +127,14 @@ public sealed class ClientCapabilities
     public bool SupportsSetStaticDelay { get; set; } = true;
 
     /// <summary>
+    /// Whether this client admits servers with no pairing record over the encrypted
+    /// protocol (spec "unpaired access"). Off by default: unpaired playback sessions
+    /// are vulnerable to man-in-the-middle attacks on the local network. Only
+    /// meaningful when the connection uses the Noise transport.
+    /// </summary>
+    public bool UnpairedAccessEnabled { get; set; }
+
+    /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.
     /// This is sent in the initial client/state message after handshake.
     /// Default is 100 for backwards compatibility.

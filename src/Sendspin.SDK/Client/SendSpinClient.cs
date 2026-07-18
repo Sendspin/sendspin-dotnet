@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Extensions;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol;
@@ -21,6 +22,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IClockSynchronizer _clockSynchronizer;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IStaticDelayStore? _staticDelayStore;
+    private readonly INoiseSessionInfo? _noiseSession;
+    private bool _activateReceived;
+    private readonly IPairingRecordStore? _pairingStore;
+    private byte[]? _pendingPairingPsk;
 
     private TaskCompletionSource<bool>? _handshakeTcs;
     private GroupState? _currentGroup;
@@ -95,6 +100,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc />
     public ServerHelloPayload? LastServerHello { get; private set; }
 
+    /// <summary>
+    /// The most recent server/activate payload (encrypted protocol), or null before the
+    /// initial activation. Roles in <see cref="ServerActivatePayload.ActiveRoles"/> are
+    /// also mirrored into <see cref="LastServerHello"/> for legacy consumers.
+    /// </summary>
+    public ServerActivatePayload? LastServerActivate { get; private set; }
+
     /// <inheritdoc />
     public StreamStartPayload? LastStreamStart { get; private set; }
 
@@ -113,6 +125,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
     public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
+    /// <summary>
+    /// Raised for every server/activate on an encrypted connection, including
+    /// re-activations that change the activity set or roles.
+    /// </summary>
+    public event EventHandler<ServerActivatePayload>? ServerActivateReceived;
+
+    /// <summary>
+    /// Raised when a Pairing PSK exchange completes and the long-term record has been
+    /// persisted (argument: the paired server id).
+    /// </summary>
+    public event EventHandler<string>? PairingCompleted;
+
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
     public SendspinClientService(
@@ -121,10 +145,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         IClockSynchronizer? clockSynchronizer = null,
         ClientCapabilities? capabilities = null,
         IAudioPipeline? audioPipeline = null,
-        IStaticDelayStore? staticDelayStore = null)
+        IStaticDelayStore? staticDelayStore = null,
+        INoiseSessionInfo? noiseSession = null,
+        IPairingRecordStore? pairingRecordStore = null)
     {
         _logger = logger;
         _connection = connection;
+        _noiseSession = noiseSession;
+        _pairingStore = pairingRecordStore;
         _clockSynchronizer = clockSynchronizer ?? new KalmanClockSynchronizer();
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
@@ -166,14 +194,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
     {
         _handshakeTcs = new TaskCompletionSource<bool>();
+        _activateReceived = false;
 
-        var hello = CreateClientHelloMessage();
-        var helloJson = MessageSerializer.Serialize(hello);
-        _logger.LogInformation("Sending client/hello:\n{Json}", helloJson);
-        await _connection.SendMessageAsync(hello, cancellationToken);
+        if (_noiseSession is null)
+        {
+            // Legacy plaintext flow: the client opens with client/hello.
+            var hello = CreateClientHelloMessage();
+            var helloJson = MessageSerializer.Serialize(hello);
+            _logger.LogInformation("Sending client/hello:\n{Json}", helloJson);
+            await _connection.SendMessageAsync(hello, cancellationToken);
+        }
 
-        // Wait for server hello with timeout
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        // Encrypted flow is server-driven: server/hello arrives first (after the Noise
+        // handshake), we answer with client/hello, and the initial server/activate
+        // completes the handshake. Either way, wait for completion with a timeout
+        // (30 s per the spec's recommended handshake-phase timeout; the legacy flow
+        // keeps its historical 10 s).
+        using var timeoutCts = new CancellationTokenSource(
+            TimeSpan.FromSeconds(_noiseSession is null ? 10 : 30));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         try
@@ -188,7 +226,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
-            _logger.LogError("Handshake timeout - no server/hello received");
+            _logger.LogError("Handshake timeout - server did not complete the hello exchange");
             await _connection.DisconnectAsync("handshake_timeout");
             throw new TimeoutException("Server did not respond to handshake");
         }
@@ -206,8 +244,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ArtworkChannels.Count);
         }
 
+        bool encrypted = _noiseSession is not null;
         return ClientHelloMessage.Create(
-            clientId: _capabilities.ClientId,
+            // Under the encrypted protocol client_id/version travel in client/init and
+            // are omitted here; trust_level and unpaired_access are required instead.
+            clientId: encrypted ? null : _capabilities.ClientId,
             name: _capabilities.ClientName,
             supportedRoles: _capabilities.Roles,
             playerSupport: new PlayerSupport
@@ -236,7 +277,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 SoftwareVersion = _capabilities.SoftwareVersion,
                 MacAddress = _capabilities.MacAddress
             },
-            visualizerSupport: _capabilities.VisualizerSupport
+            visualizerSupport: _capabilities.VisualizerSupport,
+            trustLevel: !encrypted ? null
+                : _noiseSession?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
+            supportedPairMethods: encrypted ? [new PairMethodDescriptor()] : null,
+            unpairedAccess: encrypted
+                ? new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
+                : null
         );
     }
 
@@ -493,6 +540,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandleServerHello(json);
                     break;
 
+                case MessageTypes.ServerActivate:
+                    HandleServerActivate(json);
+                    break;
+
+                case MessageTypes.ServerPairFinalize:
+                    HandleServerPairFinalize();
+                    break;
+
+                case MessageTypes.PairAbort:
+                    HandlePairAbort(json);
+                    break;
+
+                case MessageTypes.ManagementListRecords:
+                case MessageTypes.ManagementAddRecord:
+                case MessageTypes.ManagementRemoveRecord:
+                case MessageTypes.ManagementGetPairingConfig:
+                case MessageTypes.ManagementSetPairingConfig:
+                    HandleManagement(messageType!, json);
+                    break;
+
+                case MessageTypes.ServerUnpair:
+                    HandleServerUnpair();
+                    break;
+
                 case MessageTypes.ServerTime:
                     HandleServerTime(json);
                     break;
@@ -544,13 +615,430 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         var payload = message.Payload;
         LastServerHello = payload;
-        ServerId = payload.ServerId;
         ServerName = payload.Name;
+
+        if (_noiseSession is not null)
+        {
+            // Encrypted flow: server/hello carries only the name. The server identity
+            // came from server/init, and roles arrive in the initial server/activate,
+            // which completes the handshake. Per spec, no other messages (including
+            // client/time and client/state) may be sent before that activate, so the
+            // connected tail runs in HandleServerActivate.
+            ServerId = _noiseSession.ServerId;
+            _logger.LogInformation("Server hello received (encrypted): {ServerId} ({ServerName})",
+                ServerId, ServerName);
+            SendEncryptedClientHelloAsync().SafeFireAndForget(_logger);
+            return;
+        }
+
+        ServerId = payload.ServerId;
         ConnectionReason = payload.ConnectionReason;
 
         _logger.LogInformation("Server hello received: {ServerId} ({ServerName}), reason: {ConnectionReason}, roles: {Roles}",
             message.ServerId, message.Name, ConnectionReason ?? "none", string.Join(", ", message.ActiveRoles));
 
+        FinishHandshake();
+
+        // Raise the typed event after state is populated but before awaiters of
+        // ConnectAsync wake up, so handlers see a fully initialized client.
+        ServerHelloReceived?.Invoke(this, payload);
+
+        _handshakeTcs?.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// Answers an encrypted-flow server/hello with the encrypted-shape client/hello
+    /// (client_id/version omitted; trust_level and unpaired_access included).
+    /// </summary>
+    private async Task SendEncryptedClientHelloAsync()
+    {
+        var hello = CreateClientHelloMessage();
+        var helloJson = MessageSerializer.Serialize(hello);
+        _logger.LogInformation("Sending client/hello (encrypted):\n{Json}", helloJson);
+        await _connection.SendMessageAsync(hello);
+    }
+
+    private void HandleServerActivate(string json)
+    {
+        var message = MessageSerializer.Deserialize<ServerActivateMessage>(json);
+        if (message is null)
+        {
+            _logger.LogWarning("Failed to deserialize server/activate");
+            return;
+        }
+
+        var payload = message.Payload;
+        LastServerActivate = payload;
+
+        if (!ValidateActivateAdmissibility(payload, out var goodbyeReason))
+        {
+            _logger.LogWarning("Inadmissible server/activate (activities: {Activities}); closing with {Reason}",
+                string.Join(", ", payload.ActivitiesList), goodbyeReason);
+            _handshakeTcs?.TrySetResult(false);
+            DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
+            return;
+        }
+
+        // Mirror roles where legacy consumers look. active_roles persists across
+        // activates that omit it, so only overwrite when present.
+        if (payload.ActiveRoles is not null && LastServerHello is not null)
+        {
+            LastServerHello.ActiveRoles = payload.ActiveRoles;
+        }
+
+        _logger.LogInformation("Server activate: activities [{Activities}], roles [{Roles}]",
+            string.Join(", ", payload.ActivitiesList),
+            string.Join(", ", payload.ActiveRoles ?? LastServerHello?.ActiveRoles ?? []));
+
+        if (payload.ActivitiesList.Contains(Activities.Pairing))
+        {
+            HandlePairingActivate(payload);
+        }
+
+        bool first = !_activateReceived;
+        _activateReceived = true;
+
+        if (first)
+        {
+            // The initial activate completes the encrypted handshake; only now may the
+            // client start sending (client/time, client/state).
+            FinishHandshake();
+            if (LastServerHello is { } hello)
+            {
+                ServerHelloReceived?.Invoke(this, hello);
+            }
+        }
+
+        ServerActivateReceived?.Invoke(this, payload);
+
+        if (first)
+        {
+            _handshakeTcs?.TrySetResult(true);
+        }
+    }
+
+    /// <summary>
+    /// Applies the spec's server/activate admissibility table for the matched PSK
+    /// category. Returns false with the client/goodbye reason to close with.
+    /// </summary>
+    private bool ValidateActivateAdmissibility(ServerActivatePayload payload, out string goodbyeReason)
+    {
+        goodbyeReason = string.Empty;
+        var psk = _noiseSession?.MatchedPsk;
+        if (psk is null)
+        {
+            // No session info (legacy flow or externally-managed session): no gate.
+            return true;
+        }
+
+        var activities = payload.ActivitiesList ?? [];
+        bool hasRoles = payload.ActiveRoles is { Count: > 0 };
+
+        if (IsAdmissible(psk.Category, activities, hasRoles, _capabilities.UnpairedAccessEnabled))
+        {
+            return true;
+        }
+
+        // Spec rule ordering: prefer 'pairing_required' when enabling unpaired access
+        // would make the activation admissible on a Sentinel-keyed session.
+        if (psk.Category == PskCategory.Sentinel
+            && !_capabilities.UnpairedAccessEnabled
+            && IsAdmissible(psk.Category, activities, hasRoles, unpairedAccessEnabled: true))
+        {
+            goodbyeReason = "pairing_required";
+            return false;
+        }
+
+        goodbyeReason = "unauthorized";
+        return false;
+    }
+
+    private static bool IsAdmissible(PskCategory category, List<string> activities, bool hasRoles, bool unpairedAccessEnabled)
+    {
+        bool AllowedSet(IReadOnlyCollection<string> set) => category switch
+        {
+            PskCategory.Pairing => set.Count == 1 && set.Contains(Activities.Pairing),
+            PskCategory.LongTerm => (set.Count == 1 && set.Contains(Activities.Pairing))
+                || set.All(a => a is Activities.Playback or Activities.Management),
+            PskCategory.Sentinel => set.Count == 0
+                || (set.Count == 1 && set.Contains(Activities.Pairing))
+                || (set.Count == 1 && set.Contains(Activities.Playback) && unpairedAccessEnabled),
+            _ => false,
+        };
+
+        if (!AllowedSet(activities))
+        {
+            return false;
+        }
+
+        if (!hasRoles)
+        {
+            return true;
+        }
+
+        // Non-empty active_roles requires a playback-capable connection: activities
+        // extended with 'playback' must still be an allowed set.
+        var withPlayback = activities.Contains(Activities.Playback)
+            ? activities
+            : [.. activities, Activities.Playback];
+        return AllowedSet(withPlayback);
+    }
+
+    /// <summary>
+    /// Starts the client side of a pairing attempt when server/activate declares the
+    /// pairing activity. Only the (client-mandatory) Pairing PSK method is implemented:
+    /// the client generates the long-term PSK and delivers it in client/pair-finalize.
+    /// </summary>
+    private void HandlePairingActivate(ServerActivatePayload payload)
+    {
+        if (payload.SelectedPairMethod != "pairing_psk")
+        {
+            _logger.LogWarning("Server selected unsupported pair method {Method}; aborting",
+                payload.SelectedPairMethod);
+            _connection.SendMessageAsync(new PairAbortMessage
+            {
+                Payload = new PairAbortPayload { Reason = "method_not_supported" },
+            }).SafeFireAndForget(_logger);
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+            return;
+        }
+
+        _pendingPairingPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
+        _connection.SendMessageAsync(new ClientPairFinalizeMessage
+        {
+            Payload = new ClientPairFinalizePayload
+            {
+                LongTermPsk = Convert.ToBase64String(_pendingPairingPsk)
+                    .TrimEnd('=').Replace('+', '-').Replace('/', '_'),
+            },
+        }).SafeFireAndForget(_logger);
+    }
+
+    /// <summary>
+    /// The server persisted the pairing record; persist ours. The server will follow
+    /// with an in-band re-handshake to the new PSK (handled by the Noise framing).
+    /// </summary>
+    private void HandleServerPairFinalize()
+    {
+        if (_pendingPairingPsk is null)
+        {
+            _logger.LogWarning("server/pair-finalize with no pairing attempt in flight; ignoring");
+            return;
+        }
+
+        if (_pairingStore is not null && ServerId is not null)
+        {
+            _pairingStore.Upsert(new PairingRecord(
+                _pendingPairingPsk, PskCategory.LongTerm, ServerId));
+            _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
+        }
+        else
+        {
+            _logger.LogWarning("Pairing completed but no record store configured; record NOT persisted");
+        }
+
+        _pendingPairingPsk = null;
+        PairingCompleted?.Invoke(this, ServerId ?? string.Empty);
+    }
+
+    /// <summary>
+    /// Handles a management/* request. Management is scoped to connections whose
+    /// current activities include 'management'; outside that, every request answers
+    /// permission_denied. All requests are answered by exactly one management/result.
+    /// </summary>
+    private void HandleManagement(string type, string json)
+    {
+        var result = new ManagementResultPayload();
+
+        if (LastServerActivate?.ActivitiesList.Contains(Activities.Management) != true)
+        {
+            result.Result = "permission_denied";
+        }
+        else
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var payload = doc.RootElement.GetProperty("payload");
+                result = ExecuteManagementOperation(type, payload);
+            }
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or KeyNotFoundException or FormatException)
+            {
+                result.Result = "invalid";
+            }
+        }
+
+        _connection.SendMessageAsync(new ManagementResultMessage { Payload = result })
+            .SafeFireAndForget(_logger);
+
+        if (result.Result == "ok" && _pendingSelfRemoval)
+        {
+            // Removing the requester's own record closes the management session.
+            _pendingSelfRemoval = false;
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+        }
+    }
+
+    private bool _pendingSelfRemoval;
+
+    private ManagementResultPayload ExecuteManagementOperation(
+        string type, System.Text.Json.JsonElement payload)
+    {
+        var result = new ManagementResultPayload();
+        switch (type)
+        {
+            case MessageTypes.ManagementListRecords:
+            {
+                var entries = (_pairingStore?.List() ?? [])
+                    .Select(r => r.ServerId is null
+                        ? $"{{\"psk_id\":\"{r.PskId}\",\"used\":{(r.Used ? "true" : "false")}}}"
+                        : $"{{\"psk_id\":\"{r.PskId}\",\"server_id\":\"{r.ServerId}\",\"used\":{(r.Used ? "true" : "false")}}}");
+                result.Data = System.Text.Json.JsonDocument
+                    .Parse($"{{\"records\":[{string.Join(",", entries)}]}}").RootElement.Clone();
+                break;
+            }
+
+            case MessageTypes.ManagementAddRecord:
+            {
+                byte[] psk;
+                try
+                {
+                    psk = Connection.Noise.SendspinIdentity.DecodePeerId(
+                        payload.GetProperty("psk").GetString() ?? string.Empty);
+                }
+                catch (Exception)
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
+                string? serverId = payload.TryGetProperty("server_id", out var sid) ? sid.GetString() : null;
+                if (_pairingStore is null)
+                {
+                    result.Result = "storage_exhausted";
+                }
+                else if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
+                {
+                    result.Result = "already_exists";
+                }
+                else
+                {
+                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                }
+
+                break;
+            }
+
+            case MessageTypes.ManagementRemoveRecord:
+            {
+                string pskId = payload.GetProperty("psk_id").GetString()
+                    ?? throw new FormatException("psk_id missing");
+                var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
+                if (record is null)
+                {
+                    result.Result = "not_found";
+                    break;
+                }
+
+                _pairingStore!.Remove(pskId);
+                if (_noiseSession?.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
+                {
+                    _pendingSelfRemoval = true;
+                }
+
+                break;
+            }
+
+            case MessageTypes.ManagementGetPairingConfig:
+            {
+                // PIN methods are not implemented, so their objects are absent per spec.
+                string enabled = _capabilities.UnpairedAccessEnabled ? "true" : "false";
+                result.Data = System.Text.Json.JsonDocument.Parse(
+                    $"{{\"pairing_psk\":{{\"enabled\":true}},\"unpaired_access\":{{\"enabled\":{enabled}}}}}")
+                    .RootElement.Clone();
+                break;
+            }
+
+            case MessageTypes.ManagementSetPairingConfig:
+            {
+                // Patch semantics: only fields present are applied. Setting fields on an
+                // unimplemented PIN method returns invalid.
+                if (payload.TryGetProperty("static_pin", out _) || payload.TryGetProperty("dynamic_pin", out _))
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
+                if (payload.TryGetProperty("unpaired_access", out var ua)
+                    && ua.TryGetProperty("enabled", out var uaEnabled))
+                {
+                    _capabilities.UnpairedAccessEnabled = uaEnabled.GetBoolean();
+                }
+
+                if (payload.TryGetProperty("pairing_psk", out var pp)
+                    && pp.TryGetProperty("psk", out var pskEl))
+                {
+                    if (_pairingStore is null)
+                    {
+                        result.Result = "storage_exhausted";
+                        break;
+                    }
+
+                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePeerId(pskEl.GetString() ?? string.Empty);
+                    foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
+                    {
+                        _pairingStore.Remove(old.PskId);
+                    }
+
+                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.Pairing));
+                }
+
+                break;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// A paired server dropped its own pairing record: remove the matched stored-pubkey
+    /// record (shared records are kept per spec), say goodbye with reason 'unpaired',
+    /// and close. Ignored at trust level 'none'.
+    /// </summary>
+    private void HandleServerUnpair()
+    {
+        var current = _noiseSession?.MatchedPsk;
+        if (current is null || current.Category != PskCategory.LongTerm)
+        {
+            _logger.LogDebug("server/unpair on a non-user-trust connection; ignoring");
+            return;
+        }
+
+        string pskId = NoiseConstants.DerivePskId(current.Key.Span);
+        var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
+        if (record is not null && record.ServerId is not null)
+        {
+            _pairingStore!.Remove(pskId);
+            _logger.LogInformation("server/unpair: removed pairing record for {ServerId}", ServerId);
+        }
+
+        DisconnectAsync("unpaired").SafeFireAndForget(_logger);
+    }
+
+    private void HandlePairAbort(string json)
+    {
+        var message = MessageSerializer.Deserialize<PairAbortMessage>(json);
+        _logger.LogWarning("Pairing aborted: {Reason}", message?.Payload.Reason ?? "unknown");
+        _pendingPairingPsk = null;
+    }
+
+    /// <summary>
+    /// The connected tail shared by both handshake flows: runs when the legacy
+    /// server/hello arrives, or when the encrypted flow's initial server/activate does.
+    /// </summary>
+    private void FinishHandshake()
+    {
         // Mark connection as fully connected
         if (_connection is SendspinConnection conn)
         {
@@ -574,18 +1062,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // sees the calibrated delay immediately on (re)connect. No-op when no store is configured.
         LoadPersistedStaticDelay();
 
-        // Send initial client state (required by protocol after server/hello)
+        // Send initial client state (required by protocol after the handshake completes)
         // This tells the server we're synchronized and ready
         SendInitialClientStateAsync().SafeFireAndForget(_logger);
 
         // Start time synchronization loop with adaptive intervals
         StartTimeSyncLoop();
-
-        // Raise the typed event after state is populated but before awaiters of
-        // ConnectAsync wake up, so handlers see a fully initialized client.
-        ServerHelloReceived?.Invoke(this, payload);
-
-        _handshakeTcs?.TrySetResult(true);
     }
 
     /// <summary>
@@ -938,21 +1420,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             var meta = payload.Metadata;
             var existing = _currentGroup.Metadata ?? new TrackMetadata();
 
-            // Only update fields that are present in the message
-            // For Progress, we use Optional<T> to distinguish between:
-            //   - Absent: keep existing value (partial update)
-            //   - Present but null: clear progress (track ended)
-            //   - Present with value: update progress
+            // All fields use Optional<T>: absent = keep existing, present-null = clear, present-with-value = update.
             _currentGroup.Metadata = new TrackMetadata
             {
-                Timestamp = meta.Timestamp ?? existing.Timestamp,
-                Title = meta.Title ?? existing.Title,
-                Artist = meta.Artist ?? existing.Artist,
-                AlbumArtist = meta.AlbumArtist ?? existing.AlbumArtist,
-                Album = meta.Album ?? existing.Album,
-                ArtworkUrl = meta.ArtworkUrl ?? existing.ArtworkUrl,
-                Year = meta.Year ?? existing.Year,
-                Track = meta.Track ?? existing.Track,
+                Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
+                Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
+                Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
+                AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
+                Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
+                ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
+                Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
+                Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
                 Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
             };
         }

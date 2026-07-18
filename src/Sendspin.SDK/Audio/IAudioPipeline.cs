@@ -102,6 +102,25 @@ public interface IAudioPipeline : IAsyncDisposable
     void Clear(long? newTargetTimestamp = null);
 
     /// <summary>
+    /// Re-anchors playback timing without discarding buffered audio.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Resets the sync-timing anchor so the next callback re-derives the scheduled start from the
+    /// current clock state — picking up a changed <see cref="Synchronization.IClockSynchronizer.StaticDelayMs"/> —
+    /// while keeping all buffered audio.
+    /// </para>
+    /// <para>
+    /// Use this to apply a static-delay change mid-playback. Unlike <see cref="Clear"/>, it does not
+    /// dump the buffer, so playback continues from the already-buffered audio (shifted by the new
+    /// delay) instead of stalling to refill. That matters with servers that transmit far ahead of
+    /// playback, where <see cref="Clear"/> leaves the buffer waiting the full transmit-ahead window
+    /// (tens of seconds) for re-received, future-timestamped audio.
+    /// </para>
+    /// </remarks>
+    void ReanchorTiming();
+
+    /// <summary>
     /// Processes an incoming audio chunk.
     /// </summary>
     /// <param name="chunk">The audio chunk to process.</param>
