@@ -9,6 +9,7 @@ public static class MessageTypes
     // Handshake
     public const string ClientHello = "client/hello";
     public const string ServerHello = "server/hello";
+    public const string ServerActivate = "server/activate";
     public const string ClientGoodbye = "client/goodbye";
 
     // Clock synchronization

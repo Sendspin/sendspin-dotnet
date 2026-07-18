@@ -19,13 +19,15 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
     /// Creates a ClientHelloMessage with the specified payload.
     /// </summary>
     public static ClientHelloMessage Create(
-        string clientId,
+        string? clientId,
         string name,
         List<string> supportedRoles,
         PlayerSupport? playerSupport = null,
         ArtworkSupport? artworkSupport = null,
         DeviceInfo? deviceInfo = null,
-        VisualizerSupport? visualizerSupport = null)
+        VisualizerSupport? visualizerSupport = null,
+        string? trustLevel = null,
+        UnpairedAccess? unpairedAccess = null)
     {
         return new ClientHelloMessage
         {
@@ -33,7 +35,11 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
             {
                 ClientId = clientId,
                 Name = name,
-                Version = 1,
+                // Under the encrypted protocol client_id/version are omitted (they travel
+                // in client/init); a null clientId marks that shape.
+                Version = clientId is null ? null : 1,
+                TrustLevel = trustLevel,
+                UnpairedAccess = unpairedAccess,
                 SupportedRoles = supportedRoles,
                 PlayerV1Support = playerSupport,
                 ArtworkV1Support = artworkSupport,
@@ -50,10 +56,12 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
 public sealed class ClientHelloPayload
 {
     /// <summary>
-    /// Unique client identifier (persistent across sessions).
+    /// Unique client identifier (persistent across sessions). Omitted under the
+    /// encrypted protocol, where the identity travels in client/init instead.
     /// </summary>
     [JsonPropertyName("client_id")]
-    required public string ClientId { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ClientId { get; init; }
 
     /// <summary>
     /// Human-readable client name.
@@ -62,10 +70,28 @@ public sealed class ClientHelloPayload
     required public string Name { get; init; }
 
     /// <summary>
-    /// Protocol version (must be 1).
+    /// Protocol version (must be 1). Omitted under the encrypted protocol, where the
+    /// version travels in client/init instead.
     /// </summary>
     [JsonPropertyName("version")]
-    public int Version { get; init; } = 1;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? Version { get; init; } = 1;
+
+    /// <summary>
+    /// The trust level the client extends to this server ('user' when a pairing record
+    /// exists, 'none' otherwise). Sent only under the encrypted protocol.
+    /// </summary>
+    [JsonPropertyName("trust_level")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TrustLevel { get; init; }
+
+    /// <summary>
+    /// Whether this client currently admits unpaired access. Sent only under the
+    /// encrypted protocol.
+    /// </summary>
+    [JsonPropertyName("unpaired_access")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public UnpairedAccess? UnpairedAccess { get; init; }
 
     /// <summary>
     /// List of roles the client supports, in priority order.
@@ -221,4 +247,15 @@ public sealed class DeviceInfo
     [JsonPropertyName("mac_address")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? MacAddress { get; init; }
+}
+
+/// <summary>
+/// The client's unpaired-access setting, advertised in <c>client/hello</c> under the
+/// encrypted protocol.
+/// </summary>
+public sealed class UnpairedAccess
+{
+    /// <summary>Whether the client admits servers with no pairing record.</summary>
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; init; }
 }

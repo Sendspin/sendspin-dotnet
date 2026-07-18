@@ -21,7 +21,7 @@ namespace Sendspin.SDK.Connection.Noise;
 /// <see cref="InboundFrameResult.Fatal"/> and the connection closes without an
 /// application-level error, per spec.
 /// </remarks>
-public sealed class NoiseWireFraming : IWireFraming
+public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
 {
     private enum HandshakePhase
     {

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Extensions;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol;
@@ -21,6 +22,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IClockSynchronizer _clockSynchronizer;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IStaticDelayStore? _staticDelayStore;
+    private readonly INoiseSessionInfo? _noiseSession;
+    private bool _activateReceived;
 
     private TaskCompletionSource<bool>? _handshakeTcs;
     private GroupState? _currentGroup;
@@ -95,6 +98,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc />
     public ServerHelloPayload? LastServerHello { get; private set; }
 
+    /// <summary>
+    /// The most recent server/activate payload (encrypted protocol), or null before the
+    /// initial activation. Roles in <see cref="ServerActivatePayload.ActiveRoles"/> are
+    /// also mirrored into <see cref="LastServerHello"/> for legacy consumers.
+    /// </summary>
+    public ServerActivatePayload? LastServerActivate { get; private set; }
+
     /// <inheritdoc />
     public StreamStartPayload? LastStreamStart { get; private set; }
 
@@ -113,6 +123,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<ClockSyncStatus>? ClockSyncConverged;
     public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
+    /// <summary>
+    /// Raised for every server/activate on an encrypted connection, including
+    /// re-activations that change the activity set or roles.
+    /// </summary>
+    public event EventHandler<ServerActivatePayload>? ServerActivateReceived;
+
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
     public SendspinClientService(
@@ -121,10 +137,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         IClockSynchronizer? clockSynchronizer = null,
         ClientCapabilities? capabilities = null,
         IAudioPipeline? audioPipeline = null,
-        IStaticDelayStore? staticDelayStore = null)
+        IStaticDelayStore? staticDelayStore = null,
+        INoiseSessionInfo? noiseSession = null)
     {
         _logger = logger;
         _connection = connection;
+        _noiseSession = noiseSession;
         _clockSynchronizer = clockSynchronizer ?? new KalmanClockSynchronizer();
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
@@ -166,14 +184,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
     {
         _handshakeTcs = new TaskCompletionSource<bool>();
+        _activateReceived = false;
 
-        var hello = CreateClientHelloMessage();
-        var helloJson = MessageSerializer.Serialize(hello);
-        _logger.LogInformation("Sending client/hello:\n{Json}", helloJson);
-        await _connection.SendMessageAsync(hello, cancellationToken);
+        if (_noiseSession is null)
+        {
+            // Legacy plaintext flow: the client opens with client/hello.
+            var hello = CreateClientHelloMessage();
+            var helloJson = MessageSerializer.Serialize(hello);
+            _logger.LogInformation("Sending client/hello:\n{Json}", helloJson);
+            await _connection.SendMessageAsync(hello, cancellationToken);
+        }
 
-        // Wait for server hello with timeout
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        // Encrypted flow is server-driven: server/hello arrives first (after the Noise
+        // handshake), we answer with client/hello, and the initial server/activate
+        // completes the handshake. Either way, wait for completion with a timeout
+        // (30 s per the spec's recommended handshake-phase timeout; the legacy flow
+        // keeps its historical 10 s).
+        using var timeoutCts = new CancellationTokenSource(
+            TimeSpan.FromSeconds(_noiseSession is null ? 10 : 30));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         try
@@ -188,7 +216,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
-            _logger.LogError("Handshake timeout - no server/hello received");
+            _logger.LogError("Handshake timeout - server did not complete the hello exchange");
             await _connection.DisconnectAsync("handshake_timeout");
             throw new TimeoutException("Server did not respond to handshake");
         }
@@ -206,8 +234,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ArtworkChannels.Count);
         }
 
+        bool encrypted = _noiseSession is not null;
         return ClientHelloMessage.Create(
-            clientId: _capabilities.ClientId,
+            // Under the encrypted protocol client_id/version travel in client/init and
+            // are omitted here; trust_level and unpaired_access are required instead.
+            clientId: encrypted ? null : _capabilities.ClientId,
             name: _capabilities.ClientName,
             supportedRoles: _capabilities.Roles,
             playerSupport: new PlayerSupport
@@ -236,7 +267,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 SoftwareVersion = _capabilities.SoftwareVersion,
                 MacAddress = _capabilities.MacAddress
             },
-            visualizerSupport: _capabilities.VisualizerSupport
+            visualizerSupport: _capabilities.VisualizerSupport,
+            trustLevel: encrypted ? "none" : null,
+            unpairedAccess: encrypted
+                ? new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
+                : null
         );
     }
 
@@ -493,6 +528,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandleServerHello(json);
                     break;
 
+                case MessageTypes.ServerActivate:
+                    HandleServerActivate(json);
+                    break;
+
                 case MessageTypes.ServerTime:
                     HandleServerTime(json);
                     break;
@@ -544,13 +583,176 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         var payload = message.Payload;
         LastServerHello = payload;
-        ServerId = payload.ServerId;
         ServerName = payload.Name;
+
+        if (_noiseSession is not null)
+        {
+            // Encrypted flow: server/hello carries only the name. The server identity
+            // came from server/init, and roles arrive in the initial server/activate,
+            // which completes the handshake. Per spec, no other messages (including
+            // client/time and client/state) may be sent before that activate, so the
+            // connected tail runs in HandleServerActivate.
+            ServerId = _noiseSession.ServerId;
+            _logger.LogInformation("Server hello received (encrypted): {ServerId} ({ServerName})",
+                ServerId, ServerName);
+            SendEncryptedClientHelloAsync().SafeFireAndForget(_logger);
+            return;
+        }
+
+        ServerId = payload.ServerId;
         ConnectionReason = payload.ConnectionReason;
 
         _logger.LogInformation("Server hello received: {ServerId} ({ServerName}), reason: {ConnectionReason}, roles: {Roles}",
             message.ServerId, message.Name, ConnectionReason ?? "none", string.Join(", ", message.ActiveRoles));
 
+        FinishHandshake();
+
+        // Raise the typed event after state is populated but before awaiters of
+        // ConnectAsync wake up, so handlers see a fully initialized client.
+        ServerHelloReceived?.Invoke(this, payload);
+
+        _handshakeTcs?.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// Answers an encrypted-flow server/hello with the encrypted-shape client/hello
+    /// (client_id/version omitted; trust_level and unpaired_access included).
+    /// </summary>
+    private async Task SendEncryptedClientHelloAsync()
+    {
+        var hello = CreateClientHelloMessage();
+        var helloJson = MessageSerializer.Serialize(hello);
+        _logger.LogInformation("Sending client/hello (encrypted):\n{Json}", helloJson);
+        await _connection.SendMessageAsync(hello);
+    }
+
+    private void HandleServerActivate(string json)
+    {
+        var message = MessageSerializer.Deserialize<ServerActivateMessage>(json);
+        if (message is null)
+        {
+            _logger.LogWarning("Failed to deserialize server/activate");
+            return;
+        }
+
+        var payload = message.Payload;
+        LastServerActivate = payload;
+
+        if (!ValidateActivateAdmissibility(payload, out var goodbyeReason))
+        {
+            _logger.LogWarning("Inadmissible server/activate (activities: {Activities}); closing with {Reason}",
+                string.Join(", ", payload.ActivitiesList), goodbyeReason);
+            _handshakeTcs?.TrySetResult(false);
+            DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
+            return;
+        }
+
+        // Mirror roles where legacy consumers look. active_roles persists across
+        // activates that omit it, so only overwrite when present.
+        if (payload.ActiveRoles is not null && LastServerHello is not null)
+        {
+            LastServerHello.ActiveRoles = payload.ActiveRoles;
+        }
+
+        _logger.LogInformation("Server activate: activities [{Activities}], roles [{Roles}]",
+            string.Join(", ", payload.ActivitiesList),
+            string.Join(", ", payload.ActiveRoles ?? LastServerHello?.ActiveRoles ?? []));
+
+        bool first = !_activateReceived;
+        _activateReceived = true;
+
+        if (first)
+        {
+            // The initial activate completes the encrypted handshake; only now may the
+            // client start sending (client/time, client/state).
+            FinishHandshake();
+            if (LastServerHello is { } hello)
+            {
+                ServerHelloReceived?.Invoke(this, hello);
+            }
+        }
+
+        ServerActivateReceived?.Invoke(this, payload);
+
+        if (first)
+        {
+            _handshakeTcs?.TrySetResult(true);
+        }
+    }
+
+    /// <summary>
+    /// Applies the spec's server/activate admissibility table for the matched PSK
+    /// category. Returns false with the client/goodbye reason to close with.
+    /// </summary>
+    private bool ValidateActivateAdmissibility(ServerActivatePayload payload, out string goodbyeReason)
+    {
+        goodbyeReason = string.Empty;
+        var psk = _noiseSession?.MatchedPsk;
+        if (psk is null)
+        {
+            // No session info (legacy flow or externally-managed session): no gate.
+            return true;
+        }
+
+        var activities = payload.ActivitiesList ?? [];
+        bool hasRoles = payload.ActiveRoles is { Count: > 0 };
+
+        if (IsAdmissible(psk.Category, activities, hasRoles, _capabilities.UnpairedAccessEnabled))
+        {
+            return true;
+        }
+
+        // Spec rule ordering: prefer 'pairing_required' when enabling unpaired access
+        // would make the activation admissible on a Sentinel-keyed session.
+        if (psk.Category == PskCategory.Sentinel
+            && !_capabilities.UnpairedAccessEnabled
+            && IsAdmissible(psk.Category, activities, hasRoles, unpairedAccessEnabled: true))
+        {
+            goodbyeReason = "pairing_required";
+            return false;
+        }
+
+        goodbyeReason = "unauthorized";
+        return false;
+    }
+
+    private static bool IsAdmissible(PskCategory category, List<string> activities, bool hasRoles, bool unpairedAccessEnabled)
+    {
+        bool AllowedSet(IReadOnlyCollection<string> set) => category switch
+        {
+            PskCategory.Pairing => set.Count == 1 && set.Contains(Activities.Pairing),
+            PskCategory.LongTerm => (set.Count == 1 && set.Contains(Activities.Pairing))
+                || set.All(a => a is Activities.Playback or Activities.Management),
+            PskCategory.Sentinel => set.Count == 0
+                || (set.Count == 1 && set.Contains(Activities.Pairing))
+                || (set.Count == 1 && set.Contains(Activities.Playback) && unpairedAccessEnabled),
+            _ => false,
+        };
+
+        if (!AllowedSet(activities))
+        {
+            return false;
+        }
+
+        if (!hasRoles)
+        {
+            return true;
+        }
+
+        // Non-empty active_roles requires a playback-capable connection: activities
+        // extended with 'playback' must still be an allowed set.
+        var withPlayback = activities.Contains(Activities.Playback)
+            ? activities
+            : [.. activities, Activities.Playback];
+        return AllowedSet(withPlayback);
+    }
+
+    /// <summary>
+    /// The connected tail shared by both handshake flows: runs when the legacy
+    /// server/hello arrives, or when the encrypted flow's initial server/activate does.
+    /// </summary>
+    private void FinishHandshake()
+    {
         // Mark connection as fully connected
         if (_connection is SendspinConnection conn)
         {
@@ -574,18 +776,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // sees the calibrated delay immediately on (re)connect. No-op when no store is configured.
         LoadPersistedStaticDelay();
 
-        // Send initial client state (required by protocol after server/hello)
+        // Send initial client state (required by protocol after the handshake completes)
         // This tells the server we're synchronized and ready
         SendInitialClientStateAsync().SafeFireAndForget(_logger);
 
         // Start time synchronization loop with adaptive intervals
         StartTimeSyncLoop();
-
-        // Raise the typed event after state is populated but before awaiters of
-        // ConnectAsync wake up, so handlers see a fully initialized client.
-        ServerHelloReceived?.Invoke(this, payload);
-
-        _handshakeTcs?.TrySetResult(true);
     }
 
     /// <summary>
