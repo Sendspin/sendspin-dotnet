@@ -317,6 +317,41 @@ var client = new SendspinClientService(
 
 When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
 
+## Multi-server arbitration & last-played persistence
+
+When multiple servers can reach a player (server-initiated mode via `SendspinHostService`), the host
+arbitrates which one is active. It completes each server's `client/hello` ↔ `server/hello` handshake
+first, then applies the spec's decision:
+
+- connections rank by priority class (spec activity ranking): `management` > `playback` >
+  `pairing` > empty. On the legacy wire, `connection_reason: playback` maps to the playback class
+  and `discovery`/absent to empty;
+- the incoming server is accepted when its priority is **higher than or equal to** the holder's,
+  with two exceptions: a pairing attempt is never displaced by incoming playback/pairing, and an
+  empty-vs-empty tie admits the incoming server only when it is the persisted **last-playback**
+  server;
+- a displaced holder is sent `client/goodbye` reason `another_server`; a rejected incoming server
+  gets `concurrent_attempt`; a same-server reconnect drops the stale socket with `user_request`.
+
+So the last-playback tie-break survives restarts, implement `ILastPlayedServerStore` (the host loads it
+once at construction and saves whenever a server becomes the last-played one):
+
+```csharp
+public sealed class FileLastPlayedServerStore : ILastPlayedServerStore
+{
+    public string? Load() => File.Exists(path) ? File.ReadAllText(path) : null;
+    public void Save(string serverId) => File.WriteAllText(path, serverId);
+}
+
+await using var host = new SendspinHostService(
+    loggerFactory,
+    lastPlayedServerStore: new FileLastPlayedServerStore());
+```
+
+The store is optional and best-effort: a throwing implementation is logged and never breaks
+arbitration. The existing `LastPlayedServerIdChanged` event and `lastPlayedServerId` seed parameter
+continue to work (the seed wins over the store when both are supplied).
+
 ## Artwork
 
 Artwork clients support **1–4 independent channels** (e.g. album art on one display, artist photos on another). Each channel has its own source, format, and maximum size. Configure them in capabilities:

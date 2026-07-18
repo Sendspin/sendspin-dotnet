@@ -23,9 +23,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly ILoggerFactory _loggerFactory;
     private readonly SendspinListener _listener;
     private readonly MdnsServiceAdvertiser _advertiser;
+    private readonly AdvertiserOptions _advertiserOptions;
     private readonly ClientCapabilities _capabilities;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IClockSynchronizer? _clockSynchronizer;
+    private readonly ILastPlayedServerStore? _lastPlayedServerStore;
 
     private readonly Dictionary<string, ActiveServerConnection> _connections = new();
     private readonly object _connectionsLock = new();
@@ -33,7 +35,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <summary>
     /// Whether the host is running (listening and advertising).
     /// </summary>
-    public bool IsRunning => _listener.IsListening && _advertiser.IsAdvertising;
+    public bool IsRunning => _listener.IsListening && (!_advertiserOptions.Enabled || _advertiser.IsAdvertising);
 
     /// <summary>
     /// Whether the service is currently being advertised via mDNS.
@@ -44,6 +46,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// The client ID being advertised.
     /// </summary>
     public string ClientId => _advertiser.ClientId;
+
+    /// <summary>
+    /// The actual port the listener is bound to (resolves an OS-assigned port when configured as 0).
+    /// </summary>
+    public int ListeningPort => _listener.BoundPort;
 
     /// <summary>
     /// Currently connected servers.
@@ -145,8 +152,44 @@ public sealed class SendspinHostService : IAsyncDisposable
             return;
 
         LastPlayedServerId = serverId;
+        TrySaveLastPlayed(serverId);
         _logger.LogInformation("Last played server updated: {ServerId}", serverId);
         LastPlayedServerIdChanged?.Invoke(this, serverId);
+    }
+
+    private string? TryLoadLastPlayed()
+    {
+        if (_lastPlayedServerStore is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return _lastPlayedServerStore.Load();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ILastPlayedServerStore.Load() threw; continuing without persisted last-played server");
+            return null;
+        }
+    }
+
+    private void TrySaveLastPlayed(string serverId)
+    {
+        if (_lastPlayedServerStore is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _lastPlayedServerStore.Save(serverId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ILastPlayedServerStore.Save({ServerId}) threw; last-played applied in-memory but not persisted", serverId);
+        }
     }
 
     public SendspinHostService(
@@ -156,14 +199,18 @@ public sealed class SendspinHostService : IAsyncDisposable
         AdvertiserOptions? advertiserOptions = null,
         IAudioPipeline? audioPipeline = null,
         IClockSynchronizer? clockSynchronizer = null,
-        string? lastPlayedServerId = null)
+        string? lastPlayedServerId = null,
+        ILastPlayedServerStore? lastPlayedServerStore = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
         _clockSynchronizer = clockSynchronizer;
-        LastPlayedServerId = lastPlayedServerId;
+        _lastPlayedServerStore = lastPlayedServerStore;
+
+        // Explicit seed wins; otherwise fall back to the store (best-effort).
+        LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();
 
         var listenOpts = listenerOptions ?? new ListenerOptions();
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
@@ -178,6 +225,7 @@ public sealed class SendspinHostService : IAsyncDisposable
             loggerFactory.CreateLogger<SendspinListener>(),
             listenOpts);
 
+        _advertiserOptions = advertiseOpts;
         _advertiser = new MdnsServiceAdvertiser(
             loggerFactory.CreateLogger<MdnsServiceAdvertiser>(),
             advertiseOpts);
@@ -193,7 +241,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         _logger.LogInformation("Starting Sendspin host service");
 
         await _listener.StartAsync(cancellationToken);
-        await _advertiser.StartAsync(cancellationToken);
+        if (_advertiserOptions.Enabled)
+        {
+            await _advertiser.StartAsync(cancellationToken);
+        }
+        else
+        {
+            _logger.LogInformation("mDNS advertising disabled by options");
+        }
 
         _logger.LogInformation("Sendspin host service started - waiting for server connections");
     }
@@ -262,7 +317,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
 
         _logger.LogInformation("Resuming mDNS advertisement");
-        await _advertiser.StartAsync(cancellationToken);
+        if (_advertiserOptions.Enabled)
+        {
+            await _advertiser.StartAsync(cancellationToken);
+        }
+        else
+        {
+            _logger.LogInformation("mDNS advertising disabled by options");
+        }
     }
 
     /// <summary>
@@ -519,11 +581,10 @@ public sealed class SendspinHostService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Arbitrates whether a newly handshaked server should become the active connection.
-    /// Only one server can be active at a time. Priority rules:
-    /// 1. "playback" connection_reason beats "discovery"
-    /// 2. If tied, the last-played server wins
-    /// 3. If still tied (or LastPlayedServerId is null), the existing server wins
+    /// Arbitrates whether a newly handshaked server should become the active connection
+    /// (only one server is active at a time). The priority rules live in and are documented by
+    /// <see cref="ServerArbitration.Decide"/>; this method applies that decision by disconnecting
+    /// the losing connection with the returned client/goodbye reason.
     /// </summary>
     /// <param name="newClient">The new client that just completed handshake.</param>
     /// <param name="newConnection">The new connection to disconnect if rejected.</param>
@@ -534,109 +595,50 @@ public sealed class SendspinHostService : IAsyncDisposable
         IncomingConnection newConnection,
         string newServerId)
     {
-        ActiveServerConnection? existingConnection = null;
-
+        ActiveServerConnection? existingConnection;
         lock (_connectionsLock)
         {
-            // Find the current active connection (there should be at most one)
+            // There is at most one active connection.
             existingConnection = _connections.Values.FirstOrDefault();
         }
 
-        // No existing server - accept the new one unconditionally
-        if (existingConnection is null)
-        {
-            _logger.LogInformation(
-                "Arbitration: Accepting {NewServerId} (no existing connection)",
-                newServerId);
-            return true;
-        }
-
-        var existingServerId = existingConnection.ServerId;
-
-        // If the same server is reconnecting, accept it (replace the stale entry)
-        if (string.Equals(newServerId, existingServerId, StringComparison.Ordinal))
-        {
-            _logger.LogInformation(
-                "Arbitration: Accepting {NewServerId} (same server reconnecting)",
-                newServerId);
-
-            // Disconnect the old connection cleanly
-            await DisconnectExistingAsync(existingConnection, "reconnecting");
-            return true;
-        }
-
-        // Normalize connection reasons: null is treated as "discovery"
-        var newReason = newClient.ConnectionReason ?? "discovery";
-        var existingReason = existingConnection.Client.ConnectionReason ?? "discovery";
-
-        bool newWins;
-        string decision;
-
-        if (string.Equals(newReason, "playback", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(existingReason, "playback", StringComparison.OrdinalIgnoreCase))
-        {
-            // New server has playback reason, existing does not - new wins
-            newWins = true;
-            decision = "new server has playback reason";
-        }
-        else if (string.Equals(existingReason, "playback", StringComparison.OrdinalIgnoreCase)
-            && !string.Equals(newReason, "playback", StringComparison.OrdinalIgnoreCase))
-        {
-            // Existing server has playback reason, new does not - existing wins
-            newWins = false;
-            decision = "existing server has playback reason";
-        }
-        else
-        {
-            // Tie: both have same reason - check LastPlayedServerId
-            if (LastPlayedServerId is not null
-                && string.Equals(newServerId, LastPlayedServerId, StringComparison.Ordinal))
-            {
-                newWins = true;
-                decision = "new server matches LastPlayedServerId (tie-break)";
-            }
-            else
-            {
-                // Existing wins by default (including when LastPlayedServerId is null)
-                newWins = false;
-                decision = LastPlayedServerId is not null
-                    ? "existing server wins tie-break (new server is not LastPlayedServerId)"
-                    : "existing server wins tie-break (no LastPlayedServerId set)";
-            }
-        }
+        var result = ServerArbitration.Decide(
+            newServerId,
+            ServerArbitration.FromConnectionReason(newClient.ConnectionReason),
+            existingConnection?.ServerId,
+            ServerArbitration.FromConnectionReason(existingConnection?.Client.ConnectionReason),
+            LastPlayedServerId);
 
         _logger.LogInformation(
-            "Arbitration: {Winner} wins. New={NewServerId} (reason={NewReason}), " +
-            "Existing={ExistingServerId} (reason={ExistingReason}). Decision: {Decision}",
-            newWins ? newServerId : existingServerId,
-            newServerId, newReason,
-            existingServerId, existingReason,
-            decision);
+            "Arbitration: {Rationale}. New={NewServerId} (reason={NewReason}), Existing={ExistingServerId}",
+            result.Rationale,
+            newServerId,
+            newClient.ConnectionReason ?? "discovery",
+            existingConnection?.ServerId ?? "(none)");
 
-        if (newWins)
+        if (result.AcceptNew)
         {
-            // Disconnect the existing server
-            await DisconnectExistingAsync(existingConnection, "another_server");
+            if (existingConnection is not null)
+            {
+                // LoserGoodbyeReason is non-null whenever there is an existing connection to drop.
+                await DisconnectExistingAsync(existingConnection, result.LoserGoodbyeReason!);
+            }
+
             return true;
         }
-        else
+
+        // New server rejected (an existing connection always exists on this path).
+        _logger.LogInformation("Arbitration: Rejecting {NewServerId}, sending goodbye", newServerId);
+        try
         {
-            // Reject the new server
-            _logger.LogInformation(
-                "Arbitration: Rejecting {NewServerId}, sending goodbye",
-                newServerId);
-
-            try
-            {
-                await newConnection.DisconnectAsync("another_server");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error disconnecting rejected server {ServerId}", newServerId);
-            }
-
-            return false;
+            await newConnection.DisconnectAsync(result.LoserGoodbyeReason!);
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error disconnecting rejected server {ServerId}", newServerId);
+        }
+
+        return false;
     }
 
     /// <summary>
