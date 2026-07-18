@@ -67,6 +67,12 @@ public sealed class TrackMetadata
     /// <summary>
     /// Playback progress information (position, duration, speed).
     /// </summary>
+    /// <remarks>
+    /// When a <c>server/state</c> update omits the progress field, the merge carries the previous
+    /// <see cref="PlaybackProgress"/> instance forward unchanged; a new instance is created only
+    /// when the server sent the field. Consumers may rely on reference identity to distinguish
+    /// fresh progress from carried-forward progress.
+    /// </remarks>
     [JsonPropertyName("progress")]
     public PlaybackProgress? Progress { get; set; }
 
