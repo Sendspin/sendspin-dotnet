@@ -17,6 +17,15 @@ public static class MessageTypes
     public const string ServerPairFinalize = "server/pair-finalize";
     public const string PairAbort = "pair/abort";
 
+    // Management (all requests answered by management/result)
+    public const string ManagementListRecords = "management/list-records";
+    public const string ManagementAddRecord = "management/add-record";
+    public const string ManagementRemoveRecord = "management/remove-record";
+    public const string ManagementGetPairingConfig = "management/get-pairing-config";
+    public const string ManagementSetPairingConfig = "management/set-pairing-config";
+    public const string ManagementResult = "management/result";
+    public const string ServerUnpair = "server/unpair";
+
     // Clock synchronization
     public const string ClientTime = "client/time";
     public const string ServerTime = "server/time";

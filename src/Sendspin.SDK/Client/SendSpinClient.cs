@@ -552,6 +552,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandlePairAbort(json);
                     break;
 
+                case MessageTypes.ManagementListRecords:
+                case MessageTypes.ManagementAddRecord:
+                case MessageTypes.ManagementRemoveRecord:
+                case MessageTypes.ManagementGetPairingConfig:
+                case MessageTypes.ManagementSetPairingConfig:
+                    HandleManagement(messageType!, json);
+                    break;
+
+                case MessageTypes.ServerUnpair:
+                    HandleServerUnpair();
+                    break;
+
                 case MessageTypes.ServerTime:
                     HandleServerTime(json);
                     break;
@@ -828,6 +840,190 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _pendingPairingPsk = null;
         PairingCompleted?.Invoke(this, ServerId ?? string.Empty);
+    }
+
+    /// <summary>
+    /// Handles a management/* request. Management is scoped to connections whose
+    /// current activities include 'management'; outside that, every request answers
+    /// permission_denied. All requests are answered by exactly one management/result.
+    /// </summary>
+    private void HandleManagement(string type, string json)
+    {
+        var result = new ManagementResultPayload();
+
+        if (LastServerActivate?.ActivitiesList.Contains(Activities.Management) != true)
+        {
+            result.Result = "permission_denied";
+        }
+        else
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var payload = doc.RootElement.GetProperty("payload");
+                result = ExecuteManagementOperation(type, payload);
+            }
+            catch (Exception ex) when (ex is System.Text.Json.JsonException or KeyNotFoundException or FormatException)
+            {
+                result.Result = "invalid";
+            }
+        }
+
+        _connection.SendMessageAsync(new ManagementResultMessage { Payload = result })
+            .SafeFireAndForget(_logger);
+
+        if (result.Result == "ok" && _pendingSelfRemoval)
+        {
+            // Removing the requester's own record closes the management session.
+            _pendingSelfRemoval = false;
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+        }
+    }
+
+    private bool _pendingSelfRemoval;
+
+    private ManagementResultPayload ExecuteManagementOperation(
+        string type, System.Text.Json.JsonElement payload)
+    {
+        var result = new ManagementResultPayload();
+        switch (type)
+        {
+            case MessageTypes.ManagementListRecords:
+            {
+                var entries = (_pairingStore?.List() ?? [])
+                    .Select(r => r.ServerId is null
+                        ? $"{{\"psk_id\":\"{r.PskId}\",\"used\":{(r.Used ? "true" : "false")}}}"
+                        : $"{{\"psk_id\":\"{r.PskId}\",\"server_id\":\"{r.ServerId}\",\"used\":{(r.Used ? "true" : "false")}}}");
+                result.Data = System.Text.Json.JsonDocument
+                    .Parse($"{{\"records\":[{string.Join(",", entries)}]}}").RootElement.Clone();
+                break;
+            }
+
+            case MessageTypes.ManagementAddRecord:
+            {
+                byte[] psk;
+                try
+                {
+                    psk = Connection.Noise.SendspinIdentity.DecodePeerId(
+                        payload.GetProperty("psk").GetString() ?? string.Empty);
+                }
+                catch (Exception)
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
+                string? serverId = payload.TryGetProperty("server_id", out var sid) ? sid.GetString() : null;
+                if (_pairingStore is null)
+                {
+                    result.Result = "storage_exhausted";
+                }
+                else if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
+                {
+                    result.Result = "already_exists";
+                }
+                else
+                {
+                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                }
+
+                break;
+            }
+
+            case MessageTypes.ManagementRemoveRecord:
+            {
+                string pskId = payload.GetProperty("psk_id").GetString()
+                    ?? throw new FormatException("psk_id missing");
+                var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
+                if (record is null)
+                {
+                    result.Result = "not_found";
+                    break;
+                }
+
+                _pairingStore!.Remove(pskId);
+                if (_noiseSession?.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
+                {
+                    _pendingSelfRemoval = true;
+                }
+
+                break;
+            }
+
+            case MessageTypes.ManagementGetPairingConfig:
+            {
+                // PIN methods are not implemented, so their objects are absent per spec.
+                string enabled = _capabilities.UnpairedAccessEnabled ? "true" : "false";
+                result.Data = System.Text.Json.JsonDocument.Parse(
+                    $"{{\"pairing_psk\":{{\"enabled\":true}},\"unpaired_access\":{{\"enabled\":{enabled}}}}}")
+                    .RootElement.Clone();
+                break;
+            }
+
+            case MessageTypes.ManagementSetPairingConfig:
+            {
+                // Patch semantics: only fields present are applied. Setting fields on an
+                // unimplemented PIN method returns invalid.
+                if (payload.TryGetProperty("static_pin", out _) || payload.TryGetProperty("dynamic_pin", out _))
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
+                if (payload.TryGetProperty("unpaired_access", out var ua)
+                    && ua.TryGetProperty("enabled", out var uaEnabled))
+                {
+                    _capabilities.UnpairedAccessEnabled = uaEnabled.GetBoolean();
+                }
+
+                if (payload.TryGetProperty("pairing_psk", out var pp)
+                    && pp.TryGetProperty("psk", out var pskEl))
+                {
+                    if (_pairingStore is null)
+                    {
+                        result.Result = "storage_exhausted";
+                        break;
+                    }
+
+                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePeerId(pskEl.GetString() ?? string.Empty);
+                    foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
+                    {
+                        _pairingStore.Remove(old.PskId);
+                    }
+
+                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.Pairing));
+                }
+
+                break;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// A paired server dropped its own pairing record: remove the matched stored-pubkey
+    /// record (shared records are kept per spec), say goodbye with reason 'unpaired',
+    /// and close. Ignored at trust level 'none'.
+    /// </summary>
+    private void HandleServerUnpair()
+    {
+        var current = _noiseSession?.MatchedPsk;
+        if (current is null || current.Category != PskCategory.LongTerm)
+        {
+            _logger.LogDebug("server/unpair on a non-user-trust connection; ignoring");
+            return;
+        }
+
+        string pskId = NoiseConstants.DerivePskId(current.Key.Span);
+        var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
+        if (record is not null && record.ServerId is not null)
+        {
+            _pairingStore!.Remove(pskId);
+            _logger.LogInformation("server/unpair: removed pairing record for {ServerId}", ServerId);
+        }
+
+        DisconnectAsync("unpaired").SafeFireAndForget(_logger);
     }
 
     private void HandlePairAbort(string json)
