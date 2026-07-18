@@ -26,6 +26,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly AdvertiserOptions _advertiserOptions;
     private readonly Connection.Noise.SendspinIdentity? _identity;
     private readonly Connection.Noise.IPairingRecordStore? _pairingRecordStore;
+    private readonly Connection.Noise.Pairing.IPinLockoutStore? _pinLockoutStore;
     private readonly ClientCapabilities _capabilities;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IClockSynchronizer? _clockSynchronizer;
@@ -137,6 +138,9 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// </summary>
     public event EventHandler<string>? LastPlayedServerIdChanged;
 
+    /// <summary>Raised when a Pairing PSK or PIN pairing exchange completes on any connection (arg: paired server id).</summary>
+    public event EventHandler<string>? PairingCompleted;
+
     /// <summary>
     /// Gets the server ID of the server that most recently had playback_state "playing".
     /// Used for tie-breaking when multiple servers with the same connection_reason try to connect.
@@ -204,12 +208,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         string? lastPlayedServerId = null,
         ILastPlayedServerStore? lastPlayedServerStore = null,
         Connection.Noise.SendspinIdentity? identity = null,
-        Connection.Noise.IPairingRecordStore? pairingRecordStore = null)
+        Connection.Noise.IPairingRecordStore? pairingRecordStore = null,
+        Connection.Noise.Pairing.IPinLockoutStore? pinLockoutStore = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
         _identity = identity;
         _pairingRecordStore = pairingRecordStore;
+        _pinLockoutStore = pinLockoutStore;
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
         _clockSynchronizer = clockSynchronizer;
@@ -279,7 +285,9 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             try
             {
-                await conn.Client.DisconnectAsync("host_stopping");
+                // 'shutdown' is the spec-valid goodbye reason for the host going down
+                // (the device is not coming back on this connection).
+                await conn.Client.DisconnectAsync("shutdown");
             }
             catch (Exception ex)
             {
@@ -407,7 +415,10 @@ public sealed class SendspinHostService : IAsyncDisposable
                 _capabilities,
                 _audioPipeline,
                 noiseSession: framing,
-                pairingRecordStore: _pairingRecordStore);
+                pairingRecordStore: _pairingRecordStore,
+                pinLockoutStore: _pinLockoutStore);
+
+            client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
 
             client.GroupStateChanged += (s, g) =>
             {

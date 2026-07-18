@@ -6,6 +6,7 @@ using Sendspin.SDK.Connection;
 
 namespace Sendspin.SDK.Tests.Connection;
 
+[Collection("RealSockets")]
 public class SimpleWebSocketServerTests : IAsyncDisposable
 {
     private readonly SimpleWebSocketServer _server = new();

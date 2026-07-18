@@ -11,6 +11,7 @@ namespace Sendspin.SDK.Tests.Connection;
 /// Verifies that connection drops which do NOT surface as a ReceiveAsync exception
 /// still drive the client into the reconnect path (windowsSpin issue #1).
 /// </summary>
+[Collection("RealSockets")]
 public class SendspinConnectionReconnectTests : IAsyncDisposable
 {
     private readonly SimpleWebSocketServer _server = new();

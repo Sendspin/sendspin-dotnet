@@ -7,6 +7,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// Coverage for the additive ILastPlayedServerStore persistence seam on the host service.
 /// The host is constructed but never started, so these tests touch no network.
 /// </summary>
+[Collection("RealSockets")]
 public class SendspinHostServicePersistenceTests
 {
     private static SendspinHostService NewHost(ILastPlayedServerStore? store = null, string? seed = null) =>
