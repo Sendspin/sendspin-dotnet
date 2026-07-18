@@ -179,7 +179,30 @@ Ran against a real `aiosendspin[server]==7.0.0` instance (`spike_noise_handshake
 
 Remaining Phase 0 item: the .NET-side library evaluation (Metalnem Noise vs. in-repo state machine) — not runnable in this session (no .NET SDK available in the sandbox), but the wire contract above is now fully de-risked and the spike script doubles as the reference test harness.
 
-## 8. Suggested immediate next steps
+## 8. Phase 1 exit status (2026-07-18)
+
+Phases 0, 1, and 3 are COMPLETE (PRs #62-#66): Noise KKpsk2 transport with
+fragmentation and in-band re-handshake, server-driven hello/activate flow with
+admissibility enforcement, Pairing PSK flow with persistent record stores, and the
+management message family + server/unpair. 260 tests; full-stack E2E verified against
+aiosendspin 7.0.0.
+
+**Deliberately deferred — tracked as repo issues:**
+
+1. **PIN pairing methods (CPace)** — `dynamic_pin`/`static_pin` need
+   CPACE-X25519-SHA512 (draft-irtf-cfrg-cpace), commit/reveal PIN derivation, PSK
+   wrapping, and lockout persistence. Spec-optional for clients ("clients must
+   implement Pairing PSK and may additionally implement either or both PIN methods").
+   Needed before devices with displays can offer "show a PIN" pairing UX.
+2. **Live pairing interop harness** — CI (or documented manual) run of the Pairing PSK
+   flow + post-pairing re-handshake against a real `aiosendspin[server]==7.0.0` with a
+   server-side staged Pairing PSK. Unit/loopback coverage exists; the live
+   counterparty run is the remaining conformance gate.
+
+Next phase: Phase 2 (activities-ranked multi-server arbitration, last-playback
+persistence — also closes upstream conformance-audit findings #91/#92 for this SDK).
+
+## 9. Suggested immediate next steps
 
 1. Phase 0 spike: clone-and-test a Noise `KKpsk2` handshake against `aiosendspin`; validate sentinel constants. (~1–2 days)
 2. Land the framing-layer refactor behind the current protocol (pure refactor PR, no wire change).
