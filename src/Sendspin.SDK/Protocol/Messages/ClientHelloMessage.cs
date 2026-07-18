@@ -27,7 +27,8 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
         DeviceInfo? deviceInfo = null,
         VisualizerSupport? visualizerSupport = null,
         string? trustLevel = null,
-        UnpairedAccess? unpairedAccess = null)
+        UnpairedAccess? unpairedAccess = null,
+        List<PairMethodDescriptor>? supportedPairMethods = null)
     {
         return new ClientHelloMessage
         {
@@ -40,6 +41,7 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
                 Version = clientId is null ? null : 1,
                 TrustLevel = trustLevel,
                 UnpairedAccess = unpairedAccess,
+                SupportedPairMethods = supportedPairMethods,
                 SupportedRoles = supportedRoles,
                 PlayerV1Support = playerSupport,
                 ArtworkV1Support = artworkSupport,
@@ -88,6 +90,13 @@ public sealed class ClientHelloPayload
     /// <summary>
     /// Whether this client currently admits unpaired access. Sent only under the
     /// encrypted protocol.
+    /// </summary>
+    [JsonPropertyName("supported_pair_methods")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<PairMethodDescriptor>? SupportedPairMethods { get; init; }
+
+    /// <summary>
+    /// Whether this client currently admits unpaired access (encrypted protocol only).
     /// </summary>
     [JsonPropertyName("unpaired_access")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

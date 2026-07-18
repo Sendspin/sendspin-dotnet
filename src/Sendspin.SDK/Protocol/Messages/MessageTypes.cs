@@ -12,6 +12,11 @@ public static class MessageTypes
     public const string ServerActivate = "server/activate";
     public const string ClientGoodbye = "client/goodbye";
 
+    // Pairing
+    public const string ClientPairFinalize = "client/pair-finalize";
+    public const string ServerPairFinalize = "server/pair-finalize";
+    public const string PairAbort = "pair/abort";
+
     // Clock synchronization
     public const string ClientTime = "client/time";
     public const string ServerTime = "server/time";
