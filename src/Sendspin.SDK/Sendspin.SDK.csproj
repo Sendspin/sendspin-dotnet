@@ -648,6 +648,7 @@ For older release notes (v5.0.0 and earlier), see https://github.com/chrisuthe/w
   <ItemGroup>
     <!-- Core dependencies - all cross-platform -->
     <PackageReference Include="Concentus" Version="2.2.2" />
+    <PackageReference Include="Noise.NET" Version="1.0.0" />
     <PackageReference Include="Zeroconf" Version="3.7.16" />
     <PackageReference Include="Makaretu.Dns.Multicast" Version="0.27.0" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />

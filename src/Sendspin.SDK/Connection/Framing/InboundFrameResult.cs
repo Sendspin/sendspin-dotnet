@@ -16,6 +16,13 @@ public readonly struct InboundFrameResult
     /// <summary>Wire frames to transmit in response before processing further input, if any.</summary>
     public IReadOnlyList<WireFrame>? Replies { get; init; }
 
+    /// <summary>
+    /// When set, the framing layer hit an unrecoverable protocol/crypto failure. The
+    /// connection must close the socket without sending any application-level error
+    /// (per the spec's handshake failure-handling rules). The value is a log-only reason.
+    /// </summary>
+    public string? FatalReason { get; init; }
+
     /// <summary>A result surfacing an application JSON message.</summary>
     public static InboundFrameResult ForText(string text) => new() { Text = text };
 
@@ -24,4 +31,7 @@ public readonly struct InboundFrameResult
 
     /// <summary>A result surfacing nothing (the frame was fully consumed by the framing layer).</summary>
     public static InboundFrameResult None => default;
+
+    /// <summary>A result signaling an unrecoverable framing failure.</summary>
+    public static InboundFrameResult Fatal(string reason) => new() { FatalReason = reason };
 }
