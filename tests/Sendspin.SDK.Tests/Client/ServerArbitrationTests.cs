@@ -76,4 +76,23 @@ public class ServerArbitrationTests
     {
         Assert.Equal(expected, ServerArbitration.FromConnectionReason(reason));
     }
+
+    [Theory]
+    [InlineData(new string[0], ConnectionPriority.Empty)]
+    [InlineData(new[] { "pairing" }, ConnectionPriority.Pairing)]
+    [InlineData(new[] { "playback" }, ConnectionPriority.Playback)]
+    [InlineData(new[] { "management" }, ConnectionPriority.Management)]
+    [InlineData(new[] { "playback", "management" }, ConnectionPriority.Management)]
+    [InlineData(new[] { "pairing", "playback" }, ConnectionPriority.Playback)]
+    [InlineData(new[] { "unknown-future-activity" }, ConnectionPriority.Empty)]
+    public void FromActivities_RanksByHighestDeclaredActivity(string[] activities, ConnectionPriority expected)
+    {
+        Assert.Equal(expected, ServerArbitration.FromActivities(activities));
+    }
+
+    [Fact]
+    public void FromActivities_NullSet_IsEmpty()
+    {
+        Assert.Equal(ConnectionPriority.Empty, ServerArbitration.FromActivities(null));
+    }
 }
