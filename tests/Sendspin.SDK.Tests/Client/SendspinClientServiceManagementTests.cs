@@ -18,6 +18,7 @@ public class SendspinClientServiceManagementTests
     {
         public string? ServerId { get; set; } = SendspinClientServiceManagementTests.ServerId;
         public NoisePsk? MatchedPsk { get; set; }
+        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
     }
 
     private static readonly byte[] SessionPsk = Enumerable.Repeat((byte)7, 32).ToArray();

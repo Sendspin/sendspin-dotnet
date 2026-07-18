@@ -19,6 +19,7 @@ public class SendspinClientServicePairingTests
         public string? ServerId { get; set; } = SendspinClientServicePairingTests.ServerId;
         public NoisePsk? MatchedPsk { get; set; } =
             new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Pairing);
+        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
     }
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPairingRecordStore) Create()

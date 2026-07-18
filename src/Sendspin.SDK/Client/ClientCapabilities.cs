@@ -135,6 +135,35 @@ public sealed class ClientCapabilities
     public bool UnpairedAccessEnabled { get; set; }
 
     /// <summary>
+    /// PIN pairing methods this client offers in addition to the mandatory Pairing PSK
+    /// method, in the encrypted protocol. Empty by default (Pairing PSK only). Add
+    /// "dynamic_pin" and/or "static_pin". Dynamic PIN requires <see cref="EmitPin"/>.
+    /// </summary>
+    public List<string> PinPairingMethods { get; set; } = new();
+
+    /// <summary>Shortest dynamic PIN length in digits this client accepts (4-12). Default 6.</summary>
+    public int MinPinLength { get; set; } = 6;
+
+    /// <summary>
+    /// Out-channels through which the dynamic PIN is conveyed to the operator
+    /// (informational hint: "display", "speaker", "other"). Default ["display"].
+    /// </summary>
+    public List<string> PinOutChannels { get; set; } = new() { "display" };
+
+    /// <summary>
+    /// For static PIN: the device-specific fixed PIN (8 digits). Required if
+    /// "static_pin" is offered.
+    /// </summary>
+    public string? StaticPin { get; set; }
+
+    /// <summary>
+    /// Callback invoked with the derived dynamic PIN so the app can emit it via its
+    /// out-channel (display/speaker) for the operator to enter into the server.
+    /// Required when "dynamic_pin" is offered.
+    /// </summary>
+    public Action<string>? EmitPin { get; set; }
+
+    /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.
     /// This is sent in the initial client/state message after handshake.
     /// Default is 100 for backwards compatibility.

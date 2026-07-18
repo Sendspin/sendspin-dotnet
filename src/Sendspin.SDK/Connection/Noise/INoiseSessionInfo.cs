@@ -12,4 +12,7 @@ public interface INoiseSessionInfo
 
     /// <summary>The PSK that authenticated the current session, once the handshake completes.</summary>
     NoisePsk? MatchedPsk { get; }
+
+    /// <summary>The Noise handshake hash h, once the handshake completes (PIN pairing binds to it).</summary>
+    ReadOnlyMemory<byte>? HandshakeHash { get; }
 }

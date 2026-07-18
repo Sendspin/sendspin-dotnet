@@ -12,7 +12,12 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinHostServiceArbitrationTests
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
+    // Generous ceiling: these loopback tests spin up real WebSocket connections and
+    // handshakes, so a busy CI runner can exceed a few seconds. The awaits complete as
+    // soon as the expected event fires, so a high ceiling only bounds the failure case
+    // (it does not slow the happy path); it exists to keep the socket timing
+    // non-flaky under load, not as an expected duration.
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
     private static async Task<SendspinHostService> StartHostAsync(string? seed = null)
     {
