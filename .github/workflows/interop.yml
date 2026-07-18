@@ -1,0 +1,38 @@
+name: Interop
+
+# Live interop against the aiosendspin reference server. Kept separate from the core
+# build so its Python/network requirements never gate the unit-test workflow.
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install aiosendspin reference server
+        run: pip install "aiosendspin[server]==7.0.0"
+
+      - name: Build interop client
+        run: dotnet build tools/interop/InteropClient -c Release
+
+      - name: Unpaired connect (client admitted over unpaired access)
+        run: bash tools/interop/run.sh unpaired
+
+      - name: Pairing PSK round-trip (pair, persist, re-handshake to user trust)
+        run: bash tools/interop/run.sh pairing
