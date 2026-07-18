@@ -182,6 +182,16 @@ public sealed class IncomingConnection : ISendspinConnection
     {
         var inbound = _framing.ProcessInbound(frame);
 
+        if (inbound.FatalReason is { } fatal)
+        {
+            // Per spec: close without sending an application-level error message.
+            _logger.LogWarning("Wire framing failure: {Reason}; closing connection", fatal);
+            _isOpen = false;
+            _ = CloseSocketSafeAsync();
+            SetState(ConnectionState.Disconnected, fatal);
+            return;
+        }
+
         if (inbound.Replies is { Count: > 0 } replies)
         {
             // Replies only occur for handshaking framings; the socket callbacks are
@@ -199,6 +209,18 @@ public sealed class IncomingConnection : ISendspinConnection
         {
             _logger.LogTrace("Received binary: {Length} bytes", binary.Length);
             BinaryMessageReceived?.Invoke(this, binary);
+        }
+    }
+
+    private async Task CloseSocketSafeAsync()
+    {
+        try
+        {
+            await _socket.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error closing socket after framing failure");
         }
     }
 

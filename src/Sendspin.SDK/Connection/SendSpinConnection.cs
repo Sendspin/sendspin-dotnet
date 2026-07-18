@@ -281,6 +281,14 @@ public sealed class SendspinConnection : ISendspinConnection
                     messageData);
                 var inbound = _framing.ProcessInbound(frame);
 
+                if (inbound.FatalReason is { } fatal)
+                {
+                    // Per spec: close without sending an application-level error message.
+                    _logger.LogWarning("Wire framing failure: {Reason}; closing connection", fatal);
+                    await HandleConnectionLostAsync();
+                    return;
+                }
+
                 if (inbound.Replies is { Count: > 0 })
                 {
                     await SendWireFramesAsync(inbound.Replies, cancellationToken);
