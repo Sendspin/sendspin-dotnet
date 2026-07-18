@@ -5,6 +5,7 @@ using Sendspin.SDK.Connection;
 
 namespace Sendspin.SDK.Tests.Client;
 
+[Collection("RealSockets")]
 public class SendspinHostServicePortTests
 {
     [Fact]

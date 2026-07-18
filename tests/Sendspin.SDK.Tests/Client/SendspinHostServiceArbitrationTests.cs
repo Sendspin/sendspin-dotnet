@@ -10,6 +10,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// real listener, and each scenario asserts which connection receives a client/goodbye and with what
 /// reason — verifying the bytes on the wire, not just the decision logic.
 /// </summary>
+[Collection("RealSockets")]
 public class SendspinHostServiceArbitrationTests
 {
     // Generous ceiling: these loopback tests spin up real WebSocket connections and
