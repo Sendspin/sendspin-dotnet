@@ -262,7 +262,12 @@ public class SendspinClientServiceServerStateTests
             }
             """);
 
-        Assert.Same(firstProgress, client.CurrentGroup?.Metadata?.Progress);
+        // Guard against a vacuous pass: prove the second message was actually processed
+        // (a silently dropped message would leave the old instance in place too).
+        var meta = client.CurrentGroup?.Metadata;
+        Assert.NotNull(meta);
+        Assert.Equal("Track A updated", meta.Title);
+        Assert.Same(firstProgress, meta.Progress);
     }
 
     [Fact]
