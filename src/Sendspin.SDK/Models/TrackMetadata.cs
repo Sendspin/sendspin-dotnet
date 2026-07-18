@@ -67,6 +67,15 @@ public sealed class TrackMetadata
     /// <summary>
     /// Playback progress information (position, duration, speed).
     /// </summary>
+    /// <remarks>
+    /// On the merged metadata surfaced by <see cref="Client.ISendspinClient.CurrentGroup"/> and
+    /// <see cref="Client.ISendspinClient.GroupStateChanged"/>: when a <c>server/state</c> update
+    /// omits the progress field, the merge carries the previous <see cref="PlaybackProgress"/>
+    /// instance forward unchanged; a new instance is created only when the server sent the field.
+    /// Consumers may rely on reference identity to distinguish fresh progress from carried-forward
+    /// progress. This guarantee applies only to the client's merged state, not to instances
+    /// deserialized elsewhere.
+    /// </remarks>
     [JsonPropertyName("progress")]
     public PlaybackProgress? Progress { get; set; }
 

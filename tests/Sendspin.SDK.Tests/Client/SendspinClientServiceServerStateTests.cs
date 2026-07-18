@@ -4,8 +4,9 @@ using Sendspin.SDK.Client;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Coverage for server/state handling: repeat/shuffle in controller, and Optional-field merge
-/// semantics (absent = keep, explicit null = clear) for all metadata string/numeric fields.
+/// Coverage for server/state handling: repeat/shuffle in controller, Optional-field merge
+/// semantics (absent = keep, explicit null = clear) for all metadata string/numeric fields,
+/// and the reference-identity contract for the merged progress object.
 /// </summary>
 public class SendspinClientServiceServerStateTests
 {
@@ -220,5 +221,171 @@ public class SendspinClientServiceServerStateTests
         Assert.NotNull(meta);
         Assert.Null(meta.Year);
         Assert.Null(meta.Track);
+    }
+
+    // --- Optional-field merge: progress (reference identity) ---
+
+    [Fact]
+    public void Metadata_Progress_Absent_CarriesForwardSameInstance()
+    {
+        // Consumers use ReferenceEquals to distinguish fresh progress from progress carried
+        // forward by the merge (e.g. the Windows client's seek bar only re-anchors on a fresh
+        // instance). A partial update without the progress field must reuse the previous
+        // PlaybackProgress instance — not clone it or copy its values.
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": {
+                        "title": "Track A",
+                        "progress": { "track_progress": 5000, "track_duration": 180000, "playback_speed": 1000 }
+                    }
+                }
+            }
+            """);
+
+        var firstProgress = client.CurrentGroup?.Metadata?.Progress;
+        Assert.NotNull(firstProgress);
+
+        // Partial update: progress absent means "no change"
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": { "title": "Track A updated" }
+                }
+            }
+            """);
+
+        // Guard against a vacuous pass: prove the second message was actually processed
+        // (a silently dropped message would leave the old instance in place too).
+        var meta = client.CurrentGroup?.Metadata;
+        Assert.NotNull(meta);
+        Assert.Equal("Track A updated", meta.Title);
+        Assert.Same(firstProgress, meta.Progress);
+    }
+
+    [Fact]
+    public void Metadata_Progress_Present_IsFreshInstance()
+    {
+        // Every server/state that carries the progress field yields a newly deserialized
+        // PlaybackProgress instance — even when the values are identical to the previous
+        // update. This is the other half of the reference-identity freshness contract.
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": {
+                        "progress": { "track_progress": 5000, "track_duration": 180000 }
+                    }
+                }
+            }
+            """);
+
+        var firstProgress = client.CurrentGroup?.Metadata?.Progress;
+        Assert.NotNull(firstProgress);
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": {
+                        "progress": { "track_progress": 5000, "track_duration": 180000 }
+                    }
+                }
+            }
+            """);
+
+        var secondProgress = client.CurrentGroup?.Metadata?.Progress;
+        Assert.NotNull(secondProgress);
+        Assert.NotSame(firstProgress, secondProgress);
+        Assert.Equal(5000, secondProgress.TrackProgress);
+    }
+
+    [Fact]
+    public void Metadata_Progress_ExplicitNull_ClearsMergedMetadata()
+    {
+        // progress: null is the spec's "track ended" signal and must clear the merged value,
+        // not retain the previous instance.
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": {
+                        "progress": { "track_progress": 5000, "track_duration": 180000 }
+                    }
+                }
+            }
+            """);
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": { "progress": null }
+                }
+            }
+            """);
+
+        var meta = client.CurrentGroup?.Metadata;
+        Assert.NotNull(meta);
+        Assert.Null(meta.Progress);
+    }
+
+    [Fact]
+    public void Metadata_Timestamp_UpdatesWhileAbsentProgressIsCarriedForward()
+    {
+        // Timestamp merges independently of progress: a partial update carrying a new
+        // timestamp but no progress field yields a fresh Timestamp alongside the
+        // carried-forward Progress instance. Consumers must not treat a newer timestamp
+        // as evidence that the progress object itself is fresh.
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection);
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": {
+                        "timestamp": 1000000,
+                        "progress": { "track_progress": 5000, "track_duration": 180000 }
+                    }
+                }
+            }
+            """);
+
+        var firstProgress = client.CurrentGroup?.Metadata?.Progress;
+        Assert.NotNull(firstProgress);
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": { "timestamp": 2000000 }
+                }
+            }
+            """);
+
+        var meta = client.CurrentGroup?.Metadata;
+        Assert.NotNull(meta);
+        Assert.Equal(2000000, meta.Timestamp);
+        Assert.Same(firstProgress, meta.Progress);
     }
 }
