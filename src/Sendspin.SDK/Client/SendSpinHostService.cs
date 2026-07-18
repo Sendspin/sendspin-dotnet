@@ -24,6 +24,8 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly SendspinListener _listener;
     private readonly MdnsServiceAdvertiser _advertiser;
     private readonly AdvertiserOptions _advertiserOptions;
+    private readonly Connection.Noise.SendspinIdentity? _identity;
+    private readonly Connection.Noise.IPairingRecordStore? _pairingRecordStore;
     private readonly ClientCapabilities _capabilities;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IClockSynchronizer? _clockSynchronizer;
@@ -200,10 +202,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         IAudioPipeline? audioPipeline = null,
         IClockSynchronizer? clockSynchronizer = null,
         string? lastPlayedServerId = null,
-        ILastPlayedServerStore? lastPlayedServerStore = null)
+        ILastPlayedServerStore? lastPlayedServerStore = null,
+        Connection.Noise.SendspinIdentity? identity = null,
+        Connection.Noise.IPairingRecordStore? pairingRecordStore = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
+        _identity = identity;
+        _pairingRecordStore = pairingRecordStore;
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
         _clockSynchronizer = clockSynchronizer;
@@ -376,9 +382,20 @@ public sealed class SendspinHostService : IAsyncDisposable
             }
             connectionId = Guid.NewGuid().ToString("N")[..8];
             _logger.LogInformation("New server connection: {ConnectionId}", connectionId);
+            // Encrypted mode: each incoming connection gets its own Noise framing; the
+            // server (dialer) is still the Noise initiator per spec, our side responds.
+            Connection.Noise.NoiseWireFraming? framing = _identity is null
+                ? null
+                : new Connection.Noise.NoiseWireFraming(
+                    _identity,
+                    _pairingRecordStore is null
+                        ? null
+                        : new Connection.Noise.RecordPskResolver(_pairingRecordStore));
+
             var connection = new IncomingConnection(
                 _loggerFactory.CreateLogger<IncomingConnection>(),
-                webSocket);
+                webSocket,
+                framing);
 
             // Use the shared clock synchronizer if provided, otherwise create a per-connection one.
             var clockSync = _clockSynchronizer
@@ -388,7 +405,9 @@ public sealed class SendspinHostService : IAsyncDisposable
                 connection,
                 clockSync,
                 _capabilities,
-                _audioPipeline);
+                _audioPipeline,
+                noiseSession: framing,
+                pairingRecordStore: _pairingRecordStore);
 
             client.GroupStateChanged += (s, g) =>
             {
@@ -410,10 +429,18 @@ public sealed class SendspinHostService : IAsyncDisposable
 
             await connection.StartAsync();
 
-            // client/hello is always sent first per the protocol.
-            await SendClientHelloAsync(client, connection);
+            if (framing is null)
+            {
+                // Legacy plaintext flow: client/hello is sent first by our side.
+                await SendClientHelloAsync(client, connection);
+            }
 
-            if (!await WaitForHandshakeAsync(client, connection, connectionId))
+            // Encrypted flow is server-driven (client/init went out in StartAsync; the
+            // hello/activate exchange is handled by the client service). The connection
+            // is provisional until its first server/activate; the spec's provisional
+            // window is 30 seconds, after which it is dropped.
+            if (!await WaitForHandshakeAsync(client, connection, connectionId,
+                    timeoutSeconds: framing is null ? 10 : 30))
             {
                 return;
             }
@@ -590,6 +617,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <param name="newConnection">The new connection to disconnect if rejected.</param>
     /// <param name="newServerId">The server ID of the new connection.</param>
     /// <returns>True if the new server is accepted, false if rejected.</returns>
+    /// <summary>
+    /// A connection's arbitration priority: from its declared server/activate activities
+    /// on the encrypted flow, else mapped from the legacy connection_reason.
+    /// </summary>
+    private static ConnectionPriority PriorityOf(SendspinClientService client)
+        => client.LastServerActivate is { } activate
+            ? ServerArbitration.FromActivities(activate.ActivitiesList)
+            : ServerArbitration.FromConnectionReason(client.ConnectionReason);
+
     private async Task<bool> ArbitrateConnectionAsync(
         SendspinClientService newClient,
         IncomingConnection newConnection,
@@ -604,9 +640,9 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         var result = ServerArbitration.Decide(
             newServerId,
-            ServerArbitration.FromConnectionReason(newClient.ConnectionReason),
+            PriorityOf(newClient),
             existingConnection?.ServerId,
-            ServerArbitration.FromConnectionReason(existingConnection?.Client.ConnectionReason),
+            existingConnection is null ? ConnectionPriority.Empty : PriorityOf(existingConnection.Client),
             LastPlayedServerId);
 
         _logger.LogInformation(

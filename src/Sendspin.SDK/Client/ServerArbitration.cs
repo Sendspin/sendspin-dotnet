@@ -46,6 +46,30 @@ internal static class ServerArbitration
             : ConnectionPriority.Empty;
 
     /// <summary>
+    /// Maps a server/activate activities set to its priority class: the highest-ranked
+    /// declared activity, or empty for an empty set.
+    /// </summary>
+    internal static ConnectionPriority FromActivities(IReadOnlyCollection<string>? activities)
+    {
+        if (activities is null || activities.Count == 0)
+        {
+            return ConnectionPriority.Empty;
+        }
+
+        if (activities.Contains("management"))
+        {
+            return ConnectionPriority.Management;
+        }
+
+        if (activities.Contains("playback"))
+        {
+            return ConnectionPriority.Playback;
+        }
+
+        return activities.Contains("pairing") ? ConnectionPriority.Pairing : ConnectionPriority.Empty;
+    }
+
+    /// <summary>
     /// Decides whether a newly-handshaked server should become the active connection.
     /// </summary>
     /// <param name="newServerId">server_id of the newly connected server.</param>

@@ -199,8 +199,16 @@ aiosendspin 7.0.0.
    server-side staged Pairing PSK. Unit/loopback coverage exists; the live
    counterparty run is the remaining conformance gate.
 
-Next phase: Phase 2 (activities-ranked multi-server arbitration, last-playback
-persistence — also closes upstream conformance-audit findings #91/#92 for this SDK).
+**Phase 2 — COMPLETE.** Landed across two efforts: PR #53 (updated pre-merge)
+delivered the pure arbitration decision table, `ILastPlayedServerStore` persistence
+(closing audit finding #92), the loopback FakeServer harness, and the spec-current
+rules (activity ranking, higher-or-equal admission, pairing non-displacement,
+empty-tie last-playback gate, `concurrent_attempt` for rejected incomings). The
+follow-up PR added encrypted-mode support to `SendspinHostService` (per-connection
+Noise framing, server-driven hello, 30 s provisional-activate window) and feeds
+arbitration priority from declared `server/activate` activities, falling back to the
+legacy `connection_reason` mapping. Audit finding #91 (default goodbye reason) was
+verified already satisfied — the SDK defaults to `restart`.
 
 ## 9. Suggested immediate next steps
 
