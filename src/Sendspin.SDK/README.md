@@ -441,6 +441,46 @@ client.VisualizationReceived += (_, frame) =>
 
 > **Note:** `visualizer@v1` follows the [aiosendspin](https://github.com/Sendspin/aiosendspin) reference implementation, which is ahead of the formal protocol spec. The wire format may still evolve. The role degrades gracefully while it matures: it is **opt-in** (off by default), frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
 
+## Source role (line-in)
+
+A client with the `source@v1` role captures audio from a local input (AUX/line-in,
+turntable preamp, microphone, loopback) and streams it to the server, which mixes and
+distributes it to players. Provide an `IAudioCaptureDevice` (your platform's capture
+implementation) and add `source@v1` to `Roles`:
+
+```csharp
+var caps = new ClientCapabilities
+{
+    Roles = { "player@v1", "source@v1" },   // a device can be both
+    SourceLineSense = true,                  // optional: report signal presence
+};
+
+var client = new SendspinClientService(
+    logger, connection,
+    capabilities: caps,
+    captureDevice: myCaptureDevice);         // IAudioCaptureDevice
+```
+
+Streaming is **server-driven**: the source never streams until the server sends
+`server/command { source: { command: "start" } }`. On start the SDK sends
+`client_stream/start` (announcing the capture format), then encodes each captured
+buffer and streams it as a binary type-12 chunk timestamped in the **server** time
+domain (local capture time mapped through the clock filter's offset+drift). On `stop`,
+role deactivation, or disposal it sends `client_stream/end` and stops capturing.
+
+**Trust required.** A source streams potentially sensitive audio, so `source@v1` MUST
+run on a paired (`user`-trust) connection; the SDK refuses to activate it at trust
+`none` and closes the connection, per spec.
+
+**Encoders.** PCM is built in (and always accepted by servers). Supply a custom
+`ISourceAudioEncoderFactory` for Opus/FLAC. A device implementing both `source` and
+`player` never plays its own captured input locally — it outputs only what the server
+distributes, staying in sync with the group.
+
+**Line sensing.** When `SourceLineSense` is set, call
+`SetSourceSignalAsync(present)` to report `signal: present|absent` in `client/state`; the
+server may use it as a hint for when to start/stop.
+
 ## NativeAOT Support
 
 Since v7.0.0, the SDK is fully compatible with [NativeAOT deployment](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/) and IL trimming. This means you can publish your Sendspin player as a single native executable with no .NET runtime dependency — ideal for embedded devices, containers, or minimal Linux installations.

@@ -26,6 +26,7 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
         ArtworkSupport? artworkSupport = null,
         DeviceInfo? deviceInfo = null,
         VisualizerSupport? visualizerSupport = null,
+        SourceSupport? sourceSupport = null,
         string? trustLevel = null,
         UnpairedAccess? unpairedAccess = null,
         List<PairMethodDescriptor>? supportedPairMethods = null)
@@ -46,6 +47,7 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
                 PlayerV1Support = playerSupport,
                 ArtworkV1Support = artworkSupport,
                 VisualizerV1Support = visualizerSupport,
+                SourceV1Support = sourceSupport,
                 DeviceInfo = deviceInfo
             }
         };
@@ -115,6 +117,13 @@ public sealed class ClientHelloPayload
     [JsonPropertyName("player@v1_support")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PlayerSupport? PlayerV1Support { get; init; }
+
+    /// <summary>
+    /// Source role support details - only if source@v1 is in supported_roles.
+    /// </summary>
+    [JsonPropertyName("source@v1_support")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SourceSupport? SourceV1Support { get; init; }
 
     /// <summary>
     /// Artwork role support details.
@@ -267,4 +276,22 @@ public sealed class UnpairedAccess
     /// <summary>Whether the client admits servers with no pairing record.</summary>
     [JsonPropertyName("enabled")]
     public bool Enabled { get; init; }
+}
+
+/// <summary>The source@v1 support object in client/hello.</summary>
+public sealed class SourceSupport
+{
+    /// <summary>Optional feature hints.</summary>
+    [JsonPropertyName("features")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SourceFeatures? Features { get; init; }
+}
+
+/// <summary>Optional source feature hints.</summary>
+public sealed class SourceFeatures
+{
+    /// <summary>True if the source reports line-sense signal presence in client/state.</summary>
+    [JsonPropertyName("line_sense")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? LineSense { get; init; }
 }

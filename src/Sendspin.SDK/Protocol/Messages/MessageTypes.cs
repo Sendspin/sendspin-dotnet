@@ -50,6 +50,10 @@ public static class MessageTypes
     public const string ServerCommand = "server/command";
     public const string ClientState = "client/state";
     public const string ServerState = "server/state";
+
+    // Source role (client streams captured audio to the server)
+    public const string ClientStreamStart = "client_stream/start";
+    public const string ClientStreamEnd = "client_stream/end";
 }
 
 /// <summary>
@@ -62,6 +66,9 @@ public static class BinaryMessageTypes
     public const byte PlayerAudio1 = 5;
     public const byte PlayerAudio2 = 6;
     public const byte PlayerAudio3 = 7;
+
+    // Source (role, slots 0-3): client-captured audio streamed to the server
+    public const byte SourceAudio0 = 12;
 
     // Artwork (role 2, slots 0-3)
     public const byte Artwork0 = 8;
@@ -78,6 +85,7 @@ public static class BinaryMessageTypes
     public const byte VisualizerPitch = 21;    // slot 5
 
     public static bool IsPlayerAudio(byte type) => type >= 4 && type <= 7;
+    public static bool IsSourceAudio(byte type) => type >= 12 && type <= 15;
     public static bool IsArtwork(byte type) => type >= 8 && type <= 11;
     public static bool IsVisualizer(byte type) => type >= 16 && type <= 23;
 }

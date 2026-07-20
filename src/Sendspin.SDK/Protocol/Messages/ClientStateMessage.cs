@@ -95,6 +95,20 @@ public sealed class ClientStatePayload
     [JsonPropertyName("player")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public PlayerStatePayload? Player { get; init; }
+
+    /// <summary>Source-specific state (line-sense signal). Only if client has source role.</summary>
+    [JsonPropertyName("source")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SourceStatePayload? Source { get; init; }
+}
+
+/// <summary>Source-specific state within client/state.</summary>
+public sealed class SourceStatePayload
+{
+    /// <summary>Line sensing: 'present' or 'absent'. Only if line_sense is supported.</summary>
+    [JsonPropertyName("signal")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Signal { get; init; }
 }
 
 /// <summary>

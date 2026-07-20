@@ -4,6 +4,7 @@ using Sendspin.SDK.Audio;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Connection.Noise.Pairing;
+using Sendspin.SDK.Audio.Source;
 using Sendspin.SDK.Extensions;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol;
@@ -25,6 +26,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IStaticDelayStore? _staticDelayStore;
     private readonly INoiseSessionInfo? _noiseSession;
     private bool _activateReceived;
+    private readonly SourceStreamPipeline? _sourcePipeline;
+    private readonly IAudioCaptureDevice? _captureDevice;
+    private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
@@ -152,14 +156,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         IStaticDelayStore? staticDelayStore = null,
         INoiseSessionInfo? noiseSession = null,
         IPairingRecordStore? pairingRecordStore = null,
-        IPinLockoutStore? pinLockoutStore = null)
+        IPinLockoutStore? pinLockoutStore = null,
+        IAudioCaptureDevice? captureDevice = null,
+        ISourceAudioEncoderFactory? sourceEncoderFactory = null)
     {
         _logger = logger;
         _connection = connection;
         _noiseSession = noiseSession;
         _pairingStore = pairingRecordStore;
         _pinLockoutStore = pinLockoutStore;
+        _captureDevice = captureDevice;
+        _sourceEncoderFactory = sourceEncoderFactory;
         _clockSynchronizer = clockSynchronizer ?? new KalmanClockSynchronizer();
+
+        if (_captureDevice is not null)
+        {
+            _sourcePipeline = new SourceStreamPipeline(
+                _captureDevice,
+                _clockSynchronizer,
+                msg => _connection.SendMessageAsync(msg),
+                data => _connection.SendBinaryAsync(data),
+                _logger,
+                _sourceEncoderFactory);
+        }
         _capabilities = capabilities ?? new ClientCapabilities();
         _audioPipeline = audioPipeline;
         _staticDelayStore = staticDelayStore;
@@ -242,6 +261,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Creates the ClientHello message from current capabilities.
     /// Extracted for reuse between initial connection and reconnection handshakes.
     /// </summary>
+    private bool HasSourceRole()
+        => _capabilities.Roles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
+
+    /// <summary>
+    /// Reports line-sense signal presence to the server via client/state (source role).
+    /// No-op unless the source role is configured with line sensing.
+    /// </summary>
+    public async Task SetSourceSignalAsync(bool present)
+    {
+        if (!HasSourceRole() || !_capabilities.SourceLineSense)
+            return;
+
+        var message = new ClientStateMessage
+        {
+            Payload = new ClientStatePayload
+            {
+                Source = new SourceStatePayload { Signal = present ? "present" : "absent" },
+            },
+        };
+        await _connection.SendMessageAsync(message);
+    }
+
     private ClientHelloMessage CreateClientHelloMessage()
     {
         if (_capabilities.ArtworkChannels.Count > 4)
@@ -284,6 +325,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 MacAddress = _capabilities.MacAddress
             },
             visualizerSupport: _capabilities.VisualizerSupport,
+            sourceSupport: HasSourceRole()
+                ? new SourceSupport
+                {
+                    Features = _capabilities.SourceLineSense ? new SourceFeatures { LineSense = true } : null,
+                }
+                : null,
             trustLevel: !encrypted ? null
                 : _noiseSession?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
             supportedPairMethods: encrypted ? BuildPairMethods() : null,
@@ -697,10 +744,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // Source role is trust-gated: it streams potentially sensitive captured audio,
+        // so it MUST only run on a paired ('user'-trust) connection. If a server
+        // activates source@v1 without user trust, refuse and close (spec).
+        if (payload.ActiveRoles is not null
+            && payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
+            && _noiseSession?.MatchedPsk?.Category != PskCategory.LongTerm)
+        {
+            _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
+            _handshakeTcs?.TrySetResult(false);
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+            return;
+        }
+
         // Mirror roles where legacy consumers look. active_roles persists across
         // activates that omit it, so only overwrite when present.
         if (payload.ActiveRoles is not null && LastServerHello is not null)
         {
+            // When the source role is dropped from active_roles, stop streaming (spec:
+            // the client ends its input stream on deactivation).
+            bool wasSourceActive = LastServerHello.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
+            bool isSourceActive = payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
+            if (wasSourceActive && !isSourceActive && _sourcePipeline is not null)
+            {
+                _sourcePipeline.StopStreamingAsync().SafeFireAndForget(_logger);
+            }
+
             LastServerHello.ActiveRoles = payload.ActiveRoles;
         }
 
@@ -1716,9 +1785,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void HandleServerCommand(string json)
     {
         var message = MessageSerializer.Deserialize<ServerCommandMessage>(json);
-        if (message?.Payload?.Player is null)
+        if (message?.Payload is null)
         {
-            _logger.LogDebug("server/command: No player command in message");
+            _logger.LogDebug("server/command: empty payload");
+            return;
+        }
+
+        if (message.Payload.Source is { } sourceCommand && _sourcePipeline is not null)
+        {
+            _sourcePipeline.HandleCommandAsync(sourceCommand.Command).SafeFireAndForget(_logger);
+        }
+
+        if (message.Payload.Player is null)
+        {
             return;
         }
 
@@ -2074,6 +2153,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (_audioPipeline != null)
         {
             await _audioPipeline.StopAsync();
+        }
+
+        // The source pipeline owns its capture device, so dispose it here.
+        if (_sourcePipeline is not null)
+        {
+            await _sourcePipeline.DisposeAsync();
         }
 
         await _connection.DisposeAsync();

@@ -25,6 +25,18 @@ public sealed class ServerCommandPayload
     /// </summary>
     [JsonPropertyName("player")]
     public PlayerCommand? Player { get; init; }
+
+    /// <summary>Source command details (start/stop streaming). Only for source clients.</summary>
+    [JsonPropertyName("source")]
+    public SourceCommand? Source { get; init; }
+}
+
+/// <summary>Source command from the server: whether this source streams to the server.</summary>
+public sealed class SourceCommand
+{
+    /// <summary>'start' or 'stop'. Default after handshake is stop.</summary>
+    [JsonPropertyName("command")]
+    public string? Command { get; init; }
 }
 
 /// <summary>

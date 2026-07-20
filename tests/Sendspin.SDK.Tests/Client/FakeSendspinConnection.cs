@@ -55,8 +55,14 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         return Task.CompletedTask;
     }
 
+    /// <summary>Binary frames sent via <see cref="SendBinaryAsync"/>, in order.</summary>
+    public List<byte[]> SentBinary { get; } = new();
+
     public Task SendBinaryAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
-        => Task.CompletedTask;
+    {
+        SentBinary.Add(data.ToArray());
+        return Task.CompletedTask;
+    }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
