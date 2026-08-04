@@ -306,46 +306,21 @@ public class HandshakeFailureTests
         Assert.Null(permanent);
     }
 
-    [Theory]
-    [InlineData(false, "does not support Sendspin encryption")]
-    [InlineData(true, "handshake rejected")]
-    public void FramingFatal_ClassifiesByTransportReadiness(bool transportReady, string expected)
-    {
-        var framing = new StubFraming
-        {
-            IsTransportReady = transportReady,
-            FatalOnInbound = "expected server/init message",
-        };
-
-        var result = framing.ProcessInbound(WireFrame.FromText("{}"));
-        Assert.NotNull(result.FatalReason);
-
-        // This mirrors the classification IncomingConnection applies before closing: the
-        // mode is read from `transportReady` (captured before ProcessInbound), not from
-        // framing.IsTransportReady after the call — StubFraming, like the real
-        // NoiseWireFraming.Fail(), drops IsTransportReady to false as part of going fatal,
-        // so a post-call read would collapse both cases to LegacyServer.
-        var failure = new SendspinHandshakeException(
-            transportReady
-                ? HandshakeFailureKind.HandshakeRejected
-                : HandshakeFailureKind.LegacyServer,
-            result.FatalReason);
-
-        Assert.Contains(expected, failure.Message, StringComparison.OrdinalIgnoreCase);
-    }
-
     /// <summary>
-    /// The test above pins the classification rule, but constructs the exception directly —
-    /// it never calls into <see cref="IncomingConnection"/>. This test drives a real
-    /// <see cref="IncomingConnection"/> through a real accepted WebSocket, the way
-    /// <c>SendSpinHostService</c> does, so it also catches the read-after-ProcessInbound
-    /// trap that hit Task 7's dial-path equivalent of this diagnostic: if
-    /// <c>IncomingConnection</c> read <c>IsTransportReady</c> after <c>ProcessInbound</c>
-    /// instead of before, both cases below would log the <c>LegacyServer</c> message.
+    /// The listen path classifies a framing fatal exactly as the dial path does: a fatal
+    /// raised before transport mode is a rejected handshake (no matching PSK, PSK bound to
+    /// another server, unsupported version), and a fatal on an established session is a
+    /// desync. Neither is the legacy-server signature — a pre-7.0.0 server never sends
+    /// anything at all, so it cannot produce a fatal (see the close-handler test below).
+    /// This drives a real <see cref="IncomingConnection"/> through a real accepted WebSocket,
+    /// the way <c>SendSpinHostService</c> does, so it also catches the read-after-
+    /// <c>ProcessInbound</c> trap: <c>StubFraming</c>, like the real
+    /// <c>NoiseWireFraming.Fail()</c>, drops <c>IsTransportReady</c> as part of going fatal,
+    /// so a post-call read would collapse both cases below into the first.
     /// </summary>
     [Theory]
-    [InlineData(false, "does not support Sendspin encryption")]
-    [InlineData(true, "handshake rejected")]
+    [InlineData(false, "handshake rejected")]
+    [InlineData(true, "established session")]
     public async Task IncomingConnection_LogsClassifiedFailure_OnFramingFatal(bool transportReady, string expected)
     {
         await using var server = new SimpleWebSocketServer();
@@ -387,6 +362,102 @@ public class HandshakeFailureTests
         }
 
         Assert.Contains(expected, warning.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The case the LegacyServer diagnostic exists for: a pre-7.0.0 server dials in, receives
+    /// the client/init sent from StartAsync, fails to deserialize it, and closes without ever
+    /// replying. No frame arrives, so there is no framing fatal — the close handler is the
+    /// only place this is visible, and without the diagnostic it reads as an ordinary
+    /// "Server closed connection" at Information.
+    /// </summary>
+    [Fact]
+    public async Task IncomingConnection_LogsLegacyServerDiagnostic_OnCloseBeforeTransportMode()
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var accepted = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (_, c) => accepted.TrySetResult(c);
+
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"), CancellationToken.None);
+
+        var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var logger = new CapturingLogger();
+        await using var incoming = new IncomingConnection(
+            logger, serverSideSocket, new StubFraming { IsTransportReady = false });
+
+        var disconnected = new TaskCompletionSource<bool>();
+        incoming.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+                disconnected.TrySetResult(true);
+        };
+
+        await incoming.StartAsync();
+
+        // The measured pre-7.0.0 signature: a normal-closure close with no reply at all.
+        await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+
+        await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        (LogLevel Level, string Message) warning;
+        lock (logger.Entries)
+        {
+            warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        }
+
+        Assert.Contains("does not support Sendspin encryption", warning.Message);
+        Assert.Contains("aiosendspin >= 7.0.0", warning.Message);
+    }
+
+    /// <summary>
+    /// Once the peer has answered, it has proven it speaks the encrypted protocol, so a close
+    /// is ambiguous (restarting server, draining proxy) rather than the legacy signature.
+    /// </summary>
+    [Fact]
+    public async Task IncomingConnection_DoesNotBlameLegacyServer_WhenThePeerReplied()
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var accepted = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (_, c) => accepted.TrySetResult(c);
+
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"), CancellationToken.None);
+
+        var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var logger = new CapturingLogger();
+        await using var incoming = new IncomingConnection(
+            logger, serverSideSocket, new StubFraming { IsTransportReady = false });
+
+        var received = new TaskCompletionSource<bool>();
+        incoming.TextMessageReceived += (_, _) => received.TrySetResult(true);
+
+        var disconnected = new TaskCompletionSource<bool>();
+        incoming.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+                disconnected.TrySetResult(true);
+        };
+
+        await incoming.StartAsync();
+
+        var reply = Encoding.UTF8.GetBytes("{\"type\":\"server/init\"}");
+        await client.SendAsync(reply, WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+        await received.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+        await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        lock (logger.Entries)
+        {
+            Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Warning);
+        }
     }
 
     /// <summary>Captures log calls so tests can assert on the classified message text.</summary>

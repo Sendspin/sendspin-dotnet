@@ -19,6 +19,7 @@ public sealed class IncomingConnection : ISendspinConnection
     private ConnectionState _state = ConnectionState.Disconnected;
     private bool _disposed;
     private bool _isOpen;
+    private int _inboundFramesSinceReset;
 
     public ConnectionState State => _state;
     public Uri? ServerUri { get; private set; }
@@ -64,6 +65,7 @@ public sealed class IncomingConnection : ISendspinConnection
         _isOpen = true;
 
         _framing.Reset();
+        _inboundFramesSinceReset = 0;
         var startFrames = _framing.Start();
         if (startFrames.Count > 0)
         {
@@ -180,22 +182,28 @@ public sealed class IncomingConnection : ISendspinConnection
 
     private void DispatchInbound(WireFrame frame)
     {
+        // The peer answered, so this connection cannot be the legacy signature (see OnClose).
+        _inboundFramesSinceReset++;
+
         // Capture before ProcessInbound: NoiseWireFraming.Fail() moves the phase to Failed
         // as part of producing a fatal result, which drops IsTransportReady to false. Reading
-        // it after the call would misclassify every fatal as LegacyServer.
+        // it after the call would collapse both cases below into the handshake-time one.
         var wasTransportReady = _framing.IsTransportReady;
         var inbound = _framing.ProcessInbound(frame);
 
         if (inbound.FatalReason is { } fatal)
         {
-            var failure = new SendspinHandshakeException(
-                wasTransportReady
-                    ? HandshakeFailureKind.HandshakeRejected
-                    : HandshakeFailureKind.LegacyServer,
-                fatal);
+            // Mirrors the dial path's classification. A fatal raised before transport mode is
+            // a rejected handshake (no matching PSK, PSK bound to another server, unsupported
+            // version) — never the legacy-server signature, which produces no fatal at all
+            // because the peer never sends anything. A fatal on an established session is a
+            // desync or a failed server-initiated re-handshake. Neither is retried here: the
+            // listen path has no reconnect loop, so we close and let the server redial.
+            _logger.LogWarning("{Message}", wasTransportReady
+                ? $"Wire framing failure on an established session: {fatal}; closing connection"
+                : new SendspinHandshakeException(HandshakeFailureKind.HandshakeRejected, fatal).Message);
 
             // Per spec: close without sending an application-level error message.
-            _logger.LogWarning("{Message}", failure.Message);
             _isOpen = false;
             _ = CloseSocketSafeAsync();
             SetState(ConnectionState.Disconnected, fatal);
@@ -248,6 +256,24 @@ public sealed class IncomingConnection : ISendspinConnection
 
     private void OnClose()
     {
+        // A server that predates the encrypted protocol (aiosendspin < 7.0.0) dials in, fails
+        // to deserialize the client/init we sent from StartAsync, and closes without ever
+        // replying. That produces no framing fatal, so this close handler is the only place
+        // the condition is visible. One inbound frame proves the peer speaks the encrypted
+        // protocol, so a close after that is ambiguous (restarting server, draining proxy).
+        // The Handshaking guard keeps a local disconnect (e.g. the host's handshake timeout,
+        // which closes the socket itself) from being reported as a legacy server.
+        if (_state == ConnectionState.Handshaking
+            && !_framing.IsTransportReady
+            && _inboundFramesSinceReset == 0)
+        {
+            var failure = new SendspinHandshakeException(HandshakeFailureKind.LegacyServer);
+            _logger.LogWarning("{Message}", failure.Message);
+            _isOpen = false;
+            SetState(ConnectionState.Disconnected, failure.Message);
+            return;
+        }
+
         _logger.LogInformation("Server closed connection");
         _isOpen = false;
         SetState(ConnectionState.Disconnected, "Connection closed by server");
