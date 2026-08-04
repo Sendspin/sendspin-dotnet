@@ -194,4 +194,111 @@ public class HandshakeFailureTests
             "Client should reach Handshaking first, so the backoff under test is a mid-handshake drop");
         Assert.Equal(ConnectionState.Reconnecting, connection.State);
     }
+
+    /// <summary>
+    /// A framing fatal in transport mode is a desync or a failed server-initiated
+    /// re-handshake (key rotation / post-pairing promotion), not a rejected handshake.
+    /// Reconnecting re-runs the Noise handshake from scratch via <c>Reset()</c>, which is
+    /// exactly the recovery those need — so it must stay on the ordinary reconnect path.
+    /// </summary>
+    [Fact]
+    public async Task TransportModeFatal_RecoversByReconnecting()
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var firstConnection = new TaskCompletionSource<WebSocketClientConnection>();
+        var secondConnection = new TaskCompletionSource<bool>();
+        var dials = 0;
+        server.ClientConnected += (_, c) =>
+        {
+            if (Interlocked.Increment(ref dials) == 1)
+                firstConnection.TrySetResult(c);
+            else
+                secondConnection.TrySetResult(true);
+        };
+
+        // Transport-ready when the frame arrives. StubFraming drops IsTransportReady on the
+        // fatal exactly as NoiseWireFraming.Fail() does, so a connection that reads the flag
+        // after ProcessInbound would misread this as a handshake-time failure.
+        await using var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions { AutoReconnect = true, ReconnectDelayMs = 100 },
+            new StubFraming { IsTransportReady = true, FatalOnInbound = "desync" });
+
+        var reconnecting = new TaskCompletionSource<bool>();
+        connection.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Reconnecting)
+                reconnecting.TrySetResult(true);
+        };
+
+        await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"));
+        var serverConn = await firstConnection.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Any inbound frame trips the framing's fatal path.
+        await serverConn.SendAsync("{}");
+
+        Assert.True(await reconnecting.Task.WaitAsync(TimeSpan.FromSeconds(10)),
+            "A transport-mode framing fatal must re-enter the reconnect loop, not fail permanently");
+
+        // Redialling on the ordinary socket schedule, not the 30s handshake backoff: a failed
+        // key rotation should recover promptly.
+        Assert.True(await secondConnection.Task.WaitAsync(TimeSpan.FromSeconds(10)),
+            "Client should redial after a transport-mode fatal");
+    }
+
+    /// <summary>
+    /// Once the peer has answered, it has proven it speaks the encrypted protocol, so a
+    /// clean close is ambiguous (restarting server, draining proxy) rather than the measured
+    /// legacy signature — which is a 1000 close with *no reply at all*.
+    /// </summary>
+    [Fact]
+    public async Task CleanCloseAfterServerReplied_IsAmbiguous_AndRetries()
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var firstConnection = new TaskCompletionSource<WebSocketClientConnection>();
+        var secondConnection = new TaskCompletionSource<bool>();
+        var dials = 0;
+        server.ClientConnected += (_, c) =>
+        {
+            if (Interlocked.Increment(ref dials) == 1)
+                firstConnection.TrySetResult(c);
+            else
+                secondConnection.TrySetResult(true);
+        };
+
+        // Still mid-handshake (not transport-ready), but the server does reply before closing.
+        await using var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions
+            {
+                AutoReconnect = true,
+                ReconnectDelayMs = 100,
+                HandshakeFailureBackoffMs = 100,
+            },
+            new StubFraming { IsTransportReady = false });
+
+        SendspinHandshakeException? permanent = null;
+        connection.StateChanged += (_, e) =>
+        {
+            if (e.Exception is SendspinHandshakeException handshake)
+                permanent = handshake;
+        };
+
+        await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"));
+        var serverConn = await firstConnection.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The reply is what distinguishes this from a pre-7.0.0 server: aiosendspin < 7.0.0
+        // closes without ever answering client/init.
+        await serverConn.SendAsync("{\"type\":\"server/init\"}");
+        await Task.Delay(200);
+        await serverConn.CloseAsync();
+
+        Assert.True(await secondConnection.Task.WaitAsync(TimeSpan.FromSeconds(10)),
+            "A clean close after the server replied is ambiguous and must be retried");
+        Assert.Null(permanent);
+    }
 }

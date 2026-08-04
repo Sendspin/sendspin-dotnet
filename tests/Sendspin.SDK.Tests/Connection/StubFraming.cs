@@ -34,7 +34,14 @@ internal sealed class StubFraming : IWireFraming
     public InboundFrameResult ProcessInbound(WireFrame frame)
     {
         if (FatalOnInbound is { } fatal)
+        {
+            // Mirrors NoiseWireFraming.Fail(), which moves the phase to Failed and so drops
+            // IsTransportReady to false. A connection that reads IsTransportReady *after*
+            // ProcessInbound therefore cannot tell a handshake-time fatal from a
+            // transport-mode one — this stub reproduces that so tests can catch it.
+            IsTransportReady = false;
             return InboundFrameResult.Fatal(fatal);
+        }
 
         return frame.Kind == WireFrameKind.Text
             ? InboundFrameResult.ForText(frame.PayloadAsText())
