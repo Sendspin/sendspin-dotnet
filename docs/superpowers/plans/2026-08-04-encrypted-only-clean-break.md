@@ -1013,22 +1013,7 @@ namespace Sendspin.SDK.Tests.Connection;
 [Collection("RealSockets")]
 public class HandshakeFailureTests
 {
-    /// <summary>
-    /// Test framing with a settable transport-ready flag, standing in for the
-    /// deleted PlaintextWireFraming. <c>IsTransportReady</c> is what classifies a
-    /// close as legacy-server versus an ordinary mid-session drop.
-    /// </summary>
-    private sealed class StubFraming : IWireFraming
-    {
-        public string? FatalOnInbound { get; set; }
-        public bool IsTransportReady { get; set; }
-        public IReadOnlyList<WireFrame> Start() => [WireFrame.FromText("""{"type":"client/init"}""")];
-        public IEnumerable<WireFrame> EncodeText(string json) => [WireFrame.FromText(json)];
-        public IEnumerable<WireFrame> EncodeBinary(ReadOnlyMemory<byte> data) => [WireFrame.FromBinary(data)];
-        public InboundFrameResult ProcessInbound(WireFrame frame) =>
-            FatalOnInbound is { } reason ? InboundFrameResult.Fatal(reason) : InboundFrameResult.None;
-        public void Reset() { }
-    }
+    // StubFraming is NOT declared here — see the note below.
 
     [Fact]
     public void HandshakeFailureBackoff_DefaultsTo30Seconds()
@@ -1057,6 +1042,14 @@ public class HandshakeFailureTests
     }
 }
 ```
+
+> **Correction applied during execution — `StubFraming` already exists.** Task 5's fix round created `tests/Sendspin.SDK.Tests/Connection/StubFraming.cs` (`internal sealed`), a passthrough `IWireFraming` with a settable `IsTransportReady` defaulting to **`true`**, used by `ExplicitDisconnect_DoesNotReconnect`. Do not declare a second one — two types of the same name in one namespace will not compile.
+>
+> Extend the shared type instead, and **keep its current defaults so existing callers stay green**:
+> - add `public string? FatalOnInbound { get; set; }`, and have `ProcessInbound` return `InboundFrameResult.Fatal(FatalOnInbound)` when it is set, falling through to the existing passthrough behavior when it is null;
+> - if a test needs `Start()` to emit an opening frame, make that opt-in (e.g. a settable `StartFrames` defaulting to empty) rather than changing the current empty-array default.
+>
+> `IsTransportReady` is already settable, so this task's tests pass `false` explicitly.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1216,20 +1209,22 @@ And in `CalculateReconnectDelay`, when the last failure was an ambiguous handsha
 
 Clear `_permanentFailure` in `ConnectAsync` (beside `_reconnectAttempt = 0;`) so an explicit reconnect by the app is allowed.
 
-- [ ] **Step 9: Repair the existing reconnect test, which this change breaks**
+- [ ] **Step 9: Repair the existing reconnect tests, which this change breaks**
 
 **Read this before running the suite.** `SendspinConnectionReconnectTests.CleanServerClose_DrivesReconnect` asserts that a graceful server close drives a reconnect (windowsSpin issue #1 — a Music Assistant restart mid-session). Its server is a plain `SimpleWebSocketServer` that never speaks Noise, so after Task 5 its framing is a `NoiseWireFraming` stuck at `IsTransportReady == false`. Step 6's new rule classifies that close as `LegacyServer` and refuses to reconnect — the test fails, and it is **right to fail** as written.
 
-The test's real intent is a mid-session drop, so give it a framing that has reached transport mode. In `SendspinConnectionReconnectTests.cs`, replace the framing argument added in Task 5 for this test with the shared stub:
+The test's real intent is a mid-session drop, so give it a framing that has reached transport mode — the shared `StubFraming` created in Task 5's fix round, whose `IsTransportReady` already defaults to `true`:
 
 ```csharp
 await using var connection = new SendspinConnection(
     NullLogger<SendspinConnection>.Instance,
     new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
-    new StubFraming { IsTransportReady = true });
+    new StubFraming());
 ```
 
-Promote `StubFraming` out of `HandshakeFailureTests` into its own file `tests/Sendspin.SDK.Tests/Connection/StubFraming.cs` (marked `internal sealed`) so both test classes share it. Apply the same treatment to any other test in that file whose close happens mid-session rather than mid-handshake.
+`ExplicitDisconnect_DoesNotReconnect` was already moved onto `StubFraming` in Task 5's fix round and needs no change here.
+
+**Audit every remaining test in that file the same way** rather than stopping at the one named above. The question for each is whether its close happens mid-session (needs `StubFraming`) or genuinely mid-handshake (correctly stays on `NoiseWireFraming`). Task 5's review traced `AbruptServerDrop_DrivesReconnect` and `HalfOpenConnection_DrivesReconnect` as detecting loss purely from the receive side without ever calling `EncodeText` — but they were traced against the *pre-classification* code, so re-check them against Step 6's new close-classification rule, which is what this task adds.
 
 - [ ] **Step 10: Add the three integration tests**
 
