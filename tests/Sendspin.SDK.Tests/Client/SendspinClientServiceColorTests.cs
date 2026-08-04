@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
@@ -11,17 +10,11 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceColorTests
 {
-    private const string ServerHelloJson = """
-        { "type": "server/hello", "payload": { "server_id": "s", "version": 1, "active_roles": ["color@v1"] } }
-        """;
-
     [Fact]
     public void ServerStateColor_PopulatesGroupAndRaisesColorChanged()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         ColorPalette? raised = null;
         client.ColorChanged += (_, p) => raised = p;
@@ -46,10 +39,8 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void ServerStateColor_MergesDeltas_AbsentKeepsNullClearsValueUpdates()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         // First update: set primary and accent.
         connection.RaiseTextMessageReceived("""
@@ -70,10 +61,8 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void MalformedColor_DoesNotDropSiblingControllerUpdate()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         // One bad color channel must not abort the whole server/state and lose the volume update.
         connection.RaiseTextMessageReceived("""
@@ -88,10 +77,8 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void ColorTimestamp_KeptWhenLaterUpdateOmitsIt()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             { "type": "server/state", "payload": { "color": { "timestamp": 100, "primary": [1, 1, 1] } } }
@@ -106,10 +93,8 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void ServerState_WithoutColor_DoesNotRaiseColorChanged()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         var fired = false;
         client.ColorChanged += (_, _) => fired = true;
@@ -122,16 +107,12 @@ public class SendspinClientServiceColorTests
     }
 
     [Fact]
-    public async Task ClientHello_AdvertisesColorRole()
+    public void ClientHello_AdvertisesColorRole()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
-        var connectTask = client.ConnectAsync(new Uri("ws://test"));
-        connection.RaiseTextMessageReceived(ServerHelloJson);
-        await connectTask;
+        TestClient.CompleteHandshake(connection, "color@v1");
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
         Assert.Contains("color@v1", hello.Payload.SupportedRoles);
