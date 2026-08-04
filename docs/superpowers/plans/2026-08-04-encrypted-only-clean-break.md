@@ -556,9 +556,25 @@ Delete the `ConnectionReason` property at line 106 and its assignments at lines 
 
 Run: `dotnet build c:\CodeProjects\SendspinSDK\SendspinSDK.slnx -f net10.0 --nologo`
 
-Expected: errors at `SendSpinHostService.cs:638` and `:663` (they still reference `ConnectionReason`). Leave those — Task 4 owns that file. Fix any errors **inside `SendSpinClient.cs`** now.
+Expected: errors at `SendSpinHostService.cs:638` and `:663`, which still reference the deleted `ConnectionReason`.
 
-If the host-service errors block the test run, apply the minimal stopgap in `SendSpinHostService.cs`: change line 638 to `: ConnectionPriority.Empty` and line 663 to `"(unknown)"`, and note in the commit that Task 4 finishes it.
+**Apply this stopgap — it is required, not optional.** The solution must compile for Step 8's test run, so `SendSpinHostService.cs` cannot be left broken for Task 4:
+
+```csharp
+// line 638 — Task 4 replaces this with the activities-only PriorityOf
+            : ConnectionPriority.Empty;
+```
+
+```csharp
+// line 660-664 — drop the reason from the arbitration log
+        _logger.LogInformation(
+            "Arbitration: {Rationale}. New={NewServerId}, Existing={ExistingServerId}",
+            result.Rationale,
+            newServerId,
+            existingConnection?.ServerId ?? "(none)");
+```
+
+Task 4 then deletes `FromConnectionReason` itself and finishes the host-service work. Fix all other errors **inside `SendSpinClient.cs`** now.
 
 - [ ] **Step 8: Run the full suite**
 
@@ -602,11 +618,11 @@ Part of #78."
 
 In `tests/Sendspin.SDK.Tests/Client/ServerArbitrationTests.cs`, delete the `FromConnectionReason_MapsLegacyReasons` theory (lines ~70-78) and its `[InlineData]` rows.
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Confirm nothing else depended on it**
 
 Run: `dotnet test c:\CodeProjects\SendspinSDK\SendspinSDK.slnx -f net10.0 --nologo --filter "FullyQualifiedName~ServerArbitrationTests"`
 
-Expected: PASS with a lower count (the legacy theory is gone). This is a deletion, so "failing first" means the build must still be green — the point of this step is to confirm nothing else referenced it.
+Expected: PASS with a lower count (the legacy theory is gone). There is no red-first step here — this task begins by removing coverage for a method being deleted, so the gate is that the remaining arbitration tests still pass.
 
 - [ ] **Step 3: Delete `FromConnectionReason`**
 
