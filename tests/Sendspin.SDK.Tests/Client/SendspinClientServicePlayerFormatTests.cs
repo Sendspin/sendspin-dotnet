@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -13,8 +12,8 @@ public class SendspinClientServicePlayerFormatTests
     [Fact]
     public async Task RequestPlayerFormatAsync_SendsPlayerRequestFormat()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(NullLogger<SendspinClientService>.Instance, connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.RequestPlayerFormatAsync(codec: "opus", sampleRate: 48000, channels: 2, bitDepth: 16);
 
@@ -30,8 +29,8 @@ public class SendspinClientServicePlayerFormatTests
     [Fact]
     public async Task RequestPlayerFormatAsync_OmitsUnsetFields()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(NullLogger<SendspinClientService>.Instance, connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.RequestPlayerFormatAsync(codec: "pcm");
 
