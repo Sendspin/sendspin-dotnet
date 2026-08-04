@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
@@ -274,22 +273,5 @@ public class SendspinClientServiceEncryptedFlowTests
 
         Assert.Equal(ConnectionState.Disconnected, connection.State);
         Assert.Equal("pairing_required", connection.LastDisconnectReason);
-    }
-
-    [Fact]
-    public void LegacyFlow_WithoutNoiseSession_IsUnchanged()
-    {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
-
-        connection.RaiseTextMessageReceived("""
-            {"type":"server/hello","payload":{"server_id":"legacy-1","name":"srv","version":1,"active_roles":["player@v1"],"connection_reason":"playback"}}
-            """);
-
-        // Legacy: server/hello completes the handshake directly; no activate needed.
-        Assert.Equal("legacy-1", client.ServerId);
-        Assert.Contains(connection.SentMessages, m => m is ClientStateMessage);
     }
 }

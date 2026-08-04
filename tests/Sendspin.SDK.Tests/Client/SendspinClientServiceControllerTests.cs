@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -10,9 +9,6 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceControllerTests
 {
-    private static SendspinClientService NewClient(FakeSendspinConnection connection) =>
-        new(NullLogger<SendspinClientService>.Instance, connection);
-
     private static ControllerCommand LastControllerCommand(FakeSendspinConnection connection)
     {
         var msg = Assert.IsType<ClientCommandMessage>(connection.SentMessages.Last());
@@ -23,8 +19,8 @@ public class SendspinClientServiceControllerTests
     [Fact]
     public async Task SetVolumeAsync_SendsControllerVolumeCommand()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.SetVolumeAsync(150); // clamps to 100
 
@@ -37,8 +33,8 @@ public class SendspinClientServiceControllerTests
     [Fact]
     public async Task SetMuteAsync_SendsControllerMuteCommand()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.SetMuteAsync(true);
 
@@ -54,8 +50,9 @@ public class SendspinClientServiceControllerTests
         // SetVolumeAsync sends directly with no connection-state guard, relying on the transport
         // to reject the send when there's no live socket. EnforceConnectionState makes the fake
         // throw "WebSocket is not connected" like SendspinConnection does while disconnected.
-        var connection = new FakeSendspinConnection { EnforceConnectionState = true };
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        connection.EnforceConnectionState = true;
+        using var _c = client;
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.SetVolumeAsync(50));
         Assert.Empty(connection.SentMessages);
@@ -64,8 +61,8 @@ public class SendspinClientServiceControllerTests
     [Fact]
     public async Task SendCommandAsync_PlaintCommand_NestsUnderController()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.SendCommandAsync(Commands.Play);
 
@@ -77,8 +74,8 @@ public class SendspinClientServiceControllerTests
     [InlineData("muted")]
     public async Task SendCommandAsync_AcceptsMuteOrMutedParamKey(string key)
     {
-        var connection = new FakeSendspinConnection();
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.SendCommandAsync(Commands.Mute, new Dictionary<string, object> { [key] = true });
 
@@ -88,8 +85,8 @@ public class SendspinClientServiceControllerTests
     [Fact]
     public void ServerState_SupportedCommands_SurfacedOnGroup()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {

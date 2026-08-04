@@ -408,15 +408,25 @@ public sealed class SendspinHostService : IAsyncDisposable
             // Use the shared clock synchronizer if provided, otherwise create a per-connection one.
             var clockSync = _clockSynchronizer
                 ?? new KalmanClockSynchronizer(_loggerFactory.CreateLogger<KalmanClockSynchronizer>());
+
+            // Stopgap for the required-session constructor (Task 3): `_identity` is still
+            // nullable on the host today, so `framing` can still be null here. Task 4 makes
+            // framing unconditional and moves this whole method onto the options object; until
+            // then, a host with no identity constructs a client with a null session, which
+            // cannot complete a handshake.
             client = new SendspinClientService(
                 _loggerFactory.CreateLogger<SendspinClientService>(),
                 connection,
-                clockSync,
-                _capabilities,
-                _audioPipeline,
-                noiseSession: framing,
-                pairingRecordStore: _pairingRecordStore,
-                pinLockoutStore: _pinLockoutStore);
+                framing!,
+                new SendspinClientOptions
+                {
+                    Identity = _identity!,
+                    ClockSynchronizer = clockSync,
+                    Capabilities = _capabilities,
+                    AudioPipeline = _audioPipeline,
+                    PairingRecordStore = _pairingRecordStore,
+                    PinLockoutStore = _pinLockoutStore,
+                });
 
             client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
 
@@ -635,7 +645,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private static ConnectionPriority PriorityOf(SendspinClientService client)
         => client.LastServerActivate is { } activate
             ? ServerArbitration.FromActivities(activate.ActivitiesList)
-            : ServerArbitration.FromConnectionReason(client.ConnectionReason);
+            : ConnectionPriority.Empty;
 
     private async Task<bool> ArbitrateConnectionAsync(
         SendspinClientService newClient,
@@ -657,10 +667,9 @@ public sealed class SendspinHostService : IAsyncDisposable
             LastPlayedServerId);
 
         _logger.LogInformation(
-            "Arbitration: {Rationale}. New={NewServerId} (reason={NewReason}), Existing={ExistingServerId}",
+            "Arbitration: {Rationale}. New={NewServerId}, Existing={ExistingServerId}",
             result.Rationale,
             newServerId,
-            newClient.ConnectionReason ?? "discovery",
             existingConnection?.ServerId ?? "(none)");
 
         if (result.AcceptNew)
