@@ -101,6 +101,14 @@ internal sealed class FakeServer : IAsyncDisposable
         {
             // Disposal cancelled the receive loop.
         }
+        catch (Exception ex)
+        {
+            // A decrypt or parse failure is exactly what this double exists to catch, and it
+            // would otherwise only fault _receiveLoop — which DisposeAsync discards, leaving a
+            // bare 30s timeout as the sole symptom. Surface it through the channel the tests
+            // already await so it lands as an immediate stack trace.
+            _goodbye.TrySetException(ex);
+        }
     }
 
     /// <summary>Handles the two cleartext handshake messages the host sends: client/init and noise/handshake.</summary>
