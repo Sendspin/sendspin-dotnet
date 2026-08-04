@@ -284,11 +284,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ArtworkChannels.Count);
         }
 
-        bool encrypted = _session is not null;
         return ClientHelloMessage.Create(
             // Under the encrypted protocol client_id/version travel in client/init and
             // are omitted here; trust_level and unpaired_access are required instead.
-            clientId: encrypted ? null : _capabilities.ClientId,
             name: _capabilities.ClientName,
             supportedRoles: _capabilities.Roles,
             playerSupport: new PlayerSupport
@@ -324,12 +322,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     Features = _capabilities.SourceLineSense ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
-            trustLevel: !encrypted ? null
-                : _session?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
-            supportedPairMethods: encrypted ? BuildPairMethods() : null,
-            unpairedAccess: encrypted
-                ? new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
-                : null
+            trustLevel: _session?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
+            supportedPairMethods: BuildPairMethods(),
+            unpairedAccess: new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
         );
     }
 

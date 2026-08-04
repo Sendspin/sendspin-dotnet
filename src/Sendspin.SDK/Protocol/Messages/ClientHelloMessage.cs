@@ -19,7 +19,6 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
     /// Creates a ClientHelloMessage with the specified payload.
     /// </summary>
     public static ClientHelloMessage Create(
-        string? clientId,
         string name,
         List<string> supportedRoles,
         PlayerSupport? playerSupport = null,
@@ -35,11 +34,7 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
         {
             Payload = new ClientHelloPayload
             {
-                ClientId = clientId,
                 Name = name,
-                // Under the encrypted protocol client_id/version are omitted (they travel
-                // in client/init); a null clientId marks that shape.
-                Version = clientId is null ? null : 1,
                 TrustLevel = trustLevel,
                 UnpairedAccess = unpairedAccess,
                 SupportedPairMethods = supportedPairMethods,
@@ -60,26 +55,10 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
 public sealed class ClientHelloPayload
 {
     /// <summary>
-    /// Unique client identifier (persistent across sessions). Omitted under the
-    /// encrypted protocol, where the identity travels in client/init instead.
-    /// </summary>
-    [JsonPropertyName("client_id")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? ClientId { get; init; }
-
-    /// <summary>
     /// Human-readable client name.
     /// </summary>
     [JsonPropertyName("name")]
     required public string Name { get; init; }
-
-    /// <summary>
-    /// Protocol version (must be 1). Omitted under the encrypted protocol, where the
-    /// version travels in client/init instead.
-    /// </summary>
-    [JsonPropertyName("version")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? Version { get; init; } = 1;
 
     /// <summary>
     /// The trust level the client extends to this server ('user' when a pairing record

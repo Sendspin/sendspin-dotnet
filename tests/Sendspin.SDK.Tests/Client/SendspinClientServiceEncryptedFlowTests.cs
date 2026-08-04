@@ -32,8 +32,6 @@ public class SendspinClientServiceEncryptedFlowTests
             """);
 
         var hello = Assert.IsType<ClientHelloMessage>(Assert.Single(connection.SentMessages));
-        Assert.Null(hello.Payload.ClientId);
-        Assert.Null(hello.Payload.Version);
         Assert.Equal("none", hello.Payload.TrustLevel);
         Assert.NotNull(hello.Payload.UnpairedAccess);
         Assert.False(hello.Payload.UnpairedAccess.Enabled);
