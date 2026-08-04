@@ -82,6 +82,60 @@ public class SendspinClientServiceEncryptedFlowTests
     }
 
     [Fact]
+    public async Task ConnectAsync_AwaitsTheServerDrivenHandshake_AndCompletesOnActivate()
+    {
+        // The client's own connect path (not just the fake's): ConnectAsync opens the
+        // connection and then parks on the handshake TCS. Because the encrypted flow is
+        // server-driven, the task must still be pending after server/hello alone.
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        using var _c = client;
+
+        var connectTask = client.ConnectAsync(ServerUri);
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+
+        Assert.False(connectTask.IsCompleted);
+        Assert.IsType<ClientHelloMessage>(Assert.Single(connection.SentMessages));
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
+            """);
+
+        await connectTask;
+
+        Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Connected, connection.State);
+        Assert.Equal(FakeNoiseSession.FakeServerId, client.ServerId);
+        Assert.NotNull(client.LastServerActivate);
+        Assert.Contains(connection.SentMessages, m => m is ClientStateMessage);
+    }
+
+    [Fact]
+    public async Task ConnectAsync_WhenCallerCancels_ThrowsCanceled_WithoutTheHandshakeTimeoutClose()
+    {
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        using var _c = client;
+        using var cts = new CancellationTokenSource();
+
+        var connectTask = client.ConnectAsync(ServerUri, cts.Token);
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+        Assert.False(connectTask.IsCompleted);
+
+        cts.Cancel();
+
+        // The caller's token is linked into the handshake wait, so cancelling it surfaces as
+        // OperationCanceledException - distinct from the TimeoutException the 30 s handshake
+        // timeout raises, and without that path's client/goodbye 'handshake_timeout' close.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => connectTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void ActivateRoles_MirroredIntoLastServerHello_AndPersistAcrossOmission()
     {
         var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
