@@ -16,6 +16,7 @@
 - Nullable reference types are enabled and these are errors: `CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625`.
 - No self-referencing text in commit messages (no AI attribution, no `Co-Authored-By`).
 - Baseline before starting: **325 tests passing, 0 failing** on `net10.0`. Every task must end at least as green.
+- **Express test-count gates relationally, not as absolute numbers.** Two tasks have already raised false alarms against hard-coded totals that drifted as tasks added guard tests. State the expected *delta* ("this task deletes exactly one test, so the total drops by one from whatever the suite reports when you start") and have the implementer record the absolute figure it observed. **Zero failing is the invariant that matters**; the total is bookkeeping.
 - Full test command used throughout:
   `dotnet test c:\CodeProjects\SendspinSDK\SendspinSDK.slnx -f net10.0 --nologo`
 - Single-test command used throughout:
@@ -430,6 +431,23 @@ plaintext path, so the suite measures the protocol v10 actually ships."
 
 ---
 
+### Inserted Task 3a: Teach `FakeServer` to speak Noise
+
+*Added during execution. Full brief: `.superpowers/sdd/2026-08-04-encrypted-only-clean-break/task-3a-brief.md`.*
+
+Task 3 blocked on a gap this plan did not cover. `SendspinHostServiceArbitrationTests` drives the host through `FakeServer`, a plaintext-only WebSocket double. Once `SendspinClientService` requires a Noise session, the host's legacy branch can no longer construct a client, and five arbitration tests fail. Nothing in Tasks 4–9 would have healed it.
+
+The fix is cheaper than it first appears: `TestNoiseServer` in `NoiseWireFramingTests.cs` is already a complete server-side `KKpsk2` initiator. Task 3a extracts it to `tests/Sendspin.SDK.Tests/Connection/TestNoiseServer.cs`, rebuilds `FakeServer` on top of it, and gives the arbitration tests an identity plus a seeded `LongTerm` pairing record.
+
+Two non-obvious constraints, both verified against production source:
+
+- **`server_id` is the Noise remote static key.** `RunResponderExchange` does `SendspinIdentity.DecodePeerId(_serverId)` and passes the result as `rs`, so readable literals like `"srv-only"` throw on decode. Test server ids must be real generated Curve25519 keys — which inverts construction order in the test that seeds a last-played id, and forces a shared `KeyPair` in the same-server-reconnect test.
+- **A sentinel-keyed session cannot be granted `playback`.** The spec's admissibility table — the one Task 3 stops bypassing — refuses it without unpaired access. The seeded `LongTerm` record makes trust `user` so the connections these tests set up are admissible.
+
+Net effect on coverage: the arbitration tests now additionally exercise the host's Noise responder path, `psk_id` resolution against the record store, and `server/activate` admissibility end-to-end over a real socket.
+
+---
+
 ### Task 3: Delete the legacy protocol path from `SendspinClientService`
 
 **Files:**
@@ -483,7 +501,11 @@ git commit -m "test: pin that an inadmissible server/activate always disconnects
 
 - [ ] **Step 3: Make the session non-nullable and delete the old constructor**
 
-> **Carried forward from Task 2:** `SendspinClientServiceEncryptedFlowTests.LegacyFlow_WithoutNoiseSession_IsUnchanged` is the last caller of the legacy constructor and the only coverage of the legacy branch in `HandleServerHello`. Task 2 deliberately left it. Delete that test in this step — it cannot compile once the constructor is gone, and its subject is the path being removed. Expect the suite total to drop by one.
+> **Carried forward from Task 2:** `SendspinClientServiceEncryptedFlowTests.LegacyFlow_WithoutNoiseSession_IsUnchanged` is a caller of the legacy constructor and the only coverage of the legacy branch in `HandleServerHello`. Task 2 deliberately left it. Delete that test in this step — it cannot compile once the constructor is gone, and its subject is the path being removed. **The suite total drops by exactly one from whatever it reports when this task starts; zero failing is the gate.**
+>
+> Task 2's claim that it was the *last* such caller was wrong: `SendspinClientServiceControllerTests.cs` and `SendspinClientServiceExternalSourceTests.cs` each have a private `NewClient(FakeSendspinConnection)` helper on the old constructor. Migrate both onto `TestClient.Create()` using Task 2's established pattern — this is a mechanical swap; neither file exercises handshake or session logic.
+>
+> **Prerequisite, added during execution:** inserted Task 3a taught `FakeServer` to speak Noise and gave `SendspinHostServiceArbitrationTests` an identity plus a seeded `LongTerm` pairing record. Without it, this task's deletion strands those five tests — the host's legacy branch cannot construct a client once the session is required. Do not start this task until 3a is green.
 
 In `SendSpinClient.cs`, change the field at line 27:
 
@@ -560,7 +582,7 @@ Delete the `ConnectionReason` property at line 106 and its assignments at lines 
 
 Run: `dotnet build c:\CodeProjects\SendspinSDK\SendspinSDK.slnx -f net10.0 --nologo`
 
-Expected: errors at `SendSpinHostService.cs:638` and `:663`, which still reference the deleted `ConnectionReason`.
+Expected: errors at `SendSpinHostService.cs:638` and `:663`, which still reference the deleted `ConnectionReason` — **and a third site the original plan missed**, the per-connection `new SendspinClientService(...)` call around `SendSpinHostService.cs:411`, which still uses the deleted constructor's 8-argument shape including `noiseSession: framing`. Update that call to the new `(logger, connection, session, options)` shape, passing `framing` as the session and building a `SendspinClientOptions` from the host's fields. Task 4 then moves the host onto the options object wholesale.
 
 **Apply this stopgap — it is required, not optional.** The solution must compile for Step 8's test run, so `SendSpinHostService.cs` cannot be left broken for Task 4:
 
