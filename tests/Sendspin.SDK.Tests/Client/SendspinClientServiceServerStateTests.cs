@@ -1,5 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
-using Sendspin.SDK.Client;
 
 namespace Sendspin.SDK.Tests.Client;
 
@@ -13,10 +11,8 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void RepeatAndShuffle_ReadFromControllerObject()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -35,10 +31,8 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void RepeatAndShuffle_InMetadataObject_AreIgnored()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         // Old wire layout: repeat/shuffle under metadata. They moved to the controller object,
         // so the client must not pick them up here.
@@ -62,10 +56,8 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void Metadata_ArtworkUrl_WithValue_SetsMergedMetadata()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -84,10 +76,8 @@ public class SendspinClientServiceServerStateTests
     {
         // Regression: artwork_url: null is the spec's "clear" signal (sent by MA on artless tracks).
         // The SDK must not retain the old URL via the ?? merge operator.
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -113,10 +103,8 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void Metadata_ArtworkUrl_Absent_RetainsPreviousValue()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -147,10 +135,8 @@ public class SendspinClientServiceServerStateTests
     {
         // cleared_update() in aiosendspin nulls every field when playback stops.
         // All fields must forward the null rather than silently retaining old values.
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -194,10 +180,8 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void Metadata_NumericFields_ExplicitNull_ClearMergedMetadata()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -232,10 +216,8 @@ public class SendspinClientServiceServerStateTests
         // forward by the merge (e.g. the Windows client's seek bar only re-anchors on a fresh
         // instance). A partial update without the progress field must reuse the previous
         // PlaybackProgress instance — not clone it or copy its values.
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -276,10 +258,8 @@ public class SendspinClientServiceServerStateTests
         // Every server/state that carries the progress field yields a newly deserialized
         // PlaybackProgress instance — even when the values are identical to the previous
         // update. This is the other half of the reference-identity freshness contract.
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -317,10 +297,8 @@ public class SendspinClientServiceServerStateTests
     {
         // progress: null is the spec's "track ended" signal and must clear the merged value,
         // not retain the previous instance.
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -354,10 +332,8 @@ public class SendspinClientServiceServerStateTests
         // timestamp but no progress field yields a fresh Timestamp alongside the
         // carried-forward Progress instance. Consumers must not treat a newer timestamp
         // as evidence that the progress object itself is fresh.
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
