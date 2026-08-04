@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
@@ -250,6 +251,28 @@ public class SendspinClientServiceEncryptedFlowTests
             """);
 
         Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
+        Assert.Equal("pairing_required", connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void InadmissibleActivate_AlwaysDisconnects_NoBypassPath()
+    {
+        // A Sentinel-keyed session with unpaired access off may not be granted playback.
+        // Before the clean break, a client with no session info skipped this gate entirely.
+        var (client, connection, _) = TestClient.Create(
+            category: PskCategory.Sentinel,
+            unpairedAccess: false);
+        using var _c = client;
+
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
+            """);
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
         Assert.Equal("pairing_required", connection.LastDisconnectReason);
     }
 
