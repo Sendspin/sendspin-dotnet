@@ -25,6 +25,8 @@ public sealed class SendspinConnection : ISendspinConnection
     private int _state = (int)ConnectionState.Disconnected;
     private int _reconnectAttempt;
     private int _connectionLostGuard;
+    private SendspinHandshakeException? _permanentFailure;
+    private bool _lastLossDuringHandshake;
     private bool _disposed;
 
     public ConnectionState State => (ConnectionState)Volatile.Read(ref _state);
@@ -58,6 +60,11 @@ public sealed class SendspinConnection : ISendspinConnection
 
         _serverUri = serverUri;
         _reconnectAttempt = 0;
+
+        // An explicit dial by the application is always allowed to try again, even after a
+        // failure the reconnect loop refuses to retry on its own.
+        _permanentFailure = null;
+        _lastLossDuringHandshake = false;
 
         try
         {
@@ -265,6 +272,17 @@ public sealed class SendspinConnection : ISendspinConnection
                         _logger.LogInformation("Server closed connection: {Status} - {Description}",
                             result.CloseStatus, result.CloseStatusDescription);
 
+                        // A clean close before the framing reached transport mode is the
+                        // legacy-server signature: aiosendspin < 7.0.0 fails to deserialize
+                        // client/init and closes with 1000, no reply.
+                        if (!_framing.IsTransportReady
+                            && result.CloseStatus == WebSocketCloseStatus.NormalClosure)
+                        {
+                            await FailPermanentlyAsync(
+                                new SendspinHandshakeException(HandshakeFailureKind.LegacyServer));
+                            return;
+                        }
+
                         // A server-initiated close (graceful restart/update) must flow into the
                         // reconnect path, not silently exit the loop. HandleConnectionLostAsync
                         // no-ops when State is Disconnecting or the object is disposed, so an
@@ -288,7 +306,8 @@ public sealed class SendspinConnection : ISendspinConnection
                 {
                     // Per spec: close without sending an application-level error message.
                     _logger.LogWarning("Wire framing failure: {Reason}; closing connection", fatal);
-                    await HandleConnectionLostAsync();
+                    await FailPermanentlyAsync(
+                        new SendspinHandshakeException(HandshakeFailureKind.HandshakeRejected, fatal));
                     return;
                 }
 
@@ -339,6 +358,19 @@ public sealed class SendspinConnection : ISendspinConnection
         }
     }
 
+    /// <summary>
+    /// Ends the connection without retrying. Used for conditions a retry cannot fix —
+    /// a server that does not speak the encrypted protocol, or a rejected handshake.
+    /// </summary>
+    private async Task FailPermanentlyAsync(SendspinHandshakeException failure)
+    {
+        _permanentFailure = failure;
+        _logger.LogError("{Message}", failure.Message);
+
+        await CleanupWebSocketAsync();
+        SetState(ConnectionState.Disconnected, failure.Message, failure);
+    }
+
     private async Task HandleConnectionLostAsync()
     {
         if (State == ConnectionState.Disconnecting || _disposed)
@@ -351,6 +383,12 @@ public sealed class SendspinConnection : ISendspinConnection
             _logger.LogDebug("Connection loss already being handled, skipping duplicate call");
             return;
         }
+
+        // Read the framing's mode at the moment of loss, before any reconnect resets it:
+        // a drop before transport mode is a handshake failure, not an ordinary socket drop.
+        // Only the caller that won the guard records this, so a duplicate caller arriving
+        // after a reconnect has already re-armed the framing cannot overwrite it.
+        _lastLossDuringHandshake = !_framing.IsTransportReady;
 
         try
         {
@@ -375,6 +413,12 @@ public sealed class SendspinConnection : ISendspinConnection
     {
         while (!cancellationToken.IsCancellationRequested && !_disposed)
         {
+            if (_permanentFailure is not null)
+            {
+                SetState(ConnectionState.Disconnected, _permanentFailure.Message, _permanentFailure);
+                return;
+            }
+
             if (_options.MaxReconnectAttempts >= 0 && _reconnectAttempt >= _options.MaxReconnectAttempts)
             {
                 _logger.LogWarning("Max reconnection attempts ({Max}) reached", _options.MaxReconnectAttempts);
@@ -411,6 +455,14 @@ public sealed class SendspinConnection : ISendspinConnection
 
     private int CalculateReconnectDelay()
     {
+        // An ambiguous handshake failure (the peer dropped us before transport mode, but
+        // not with the legacy-server signature) is not a transient socket blip, so it backs
+        // off on its own, slower schedule rather than hammering the server.
+        if (_lastLossDuringHandshake)
+        {
+            return _options.HandshakeFailureBackoffMs;
+        }
+
         var delay = (int)(_options.ReconnectDelayMs * Math.Pow(_options.ReconnectBackoffMultiplier, _reconnectAttempt - 1));
         return Math.Min(delay, _options.MaxReconnectDelayMs);
     }

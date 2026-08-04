@@ -33,10 +33,15 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
                 secondConnection.TrySetResult(true);
         };
 
+        // The subject here is a restart mid-session, so the framing must already be in
+        // transport mode. A NoiseWireFraming against this loopback server never gets there,
+        // which would make the server's normal-closure close the legacy-server signature
+        // (a permanent, deliberately un-retried failure) instead of the mid-session drop
+        // this test is about. StubFraming is transport-ready, so the close is a drop.
         await using var connection = new SendspinConnection(
             NullLogger<SendspinConnection>.Instance,
             new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
-            new NoiseWireFraming(SendspinIdentity.Generate()));
+            new StubFraming());
 
         var reconnecting = new TaskCompletionSource<bool>();
         connection.StateChanged += (_, e) =>
@@ -157,10 +162,14 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
                 secondConnection.TrySetResult(true);
         };
 
+        // A crash/container kill takes down an established session, so — as in
+        // CleanServerClose_DrivesReconnect — the framing must be in transport mode. With a
+        // NoiseWireFraming the drop would instead be an ambiguous mid-handshake failure and
+        // redial on HandshakeFailureBackoffMs (30s), well past this test's 10s window.
         await using var connection = new SendspinConnection(
             NullLogger<SendspinConnection>.Instance,
             new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
-            new NoiseWireFraming(SendspinIdentity.Generate()));
+            new StubFraming());
 
         var reconnecting = new TaskCompletionSource<bool>();
         connection.StateChanged += (_, e) =>

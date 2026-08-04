@@ -13,6 +13,12 @@ internal sealed class StubFraming : IWireFraming
 {
     public bool IsTransportReady { get; set; } = true;
 
+    /// <summary>
+    /// When set, every inbound frame trips the framing's fatal path with this reason —
+    /// standing in for a rejected handshake (bad PSK, unsupported suite, malformed input).
+    /// </summary>
+    public string? FatalOnInbound { get; set; }
+
     public IReadOnlyList<WireFrame> Start() => Array.Empty<WireFrame>();
 
     public IEnumerable<WireFrame> EncodeText(string json)
@@ -25,10 +31,15 @@ internal sealed class StubFraming : IWireFraming
         yield return WireFrame.FromBinary(data);
     }
 
-    public InboundFrameResult ProcessInbound(WireFrame frame) =>
-        frame.Kind == WireFrameKind.Text
+    public InboundFrameResult ProcessInbound(WireFrame frame)
+    {
+        if (FatalOnInbound is { } fatal)
+            return InboundFrameResult.Fatal(fatal);
+
+        return frame.Kind == WireFrameKind.Text
             ? InboundFrameResult.ForText(frame.PayloadAsText())
             : InboundFrameResult.ForBinary(frame.Payload);
+    }
 
     public void Reset()
     {
