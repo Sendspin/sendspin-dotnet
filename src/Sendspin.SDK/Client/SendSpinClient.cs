@@ -25,8 +25,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IStaticDelayStore? _staticDelayStore;
     private readonly INoiseSessionInfo _session;
-    private readonly SendspinIdentity _identity;
-    private readonly NoiseCipherSuite _suite;
     private bool _activateReceived;
     private readonly SourceStreamPipeline? _sourcePipeline;
     private readonly IAudioCaptureDevice? _captureDevice;
@@ -174,8 +172,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _logger = logger;
         _connection = connection;
         _session = session;
-        _identity = options.Identity;
-        _suite = options.Suite;
         _capabilities = options.Capabilities;
         _pairingStore = options.PairingRecordStore;
         _pinLockoutStore = options.PinLockoutStore;
@@ -281,10 +277,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    /// <summary>
-    /// Creates the ClientHello message from current capabilities.
-    /// Extracted for reuse between initial connection and reconnection handshakes.
-    /// </summary>
     private bool HasSourceRole()
         => _capabilities.Roles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
 
@@ -307,6 +299,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         await _connection.SendMessageAsync(message);
     }
 
+    /// <summary>
+    /// Creates the ClientHello message from current capabilities.
+    /// Extracted for reuse between initial connection and reconnection handshakes.
+    /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
         if (_capabilities.ArtworkChannels.Count > 4)
@@ -353,7 +349,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     Features = _capabilities.SourceLineSense ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
-            trustLevel: _session?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
+            trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
             supportedPairMethods: BuildPairMethods(),
             unpairedAccess: new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
         );
@@ -781,7 +777,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // activates source@v1 without user trust, refuse and close (spec).
         if (payload.ActiveRoles is not null
             && payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
-            && _session?.MatchedPsk?.Category != PskCategory.LongTerm)
+            && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
             _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
             _handshakeTcs?.TrySetResult(false);
@@ -906,11 +902,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Starts the client side of a pairing attempt when server/activate declares the
-    /// pairing activity. Only the (client-mandatory) Pairing PSK method is implemented:
-    /// the client generates the long-term PSK and delivers it in client/pair-finalize.
-    /// </summary>
-    /// <summary>
     /// Builds the supported_pair_methods list for the encrypted client/hello: the
     /// mandatory Pairing PSK plus any configured PIN methods with their descriptors,
     /// including current lockout state.
@@ -941,6 +932,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         return methods;
     }
 
+    /// <summary>
+    /// Starts the client side of a pairing attempt when server/activate declares the
+    /// pairing activity, dispatching on the method the server selected: Pairing PSK
+    /// generates the long-term PSK and delivers it in client/pair-finalize, and the PIN
+    /// methods begin a PIN attempt. Anything else is aborted.
+    /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
         _pinState = null;
@@ -1025,7 +1022,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         state.NonceA = PinPairing.DecodeB64Url(msg.Payload.NonceA);
-        var h = _session!.HandshakeHash!.Value.ToArray();
+        var h = _session.HandshakeHash!.Value.ToArray();
         string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, pinLength);
 
         // Emit the PIN via the app's out-channel for the operator to enter into the server.
@@ -1042,7 +1039,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Static PIN: the PIN is device-printed and known from the start.
         string pin = state.Dynamic ? state.Pin! : (_capabilities.StaticPin ?? string.Empty);
-        var h = _session!.HandshakeHash!.Value.ToArray();
+        var h = _session.HandshakeHash!.Value.ToArray();
         byte[] sid = PinPairing.BuildSid(h, (uint)_pairingCounter);
 
         var cpace = CPace.Start(
@@ -1258,7 +1255,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
 
                 _pairingStore!.Remove(pskId);
-                if (_session?.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
+                if (_session.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
                 {
                     _pendingSelfRemoval = true;
                 }
@@ -1324,7 +1321,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandleServerUnpair()
     {
-        var current = _session?.MatchedPsk;
+        var current = _session.MatchedPsk;
         if (current is null || current.Category != PskCategory.LongTerm)
         {
             _logger.LogDebug("server/unpair on a non-user-trust connection; ignoring");
@@ -1351,8 +1348,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// The connected tail shared by both handshake flows: runs when the legacy
-    /// server/hello arrives, or when the encrypted flow's initial server/activate does.
+    /// The connected tail of the handshake: runs when the initial server/activate arrives,
+    /// which is the point the encrypted handshake completes and the client may start sending.
     /// </summary>
     private void FinishHandshake()
     {
