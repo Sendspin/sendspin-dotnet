@@ -25,6 +25,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IStaticDelayStore? _staticDelayStore;
     private readonly INoiseSessionInfo? _noiseSession;
+    private readonly SendspinIdentity? _identity;
+    private readonly NoiseCipherSuite _suite = NoiseCipherSuite.ChaChaPoly;
     private bool _activateReceived;
     private readonly SourceStreamPipeline? _sourcePipeline;
     private readonly IAudioCaptureDevice? _captureDevice;
@@ -146,6 +148,35 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<string>? PairingCompleted;
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
+
+    /// <summary>
+    /// Constructs a client for the encrypted Sendspin protocol.
+    /// </summary>
+    /// <param name="session">
+    /// The Noise session backing this connection. In production this is the same
+    /// <see cref="NoiseWireFraming"/> instance the connection uses for framing.
+    /// </param>
+    public SendspinClientService(
+        ILogger<SendspinClientService> logger,
+        ISendspinConnection connection,
+        INoiseSessionInfo session,
+        SendspinClientOptions options)
+        : this(
+            logger,
+            connection,
+            options.ClockSynchronizer,
+            options.Capabilities,
+            options.AudioPipeline,
+            options.StaticDelayStore,
+            session,
+            options.PairingRecordStore,
+            options.PinLockoutStore,
+            options.CaptureDevice,
+            options.SourceEncoderFactory)
+    {
+        _identity = options.Identity;
+        _suite = options.Suite;
+    }
 
     public SendspinClientService(
         ILogger<SendspinClientService> logger,

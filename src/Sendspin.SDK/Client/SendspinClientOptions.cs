@@ -1,0 +1,53 @@
+using Sendspin.SDK.Audio;
+using Sendspin.SDK.Audio.Source;
+using Sendspin.SDK.Connection.Noise;
+using Sendspin.SDK.Connection.Noise.Pairing;
+using Sendspin.SDK.Synchronization;
+
+namespace Sendspin.SDK.Client;
+
+/// <summary>
+/// Everything a Sendspin client needs that is not the connection itself.
+/// </summary>
+/// <remarks>
+/// The identity is required: under the encrypted protocol a client's <c>client_id</c>
+/// IS its Curve25519 public key, so there is no such thing as a client without one.
+/// This type is the single construction seam for both the dial path
+/// (<see cref="SendspinClientService.CreateForDial"/>) and the listen path
+/// (<see cref="SendspinHostService"/>).
+/// </remarks>
+public sealed class SendspinClientOptions
+{
+    /// <summary>
+    /// Persistent Curve25519 identity. <c>client_id</c> is derived from it, and the spec
+    /// requires it to survive reboots — persist and reuse the same keypair.
+    /// </summary>
+    required public SendspinIdentity Identity { get; init; }
+
+    /// <summary>Pairing record store holding the PSKs this client has been paired with.</summary>
+    public IPairingRecordStore? PairingRecordStore { get; init; }
+
+    /// <summary>Roles, features and names advertised in <c>client/hello</c>.</summary>
+    public ClientCapabilities Capabilities { get; init; } = new();
+
+    /// <summary>Noise cipher suite announced in <c>client/init</c>.</summary>
+    public NoiseCipherSuite Suite { get; init; } = NoiseCipherSuite.ChaChaPoly;
+
+    /// <summary>Clock synchronizer. A <see cref="KalmanClockSynchronizer"/> is created when null.</summary>
+    public IClockSynchronizer? ClockSynchronizer { get; init; }
+
+    /// <summary>Audio pipeline for the player role.</summary>
+    public IAudioPipeline? AudioPipeline { get; init; }
+
+    /// <summary>Persistence for the player's static delay calibration.</summary>
+    public IStaticDelayStore? StaticDelayStore { get; init; }
+
+    /// <summary>Lockout counter persistence for the PIN pairing methods.</summary>
+    public IPinLockoutStore? PinLockoutStore { get; init; }
+
+    /// <summary>Capture device for the <c>source@v1</c> role.</summary>
+    public IAudioCaptureDevice? CaptureDevice { get; init; }
+
+    /// <summary>Encoder factory for the <c>source@v1</c> role.</summary>
+    public ISourceAudioEncoderFactory? SourceEncoderFactory { get; init; }
+}
