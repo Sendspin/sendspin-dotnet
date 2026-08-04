@@ -1,5 +1,9 @@
+using System.Net.WebSockets;
+using System.Text;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Framing;
 
 namespace Sendspin.SDK.Tests.Connection;
 
@@ -300,5 +304,111 @@ public class HandshakeFailureTests
         Assert.True(await secondConnection.Task.WaitAsync(TimeSpan.FromSeconds(10)),
             "A clean close after the server replied is ambiguous and must be retried");
         Assert.Null(permanent);
+    }
+
+    [Theory]
+    [InlineData(false, "does not support Sendspin encryption")]
+    [InlineData(true, "handshake rejected")]
+    public void FramingFatal_ClassifiesByTransportReadiness(bool transportReady, string expected)
+    {
+        var framing = new StubFraming
+        {
+            IsTransportReady = transportReady,
+            FatalOnInbound = "expected server/init message",
+        };
+
+        var result = framing.ProcessInbound(WireFrame.FromText("{}"));
+        Assert.NotNull(result.FatalReason);
+
+        // This mirrors the classification IncomingConnection applies before closing: the
+        // mode is read from `transportReady` (captured before ProcessInbound), not from
+        // framing.IsTransportReady after the call — StubFraming, like the real
+        // NoiseWireFraming.Fail(), drops IsTransportReady to false as part of going fatal,
+        // so a post-call read would collapse both cases to LegacyServer.
+        var failure = new SendspinHandshakeException(
+            transportReady
+                ? HandshakeFailureKind.HandshakeRejected
+                : HandshakeFailureKind.LegacyServer,
+            result.FatalReason);
+
+        Assert.Contains(expected, failure.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The test above pins the classification rule, but constructs the exception directly —
+    /// it never calls into <see cref="IncomingConnection"/>. This test drives a real
+    /// <see cref="IncomingConnection"/> through a real accepted WebSocket, the way
+    /// <c>SendSpinHostService</c> does, so it also catches the read-after-ProcessInbound
+    /// trap that hit Task 7's dial-path equivalent of this diagnostic: if
+    /// <c>IncomingConnection</c> read <c>IsTransportReady</c> after <c>ProcessInbound</c>
+    /// instead of before, both cases below would log the <c>LegacyServer</c> message.
+    /// </summary>
+    [Theory]
+    [InlineData(false, "does not support Sendspin encryption")]
+    [InlineData(true, "handshake rejected")]
+    public async Task IncomingConnection_LogsClassifiedFailure_OnFramingFatal(bool transportReady, string expected)
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var accepted = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (_, c) => accepted.TrySetResult(c);
+
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"), CancellationToken.None);
+
+        var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var logger = new CapturingLogger();
+        await using var incoming = new IncomingConnection(
+            logger,
+            serverSideSocket,
+            new StubFraming { IsTransportReady = transportReady, FatalOnInbound = "expected server/init message" });
+
+        var disconnected = new TaskCompletionSource<bool>();
+        incoming.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+                disconnected.TrySetResult(true);
+        };
+
+        await incoming.StartAsync();
+
+        // Mimics a Sendspin server dialing in and sending a message our framing rejects.
+        await client.SendAsync(
+            Encoding.UTF8.GetBytes("{}"), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
+
+        await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        (LogLevel Level, string Message) warning;
+        lock (logger.Entries)
+        {
+            warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        }
+
+        Assert.Contains(expected, warning.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Captures log calls so tests can assert on the classified message text.</summary>
+    private sealed class CapturingLogger : ILogger<IncomingConnection>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            lock (Entries)
+            {
+                Entries.Add((logLevel, formatter(state, exception)));
+            }
+        }
     }
 }

@@ -180,12 +180,22 @@ public sealed class IncomingConnection : ISendspinConnection
 
     private void DispatchInbound(WireFrame frame)
     {
+        // Capture before ProcessInbound: NoiseWireFraming.Fail() moves the phase to Failed
+        // as part of producing a fatal result, which drops IsTransportReady to false. Reading
+        // it after the call would misclassify every fatal as LegacyServer.
+        var wasTransportReady = _framing.IsTransportReady;
         var inbound = _framing.ProcessInbound(frame);
 
         if (inbound.FatalReason is { } fatal)
         {
+            var failure = new SendspinHandshakeException(
+                wasTransportReady
+                    ? HandshakeFailureKind.HandshakeRejected
+                    : HandshakeFailureKind.LegacyServer,
+                fatal);
+
             // Per spec: close without sending an application-level error message.
-            _logger.LogWarning("Wire framing failure: {Reason}; closing connection", fatal);
+            _logger.LogWarning("{Message}", failure.Message);
             _isOpen = false;
             _ = CloseSocketSafeAsync();
             SetState(ConnectionState.Disconnected, fatal);
