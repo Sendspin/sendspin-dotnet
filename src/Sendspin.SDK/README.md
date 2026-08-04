@@ -26,31 +26,35 @@ dotnet add package Sendspin.SDK
 
 ## Quick Start
 
+Under the encrypted Sendspin protocol, a client's `client_id` **is** its Curve25519 public
+key, so its identity must persist across restarts — `SendspinIdentity.Generate()` below is
+for a first run only; a real app loads a saved key on every run after that.
+
 ```csharp
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
-using Sendspin.SDK.Connection;
-using Sendspin.SDK.Synchronization;
+using Sendspin.SDK.Connection.Noise;
 
-// Create dependencies
+// Load a persisted identity, or generate and save one on first run.
+var identity = SendspinIdentity.Generate();
+
 var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
-var connection = new SendspinConnection(loggerFactory.CreateLogger<SendspinConnection>());
-var clockSync = new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>());
 
-// Create client with device info
-var capabilities = new ClientCapabilities
-{
-    ClientName = "My Player",
-    ProductName = "My Awesome Player",
-    Manufacturer = "My Company",
-    SoftwareVersion = "1.0.0"
-};
-
-var client = new SendspinClientService(
-    loggerFactory.CreateLogger<SendspinClientService>(),
-    connection,
-    clockSync,
-    capabilities
-);
+// CreateForDial wires the identity, wire framing, and Noise session together so they
+// can't drift apart.
+var client = SendspinClientService.CreateForDial(
+    loggerFactory,
+    new SendspinClientOptions
+    {
+        Identity = identity,
+        Capabilities = new ClientCapabilities
+        {
+            ClientName = "My Player",
+            ProductName = "My Awesome Player",
+            Manufacturer = "My Company",
+            SoftwareVersion = "1.0.0"
+        }
+    });
 
 // Connect to server
 await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
