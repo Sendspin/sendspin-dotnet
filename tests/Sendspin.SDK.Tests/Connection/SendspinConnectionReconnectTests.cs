@@ -66,10 +66,16 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
         var connected = new TaskCompletionSource<WebSocketClientConnection>();
         _server.ClientConnected += (_, c) => connected.TrySetResult(c);
 
+        // Unlike the other reconnect tests, this one calls DisconnectAsync, which sends a
+        // client/goodbye through the framing before closing. A NoiseWireFraming against this
+        // loopback server never reaches transport mode, so EncodeText would throw and the
+        // graceful WebSocket close (and the race it sets up against the receive loop) would
+        // never run — masking the ConnectionState.Disconnecting guard this test exists to
+        // cover. StubFraming stays transport-ready so the disconnect path runs as written.
         await using var connection = new SendspinConnection(
             NullLogger<SendspinConnection>.Instance,
             new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
-            new NoiseWireFraming(SendspinIdentity.Generate()));
+            new StubFraming());
 
         var sawReconnecting = false;
         connection.StateChanged += (_, e) =>
