@@ -1,14 +1,17 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Noise;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Discovery;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Loopback end-to-end coverage for multi-server arbitration: two FakeServers connect to the host's
-/// real listener, and each scenario asserts which connection receives a client/goodbye and with what
-/// reason — verifying the bytes on the wire, not just the decision logic.
+/// Loopback end-to-end coverage for multi-server arbitration: two FakeServers complete a real
+/// Noise handshake against the host's listener, and each scenario asserts which connection
+/// receives a client/goodbye and with what reason — verifying the bytes on the wire, not just
+/// the decision logic. Priority comes from each server/activate's activities.
 /// </summary>
 [Collection("RealSockets")]
 public class SendspinHostServiceArbitrationTests
@@ -20,13 +23,26 @@ public class SendspinHostServiceArbitrationTests
     // non-flaky under load, not as an expected duration.
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
+    private static readonly byte[] TestPsk = Enumerable.Repeat((byte)0x42, 32).ToArray();
+
     private static async Task<SendspinHostService> StartHostAsync(string? seed = null)
     {
+        var records = new InMemoryPairingRecordStore();
+
+        // A LongTerm record makes the session trust 'user', so a server/activate granting
+        // 'playback' is admissible. On the sentinel PSK it would be refused by the spec's
+        // admissibility table, which is not what these tests are exercising. The record is
+        // deliberately unbound: each FakeServer generates a fresh server identity, and a
+        // bound record whose server_id differs fails the handshake.
+        records.Upsert(new PairingRecord(TestPsk, PskCategory.LongTerm));
+
         var host = new SendspinHostService(
             NullLoggerFactory.Instance,
             listenerOptions: new ListenerOptions { Port = 0 },
             advertiserOptions: new AdvertiserOptions { Enabled = false },
-            lastPlayedServerId: seed);
+            lastPlayedServerId: seed,
+            identity: SendspinIdentity.Generate(),
+            pairingRecordStore: records);
 
         await host.StartAsync(); // prevent real network servers from racing into arbitration
         return host;
@@ -65,25 +81,25 @@ public class SendspinHostServiceArbitrationTests
     public async Task SingleDiscoveryServer_IsAcceptedWithoutGoodbye()
     {
         await using var host = await StartHostAsync();
-        await using var server = new FakeServer("srv-only", "discovery");
+        await using var server = new FakeServer(TestPsk, []);
         await server.ConnectAsync(host.ListeningPort);
-        await WaitForServerConnectedAsync(host, "srv-only");
+        await WaitForServerConnectedAsync(host, server.ServerId);
 
         var reason = await server.WaitForGoodbyeAsync(TimeSpan.FromMilliseconds(750));
 
         Assert.Null(reason); // accepted, stayed connected
-        Assert.Contains(host.ConnectedServers, c => c.ServerId == "srv-only");
+        Assert.Contains(host.ConnectedServers, c => c.ServerId == server.ServerId);
     }
 
     [Fact]
     public async Task NewPlaybackServer_SwitchesAndSendsAnotherServerToExisting()
     {
         await using var host = await StartHostAsync();
-        await using var existing = new FakeServer("srv-existing", "discovery");
+        await using var existing = new FakeServer(TestPsk, []);
         await existing.ConnectAsync(host.ListeningPort);
-        await WaitForServerConnectedAsync(host, "srv-existing");
+        await WaitForServerConnectedAsync(host, existing.ServerId);
 
-        await using var incoming = new FakeServer("srv-new", "playback");
+        await using var incoming = new FakeServer(TestPsk, ["playback"]);
         await incoming.ConnectAsync(host.ListeningPort);
 
         Assert.Equal("another_server", await existing.WaitForGoodbyeAsync(Timeout));
@@ -93,11 +109,11 @@ public class SendspinHostServiceArbitrationTests
     public async Task NewDiscoveryServer_AgainstPlaybackExisting_IsRejectedWithConcurrentAttempt()
     {
         await using var host = await StartHostAsync();
-        await using var existing = new FakeServer("srv-existing", "playback");
+        await using var existing = new FakeServer(TestPsk, ["playback"]);
         await existing.ConnectAsync(host.ListeningPort);
-        await WaitForServerConnectedAsync(host, "srv-existing");
+        await WaitForServerConnectedAsync(host, existing.ServerId);
 
-        await using var incoming = new FakeServer("srv-new", "discovery");
+        await using var incoming = new FakeServer(TestPsk, []);
         await incoming.ConnectAsync(host.ListeningPort);
 
         Assert.Equal("concurrent_attempt", await incoming.WaitForGoodbyeAsync(Timeout));
@@ -106,12 +122,14 @@ public class SendspinHostServiceArbitrationTests
     [Fact]
     public async Task BothDiscovery_LastPlayedNewServer_WinsTieAndExistingGetsAnotherServer()
     {
-        await using var host = await StartHostAsync(seed: "srv-new");
-        await using var existing = new FakeServer("srv-existing", "discovery");
+        // The incoming server is built first because its real server_id is what the host has
+        // to be seeded with as the last-played server.
+        await using var incoming = new FakeServer(TestPsk, []);
+        await using var host = await StartHostAsync(seed: incoming.ServerId);
+        await using var existing = new FakeServer(TestPsk, []);
         await existing.ConnectAsync(host.ListeningPort);
-        await WaitForServerConnectedAsync(host, "srv-existing");
+        await WaitForServerConnectedAsync(host, existing.ServerId);
 
-        await using var incoming = new FakeServer("srv-new", "discovery");
         await incoming.ConnectAsync(host.ListeningPort);
 
         Assert.Equal("another_server", await existing.WaitForGoodbyeAsync(Timeout));
@@ -121,11 +139,15 @@ public class SendspinHostServiceArbitrationTests
     public async Task SameServerReconnect_SendsUserRequestToStaleConnection()
     {
         await using var host = await StartHostAsync();
-        await using var first = new FakeServer("srv-1", "discovery");
-        await first.ConnectAsync(host.ListeningPort);
-        await WaitForServerConnectedAsync(host, "srv-1");
 
-        await using var second = new FakeServer("srv-1", "discovery"); // same server_id reconnecting
+        // Both connections are the SAME server, and server_id is the static public key, so
+        // the two instances have to share one key pair to present one identity.
+        var keys = KeyPair.Generate();
+        await using var first = new FakeServer(TestPsk, [], keys);
+        await first.ConnectAsync(host.ListeningPort);
+        await WaitForServerConnectedAsync(host, first.ServerId);
+
+        await using var second = new FakeServer(TestPsk, [], keys); // same server_id reconnecting
         await second.ConnectAsync(host.ListeningPort);
 
         Assert.Equal("user_request", await first.WaitForGoodbyeAsync(Timeout));
