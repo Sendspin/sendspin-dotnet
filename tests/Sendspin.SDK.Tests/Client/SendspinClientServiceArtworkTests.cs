@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -11,10 +10,6 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceArtworkTests
 {
-    private const string ServerHelloJson = """
-        { "type": "server/hello", "payload": { "server_id": "s", "version": 1, "active_roles": ["artwork@v1"] } }
-        """;
-
     private static byte[] ArtworkBinary(byte type, long timestamp, byte[] image)
     {
         var buf = new byte[9 + image.Length];
@@ -25,13 +20,10 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
-    public async Task ClientHello_AdvertisesAllConfiguredArtworkChannels()
+    public void ClientHello_AdvertisesAllConfiguredArtworkChannels()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: new ClientCapabilities
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options.Capabilities = new ClientCapabilities
             {
                 ArtworkChannels = new List<ArtworkChannelSpec>
                 {
@@ -39,10 +31,9 @@ public class SendspinClientServiceArtworkTests
                     new() { Source = ArtworkSources.Artist, Format = "png", MediaWidth = 256, MediaHeight = 256 },
                 },
             });
+        using var _c = client;
 
-        var connectTask = client.ConnectAsync(new Uri("ws://test"));
-        connection.RaiseTextMessageReceived(ServerHelloJson); // completes the handshake
-        await connectTask;
+        TestClient.CompleteHandshake(connection, "artwork@v1");
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
         var channels = hello.Payload.ArtworkV1Support?.Channels;
@@ -54,16 +45,12 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
-    public async Task ClientHello_DefaultCapabilities_AdvertisesSingleAlbumChannel()
+    public void ClientHello_DefaultCapabilities_AdvertisesSingleAlbumChannel()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection); // default capabilities
+        var (client, connection, _) = TestClient.Create(); // default capabilities
+        using var _c = client;
 
-        var connectTask = client.ConnectAsync(new Uri("ws://test"));
-        connection.RaiseTextMessageReceived(ServerHelloJson);
-        await connectTask;
+        TestClient.CompleteHandshake(connection, "artwork@v1");
 
         var channels = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.ArtworkV1Support?.Channels;
         Assert.NotNull(channels);
@@ -75,22 +62,18 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
-    public async Task ClientHello_CapsAdvertisedChannelsAtFour()
+    public void ClientHello_CapsAdvertisedChannelsAtFour()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: new ClientCapabilities
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options.Capabilities = new ClientCapabilities
             {
                 ArtworkChannels = Enumerable.Range(0, 6)
                     .Select(i => new ArtworkChannelSpec { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = i, MediaHeight = i })
                     .ToList(),
             });
+        using var _c = client;
 
-        var connectTask = client.ConnectAsync(new Uri("ws://test"));
-        connection.RaiseTextMessageReceived(ServerHelloJson);
-        await connectTask;
+        TestClient.CompleteHandshake(connection, "artwork@v1");
 
         var channels = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.ArtworkV1Support?.Channels;
         Assert.NotNull(channels);
@@ -107,10 +90,8 @@ public class SendspinClientServiceArtworkTests
     [InlineData(BinaryMessageTypes.Artwork3, 3)]
     public void ArtworkBinary_RaisesReceivedWithChannelAndTimestamp(byte type, int expectedChannel)
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         ArtworkReceivedEventArgs? received = null;
         client.ArtworkReceived += (_, e) => received = e;
@@ -129,10 +110,8 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void MalformedArtworkBinary_RaisesNoEvent()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         var fired = false;
         client.ArtworkReceived += (_, _) => fired = true;
@@ -148,10 +127,8 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void EmptyArtworkBinary_RaisesClearedWithChannel()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         ArtworkClearedEventArgs? cleared = null;
         ArtworkReceivedEventArgs? received = null;
@@ -170,10 +147,8 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public async Task RequestArtworkFormatAsync_SendsArtworkRequestFormat()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.None, format: "png", mediaWidth: 128, mediaHeight: 128);
 
@@ -190,10 +165,8 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public async Task RequestArtworkFormatAsync_OmitsUnsetFields()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.RequestArtworkFormatAsync(channel: 0, source: ArtworkSources.None);
 
