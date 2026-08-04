@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Connection;
 
@@ -34,7 +35,8 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
 
         await using var connection = new SendspinConnection(
             NullLogger<SendspinConnection>.Instance,
-            new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true });
+            new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
+            new NoiseWireFraming(SendspinIdentity.Generate()));
 
         var reconnecting = new TaskCompletionSource<bool>();
         connection.StateChanged += (_, e) =>
@@ -66,7 +68,8 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
 
         await using var connection = new SendspinConnection(
             NullLogger<SendspinConnection>.Instance,
-            new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true });
+            new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
+            new NoiseWireFraming(SendspinIdentity.Generate()));
 
         var sawReconnecting = false;
         connection.StateChanged += (_, e) =>
@@ -105,7 +108,8 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
                 KeepAliveTimeoutMs = 200,
                 ReconnectDelayMs = 100,
                 AutoReconnect = true,
-            });
+            },
+            new NoiseWireFraming(SendspinIdentity.Generate()));
 
         var sawHandshaking = false;
         var reconnecting = new TaskCompletionSource<bool>();
@@ -149,7 +153,8 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
 
         await using var connection = new SendspinConnection(
             NullLogger<SendspinConnection>.Instance,
-            new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true });
+            new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
+            new NoiseWireFraming(SendspinIdentity.Generate()));
 
         var reconnecting = new TaskCompletionSource<bool>();
         connection.StateChanged += (_, e) =>

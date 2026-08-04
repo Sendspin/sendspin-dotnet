@@ -36,12 +36,12 @@ public sealed class SendspinConnection : ISendspinConnection
 
     public SendspinConnection(
         ILogger<SendspinConnection> logger,
-        ConnectionOptions? options = null,
-        IWireFraming? framing = null)
+        ConnectionOptions? options,
+        IWireFraming framing)
     {
         _logger = logger;
         _options = options ?? new ConnectionOptions();
-        _framing = framing ?? PlaintextWireFraming.Instance;
+        _framing = framing;
     }
 
     public async Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)

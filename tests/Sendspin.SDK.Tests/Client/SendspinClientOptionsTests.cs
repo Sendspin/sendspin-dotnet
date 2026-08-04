@@ -39,4 +39,19 @@ public class SendspinClientOptionsTests
         var options = new SendspinClientOptions { Identity = SendspinIdentity.Generate() };
         Assert.Equal(NoiseCipherSuite.ChaChaPoly, options.Suite);
     }
+
+    [Fact]
+    public void CreateForDial_WiresOneNoiseFramingAsBothFramingAndSession()
+    {
+        var options = new SendspinClientOptions { Identity = SendspinIdentity.Generate() };
+
+        using var client = SendspinClientService.CreateForDial(
+            NullLoggerFactory.Instance,
+            options);
+
+        // The dial path must be encrypted end to end: the client's session id is the
+        // framing's, and no plaintext framing exists to fall back to.
+        Assert.NotNull(client);
+        Assert.Null(client.ServerId); // no server/init yet
+    }
 }

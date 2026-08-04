@@ -9,22 +9,21 @@ namespace Sendspin.SDK.Connection.Framing;
 /// implementation owns the cryptographic handshake (emitting its opening frames via
 /// <see cref="Start"/> and responding through <see cref="InboundFrameResult.Replies"/>),
 /// encrypts outbound application frames, decrypts inbound ones, and splits/reassembles
-/// fragmented messages. The plaintext implementation
-/// (<see cref="PlaintextWireFraming"/>) is a 1:1 passthrough.
+/// fragmented messages.
 /// Implementations need not be thread-safe: connections serialize encode calls under
 /// their send lock and process inbound frames on a single receive path.
 /// </remarks>
 public interface IWireFraming
 {
     /// <summary>
-    /// Whether application frames may currently flow. Always true for plaintext framing;
-    /// false for an encrypted framing until its handshake completes.
+    /// Whether application frames may currently flow; false for an encrypted framing
+    /// until its handshake completes.
     /// </summary>
     bool IsTransportReady { get; }
 
     /// <summary>
     /// Wire frames to transmit immediately after the underlying socket opens
-    /// (e.g. an encrypted framing's first handshake message). Empty for plaintext framing.
+    /// (e.g. an encrypted framing's first handshake message).
     /// </summary>
     IReadOnlyList<WireFrame> Start();
 

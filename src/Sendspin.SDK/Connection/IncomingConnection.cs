@@ -30,11 +30,11 @@ public sealed class IncomingConnection : ISendspinConnection
     public IncomingConnection(
         ILogger<IncomingConnection> logger,
         WebSocketClientConnection socket,
-        IWireFraming? framing = null)
+        IWireFraming framing)
     {
         _logger = logger;
         _socket = socket;
-        _framing = framing ?? PlaintextWireFraming.Instance;
+        _framing = framing;
 
         // Get server address from connection info
         var clientIp = socket.ClientIpAddress;

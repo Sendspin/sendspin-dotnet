@@ -2201,4 +2201,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         await _connection.SendMessageAsync(ClientStateMessage.CreateError(message));
     }
+
+    /// <summary>
+    /// Builds a client that dials a server, wiring one <see cref="NoiseWireFraming"/> as
+    /// both the connection's framing and the client's Noise session so the two cannot
+    /// drift apart.
+    /// </summary>
+    public static SendspinClientService CreateForDial(
+        ILoggerFactory loggerFactory,
+        SendspinClientOptions options,
+        ConnectionOptions? connectionOptions = null)
+    {
+        var framing = new NoiseWireFraming(
+            options.Identity,
+            options.PairingRecordStore is null ? null : new RecordPskResolver(options.PairingRecordStore),
+            options.Suite);
+
+        var connection = new SendspinConnection(
+            loggerFactory.CreateLogger<SendspinConnection>(),
+            connectionOptions,
+            framing);
+
+        return new SendspinClientService(
+            loggerFactory.CreateLogger<SendspinClientService>(),
+            connection,
+            framing,
+            options);
+    }
 }
