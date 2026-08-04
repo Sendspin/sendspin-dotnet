@@ -38,11 +38,14 @@ public class SendspinHostServiceArbitrationTests
 
         var host = new SendspinHostService(
             NullLoggerFactory.Instance,
+            new SendspinClientOptions
+            {
+                Identity = SendspinIdentity.Generate(),
+                PairingRecordStore = records,
+            },
             listenerOptions: new ListenerOptions { Port = 0 },
             advertiserOptions: new AdvertiserOptions { Enabled = false },
-            lastPlayedServerId: seed,
-            identity: SendspinIdentity.Generate(),
-            pairingRecordStore: records);
+            lastPlayedServerId: seed);
 
         await host.StartAsync(); // prevent real network servers from racing into arbitration
         return host;

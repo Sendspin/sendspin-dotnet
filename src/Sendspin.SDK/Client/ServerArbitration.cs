@@ -37,15 +37,6 @@ internal static class ServerArbitration
     private const string ConcurrentAttempt = "concurrent_attempt";
 
     /// <summary>
-    /// Maps a legacy connection_reason to its priority class: 'playback' ranks as
-    /// playback; anything else (including 'discovery' and absent) as empty.
-    /// </summary>
-    internal static ConnectionPriority FromConnectionReason(string? reason)
-        => string.Equals(reason ?? "discovery", "playback", StringComparison.OrdinalIgnoreCase)
-            ? ConnectionPriority.Playback
-            : ConnectionPriority.Empty;
-
-    /// <summary>
     /// Maps a server/activate activities set to its priority class: the highest-ranked
     /// declared activity, or empty for an empty set.
     /// </summary>

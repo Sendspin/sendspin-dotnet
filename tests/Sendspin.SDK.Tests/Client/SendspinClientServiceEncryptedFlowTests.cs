@@ -274,4 +274,29 @@ public class SendspinClientServiceEncryptedFlowTests
         Assert.Equal(ConnectionState.Disconnected, connection.State);
         Assert.Equal("pairing_required", connection.LastDisconnectReason);
     }
+
+    [Fact]
+    public void ServerActivate_WithNullMatchedPsk_AlwaysDisconnects_NoBypassPath()
+    {
+        // Before the clean break, ValidateActivateAdmissibility had a `psk is null => return
+        // true` bypass. TestClient.Create always seeds a non-null MatchedPsk, so that branch
+        // needs its own coverage: a session that somehow completed with no matched PSK must
+        // still be refused, never waved through.
+        var (client, connection, session) = TestClient.Create(
+            category: PskCategory.Sentinel,
+            unpairedAccess: false);
+        using var _c = client;
+        session.MatchedPsk = null;
+
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
+            """);
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
 }

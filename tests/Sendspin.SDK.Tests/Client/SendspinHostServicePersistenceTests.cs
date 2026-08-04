@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Client;
 
@@ -11,7 +12,11 @@ namespace Sendspin.SDK.Tests.Client;
 public class SendspinHostServicePersistenceTests
 {
     private static SendspinHostService NewHost(ILastPlayedServerStore? store = null, string? seed = null) =>
-        new(NullLoggerFactory.Instance, lastPlayedServerId: seed, lastPlayedServerStore: store);
+        new(
+            NullLoggerFactory.Instance,
+            new SendspinClientOptions { Identity = SendspinIdentity.Generate() },
+            lastPlayedServerId: seed,
+            lastPlayedServerStore: store);
 
     [Fact]
     public async Task Construction_SeedsLastPlayedFromStore()
