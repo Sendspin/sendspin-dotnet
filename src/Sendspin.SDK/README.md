@@ -313,10 +313,14 @@ public sealed class FileStaticDelayStore : IStaticDelayStore
         => File.WriteAllText(path, staticDelayMs.ToString(CultureInfo.InvariantCulture));
 }
 
-var client = new SendspinClientService(
-    logger, connection, clockSync, capabilities,
-    audioPipeline: pipeline,
-    staticDelayStore: new FileStaticDelayStore());
+var client = SendspinClientService.CreateForDial(
+    loggerFactory,
+    new SendspinClientOptions
+    {
+        Identity = identity,          // the persisted identity from Quick Start
+        AudioPipeline = pipeline,
+        StaticDelayStore = new FileStaticDelayStore(),
+    });
 ```
 
 When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
@@ -466,10 +470,14 @@ var caps = new ClientCapabilities
     SourceLineSense = true,                  // optional: report signal presence
 };
 
-var client = new SendspinClientService(
-    logger, connection,
-    capabilities: caps,
-    captureDevice: myCaptureDevice);         // IAudioCaptureDevice
+var client = SendspinClientService.CreateForDial(
+    loggerFactory,
+    new SendspinClientOptions
+    {
+        Identity = identity,                 // the persisted identity from Quick Start
+        Capabilities = caps,
+        CaptureDevice = myCaptureDevice,     // IAudioCaptureDevice
+    });
 ```
 
 Streaming is **server-driven**: the source never streams until the server sends
