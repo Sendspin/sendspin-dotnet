@@ -351,7 +351,9 @@ internal static class TestClient
 }
 ```
 
-> `configure` exists because `SendspinClientOptions` uses `init` properties: a test that needs a capture device or audio pipeline mutates the options before construction rather than after.
+> **Correction applied during execution:** `Action<SendspinClientOptions>` does not compile — `SendspinClientOptions` is `init`-only throughout, so assigning inside the callback is CS8852. The shipped helper takes `Action<TestClientOptions>`, a mutable 1:1 mirror copied into the real options at construction. Call sites are unchanged (the lambda's type is inferred), so the usage shown in later tasks still holds. The two types must be kept in sync by hand — a new property on `SendspinClientOptions` produces no compile error, only an option tests cannot set.
+>
+> `CompleteHandshake`'s raw string also needs `$$$` with `{{{roles}}}`, not `$$`/`{{roles}}`: the `server/activate` JSON ends in `]}}`, a two-brace run, so a `$$` prefix hits CS9007.
 
 - [ ] **Step 2: Verify the helper compiles against the existing suite**
 
@@ -480,6 +482,8 @@ git commit -m "test: pin that an inadmissible server/activate always disconnects
 ```
 
 - [ ] **Step 3: Make the session non-nullable and delete the old constructor**
+
+> **Carried forward from Task 2:** `SendspinClientServiceEncryptedFlowTests.LegacyFlow_WithoutNoiseSession_IsUnchanged` is the last caller of the legacy constructor and the only coverage of the legacy branch in `HandleServerHello`. Task 2 deliberately left it. Delete that test in this step — it cannot compile once the constructor is gone, and its subject is the path being removed. Expect the suite total to drop by one.
 
 In `SendSpinClient.cs`, change the field at line 27:
 
