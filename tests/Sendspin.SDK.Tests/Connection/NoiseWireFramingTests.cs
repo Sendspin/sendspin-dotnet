@@ -1,11 +1,7 @@
-using System.Buffers.Text;
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using Noise;
 using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Connection.Noise;
-using NoiseProtocol = Noise.Protocol;
 
 namespace Sendspin.SDK.Tests.Connection;
 
@@ -53,7 +49,7 @@ public class NoiseWireFramingTests
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity);
-        var server = new TestNoiseServer(identity, psk: RandomNumberGenerator.GetBytes(32));
+        var server = new TestNoiseServer(identity.PublicKey, psk: RandomNumberGenerator.GetBytes(32));
 
         var clientInit = Assert.Single(framing.Start());
         var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
@@ -71,7 +67,7 @@ public class NoiseWireFramingTests
         var identity = SendspinIdentity.Generate();
         var resolver = new BoundResolver("SomeOtherServerIdAAAAAAAAAAAAAAAAAAAAAAAAAA");
         var framing = new NoiseWireFraming(identity, resolver);
-        var server = new TestNoiseServer(identity, NoiseConstants.SentinelPsk.ToArray());
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
 
         var clientInit = Assert.Single(framing.Start());
         var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
@@ -206,7 +202,7 @@ public class NoiseWireFramingTests
         byte[] newPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
         store.Upsert(new PairingRecord(newPsk, PskCategory.LongTerm));
         var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
-        var server = new TestNoiseServer(identity, NoiseConstants.SentinelPsk.ToArray());
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
 
         var clientInit = Assert.Single(framing.Start());
         var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
@@ -240,7 +236,7 @@ public class NoiseWireFramingTests
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity);
-        var server = new TestNoiseServer(identity, NoiseConstants.SentinelPsk.ToArray());
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
 
         var clientInit = Assert.Single(framing.Start());
         var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
@@ -258,166 +254,5 @@ public class NoiseWireFramingTests
     {
         public NoisePsk? Resolve(string pskId) =>
             new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.LongTerm, serverId);
-    }
-
-    /// <summary>Server-side Noise initiator, mirroring aiosendspin's server role.</summary>
-    private sealed class TestNoiseServer
-    {
-        private readonly KeyPair _keys = KeyPair.Generate();
-        private readonly SendspinIdentity _clientIdentity;
-        private readonly byte[] _psk;
-        private HandshakeState? _state;
-        private Transport? _transport;
-
-        public string ServerId { get; }
-
-        public TestNoiseServer(SendspinIdentity clientIdentity, byte[] psk)
-        {
-            _clientIdentity = clientIdentity;
-            _psk = psk;
-            ServerId = Base64Url.EncodeToString(_keys.PublicKey);
-        }
-
-        public (string ServerInitText, string Msg1Text) Respond(string clientInitText)
-        {
-            string serverInitText = JsonSerializer.Serialize(new Dictionary<string, object>
-            {
-                ["type"] = "server/init",
-                ["payload"] = new Dictionary<string, object> { ["server_id"] = ServerId, ["version"] = 1 },
-            });
-
-            byte[] prologue = Encoding.UTF8.GetBytes(clientInitText + serverInitText);
-            var protocol = NoiseProtocol.Parse("Noise_KKpsk2_25519_ChaChaPoly_SHA256".AsSpan());
-            _state = protocol.Create(
-                initiator: true, prologue: prologue,
-                s: (byte[])_keys.PrivateKey.Clone(),
-                rs: _clientIdentity.PublicKey.ToArray(),
-                psks: [_psk]);
-
-            string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
-            {
-                ["psk_id"] = NoiseConstants.DerivePskId(_psk),
-            });
-            var buf = new byte[NoiseProtocol.MaxMessageLength];
-            var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(msg1Payload), buf);
-
-            string msg1Text = JsonSerializer.Serialize(new Dictionary<string, object>
-            {
-                ["type"] = "noise/handshake",
-                ["payload"] = new Dictionary<string, object> { ["data"] = Base64Url.EncodeToString(buf.AsSpan(0, len)) },
-            });
-            return (serverInitText, msg1Text);
-        }
-
-        public byte[]? HandshakeHash { get; private set; }
-
-        public void CompleteHandshake(string msg2Text)
-        {
-            using var doc = JsonDocument.Parse(msg2Text);
-            byte[] msg2 = Base64Url.DecodeFromChars(
-                doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
-            var buf = new byte[NoiseProtocol.MaxMessageLength];
-            var (_, hash, transport) = _state!.ReadMessage(msg2, buf);
-            _transport = transport ?? throw new InvalidOperationException("handshake incomplete");
-            HandshakeHash = hash;
-            _state.Dispose();
-        }
-
-        /// <summary>Initiates an in-band re-handshake to a new PSK; returns the encrypted msg1 frame.</summary>
-        public byte[] StartRehandshake(byte[] newPsk)
-        {
-            var protocol = NoiseProtocol.Parse("Noise_KKpsk2_25519_ChaChaPoly_SHA256".AsSpan());
-            _state = protocol.Create(
-                initiator: true, prologue: HandshakeHash!,
-                s: (byte[])_keys.PrivateKey.Clone(),
-                rs: _clientIdentity.PublicKey.ToArray(),
-                psks: [newPsk]);
-            string payload = JsonSerializer.Serialize(new Dictionary<string, string>
-            {
-                ["psk_id"] = NoiseConstants.DerivePskId(newPsk),
-            });
-            var buf = new byte[NoiseProtocol.MaxMessageLength];
-            var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(payload), buf);
-            string msg1Text = JsonSerializer.Serialize(new Dictionary<string, object>
-            {
-                ["type"] = "noise/handshake",
-                ["payload"] = new Dictionary<string, object> { ["data"] = Base64Url.EncodeToString(buf.AsSpan(0, len)) },
-            });
-            byte[] plain = [0, .. Encoding.UTF8.GetBytes(msg1Text)];
-            return EncryptFrame(plain);
-        }
-
-        /// <summary>Completes the re-handshake from the client's encrypted msg2 reply (old keys).</summary>
-        public void CompleteRehandshake(byte[] encryptedReply)
-        {
-            byte[] plain = DecryptFrame(encryptedReply);
-            Assert.Equal(0, plain[0]);
-            CompleteHandshake(Encoding.UTF8.GetString(plain[1..]));
-        }
-
-        public byte[] EncryptFrame(byte[] plaintext)
-        {
-            var buf = new byte[plaintext.Length + 16];
-            int written = _transport!.WriteMessage(plaintext, buf);
-            return buf[..written];
-        }
-
-        public byte[] DecryptFrame(byte[] ciphertext)
-        {
-            var buf = new byte[ciphertext.Length];
-            int len = _transport!.ReadMessage(ciphertext, buf);
-            return buf[..len];
-        }
-
-        public IEnumerable<byte[]> EncryptFragmented(byte[] appMessage)
-        {
-            byte origType = appMessage[0];
-            ReadOnlyMemory<byte> remaining = appMessage.AsMemory(1);
-            bool first = true;
-            while (true)
-            {
-                int headerLen = first ? 2 : 1;
-                int chunkLen = Math.Min(remaining.Length, NoiseConstants.MaxTransportPlaintext - headerLen);
-                bool isLast = chunkLen == remaining.Length;
-
-                var fragment = new byte[headerLen + chunkLen];
-                fragment[0] = isLast ? NoiseConstants.MessageTypeFragmentEnd : NoiseConstants.MessageTypeFragmentMore;
-                if (first)
-                    fragment[1] = origType;
-                remaining[..chunkLen].CopyTo(fragment.AsMemory(headerLen));
-                yield return EncryptFrame(fragment);
-
-                if (isLast)
-                    yield break;
-                remaining = remaining[chunkLen..];
-                first = false;
-            }
-        }
-
-        public byte[] DecryptAndReassemble(IEnumerable<byte[]> frames)
-        {
-            using var assembled = new MemoryStream();
-            byte? origType = null;
-            foreach (var frame in frames)
-            {
-                byte[] plaintext = DecryptFrame(frame);
-                if (origType is null && plaintext[0] is not (NoiseConstants.MessageTypeFragmentMore or NoiseConstants.MessageTypeFragmentEnd))
-                {
-                    return plaintext;
-                }
-
-                if (origType is null)
-                {
-                    origType = plaintext[1];
-                    assembled.Write(plaintext.AsSpan(2));
-                }
-                else
-                {
-                    assembled.Write(plaintext.AsSpan(1));
-                }
-            }
-
-            return [origType!.Value, .. assembled.ToArray()];
-        }
     }
 }
