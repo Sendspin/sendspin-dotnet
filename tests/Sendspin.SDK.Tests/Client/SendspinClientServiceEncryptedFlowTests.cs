@@ -14,39 +14,18 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceEncryptedFlowTests
 {
-    private const string FakeServerId = "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo";
-
-    private sealed class FakeNoiseSession : INoiseSessionInfo
-    {
-        public string? ServerId { get; set; } = FakeServerId;
-        public NoisePsk? MatchedPsk { get; set; }
-        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
-    }
-
-    private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session)
-        CreateEncryptedClient(bool unpairedAccess = false, PskCategory category = PskCategory.Sentinel)
-    {
-        var connection = new FakeSendspinConnection();
-        var session = new FakeNoiseSession
-        {
-            MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), category),
-        };
-        var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: new ClientCapabilities { UnpairedAccessEnabled = unpairedAccess },
-            noiseSession: session);
-        // Put the fake in the Connected state so admissibility outcomes are observable:
-        // inadmissible activates disconnect (with a recorded reason), admissible ones don't.
-        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
-        return (client, connection, session);
-    }
+    /// <summary>
+    /// The fake is put in the Connected state before each scenario so admissibility outcomes are
+    /// observable: inadmissible activates disconnect (with a recorded reason), admissible ones don't.
+    /// </summary>
+    private static readonly Uri ServerUri = new("ws://test.local:8927/sendspin");
 
     [Fact]
     public void ServerHello_TriggersEncryptedClientHello_WithoutClientIdOrVersion()
     {
-        var (client, connection, _) = CreateEncryptedClient();
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -66,15 +45,16 @@ public class SendspinClientServiceEncryptedFlowTests
         Assert.Contains("\"trust_level\":\"none\"", json);
 
         // Identity comes from server/init via the Noise session
-        Assert.Equal(FakeServerId, client.ServerId);
+        Assert.Equal(FakeNoiseSession.FakeServerId, client.ServerId);
         Assert.Equal("srv", client.ServerName);
     }
 
     [Fact]
     public void HandshakeCompletes_OnInitialServerActivate_NotOnServerHello()
     {
-        var (client, connection, _) = CreateEncryptedClient();
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         int helloEvents = 0;
         int activateEvents = 0;
@@ -104,8 +84,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void ActivateRoles_MirroredIntoLastServerHello_AndPersistAcrossOmission()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: true);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -127,8 +108,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_PlaybackWithoutUnpairedAccess_ClosesWithPairingRequired()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: false);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -145,8 +127,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_PlaybackWithUnpairedAccess_IsAdmissible()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: true);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -162,8 +145,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_ManagementActivity_ClosesUnauthorized()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: true);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -180,8 +164,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void LongTermPsk_PlaybackAndManagement_IsAdmissible()
     {
-        var (client, connection, _) = CreateEncryptedClient(category: PskCategory.LongTerm);
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -196,8 +181,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_EmptyActivitiesWithRoles_WithoutUnpairedAccess_Closes()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: false);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}

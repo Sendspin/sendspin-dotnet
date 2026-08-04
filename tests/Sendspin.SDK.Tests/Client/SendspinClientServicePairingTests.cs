@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Protocol.Messages;
@@ -12,25 +11,14 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServicePairingTests
 {
-    private const string ServerId = "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo";
-
-    private sealed class FakeNoiseSession : INoiseSessionInfo
-    {
-        public string? ServerId { get; set; } = SendspinClientServicePairingTests.ServerId;
-        public NoisePsk? MatchedPsk { get; set; } =
-            new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Pairing);
-        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
-    }
+    private const string ServerId = FakeNoiseSession.FakeServerId;
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPairingRecordStore) Create()
     {
-        var connection = new FakeSendspinConnection();
         var store = new InMemoryPairingRecordStore();
-        var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            noiseSession: new FakeNoiseSession(),
-            pairingRecordStore: store);
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Pairing,
+            configure: options => options.PairingRecordStore = store);
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         return (client, connection, store);

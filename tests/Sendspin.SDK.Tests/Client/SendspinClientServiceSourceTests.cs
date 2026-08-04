@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Audio.Source;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
@@ -15,14 +14,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceSourceTests
 {
-    private const string ServerId = "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo";
-
-    private sealed class FakeNoiseSession : INoiseSessionInfo
-    {
-        public string? ServerId { get; set; } = SendspinClientServiceSourceTests.ServerId;
-        public NoisePsk? MatchedPsk { get; set; } = new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.LongTerm, SendspinClientServiceSourceTests.ServerId);
-        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
-    }
+    private const string ServerId = FakeNoiseSession.FakeServerId;
 
     private sealed class FakeCaptureDevice : IAudioCaptureDevice
     {
@@ -41,7 +33,6 @@ public class SendspinClientServiceSourceTests
     private static (SendspinClientService, FakeSendspinConnection, FakeCaptureDevice) CreateSourceClient(
         bool lineSense = false, PskCategory trust = PskCategory.LongTerm, bool unpairedAccess = false)
     {
-        var connection = new FakeSendspinConnection();
         var capture = new FakeCaptureDevice();
         var caps = new ClientCapabilities
         {
@@ -49,12 +40,17 @@ public class SendspinClientServiceSourceTests
             SourceLineSense = lineSense,
             UnpairedAccessEnabled = unpairedAccess,
         };
-        var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: caps,
-            noiseSession: new FakeNoiseSession { MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), trust, ServerId) },
-            captureDevice: capture);
+        var (client, connection, session) = TestClient.Create(
+            trust,
+            unpairedAccess,
+            configure: options =>
+            {
+                options.Capabilities = caps;
+                options.CaptureDevice = capture;
+            });
+
+        // The source trust gate reads the matched PSK, which is bound to the server id.
+        session.MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), trust, ServerId);
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         return (client, connection, capture);
