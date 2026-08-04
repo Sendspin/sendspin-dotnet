@@ -1396,13 +1396,18 @@ Expected: PASS immediately — this pins a rule the exception type already imple
 
 - [ ] **Step 3: Add the diagnostic**
 
-In `IncomingConnection.cs`, find where `ProcessInbound`'s `FatalReason` is handled and log the classified message before closing:
+In `IncomingConnection.cs`, find where `ProcessInbound`'s `FatalReason` is handled and log the classified message before closing.
+
+> **Read this first — the obvious version of this code is a no-op.** `NoiseWireFraming.Fail()` sets `_phase = Failed` and disposes `_transport` *as part of* producing the fatal result, and `IsTransportReady` is `_phase == TransportMode`. So reading `_framing.IsTransportReady` **after** `ProcessInbound` returns yields `false` for every fatal, and the classification collapses to always-`LegacyServer`. Task 7 hit exactly this on the dial path and it survived one review round undetected. Capture the mode **before** the call.
 
 ```csharp
+                var wasTransportReady = _framing.IsTransportReady;
+                var inbound = _framing.ProcessInbound(frame);
+
                 if (inbound.FatalReason is { } fatal)
                 {
                     var failure = new SendspinHandshakeException(
-                        _framing.IsTransportReady
+                        wasTransportReady
                             ? HandshakeFailureKind.HandshakeRejected
                             : HandshakeFailureKind.LegacyServer,
                         fatal);
@@ -1410,6 +1415,10 @@ In `IncomingConnection.cs`, find where `ProcessInbound`'s `FatalReason` is handl
                     // ...retain the existing close behavior
                 }
 ```
+
+Note the listen path has no reconnect loop, so unlike the dial path there is no permanence decision to make here — the connection closes either way. This is purely a diagnostic, which is why it stays a log rather than a thrown exception.
+
+`LegacyServer`'s message names a *server* that is too old, which is the correct direction on this path too: the peer dialing us is the Sendspin server.
 
 - [ ] **Step 4: Run the full suite**
 
