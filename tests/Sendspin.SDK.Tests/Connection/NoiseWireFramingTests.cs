@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using System.Text;
 using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Connection.Noise;
