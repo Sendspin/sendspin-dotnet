@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -49,9 +50,12 @@ public class SendspinClientOptionsTests
             NullLoggerFactory.Instance,
             options);
 
-        // The dial path must be encrypted end to end: the client's session id is the
-        // framing's, and no plaintext framing exists to fall back to.
-        Assert.NotNull(client);
-        Assert.Null(client.ServerId); // no server/init yet
+        // The invariant CreateForDial exists to guarantee: the connection's wire framing
+        // and the client's Noise session must be the exact same object, not merely two
+        // framings that happen to agree. Reference equality is the only assertion that
+        // can catch a miswiring here (value-based checks on ServerId etc. can pass even
+        // when the two are unrelated instances).
+        var connection = Assert.IsType<SendspinConnection>(client.ClientConnection);
+        Assert.Same(connection.Framing, client.Session);
     }
 }

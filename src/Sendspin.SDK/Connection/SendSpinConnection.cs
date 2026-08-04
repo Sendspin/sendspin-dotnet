@@ -30,6 +30,9 @@ public sealed class SendspinConnection : ISendspinConnection
     public ConnectionState State => (ConnectionState)Volatile.Read(ref _state);
     public Uri? ServerUri => _serverUri;
 
+    /// <summary>The wire framing this connection was constructed with (test-only introspection).</summary>
+    internal IWireFraming Framing => _framing;
+
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;

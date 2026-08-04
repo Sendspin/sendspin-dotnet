@@ -100,6 +100,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public string? ServerId { get; private set; }
     public string? ServerName { get; private set; }
 
+    /// <summary>The Noise session this client was constructed with (test-only introspection).</summary>
+    internal INoiseSessionInfo Session => _session;
+
+    /// <summary>
+    /// The connection this client was constructed with (test-only introspection). Named to
+    /// avoid shadowing the <c>Sendspin.SDK.Connection</c> namespace used elsewhere in this
+    /// file (e.g. <c>Connection.Noise.SendspinIdentity</c>).
+    /// </summary>
+    internal ISendspinConnection ClientConnection => _connection;
+
     /// <inheritdoc />
     public ServerHelloPayload? LastServerHello { get; private set; }
 
