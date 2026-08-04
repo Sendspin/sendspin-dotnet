@@ -323,9 +323,9 @@ When multiple servers can reach a player (server-initiated mode via `SendspinHos
 arbitrates which one is active. It completes each server's `client/hello` ↔ `server/hello` handshake
 first, then applies the spec's decision:
 
-- connections rank by priority class (spec activity ranking): `management` > `playback` >
-  `pairing` > empty. On the legacy wire, `connection_reason: playback` maps to the playback class
-  and `discovery`/absent to empty;
+- connections rank by priority class, from the highest-priority activity declared in the
+  connection's `server/activate`: `management` > `playback` > `pairing` > empty (no
+  recognized activity declared);
 - the incoming server is accepted when its priority is **higher than or equal to** the holder's,
   with two exceptions: a pairing attempt is never displaced by incoming playback/pairing, and an
   empty-vs-empty tie admits the incoming server only when it is the persisted **last-playback**
@@ -345,6 +345,13 @@ public sealed class FileLastPlayedServerStore : ILastPlayedServerStore
 
 await using var host = new SendspinHostService(
     loggerFactory,
+    new SendspinClientOptions
+    {
+        // Generate() is for this example only — the spec requires client_id to survive
+        // reboots, so a real host loads a persisted identity and only generates (and
+        // saves) one the first time it runs.
+        Identity = SendspinIdentity.Generate(),
+    },
     lastPlayedServerStore: new FileLastPlayedServerStore());
 ```
 
