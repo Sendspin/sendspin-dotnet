@@ -37,7 +37,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private PinPairingState? _pinState;
     private int _pairingCounter;
 
+    // _handshakeTcs is published by the handshake waiter and completed by the connection's
+    // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
+    // both so a permanent failure that lands before the waiter publishes its TCS is still
+    // seen by it — see SendHandshakeAsync and CompleteHandshakeWait.
+    private readonly object _handshakeLock = new();
     private TaskCompletionSource<bool>? _handshakeTcs;
+    private SendspinHandshakeException? _handshakeFailure;
     private GroupState? _currentGroup;
     private PlayerState _playerState;
     private CancellationTokenSource? _timeSyncCts;
@@ -215,6 +221,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         _logger.LogInformation("Connecting to {Uri}", serverUri);
 
+        // Cleared here rather than in SendHandshakeAsync: a failure raised between the dial
+        // and the handshake wait belongs to this attempt and must survive to reach the caller.
+        lock (_handshakeLock)
+        {
+            _handshakeFailure = null;
+        }
+
         await _connection.ConnectAsync(serverUri, cancellationToken);
         await SendHandshakeAsync(cancellationToken);
     }
@@ -225,8 +238,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
     {
-        _handshakeTcs = new TaskCompletionSource<bool>();
+        TaskCompletionSource<bool> handshakeTcs;
+        SendspinHandshakeException? alreadyFailed;
+        lock (_handshakeLock)
+        {
+            handshakeTcs = _handshakeTcs = new TaskCompletionSource<bool>();
+            alreadyFailed = _handshakeFailure;
+        }
+
         _activateReceived = false;
+
+        // The connection's receive loop is already running when we get here, so a permanent
+        // failure can be raised before there is a TCS to fail — the continuation that resumes
+        // ConnectAsync may sit queued behind a busy UI thread while the peer is already
+        // closing. Publishing the TCS and reading the failure under the same lock the handler
+        // takes makes both interleavings equivalent: whichever side runs first, the caller
+        // still gets the diagnostic rather than a 30 s wait ending in TimeoutException.
+        if (alreadyFailed is not null)
+        {
+            throw alreadyFailed;
+        }
 
         // 30 s per the spec's recommended handshake-phase timeout.
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -234,8 +265,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         try
         {
-            await using var registration = linkedCts.Token.Register(() => _handshakeTcs.TrySetCanceled());
-            var success = await _handshakeTcs.Task;
+            await using var registration = linkedCts.Token.Register(() => handshakeTcs.TrySetCanceled());
+            var success = await handshakeTcs.Task;
 
             if (success)
             {
@@ -553,7 +584,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Clean up client state on full disconnection
         if (e.NewState == ConnectionState.Disconnected)
         {
-            _handshakeTcs?.TrySetResult(false);
+            CompleteHandshakeWait(e.Exception as SendspinHandshakeException);
             ServerId = null;
             ServerName = null;
         }
@@ -563,6 +594,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (e.NewState == ConnectionState.Handshaking && e.OldState == ConnectionState.Reconnecting)
         {
             PerformReconnectHandshakeAsync().SafeFireAndForget(_logger);
+        }
+    }
+
+    /// <summary>
+    /// Ends a pending handshake wait on disconnect. A permanent handshake failure is
+    /// propagated as an exception rather than a false result, so it reaches the
+    /// <see cref="ConnectAsync"/> caller: an app that never subscribed to
+    /// <see cref="ConnectionStateChanged"/> would otherwise see the connect succeed and
+    /// only find out when its first command threw "WebSocket is not connected".
+    /// </summary>
+    private void CompleteHandshakeWait(SendspinHandshakeException? failure)
+    {
+        TaskCompletionSource<bool>? tcs;
+        lock (_handshakeLock)
+        {
+            // Recorded before the TCS is read, and read by the waiter after it publishes one,
+            // so the failure cannot fall between the two.
+            if (failure is not null)
+            {
+                _handshakeFailure = failure;
+            }
+
+            tcs = _handshakeTcs;
+        }
+
+        // Completed outside the lock: the TCS runs its continuations inline, on this thread.
+        if (failure is not null)
+        {
+            tcs?.TrySetException(failure);
+        }
+        else
+        {
+            tcs?.TrySetResult(false);
         }
     }
 

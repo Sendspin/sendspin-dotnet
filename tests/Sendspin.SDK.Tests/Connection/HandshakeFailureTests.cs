@@ -2,8 +2,11 @@ using System.Net.WebSockets;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Framing;
+using Sendspin.SDK.Connection.Noise;
+using Sendspin.SDK.Tests.Client;
 
 namespace Sendspin.SDK.Tests.Connection;
 
@@ -458,6 +461,53 @@ public class HandshakeFailureTests
         {
             Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Warning);
         }
+    }
+
+    /// <summary>
+    /// The documented Quick Start never subscribes to ConnectionStateChanged, so a permanent
+    /// handshake failure that only travels on that event leaves the app with a ConnectAsync
+    /// that returned normally and a first command that throws "WebSocket is not connected".
+    /// ConnectAsync must surface the diagnostic itself.
+    /// </summary>
+    /// <param name="closeDelayMs">
+    /// Both orderings of the same failure. With no delay the connection fails before the
+    /// handshake wait has published its TaskCompletionSource, so the failure has to be
+    /// recorded and re-checked; with a delay the wait is already parked on the TCS and the
+    /// exception is delivered through it. Before the fix the first hung for the full 30 s and
+    /// reported TimeoutException, and the second returned as though the connect had succeeded.
+    /// </param>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(250)]
+    public async Task ConnectAsync_ThrowsHandshakeException_WhenTheHandshakeFailsPermanently(int closeDelayMs)
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        // The pre-7.0.0 signature: accept, then close with 1000 without ever replying.
+        server.ClientConnected += (_, c) => _ = Task.Run(async () =>
+        {
+            if (closeDelayMs > 0)
+                await Task.Delay(closeDelayMs);
+
+            await c.CloseAsync();
+        });
+
+        await using var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions { AutoReconnect = true, ReconnectDelayMs = 10 },
+            new StubFraming { IsTransportReady = false });
+
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection,
+            new FakeNoiseSession(),
+            new SendspinClientOptions { Identity = SendspinIdentity.Generate() });
+
+        var ex = await Assert.ThrowsAsync<SendspinHandshakeException>(
+            () => client.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin")));
+
+        Assert.Equal(HandshakeFailureKind.LegacyServer, ex.Kind);
     }
 
     /// <summary>Captures log calls so tests can assert on the classified message text.</summary>
