@@ -7,13 +7,13 @@ namespace Sendspin.SDK.Client;
 /// </summary>
 public enum ConnectionPriority
 {
-    /// <summary>Empty activity set (legacy connection_reason 'discovery' or absent).</summary>
+    /// <summary>Empty activity set: no recognized activity declared.</summary>
     Empty = 0,
 
     /// <summary>A pairing attempt.</summary>
     Pairing = 1,
 
-    /// <summary>Playback (legacy connection_reason 'playback').</summary>
+    /// <summary>Playback.</summary>
     Playback = 2,
 
     /// <summary>Management.</summary>

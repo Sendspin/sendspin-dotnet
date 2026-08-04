@@ -138,7 +138,7 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     /// <summary>
     /// Gets the server ID of the server that most recently had playback_state "playing".
-    /// Used for tie-breaking when multiple servers with the same connection_reason try to connect.
+    /// Used to break an arbitration tie between two connections that declare no activities.
     /// </summary>
     public string? LastPlayedServerId { get; private set; }
 
