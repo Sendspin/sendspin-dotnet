@@ -1,6 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
-using Sendspin.SDK.Client;
-
 namespace Sendspin.SDK.Tests.Client;
 
 public class SendspinClientServiceTimeSyncTests
@@ -12,12 +9,9 @@ public class SendspinClientServiceTimeSyncTests
         // HandleStreamStart's smart-sync trigger can both invoke SendTimeSyncBurstAsync.
         // The single-slot TCS design can't safely interleave; the _burstRunning guard
         // (Interlocked.CompareExchange) makes the second invocation return immediately.
-        var connection = new FakeSendspinConnection();
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
         await connection.ConnectAsync(new Uri("ws://test"));
-
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
 
         using var firstCts = new CancellationTokenSource();
         var firstBurst = client.SendTimeSyncBurstAsync(firstCts.Token);
@@ -44,14 +38,10 @@ public class SendspinClientServiceTimeSyncTests
         // feed ProcessMeasurement on the synchronizer. The previous implementation had a
         // fallback that called ProcessMeasurement directly on unmatched responses,
         // bypassing the burst-best selection. The new code discards them.
-        var connection = new FakeSendspinConnection();
-        await connection.ConnectAsync(new Uri("ws://test"));
-
         var clockSync = new RecordingClockSynchronizer();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            clockSynchronizer: clockSync);
+        var (client, connection, _) = TestClient.Create(configure: options => options.ClockSynchronizer = clockSync);
+        using var _c = client;
+        await connection.ConnectAsync(new Uri("ws://test"));
 
         // Inject a server/time response with a T1 the client never sent.
         const string strayResponse = """
