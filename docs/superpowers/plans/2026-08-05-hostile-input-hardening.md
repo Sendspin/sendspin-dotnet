@@ -282,6 +282,102 @@ Part of #88."
 
 ---
 
+### Task 4: Stop swallowing an unparseable frame in `GetMessageType` (design §2.4)
+
+*Added after Task 2's review, which found that narrowing the five catches does not help a frame that never reaches a handler.*
+
+**Files:**
+- Modify: `src/Sendspin.SDK/Protocol/MessageSerializer.cs:77-92` (`GetMessageType(string)`) and `:97-…` (the `ReadOnlySpan<byte>` overload)
+- Test: `tests/Sendspin.SDK.Tests/Client/InboundMessageHardeningTests.cs` (created by Task 2 — add to it, do not create a second file)
+
+**Interfaces:**
+- Consumes: the narrowed catch at `SendSpinClient.cs:800`, whose filter already names `JsonException` and `InvalidOperationException`, and whose body closes with `DisconnectAsync("unauthorized")`. Task 4 adds no new close path — it routes into the one Task 2 built.
+- Produces: nothing later depends on it.
+
+**The bug.** `GetMessageType` catches its own `JsonException` and returns `null`. `OnTextMessageReceived` (`:722`) then falls to the `default:` branch at `:795`, logs at Debug, and leaves the connection up. So the *most* malformed input a hostile authenticated peer can send gets the mildest response in the file.
+
+**The distinction that makes this non-trivial** — the fix must not collapse these:
+
+| Input | Required response |
+|---|---|
+| not parseable as JSON | **close** |
+| parses, but has no `type` member | **close** |
+| parses, `type` is not a string | **close** (already: `GetString()` throws `InvalidOperationException`) |
+| parses, `type` is a string this SDK does not recognise | **tolerate** — log and continue, for forward compatibility with a newer server |
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `InboundMessageHardeningTests.cs`, following the `Create()` helper already there (it dials the fake and reaches a state where text frames route):
+
+1. **Not JSON at all** — deliver `"{{{"`. Assert the client leaves `Connected` and `LastDisconnectReason` is `"unauthorized"`.
+2. **No `type` member** — deliver `"""{"foo":"bar"}"""`. Same assertions.
+3. **Positive control, and it is not optional** — deliver `"""{"type":"server/some-future-thing","x":1}"""`. Assert the connection is **still up** and no disconnect was recorded. Without this test, a fix that closes on everything unrecognised passes tests 1 and 2.
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `dotnet test c:\CodeProjects\SendspinSDK\SendspinSDK.slnx -f net10.0 --nologo --filter "FullyQualifiedName~InboundMessageHardeningTests"`
+
+Expected: tests 1 and 2 FAIL (connection stays up); test 3 PASSES already. If test 3 fails before the change, stop and report — that would mean unknown types are already being rejected somewhere and the premise is wrong.
+
+- [ ] **Step 3: Make `GetMessageType` report malformed input instead of hiding it**
+
+In `MessageSerializer.cs`, remove the `catch (JsonException)` so an unparseable document propagates, and throw `JsonException` when the document has no `type` member:
+
+```csharp
+    /// <summary>
+    /// Gets the message type from a JSON string without full deserialization.
+    /// </summary>
+    /// <exception cref="JsonException">
+    /// The document is not valid JSON, or has no <c>type</c> member. Both are malformed
+    /// input rather than an unrecognised message: an unknown-but-well-formed type is
+    /// returned as-is for the caller to ignore.
+    /// </exception>
+    public static string? GetMessageType(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("type", out var typeProp))
+        {
+            throw new JsonException("Message has no \"type\" member.");
+        }
+
+        return typeProp.GetString();
+    }
+```
+
+Apply the same change to the `ReadOnlySpan<byte>` overload. It has no callers today, but leaving two identically-named public overloads with opposite contracts — one swallowing, one throwing — is a trap for the next caller. Note the behaviour change in your report: this is a public method that previously never threw. The branch is already source-breaking at an unchanged `9.1.0` and #91 owns the bump, so this is consistent with the branch's state, not a new problem — but say so rather than leaving it implicit.
+
+Keep the return type `string?`: `GetString()` returns null for a JSON `null` literal, which the `default:` branch handles.
+
+- [ ] **Step 4: Verify the close path needs no change**
+
+Read `SendSpinClient.cs:800-820`. `JsonException` is already in the filter and the body already closes with `DisconnectAsync("unauthorized")`. Confirm the propagating exception lands there and add nothing. If you find yourself adding a second close path, stop — that is a sign the routing is not what this step assumes.
+
+- [ ] **Step 5: Run the tests, then the full suite, then commit**
+
+Two callers in `FakeServer.cs` (`:117`, `:161`) now see a throwing `GetMessageType`. They are fed well-formed messages, so they should be unaffected — but if a test breaks there, fix it by making its input valid, never by restoring the swallow.
+
+Expected: 0 failing, total up by 3 from Task 3's figure.
+
+```bash
+git add src/Sendspin.SDK/Protocol/MessageSerializer.cs tests/Sendspin.SDK.Tests/Client/InboundMessageHardeningTests.cs
+git commit -m "fix: close on an authenticated frame that is not parseable JSON
+
+GetMessageType caught its own JsonException and returned null, so a frame that
+was not JSON at all — or that carried no type member — fell to the unhandled-type
+branch, was logged at Debug, and left the connection up. The most malformed input
+a hostile authenticated peer could send drew the mildest response on the inbound
+path, and narrowing the handler catches did not reach it, because such a frame
+never reaches a handler.
+
+Malformed input now propagates to the dispatch catch and closes the connection.
+A well-formed message whose type this SDK does not recognise is still tolerated,
+so a newer server can add message types without breaking older clients.
+
+Part of #88."
+```
+
+---
+
 ## Verification Checklist
 
 - [ ] `git grep -n 'JsonDocument.Parse(\$' src/` returns nothing.
@@ -289,6 +385,7 @@ Part of #88."
 - [ ] `git grep -n 'catch (Exception' src/Sendspin.SDK/Client/SendSpinHostService.cs` no longer matches the inner `HandleServerConnectedAsync` catch.
 - [ ] No new `client/goodbye` reason string appears anywhere in `src/`.
 - [ ] All three malformed fragment sequences produce a `FatalReason`.
+- [ ] `MessageSerializer.GetMessageType` no longer contains `catch (JsonException)`, and a frame with an unrecognised-but-well-formed `type` is still tolerated.
 - [ ] A fragmented message over 128 KiB before the first application message is refused; a larger one after it succeeds.
 - [ ] `dotnet test ... -f net10.0` passes with 0 failures.
 - [ ] `dotnet build` clean for both `net8.0` and `net10.0`; no new IL2026/IL3050 (the management payloads must go through the source-generated context, not a reflection overload).

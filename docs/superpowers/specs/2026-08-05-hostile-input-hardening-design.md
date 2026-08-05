@@ -58,11 +58,16 @@ The spec's `client/goodbye` reason list is **closed**: `another_server | shutdow
 
 The fragmentation rule (`messaging.md:107`) says malformed sequences are protocol errors and "the receiver MUST close the connection" — without prescribing a goodbye. That matches how the framing layer already signals fatals: `InboundFrameResult.Fatal` closes the socket without an application-level error.
 
-**Ruling: a protocol error closes the connection without a `client/goodbye`.** The existing `Fatal` mechanism is the vehicle; nothing new is added to the wire.
+**Ruling: a protocol error closes the connection, and no new wire value is invented.** How the close is expressed depends on the layer:
+
+- **Framing layer** — `InboundFrameResult.Fatal` closes the socket with no application-level message at all. This is the vehicle for §3's fragmentation errors.
+- **Application layer** — `DisconnectAsync` sends a goodbye whenever the socket is open, and there is no goodbye-less close API on `ISendspinConnection`. Rather than widen that interface, reuse the existing `unauthorized`, which the client already sends for a pure protocol-order violation (`ValidateActivateAdmissibility`, `SendSpinClient.cs:956`) and for the management self-removal close (`:1340`).
+
+*Amended after Task 2, whose review found the original single ruling — close without a goodbye everywhere — unimplementable at the application layer without new interface surface. `unauthorized` is a lossy reuse: its worst realistic cost is that an operator debugging a serialization bug sees an auth-flavoured close. That is cheaper than interface surface this slice deliberately avoided adding, and criterion 6 holds either way.*
 
 ### 2.2 Which catch-alls, and which are deliberately left
 
-There are 20 `catch (Exception)` sites across `SendSpinClient.cs` and `SendSpinHostService.cs`. ohf-sage's rule is a MUST and applies to all of them — but its "keep PRs small and single-purpose" rule is equally weighted and this slice is about *hostile peer input*.
+There are 18 `catch (Exception)` sites across `SendSpinClient.cs` and `SendSpinHostService.cs` — leaving 13 after this slice. (An earlier count of 20 here double-counted the two management catches at `:1312` and `:1356`, which are already narrowed.) ohf-sage's rule is a MUST and applies to all of them — but its "keep PRs small and single-purpose" rule is equally weighted and this slice is about *hostile peer input*.
 
 **In scope — the inbound-message path**, where the caught exception may be attacker-influenced:
 
@@ -81,6 +86,27 @@ There are 20 `catch (Exception)` sites across `SendSpinClient.cs` and `SendSpinH
 Narrow each in-scope catch to the failure types a malformed payload actually produces — `JsonException` and the decode failures already precedented at `:1312` — and on catching one, **close the connection**. Everything else propagates.
 
 Propagation is the point, not an oversight: a bug in our own role handling should surface as a lost connection an operator can see, not be hidden behind a log line. That is the second ohf-sage MUST.
+
+### 2.4 The tier above the five catches: an unparseable frame never reaches them
+
+*Added after Task 2, whose review found this gap.* Narrowing the five catches only helps a frame that got as far as a handler. A frame that is not valid JSON at all never does:
+
+```csharp
+// MessageSerializer.GetMessageType — swallows its own JsonException and returns null
+```
+
+`GetMessageType` returns `null`, so the frame falls to `SendSpinClient.cs:795`'s `default:` branch, is logged at Debug, and the connection stays up. That is the *most* malformed input a hostile authenticated peer can send, and it receives the mildest response in the file — so §5's "malformed JSON in an authenticated text frame → the connection closes" row is not literally satisfied by §2.3 alone.
+
+**Ruling: fix it here, not as a follow-up.** It is the central case of this slice's stated purpose, and deferring the central case to keep the PR small inverts the point of the rule.
+
+The whole difficulty is a distinction §2.3 does not have to make:
+
+| Input | Response | Why |
+|---|---|---|
+| not parseable as JSON, or no `type` member | **close** | no conformant server produces this |
+| parses, `type` is a string we do not know | **tolerate** (log at Debug, continue) | forward compatibility — a newer server may send message types this SDK predates |
+
+Collapsing those two into one branch is the failure mode in both directions: closing on the second breaks forward compatibility, and tolerating the first is the bug being fixed. The signal must therefore be three-valued — parsed-and-known, parsed-but-unknown, unparseable — not the current nullable string.
 
 ## 3. Item 4 — fragmentation
 
@@ -117,7 +143,7 @@ This needs no new interface and no coupling to the client — one bool set in `D
 | #88 item 3 — a server remotely mutating consumer-owned `ClientCapabilities` | Needs an event for the app to observe, which is public-API work: slice B (#85) |
 | #80 — the `noise/handshake` substring sniff in `DispatchMessage` | Same method this slice touches, but a separate defect with its own issue. Do not fix it in passing |
 | #89 — the reflection-based JSON that trips IL2026/IL3050 | §1.1 moves the management payloads *onto* the source-generated serializer, which helps, but #89's remaining sites are its own |
-| The 14 non-peer-input catch-alls | §2.2 |
+| The 13 non-peer-input catch-alls | §2.2 |
 | #85, #79, #91, #92 | Slice B, upstream-blocked, release engineering |
 
 Package version stays `9.1.0` (#91 owns the bump).
@@ -133,6 +159,8 @@ Every test must assert the **absence of the harm**, and any test asserting that 
 | 1 | malformed PSK in `add-record` | error names the **PSK**, not "peer id" |
 | 2 | malformed JSON in an authenticated text frame | the connection **closes**; no `client/goodbye` invented |
 | 2 | a handler throwing a non-payload exception | it **propagates** rather than being swallowed |
+| 2.4 | a frame that is not JSON at all (`"{{{"`), and one with no `type` member | the connection **closes** — neither reaches a handler, so §2.3's tests cannot cover this |
+| 2.4 | **positive control**: a well-formed frame whose `type` is `"server/some-future-thing"` | still **tolerated** — logged and ignored, connection stays up. Without this, a fix that closes on every unrecognised frame passes the row above |
 | 4 | non-fragment frame while reassembly is in flight | connection **closes**; the buffer does not survive |
 | 4 | `orig_type` of `2`, and of `3` | connection **closes**; nothing surfaces to `BinaryMessageParser` |
 | 4 | fragment-end with none in flight | still closes (regression guard on the one rule already handled) |
@@ -146,6 +174,7 @@ The positive control on item 4 is not optional: a cap regression that rejected a
 1. No JSON is built by string interpolation in the management path; a `server_id` containing JSON metacharacters cannot reach the store or an outgoing message.
 2. A malformed PSK produces an error naming the PSK.
 3. Each of the five in-scope catch-alls catches only specific types; a protocol error closes the connection and anything else propagates.
+3a. An authenticated text frame that is not parseable JSON, or that carries no `type`, closes the connection — while a frame with an unrecognised but well-formed `type` is still tolerated.
 4. All three spec-mandated malformed fragment sequences close the connection.
 5. A fragmented message cannot exceed 128 KiB before the first application message is surfaced, and large fragmented messages still work afterwards.
 6. No new `client/goodbye` reason is introduced.
