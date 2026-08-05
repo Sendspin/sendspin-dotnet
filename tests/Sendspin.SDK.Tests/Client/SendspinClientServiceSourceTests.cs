@@ -145,4 +145,80 @@ public class SendspinClientServiceSourceTests
             .Last(m => m.Payload.Source is not null);
         Assert.Equal("present", state.Payload.Source!.Signal);
     }
+
+    /// <summary>
+    /// Builds a source-capable client, drives the encrypted handshake, and optionally
+    /// activates the source role — so a test can reach the server/command path with the
+    /// role either active or inactive, at either trust level.
+    /// </summary>
+    private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeCaptureDevice Capture)
+        CreateSourceClient(PskCategory category, bool activateSourceRole)
+    {
+        var capture = new FakeCaptureDevice();
+        var (client, connection, _) = TestClient.Create(
+            category,
+            configure: options =>
+            {
+                options.CaptureDevice = capture;
+                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
+            });
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        // Empty activities deliberately. A Sentinel-keyed session granted ["playback"]
+        // is INADMISSIBLE without unpaired access, so the client would disconnect with
+        // 'pairing_required' before the server/command ever arrived and the test would
+        // fail for the wrong reason. An empty set is admissible on both PSK categories
+        // (and on LongTerm with an active role, via the withPlayback extension in
+        // IsAdmissible) — and it is the more faithful attack shape, since #75 describes
+        // a server that omits the role entirely and just sends the command.
+        string roles = activateSourceRole ? "\"source@v1\"" : string.Empty;
+        connection.RaiseTextMessageReceived(
+            $$$"""
+            {"type":"server/activate","payload":{"activities":[],"active_roles":[{{{roles}}}]}}
+            """);
+
+        return (client, connection, capture);
+    }
+
+    private static void SendSourceStart(FakeSendspinConnection connection) =>
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+
+    [Fact]
+    public void SourceStart_AtTrustNone_NeverOpensTheCaptureDevice()
+    {
+        // #75: a Sentinel-keyed server must not be able to start capture via
+        // server/command, bypassing the activate-time trust gate entirely.
+        var (client, connection, capture) = CreateSourceClient(PskCategory.Sentinel, activateSourceRole: false);
+        using var _c = client;
+
+        SendSourceStart(connection);
+
+        Assert.False(capture.Capturing, "the capture device must never open at trust 'none'");
+    }
+
+    [Fact]
+    public void SourceStart_WithSourceRoleInactive_NeverOpensTheCaptureDevice()
+    {
+        // Even at user trust, a source that was never activated must not stream.
+        var (client, connection, capture) = CreateSourceClient(PskCategory.LongTerm, activateSourceRole: false);
+        using var _c = client;
+
+        SendSourceStart(connection);
+
+        Assert.False(capture.Capturing, "the capture device must never open with the role inactive");
+    }
+
+    [Fact]
+    public void SourceStart_AtUserTrustWithActiveRole_OpensTheCaptureDevice()
+    {
+        // Positive control: a gate that refuses everything would pass both tests above.
+        var (client, connection, capture) = CreateSourceClient(PskCategory.LongTerm, activateSourceRole: true);
+        using var _c = client;
+
+        SendSourceStart(connection);
+
+        Assert.True(capture.Capturing, "the legitimate case must still stream");
+    }
 }

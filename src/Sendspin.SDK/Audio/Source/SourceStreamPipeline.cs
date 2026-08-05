@@ -16,8 +16,10 @@ namespace Sendspin.SDK.Audio.Source;
 /// <remarks>
 /// Timestamps are the local capture time mapped to the server clock via
 /// <see cref="IClockSynchronizer.ClientToServerTime"/> (offset + drift), per the spec.
-/// The pipeline does not itself enforce trust; the client service refuses to activate
-/// the source role at trust level <c>none</c>.
+/// The pipeline enforces the spec's trust rule itself, at the point the capture device
+/// opens: it refuses to stream unless <c>canStream</c> reports user trust and an active
+/// source role. Activate-time checking alone is insufficient, because server/command
+/// reaches this pipeline without passing through server/activate.
 /// </remarks>
 public sealed class SourceStreamPipeline : IAsyncDisposable
 {
@@ -27,6 +29,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly Func<byte[], Task> _sendBinaryAsync;
     private readonly Func<IMessage, Task> _sendMessageAsync;
+    private readonly Func<bool> _canStream;
     private readonly object _lock = new();
 
     private ISourceAudioEncoder? _encoder;
@@ -37,12 +40,17 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     public bool IsStreaming { get { lock (_lock) { return _streaming; } } }
 
     /// <summary>Creates a source pipeline bound to a capture device and the connection's send paths.</summary>
+    /// <param name="canStream">
+    /// Evaluated immediately before the capture device is opened. Must be false unless the
+    /// connection is at trust 'user' and the source role is currently active.
+    /// </param>
     public SourceStreamPipeline(
         IAudioCaptureDevice capture,
         IClockSynchronizer clock,
         Func<IMessage, Task> sendMessageAsync,
         Func<byte[], Task> sendBinaryAsync,
         ILogger logger,
+        Func<bool> canStream,
         ISourceAudioEncoderFactory? encoderFactory = null)
     {
         _capture = capture;
@@ -50,6 +58,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         _sendMessageAsync = sendMessageAsync;
         _sendBinaryAsync = sendBinaryAsync;
         _logger = logger;
+        _canStream = canStream;
         _encoderFactory = encoderFactory ?? new DefaultSourceAudioEncoderFactory();
     }
 
@@ -76,6 +85,18 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         {
             if (_streaming || _disposed)
                 return;
+
+            // Trust gate. Enforced here rather than at the command dispatch so that every
+            // caller is covered — the activate path, the server/command path, and any path
+            // added later. A source streams potentially sensitive audio, so the spec
+            // requires a paired connection.
+            if (!_canStream())
+            {
+                _logger.LogWarning(
+                    "Refusing to stream: source@v1 requires user trust and an active source role");
+                return;
+            }
+
             _streaming = true;
         }
 

@@ -187,6 +187,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 msg => _connection.SendMessageAsync(msg),
                 data => _connection.SendBinaryAsync(data),
                 _logger,
+                IsSourceStreamingPermitted,
                 _sourceEncoderFactory);
         }
         _audioPipeline = options.AudioPipeline;
@@ -211,6 +212,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _audioPipeline.StateChanged += OnPipelineStateChanged;
         }
     }
+
+    /// <summary>
+    /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
+    /// connection with the source role currently active. Evaluated per start attempt,
+    /// because both trust and the active-role set can change over a connection's life.
+    /// </summary>
+    private bool IsSourceStreamingPermitted() =>
+        _session.MatchedPsk?.Category == PskCategory.LongTerm
+        && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false);
 
     public async Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
     {
