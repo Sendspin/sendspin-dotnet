@@ -67,11 +67,17 @@ internal static class TestClient
     /// callback that replaces <see cref="TestClientOptions.Capabilities"/> cannot drop it.
     /// </param>
     /// <param name="configure">Mutates the options draft before the client is constructed.</param>
+    /// <param name="connected">
+    /// Whether the fake connection is dialled before the client is built (the default). Pass
+    /// false only for tests whose subject is behavior while disconnected — the client drops
+    /// received frames in that state, so no message can be delivered to an unconnected fake.
+    /// </param>
     internal static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session)
         Create(
             PskCategory category = PskCategory.LongTerm,
             bool unpairedAccess = false,
-            Action<TestClientOptions>? configure = null)
+            Action<TestClientOptions>? configure = null,
+            bool connected = true)
     {
         var connection = new FakeSendspinConnection();
         var session = new FakeNoiseSession
@@ -103,6 +109,15 @@ internal static class TestClient
             CaptureDevice = draft.CaptureDevice,
             SourceEncoderFactory = draft.SourceEncoderFactory,
         };
+
+        // Connected before the client subscribes, so no state-changed event is delivered and
+        // tests that dial explicitly are unaffected. The client drops frames received while
+        // the connection is Disconnected/Disconnecting, so a fake that never connected would
+        // silently swallow every RaiseTextMessageReceived.
+        if (connected)
+        {
+            connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        }
 
         var client = new SendspinClientService(
             NullLogger<SendspinClientService>.Instance,

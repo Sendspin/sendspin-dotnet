@@ -120,9 +120,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public ServerHelloPayload? LastServerHello { get; private set; }
 
     /// <summary>
-    /// The most recent server/activate payload (encrypted protocol), or null before the
-    /// initial activation. Roles in <see cref="ServerActivatePayload.ActiveRoles"/> are
-    /// also mirrored into <see cref="LastServerHello"/> for legacy consumers.
+    /// The most recent <em>accepted</em> server/activate payload (encrypted protocol), or
+    /// null before the initial activation. An activate the admissibility table refused is
+    /// never recorded here, because the activities it declared must not grant anything.
+    /// Roles in <see cref="ServerActivatePayload.ActiveRoles"/> are also mirrored into
+    /// <see cref="LastServerHello"/> for legacy consumers.
     /// </summary>
     public ServerActivatePayload? LastServerActivate { get; private set; }
 
@@ -665,6 +667,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void OnTextMessageReceived(object? sender, string json)
     {
+        // Once we have decided to close, nothing the peer sends may still take effect.
+        // Neither receive path stops on its own: SendspinConnection's loop keeps reading
+        // while the goodbye and the socket close are in flight, and IncomingConnection
+        // delivers frames from a synchronous socket callback. Every close this client
+        // initiates is fire-and-forget, so without this the frames that arrive during the
+        // teardown window are handled as if the connection were still live.
+        if (_connection.State is ConnectionState.Disconnected or ConnectionState.Disconnecting)
+        {
+            _logger.LogDebug("Dropping message received while {State}", _connection.State);
+            return;
+        }
+
         // Reaching here means the framing layer decrypted and authenticated a frame.
         MarkMatchedPskUsed();
 
@@ -801,7 +815,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         var payload = message.Payload;
-        LastServerActivate = payload;
 
         if (!ValidateActivateAdmissibility(payload, out var goodbyeReason))
         {
@@ -824,6 +837,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
             return;
         }
+
+        // Recorded only once the activation is admitted: this property is what the
+        // management gate and the host's arbitration read, so a refused activate must
+        // not leave its activities behind. 'Last accepted activation' is the only
+        // defensible meaning for a value other code grants permission from.
+        LastServerActivate = payload;
 
         // Mirror roles where legacy consumers look. active_roles persists across
         // activates that omit it, so only overwrite when present.

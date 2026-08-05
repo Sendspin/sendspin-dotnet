@@ -50,7 +50,7 @@ public class SendspinClientServiceControllerTests
         // SetVolumeAsync sends directly with no connection-state guard, relying on the transport
         // to reject the send when there's no live socket. EnforceConnectionState makes the fake
         // throw "WebSocket is not connected" like SendspinConnection does while disconnected.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(connected: false);
         connection.EnforceConnectionState = true;
         using var _c = client;
 

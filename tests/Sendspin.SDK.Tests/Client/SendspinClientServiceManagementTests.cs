@@ -149,6 +149,63 @@ public class SendspinClientServiceManagementTests
     }
 
     [Fact]
+    public void RefusedManagementActivate_DoesNotGrantManagement_OnALaterConnection()
+    {
+        // A Sentinel-keyed peer asks for the management activity. The admissibility table
+        // refuses it and the client closes — but the refused activate must leave nothing
+        // behind, or management/add-record on any later connection writes an
+        // attacker-chosen long-term PSK and hands the peer trust 'user' with no pairing.
+        //
+        // The second request deliberately lands on a *later* connection: on the same one
+        // the receive-path state guard would drop it, which would not pin this.
+        var store = new InMemoryPairingRecordStore();
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options => options.PairingRecordStore = store);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["management"],"active_roles":[]}}""");
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+        Assert.Null(client.LastServerActivate);
+
+        // A fresh connection, with no server/activate at all.
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        string psk = Convert.ToBase64String(Enumerable.Repeat((byte)11, 32).ToArray())
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        connection.RaiseTextMessageReceived(
+            $$$"""{"type":"management/add-record","payload":{"psk":"{{{psk}}}"}}""");
+
+        Assert.Equal("permission_denied", LastResult(connection).Result);
+        Assert.Empty(store.List());
+    }
+
+    [Fact]
+    public void MessageArrivingAfterTheClientClosed_IsDropped_WithNoReply()
+    {
+        // Defence in depth for the same window: neither receive path stops when the client
+        // decides to close, and every close is fire-and-forget, so frames keep arriving
+        // during the teardown. They must not be handled at all — not even answered.
+        var (client, connection, store) = Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"server/unpair","payload":{}}""");
+        Assert.Equal("unpaired", connection.LastDisconnectReason);
+        int repliesBefore = connection.SentMessages.OfType<ManagementResultMessage>().Count();
+
+        string psk = Convert.ToBase64String(Enumerable.Repeat((byte)12, 32).ToArray())
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        connection.RaiseTextMessageReceived(
+            $$$"""{"type":"management/add-record","payload":{"psk":"{{{psk}}}"}}""");
+
+        Assert.Equal(repliesBefore, connection.SentMessages.OfType<ManagementResultMessage>().Count());
+        Assert.Empty(store.List());
+    }
+
+    [Fact]
     public void ServerUnpair_AtTrustNone_IsIgnored()
     {
         var store = new InMemoryPairingRecordStore();

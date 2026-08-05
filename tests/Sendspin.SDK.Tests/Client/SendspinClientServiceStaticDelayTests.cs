@@ -153,8 +153,10 @@ public class SendspinClientServiceStaticDelayTests
     [Fact]
     public async Task UpdateTimingAsync_WhenDisconnected_AppliesValuesWithoutSending()
     {
-        var (client, connection, _) = TestClient.Create(configure: options =>
-            options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 });
+        var (client, connection, _) = TestClient.Create(
+            configure: options =>
+                options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 },
+            connected: false);
         using var _c = client;
 
         // Never connected: the re-report is guarded on connection state, so nothing hits the wire...
