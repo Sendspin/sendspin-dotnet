@@ -9,7 +9,13 @@ namespace Sendspin.SDK.Connection.Noise;
 /// <param name="Psk">The 32-byte PSK.</param>
 /// <param name="Category">Long-term (from pairing) or Pairing (bootstrap secret).</param>
 /// <param name="ServerId">Bound server id for stored-pubkey records; null for shared records.</param>
-/// <param name="Used">True once a server has authenticated a session with this record.</param>
+/// <param name="Used">
+/// True once a server has authenticated a session with this record. Reported to
+/// servers in management/list-records; nothing in the SDK gates on it. Per spec
+/// #122 the Pairing PSK is NOT consumed by a successful pairing — it persists and
+/// may pair this client with any number of servers — so a used Pairing PSK record
+/// is deliberately retained, not retired.
+/// </param>
 public sealed record PairingRecord(
     ReadOnlyMemory<byte> Psk,
     PskCategory Category,
@@ -120,14 +126,18 @@ public sealed class RecordPskResolver : INoisePskResolver
     public RecordPskResolver(IPairingRecordStore store) => _store = store;
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// A pure lookup. This runs inside the framing layer's inbound path, before the
+    /// AEAD has verified anything, so it must not mutate the store — the record is
+    /// marked used by the client once a decrypted message proves the session
+    /// authenticated.
+    /// </remarks>
     public NoisePsk? Resolve(string pskId)
     {
         foreach (var record in _store.List())
         {
             if (record.PskId == pskId)
             {
-                if (!record.Used)
-                    _store.Upsert(record with { Used = true });
                 return new NoisePsk(record.Psk, record.Category, record.ServerId);
             }
         }

@@ -75,6 +75,12 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     private void SetState(ConnectionState newState)
     {
         var old = State;
+        if (old == newState)
+        {
+            // Matches SendspinConnection.SetState, which does not publish a no-op transition.
+            return;
+        }
+
         State = newState;
         StateChanged?.Invoke(this, new ConnectionStateChangedEventArgs { OldState = old, NewState = newState });
     }

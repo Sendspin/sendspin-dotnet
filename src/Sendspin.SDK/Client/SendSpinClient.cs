@@ -30,10 +30,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IAudioCaptureDevice? _captureDevice;
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
+    private bool _markedPskUsed;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
     private PinPairingState? _pinState;
     private int _pairingCounter;
+    private byte[]? _lastHandshakeHash;
 
     // _handshakeTcs is published by the handshake waiter and completed by the connection's
     // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
@@ -118,9 +120,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public ServerHelloPayload? LastServerHello { get; private set; }
 
     /// <summary>
-    /// The most recent server/activate payload (encrypted protocol), or null before the
-    /// initial activation. Roles in <see cref="ServerActivatePayload.ActiveRoles"/> are
-    /// also mirrored into <see cref="LastServerHello"/> for legacy consumers.
+    /// The most recent <em>accepted</em> server/activate payload (encrypted protocol), or
+    /// null before the initial activation. An activate the admissibility table refused is
+    /// never recorded here, because the activities it declared must not grant anything.
+    /// Roles in <see cref="ServerActivatePayload.ActiveRoles"/> are also mirrored into
+    /// <see cref="LastServerHello"/> for legacy consumers.
     /// </summary>
     public ServerActivatePayload? LastServerActivate { get; private set; }
 
@@ -187,6 +191,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 msg => _connection.SendMessageAsync(msg),
                 data => _connection.SendBinaryAsync(data),
                 _logger,
+                IsSourceStreamingPermitted,
                 _sourceEncoderFactory);
         }
         _audioPipeline = options.AudioPipeline;
@@ -211,6 +216,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _audioPipeline.StateChanged += OnPipelineStateChanged;
         }
     }
+
+    /// <summary>
+    /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
+    /// connection with the source role currently active. Evaluated per start attempt,
+    /// because both trust and the active-role set can change over a connection's life.
+    /// </summary>
+    private bool IsSourceStreamingPermitted() =>
+        _session.MatchedPsk?.Category == PskCategory.LongTerm
+        && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false);
 
     public async Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
     {
@@ -243,6 +257,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         _activateReceived = false;
+
+        // A new handshake means a new session, so the record this client marked used belongs
+        // to the previous one. DetectSessionRekey covers the in-band case; this covers the
+        // per-connection one, where the identity changes without the client observing a
+        // rekey on an established session.
+        _markedPskUsed = false;
 
         // The connection's receive loop is already running when we get here, so a permanent
         // failure can be raised before there is a TCS to fail — the continuation that resumes
@@ -626,8 +646,77 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
+    /// <summary>
+    /// Notices an in-band re-handshake and restarts the state that is scoped to one Noise
+    /// session: which record has been marked used, and the CPace pairing counter (which the
+    /// spec defines as the pairing activates since the last handshake). Re-handshakes happen
+    /// inside the framing layer, but they install a fresh handshake hash, so a change in it
+    /// is our signal that the session was re-keyed.
+    /// </summary>
+    /// <remarks>
+    /// Called for every decrypted message rather than from the pairing path, because the
+    /// re-key is not followed by a pairing activate in the flow that matters most: after a
+    /// successful pairing the server rotates onto the new long-term PSK and then activates
+    /// playback, and that record must still be marked used in its turn.
+    /// </remarks>
+    private void DetectSessionRekey()
+    {
+        var currentHash = _session.HandshakeHash?.ToArray();
+        if (currentHash is null)
+            return;
+        if (_lastHandshakeHash is not null && currentHash.AsSpan().SequenceEqual(_lastHandshakeHash))
+            return;
+
+        _lastHandshakeHash = currentHash;
+        _pairingCounter = 0;
+        _markedPskUsed = false;
+    }
+
+    /// <summary>
+    /// Marks the session's matched PSK used, once per session. Called on the first decrypted
+    /// application message, which is the first proof the AEAD verified — the record
+    /// must not be marked on a merely attempted connection.
+    /// </summary>
+    private void MarkMatchedPskUsed()
+    {
+        if (_markedPskUsed || _pairingStore is null)
+            return;
+        if (_session.MatchedPsk is not { } matched)
+            return;
+
+        string pskId = NoiseConstants.DerivePskId(matched.Key.Span);
+        foreach (var record in _pairingStore.List())
+        {
+            if (record.PskId == pskId && !record.Used)
+            {
+                _pairingStore.Upsert(record with { Used = true });
+                break;
+            }
+        }
+
+        _markedPskUsed = true;
+    }
+
     private void OnTextMessageReceived(object? sender, string json)
     {
+        // Once we have decided to close, nothing the peer sends may still take effect.
+        // Neither receive path stops on its own: SendspinConnection's loop keeps reading
+        // while the goodbye and the socket close are in flight, and IncomingConnection
+        // delivers frames from a synchronous socket callback. Every close this client
+        // initiates is fire-and-forget, so without this the frames that arrive during the
+        // teardown window are handled as if the connection were still live.
+        if (_connection.State is ConnectionState.Disconnected or ConnectionState.Disconnecting)
+        {
+            _logger.LogDebug("Dropping message received while {State}", _connection.State);
+            return;
+        }
+
+        // Reaching here means the framing layer decrypted and authenticated a frame. Check
+        // for a re-key first: after one, this frame belongs to a new session, so the
+        // used-marking below applies to whichever record the session rotated onto.
+        DetectSessionRekey();
+        MarkMatchedPskUsed();
+
         try
         {
             var messageType = MessageSerializer.GetMessageType(json);
@@ -761,7 +850,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         var payload = message.Payload;
-        LastServerActivate = payload;
 
         if (!ValidateActivateAdmissibility(payload, out var goodbyeReason))
         {
@@ -784,6 +872,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
             return;
         }
+
+        // Recorded only once the activation is admitted: this property is what the
+        // management gate and the host's arbitration read, so a refused activate must
+        // not leave its activities behind. 'Last accepted activation' is the only
+        // defensible meaning for a value other code grants permission from.
+        LastServerActivate = payload;
 
         // Mirror roles where legacy consumers look. active_roles persists across
         // activates that omit it, so only overwrite when present.
@@ -933,15 +1027,52 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
+    /// Whether this client can currently complete <paramref name="method"/> on this
+    /// session. The spec's check is against live capability, which may have drifted
+    /// from what supported_pair_methods advertised in client/hello.
+    /// </summary>
+    private bool CanOffer(string? method) => method switch
+    {
+        // pairing_psk is admissible only on a session already keyed by the Pairing PSK,
+        // and only when the resulting long-term record can actually be persisted.
+        "pairing_psk" => _session.MatchedPsk?.Category == PskCategory.Pairing
+                         && _pairingStore is not null,
+        "dynamic_pin" => _capabilities.PinPairingMethods.Contains("dynamic_pin"),
+        "static_pin" => _capabilities.PinPairingMethods.Contains("static_pin"),
+        _ => false,
+    };
+
+    /// <summary>
     /// Starts the client side of a pairing attempt when server/activate declares the
     /// pairing activity, dispatching on the method the server selected: Pairing PSK
     /// generates the long-term PSK and delivers it in client/pair-finalize, and the PIN
-    /// methods begin a PIN attempt. Anything else is aborted.
+    /// methods begin a PIN attempt. A method the matched PSK disallows, or that this
+    /// client cannot currently complete, is refused with pair/abort reason
+    /// 'method_not_supported' and the connection is left open (spec #123).
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
         _pinState = null;
+
+        // Only pairing activates count. The spec defines the CPace counter as the pairing
+        // activates since the last Noise handshake; the restart on re-handshake lives in
+        // DetectSessionRekey, which has already run for this message.
         _pairingCounter++;
+
+        if (!CanOffer(payload.SelectedPairMethod))
+        {
+            // Spec: reply method_not_supported and LEAVE THE CONNECTION OPEN. The server
+            // may re-activate with another method, or re-handshake for a fresh
+            // supported_pair_methods advertisement.
+            _logger.LogWarning(
+                "Cannot offer pair method {Method} on this session; aborting the attempt",
+                payload.SelectedPairMethod);
+            _connection.SendMessageAsync(new PairAbortMessage
+            {
+                Payload = new PairAbortPayload { Reason = "method_not_supported" },
+            }).SafeFireAndForget(_logger);
+            return;
+        }
 
         switch (payload.SelectedPairMethod)
         {
@@ -954,23 +1085,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }).SafeFireAndForget(_logger);
                 break;
 
-            case "dynamic_pin" when _capabilities.PinPairingMethods.Contains("dynamic_pin"):
+            case "dynamic_pin":
                 StartPinAttempt(dynamic: true);
                 break;
 
-            case "static_pin" when _capabilities.PinPairingMethods.Contains("static_pin"):
+            case "static_pin":
                 StartPinAttempt(dynamic: false);
                 break;
 
             default:
-                _logger.LogWarning("Server selected unsupported pair method {Method}; aborting",
-                    payload.SelectedPairMethod);
-                _connection.SendMessageAsync(new PairAbortMessage
-                {
-                    Payload = new PairAbortPayload { Reason = "method_not_supported" },
-                }).SafeFireAndForget(_logger);
-                DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
-                break;
+                // CanOffer above and this switch are two lists of the same methods. A method
+                // added to one and not the other would otherwise fall through in silence,
+                // leaving the server waiting for a reply that never comes.
+                throw new System.Diagnostics.UnreachableException(
+                    $"CanOffer admitted pair method '{payload.SelectedPairMethod}' with no dispatch arm");
         }
     }
 

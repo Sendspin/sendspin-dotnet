@@ -42,7 +42,7 @@ public class SendspinClientServiceExternalSourceTests
     {
         // A disconnected connection rejects the send, like the real transport would. The enter
         // notification is unguarded, so the throw must propagate and roll back the local flag.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(connected: false);
         connection.EnforceConnectionState = true;
         using var _c = client;
 

@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using Sendspin.SDK.Audio.Source;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
-using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -15,20 +14,6 @@ namespace Sendspin.SDK.Tests.Client;
 public class SendspinClientServiceSourceTests
 {
     private const string ServerId = FakeNoiseSession.FakeServerId;
-
-    private sealed class FakeCaptureDevice : IAudioCaptureDevice
-    {
-        public AudioFormat Format { get; } = new() { Codec = "pcm", SampleRate = 48000, Channels = 2, BitDepth = 16 };
-        public bool Capturing { get; private set; }
-        public event EventHandler<CapturedAudio>? AudioCaptured;
-
-        public Task StartAsync(CancellationToken ct = default) { Capturing = true; return Task.CompletedTask; }
-        public Task StopAsync(CancellationToken ct = default) { Capturing = false; return Task.CompletedTask; }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-
-        public void Emit(byte[] pcm, long captureTimeUs) =>
-            AudioCaptured?.Invoke(this, new CapturedAudio(pcm, captureTimeUs));
-    }
 
     private static (SendspinClientService, FakeSendspinConnection, FakeCaptureDevice) CreateSourceClient(
         bool lineSense = false, PskCategory trust = PskCategory.LongTerm, bool unpairedAccess = false)
@@ -159,5 +144,118 @@ public class SendspinClientServiceSourceTests
         var state = connection.SentMessages.OfType<ClientStateMessage>()
             .Last(m => m.Payload.Source is not null);
         Assert.Equal("present", state.Payload.Source!.Signal);
+    }
+
+    /// <summary>
+    /// Builds a source-capable client, drives the encrypted handshake, and optionally
+    /// activates the source role — so a test can reach the server/command path with the
+    /// role either active or inactive, at either trust level.
+    /// </summary>
+    private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeCaptureDevice Capture)
+        CreateSourceClient(PskCategory category, bool activateSourceRole)
+    {
+        var capture = new FakeCaptureDevice();
+        var (client, connection, _) = TestClient.Create(
+            category,
+            configure: options =>
+            {
+                options.CaptureDevice = capture;
+                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
+            });
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        // Empty activities deliberately. A Sentinel-keyed session granted ["playback"]
+        // is INADMISSIBLE without unpaired access, so the client would disconnect with
+        // 'pairing_required' before the server/command ever arrived and the test would
+        // fail for the wrong reason. An empty set is admissible on both PSK categories
+        // (and on LongTerm with an active role, via the withPlayback extension in
+        // IsAdmissible) — and it is the more faithful attack shape, since #75 describes
+        // a server that omits the role entirely and just sends the command.
+        string roles = activateSourceRole ? "\"source@v1\"" : string.Empty;
+        connection.RaiseTextMessageReceived(
+            $$$"""
+            {"type":"server/activate","payload":{"activities":[],"active_roles":[{{{roles}}}]}}
+            """);
+
+        return (client, connection, capture);
+    }
+
+    private static void SendSourceStart(FakeSendspinConnection connection) =>
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+
+    [Fact]
+    public void SourceStart_AtTrustNone_NeverOpensTheCaptureDevice()
+    {
+        // #75: a Sentinel-keyed server must not be able to start capture via
+        // server/command, bypassing the activate-time trust gate entirely.
+        var (client, connection, capture) = CreateSourceClient(PskCategory.Sentinel, activateSourceRole: false);
+        using var _c = client;
+
+        SendSourceStart(connection);
+
+        Assert.False(capture.Capturing, "the capture device must never open at trust 'none'");
+    }
+
+    [Fact]
+    public void SourceStart_WithSourceRoleInactive_NeverOpensTheCaptureDevice()
+    {
+        // Even at user trust, a source that was never activated must not stream.
+        var (client, connection, capture) = CreateSourceClient(PskCategory.LongTerm, activateSourceRole: false);
+        using var _c = client;
+
+        SendSourceStart(connection);
+
+        Assert.False(capture.Capturing, "the capture device must never open with the role inactive");
+    }
+
+    [Fact]
+    public void SourceStart_AtUserTrustWithActiveRole_OpensTheCaptureDevice()
+    {
+        // Positive control: a gate that refuses everything would pass both tests above.
+        var (client, connection, capture) = CreateSourceClient(PskCategory.LongTerm, activateSourceRole: true);
+        using var _c = client;
+
+        SendSourceStart(connection);
+
+        Assert.True(capture.Capturing, "the legitimate case must still stream");
+    }
+
+    [Fact]
+    public void SourceStart_AtSentinelTrustWithRoleGrantedOnlyInHello_NeverOpensTheCaptureDevice()
+    {
+        // The three tests above never exercise the trust half of IsSourceStreamingPermitted
+        // independently of the role half — a predicate that dropped the trust check and kept
+        // only the role check would still pass all three. This test reaches (Sentinel trust,
+        // source role active) by a route that never touches server/activate's role list:
+        // ServerHelloPayload.ActiveRoles is a plain deserialized field, so a Sentinel-keyed
+        // server can grant source@v1 in server/hello, then send an activate that OMITS
+        // active_roles entirely. HandleServerActivate only overwrites LastServerHello.ActiveRoles
+        // when the activate payload carries the field, so the hello's grant survives, and the
+        // activate-time admissibility check (keyed off the activate payload's own active_roles,
+        // not the mirrored hello) never sees it either.
+        var capture = new FakeCaptureDevice();
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options =>
+            {
+                options.CaptureDevice = capture;
+                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
+            });
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/hello","payload":{"name":"srv","active_roles":["source@v1"]}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":[]}}""");
+
+        // Confirms the route actually reaches server/command rather than disconnecting first.
+        Assert.NotEqual(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
+
+        SendSourceStart(connection);
+
+        Assert.False(capture.Capturing,
+            "the capture device must never open at Sentinel trust, even when source@v1 was granted via server/hello rather than server/activate");
     }
 }
