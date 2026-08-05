@@ -49,6 +49,14 @@ internal static class SecureFile
         using (var writer = new StreamWriter(stream))
         {
             writer.Write(contents);
+
+            // Disposal only flushes to the kernel. The move below is a metadata operation and
+            // can reach the journal before the data blocks do, so a power cut at the wrong
+            // moment would leave the target name pointing at a zero-length file. Flush the
+            // writer first: flushing the FileStream while the StreamWriter still buffers
+            // accomplishes nothing.
+            writer.Flush();
+            stream.Flush(flushToDisk: true);
         }
 
         // Move last: until this succeeds, the previous file is still the valid one.

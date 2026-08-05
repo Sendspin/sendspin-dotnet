@@ -73,9 +73,10 @@ public class SecureFileTests : IDisposable
 
         if (OperatingSystem.IsWindows())
         {
-            // File.SetUnixFileMode throws PlatformNotSupportedException on Windows, so the
-            // only thing to assert here is that the write completed without one. The file
-            // inherits the parent directory's ACL.
+            // Windows has no Unix file mode: WriteAllTextAtomic leaves UnixCreateMode unset
+            // there (assigning it throws PlatformNotSupportedException), and File.GetUnixFileMode
+            // would throw too, so the only thing to assert here is that the write completed. The
+            // file inherits the parent directory's ACL.
             Assert.True(File.Exists(path));
         }
         else
