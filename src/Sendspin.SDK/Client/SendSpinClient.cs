@@ -1052,10 +1052,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
-        // The counter restarts on a re-handshake, per the spec's definition of the CPace
-        // counter as pairing activates since the last Noise handshake. That reset lives in
-        // DetectSessionRekey, which has already run for this message.
         _pinState = null;
+
+        // Only pairing activates count. The spec defines the CPace counter as the pairing
+        // activates since the last Noise handshake; the restart on re-handshake lives in
+        // DetectSessionRekey, which has already run for this message.
         _pairingCounter++;
 
         if (!CanOffer(payload.SelectedPairMethod))
