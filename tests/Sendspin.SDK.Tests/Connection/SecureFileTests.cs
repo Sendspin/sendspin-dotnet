@@ -87,6 +87,33 @@ public class SecureFileTests : IDisposable
     }
 
     [Fact]
+    public void NarrowExistingPermissions_TightensALegacyWorldReadableFile()
+    {
+        string path = Path.Combine(_dir, "legacy.json");
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(path, "psk");
+
+        if (OperatingSystem.IsWindows())
+        {
+            // No Unix file mode to inspect, so the contract on Windows is "does nothing, does
+            // not throw" - the file keeps its inherited ACL.
+            Assert.False(SecureFile.NarrowExistingPermissions(path));
+        }
+        else
+        {
+            // 0644: what a file written before SecureFile owned the write path still looks like.
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+            Assert.True(SecureFile.NarrowExistingPermissions(path));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+            // Already narrow: reports no change, so callers can log only when it mattered.
+            Assert.False(SecureFile.NarrowExistingPermissions(path));
+        }
+    }
+
+    [Fact]
     public void ReadAllTextOrNull_ReturnsNull_WhenAbsent()
     {
         Assert.Null(SecureFile.ReadAllTextOrNull(Path.Combine(_dir, "missing.json")));

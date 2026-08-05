@@ -78,7 +78,8 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
     /// Creates a store backed by the given file, loading existing records. A malformed
     /// individual record is skipped; a file that cannot be parsed at all is quarantined
     /// alongside itself and the store opens empty, so a single bad byte cannot stop the
-    /// client from starting.
+    /// client from starting. A file left at looser permissions by an earlier SDK version is
+    /// narrowed to owner-only here, since nothing else will rewrite it.
     /// </summary>
     public FilePairingRecordStore(string path, ILogger? logger = null)
     {
@@ -88,6 +89,17 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
         string? text = SecureFile.ReadAllTextOrNull(path);
         if (text is null)
             return;
+
+        // A file written by an earlier SDK version is still at the platform default (0644 on
+        // Unix), and Save() — the only thing that would replace the inode with a 0600 one — is
+        // never reached by an already-paired client that does not re-pair. Narrow it here or it
+        // stays world-readable, with raw PSKs in it, indefinitely.
+        if (SecureFile.NarrowExistingPermissions(path))
+        {
+            _logger.LogInformation(
+                "Tightened permissions on pairing record store {Path} to owner-only; it was " +
+                "readable by other users on this machine.", path);
+        }
 
         List<Entry>? entries;
         try

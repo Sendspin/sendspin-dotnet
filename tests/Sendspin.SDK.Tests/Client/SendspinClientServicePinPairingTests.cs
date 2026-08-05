@@ -345,4 +345,40 @@ public class SendspinClientServicePinPairingTests
                 Directory.Delete(dir, recursive: true);
         }
     }
+
+    [Fact]
+    public void FilePinLockoutStore_NarrowsALegacyWorldReadableFile()
+    {
+        // Counters are not secrets but they are security state: anyone who can rewrite this file
+        // resets the lockout. A file from an earlier SDK version keeps its 0644 mode until a
+        // failed PIN attempt replaces the inode, so the load path narrows it.
+        string dir = Path.Combine(Path.GetTempPath(), "sendspin-lockout-" + Guid.NewGuid().ToString("N")[..8]);
+        string path = Path.Combine(dir, "lockout.json");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(path, """{"dynamic_pin":2}""");
+
+            if (OperatingSystem.IsWindows())
+            {
+                Assert.Equal(2, new FilePinLockoutStore(path).GetFailures("dynamic_pin"));
+            }
+            else
+            {
+                File.SetUnixFileMode(path,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                    UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+                var store = new FilePinLockoutStore(path);
+
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+                Assert.Equal(2, store.GetFailures("dynamic_pin"));
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
 }

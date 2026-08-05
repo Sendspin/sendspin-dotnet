@@ -64,6 +64,34 @@ internal static class SecureFile
     }
 
     /// <summary>
+    /// Narrows an existing file to owner-only access where the platform has permissions,
+    /// returning <c>true</c> when it actually had to change something.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="WriteAllTextAtomic"/> only governs files this SDK version wrote. A store
+    /// created by an earlier version is still at the platform default (0644 on Unix) and will
+    /// stay there until something replaces the inode — which, for an already-paired client
+    /// that never re-pairs, is never. Call this when loading such a file.
+    /// </remarks>
+    internal static bool NarrowExistingPermissions(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            const UnixFileMode groupOrOther =
+                UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+
+            if ((File.GetUnixFileMode(path) & groupOrOther) != 0)
+            {
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Returns the file's contents, or <c>null</c> when it does not exist. Genuine IO
     /// failures still throw.
     /// </summary>

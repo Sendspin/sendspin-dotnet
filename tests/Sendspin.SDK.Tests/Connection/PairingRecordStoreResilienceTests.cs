@@ -97,6 +97,36 @@ public class PairingRecordStoreResilienceTests : IDisposable
     }
 
     [Fact]
+    public void Construction_NarrowsALegacyWorldReadableFile()
+    {
+        // The steady state for a consumer upgrading from 9.1.0: a records.json written by the
+        // old truncate-then-write Save() at the platform default 0644, with raw PSKs in it. It
+        // does not self-heal, because Save() is only reached by a new pairing or a Remove - an
+        // already-paired client never rewrites the file, so the mode has to be fixed on load.
+        string good = Base64UrlText.Encode(Enumerable.Repeat((byte)0x77, 32).ToArray());
+        string path = WriteStoreFile($$"""
+            [{"Psk":"{{good}}","Category":"LongTerm","ServerId":"srv-a","Used":true}]
+            """);
+
+        if (OperatingSystem.IsWindows())
+        {
+            // No Unix file mode: assert only that loading such a file still works.
+            Assert.Single(new FilePairingRecordStore(path).List());
+        }
+        else
+        {
+            File.SetUnixFileMode(path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite |
+                UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+
+            var store = new FilePairingRecordStore(path);
+
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+            Assert.Single(store.List());   // narrowing must not cost the records
+        }
+    }
+
+    [Fact]
     public void Upsert_PersistsAndReloads()
     {
         string path = Path.Combine(_dir, "records.json");

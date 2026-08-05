@@ -40,6 +40,11 @@ public sealed class FilePinLockoutStore : IPinLockoutStore
         if (text is null)
             return new Dictionary<string, int>();
 
+        // Same reason as FilePairingRecordStore: a file from an earlier SDK version keeps the
+        // platform-default mode until something replaces the inode, and only a failed PIN
+        // attempt does that. This store has no logger, so the narrowing is silent.
+        SecureFile.NarrowExistingPermissions(path);
+
         try
         {
             return JsonSerializer.Deserialize<Dictionary<string, int>>(text) ?? new Dictionary<string, int>();
