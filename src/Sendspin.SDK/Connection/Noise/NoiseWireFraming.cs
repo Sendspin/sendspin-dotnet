@@ -47,6 +47,10 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     private MemoryStream? _reassemblyBuffer;
     private byte _reassemblyOrigType;
 
+    // True once a message has genuinely reached the application on this connection;
+    // selects between the pre- and post-first-message reassembly bounds.
+    private bool _surfacedApplicationMessage;
+
     /// <summary>Creates a client-side Noise framing.</summary>
     /// <param name="identity">The client's static identity (its public key is the client_id).</param>
     /// <param name="pskResolver">Resolves psk_id from Noise message 1 to a PSK candidate.
@@ -144,6 +148,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         _matchedPsk = null;
         _reassemblyBuffer?.Dispose();
         _reassemblyBuffer = null;
+        _surfacedApplicationMessage = false;
     }
 
     // --- Handshake ---
@@ -285,6 +290,8 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         {
             NoiseConstants.MessageTypeFragmentMore => HandleFragment(plainBuf.AsMemory(0, plainLen), last: false),
             NoiseConstants.MessageTypeFragmentEnd => HandleFragment(plainBuf.AsMemory(0, plainLen), last: true),
+            _ when _reassemblyBuffer is not null =>
+                Fail("non-fragment frame received while a fragmented message is in flight"),
             _ => DispatchMessage(type, plainBuf.AsMemory(1, plainLen - 1)),
         };
     }
@@ -300,6 +307,8 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             if (plaintext.Length < 2)
                 return Fail("opening fragment missing orig_type");
             _reassemblyOrigType = plaintext.Span[1];
+            if (_reassemblyOrigType is NoiseConstants.MessageTypeFragmentMore or NoiseConstants.MessageTypeFragmentEnd)
+                return Fail("orig_type of 2 or 3");
             _reassemblyBuffer = new MemoryStream();
             data = plaintext[2..];
         }
@@ -308,7 +317,10 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             data = plaintext[1..];
         }
 
-        if (_reassemblyBuffer.Length + data.Length > NoiseConstants.MaxReassembledMessageBytes)
+        int maxReassembled = _surfacedApplicationMessage
+            ? NoiseConstants.MaxReassembledMessageBytes
+            : NoiseConstants.MaxReassembledMessageBytesBeforeFirstMessage;
+        if (_reassemblyBuffer.Length + data.Length > maxReassembled)
             return Fail("reassembled message exceeds size bound");
         _reassemblyBuffer.Write(data.Span);
 
@@ -332,7 +344,11 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     {
         using var doc = JsonDocument.Parse(json);
         if (doc.RootElement.GetProperty("type").GetString() != "noise/handshake")
+        {
+            // Sniff false positive: not actually a re-handshake, so it surfaces.
+            _surfacedApplicationMessage = true;
             return InboundFrameResult.ForText(json);
+        }
 
         byte[] msg1 = Base64UrlText.Decode(
             doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
@@ -348,14 +364,18 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             string json = Encoding.UTF8.GetString(payload.Span);
             if (json.Contains("\"noise/handshake\"", StringComparison.Ordinal))
             {
+                // Re-handshakes are consumed by the framing and never surface, so
+                // they must not count as the first application message.
                 return HandleRehandshakeMessage(json);
             }
 
+            _surfacedApplicationMessage = true;
             return InboundFrameResult.ForText(json);
         }
 
         // Non-JSON application binary: surface in the SDK's existing binary message
         // shape ([type][payload]) so BinaryMessageParser sees what it always has.
+        _surfacedApplicationMessage = true;
         var full = new byte[1 + payload.Length];
         full[0] = type;
         payload.CopyTo(full.AsMemory(1));

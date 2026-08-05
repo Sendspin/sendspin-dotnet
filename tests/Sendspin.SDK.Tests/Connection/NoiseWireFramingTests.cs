@@ -143,8 +143,10 @@ public class NoiseWireFramingTests
     {
         var (framing, server) = CompleteHandshake();
 
-        // A 150 KB artwork-style message: [type 8][payload...]
-        byte[] payload = new byte[150_000];
+        // A 100 KB artwork-style message ([type 8][payload...]): spans multiple frames
+        // while staying under the pre-first-message reassembly cap, since nothing has
+        // surfaced yet on this connection.
+        byte[] payload = new byte[100_000];
         RandomNumberGenerator.Fill(payload);
         byte[] appMessage = [8, .. payload];
 
