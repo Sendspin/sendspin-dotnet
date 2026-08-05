@@ -1,5 +1,6 @@
 using System.Text;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Connection.Noise.Pairing;
 using Sendspin.SDK.Protocol.Messages;
@@ -220,9 +221,10 @@ public class SendspinClientServicePinPairingTests
         // server's after any key rotation, and CPace then fails.
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options => options.Capabilities = new ClientCapabilities
+            configure: options =>
             {
-                PinPairingMethods = ["dynamic_pin"],
+                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
+                options.PinLockoutStore = new InMemoryPinLockoutStore();
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -256,9 +258,10 @@ public class SendspinClientServicePinPairingTests
         // PairingIndex == 1, so an "always reset" implementation would pass it too.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options => options.Capabilities = new ClientCapabilities
+            configure: options =>
             {
-                PinPairingMethods = ["dynamic_pin"],
+                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
+                options.PinLockoutStore = new InMemoryPinLockoutStore();
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -275,5 +278,71 @@ public class SendspinClientServicePinPairingTests
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(2, second.Payload.PairingIndex);
+    }
+
+    [Fact]
+    public void DynamicPin_WithNoLockoutStore_IsRefused()
+    {
+        // With no store, IsPinMethodLockedOut evaluates (null?.GetFailures() ?? 0) >= 10 —
+        // always false — and RecordPinFailure returns early. So PIN attempts are unlimited
+        // and the spec's terminal lockout is silently inert. Refuse the method instead.
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options => options.Capabilities = new ClientCapabilities
+            {
+                PinPairingMethods = ["dynamic_pin"],
+            });
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+
+        Assert.DoesNotContain(connection.SentMessages, m => m is ClientPairInitMessage);
+        var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+        Assert.Equal(ConnectionState.Connected, connection.State);
+    }
+
+    [Fact]
+    public void DynamicPin_WithALockoutStore_IsStillOffered()
+    {
+        // Positive control: the two new clauses could refuse PIN entirely and the test above
+        // would still pass.
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options =>
+            {
+                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
+                options.PinLockoutStore = new InMemoryPinLockoutStore();
+            });
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+
+        Assert.Single(connection.SentMessages.OfType<ClientPairInitMessage>());
+        Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);
+    }
+
+    [Fact]
+    public void FilePinLockoutStore_PersistsCountersAcrossInstances()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "sendspin-lockout-" + Guid.NewGuid().ToString("N")[..8]);
+        string path = Path.Combine(dir, "lockout.json");
+        try
+        {
+            new FilePinLockoutStore(path).SetFailures("dynamic_pin", 3);
+
+            Assert.Equal(3, new FilePinLockoutStore(path).GetFailures("dynamic_pin"));
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
     }
 }

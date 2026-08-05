@@ -1037,8 +1037,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // and only when the resulting long-term record can actually be persisted.
         "pairing_psk" => _session.MatchedPsk?.Category == PskCategory.Pairing
                          && _pairingStore is not null,
-        "dynamic_pin" => _capabilities.PinPairingMethods.Contains("dynamic_pin"),
-        "static_pin" => _capabilities.PinPairingMethods.Contains("static_pin"),
+        // A PIN method without a lockout store cannot enforce the spec's terminal lockout at
+        // 10 failures — IsPinMethodLockedOut would always report false — so offering it would
+        // grant unlimited attempts. Refuse rather than fail open.
+        "dynamic_pin" => _capabilities.PinPairingMethods.Contains("dynamic_pin")
+                         && _pinLockoutStore is not null,
+        "static_pin" => _capabilities.PinPairingMethods.Contains("static_pin")
+                        && _pinLockoutStore is not null,
         _ => false,
     };
 
