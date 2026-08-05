@@ -69,11 +69,29 @@ Follows the established `IStaticDelayStore` / `ILastPlayedServerStore` idiom: `L
 
 **The blob is opaque deliberately, and it is what makes §3.1 possible.** An earlier shape of this interface passed `SendspinIdentity` directly — which contradicts making `PrivateKey` internal, because then an external implementation could not serialize what it was handed. A platform store (DPAPI, Keychain, Android keystore) wants to protect a byte blob, not understand a key format, so opaque bytes are both the enabling choice and the idiomatic one. The SDK also gets to version the blob format without touching the interface.
 
-`SendspinClientOptions` gains `IdentityStore`. Resolution order at construction:
+### 3.0 The store resolves *into* `Identity`, not beside it
 
-1. `Identity` supplied explicitly → use it, do not touch the store. Existing behavior, unchanged.
-2. Else `IdentityStore` supplied → `Load()`; on `null`, `SendspinIdentity.Generate()` and `Save()`.
-3. Else → throw. `Identity` is already `required`, so this only formalises the existing contract.
+`SendspinClientOptions.Identity` is `required` — #94 made it so deliberately, for a compile-time guarantee that no client exists without an identity. So an `IdentityStore` option sitting *beside* it would contradict that: a `required` property must be set at construction, making "neither supplied" unrepresentable and any store-fallback branch unreachable.
+
+`SendspinClientOptions` therefore gains **no new property**. Instead a static factory resolves the store into an identity, used inside the initializer:
+
+```csharp
+/// <summary>
+/// Loads the identity from <paramref name="store"/>, generating and persisting a new one
+/// on first run. The returned identity's PeerId is stable across restarts.
+/// </summary>
+public static SendspinIdentity FromStore(ISendspinIdentityStore store);
+```
+
+```csharp
+var options = new SendspinClientOptions
+{
+    Identity = SendspinIdentity.FromStore(new FileSendspinIdentityStore(path)),
+    // ...
+};
+```
+
+`Identity` stays `required`, nothing becomes nullable, and there is no resolution order to get wrong — a consumer either hands over an identity or hands over a store that produces one, and both paths end at the same required property.
 
 ### 3.1 `PrivateKey` becomes `internal`, `FromKeys` stays public
 
@@ -135,10 +153,10 @@ The Unix-permission assertions are genuinely exercised despite the dev platform 
 | `SecureFile` | overwrite existing | old content replaced |
 | `SecureFile` | permissions | Unix: mode is `UserRead\|UserWrite`. Windows: no throw |
 | `SecureFile` | parent directory missing | created, no exception |
-| Identity | first run against an empty store | identity generated **and persisted** |
-| Identity | construct twice against one store | **same `PeerId`** |
-| Identity | explicit `Identity` plus a store | explicit wins; store not written |
-| Identity | neither supplied | throws |
+| Identity | `FromStore` against an empty store | identity generated **and persisted** |
+| Identity | `FromStore` twice against one store | **same `PeerId`** — the whole point |
+| Identity | `FromStore` against a store holding a corrupt blob | throws a typed, actionable error naming the store |
+| Identity | round-trip through `FileSendspinIdentityStore` | `PeerId` and private key both survive |
 | Records | one malformed entry among three | **the other two survive** |
 | Records | unparseable document | store empty, `<path>.corrupt-*` **exists**, original gone |
 | PIN gate | `PinPairingMethods` set, no lockout store | `pair/abort method_not_supported`, **no `client/pair-init`**, connection still open |
@@ -165,7 +183,7 @@ Package version stays `9.1.0` (#91 owns the bump).
 
 ## 8. Success criteria
 
-1. An identity survives a process restart through `FileSendspinIdentityStore` — same `PeerId` on the second construction.
+1. An identity survives a process restart through `SendspinIdentity.FromStore(new FileSendspinIdentityStore(path))` — same `PeerId` on the second call, without `SendspinClientOptions.Identity` ceasing to be `required`.
 2. `SendspinIdentity.PrivateKey` is not publicly accessible.
 3. A crash mid-save cannot leave a truncated record file — the write is atomic.
 4. On Unix, both stores' files are mode `0600`; on Windows, saving does not throw.
