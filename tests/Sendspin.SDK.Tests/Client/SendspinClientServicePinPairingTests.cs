@@ -1,5 +1,4 @@
 using System.Text;
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Connection.Noise.Pairing;
@@ -14,15 +13,8 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServicePinPairingTests
 {
-    private const string ServerId = "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo";
+    private const string ServerId = FakeNoiseSession.FakeServerId;
     private static readonly byte[] HandshakeHash = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
-
-    private sealed class FakeNoiseSession : INoiseSessionInfo
-    {
-        public string? ServerId { get; set; } = SendspinClientServicePinPairingTests.ServerId;
-        public NoisePsk? MatchedPsk { get; set; } = new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Sentinel);
-        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = SendspinClientServicePinPairingTests.HandshakeHash;
-    }
 
     private static byte[] B64(string s) => PinPairing.DecodeB64Url(s);
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -30,16 +22,20 @@ public class SendspinClientServicePinPairingTests
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPinLockoutStore, InMemoryPairingRecordStore)
         CreateClient(ClientCapabilities caps)
     {
-        var connection = new FakeSendspinConnection();
         var lockout = new InMemoryPinLockoutStore();
         var records = new InMemoryPairingRecordStore();
-        var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: caps,
-            noiseSession: new FakeNoiseSession(),
-            pairingRecordStore: records,
-            pinLockoutStore: lockout);
+        var (client, connection, session) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options =>
+            {
+                options.Capabilities = caps;
+                options.PairingRecordStore = records;
+                options.PinLockoutStore = lockout;
+            });
+
+        // The CPace exchange is bound to the Noise handshake hash, which the test's server
+        // counterpart derives from the same constant.
+        session.HandshakeHash = HandshakeHash;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         return (client, connection, lockout, records);
@@ -192,16 +188,17 @@ public class SendspinClientServicePinPairingTests
     public void LockedOutMethod_AbortsImmediately_AndIsAdvertised()
     {
         var caps = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
-        var connection = new FakeSendspinConnection();
         var lockout = new InMemoryPinLockoutStore();
         lockout.SetFailures("static_pin", 10);
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: caps,
-            noiseSession: new FakeNoiseSession(),
-            pairingRecordStore: new InMemoryPairingRecordStore(),
-            pinLockoutStore: lockout);
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options =>
+            {
+                options.Capabilities = caps;
+                options.PairingRecordStore = new InMemoryPairingRecordStore();
+                options.PinLockoutStore = lockout;
+            });
+        using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 

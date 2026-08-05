@@ -67,17 +67,6 @@ public class ServerArbitrationTests
     }
 
     [Theory]
-    [InlineData("playback", ConnectionPriority.Playback)]
-    [InlineData("PLAYBACK", ConnectionPriority.Playback)]
-    [InlineData("discovery", ConnectionPriority.Empty)]
-    [InlineData(null, ConnectionPriority.Empty)]
-    [InlineData("something-else", ConnectionPriority.Empty)]
-    public void FromConnectionReason_MapsLegacyReasons(string? reason, ConnectionPriority expected)
-    {
-        Assert.Equal(expected, ServerArbitration.FromConnectionReason(reason));
-    }
-
-    [Theory]
     [InlineData(new string[0], ConnectionPriority.Empty)]
     [InlineData(new[] { "pairing" }, ConnectionPriority.Pairing)]
     [InlineData(new[] { "playback" }, ConnectionPriority.Playback)]

@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -10,17 +9,14 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceExternalSourceTests
 {
-    private static SendspinClientService NewClient(FakeSendspinConnection connection) =>
-        new(NullLogger<SendspinClientService>.Instance, connection);
-
     private static string? LastState(FakeSendspinConnection connection) =>
         connection.SentMessages.OfType<ClientStateMessage>().Last().Payload.State;
 
     [Fact]
     public async Task EnterExternalSource_SendsStateAndSetsFlag()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.EnterExternalSourceAsync();
 
@@ -31,8 +27,8 @@ public class SendspinClientServiceExternalSourceTests
     [Fact]
     public async Task ExitExternalSource_ReportsSynchronizedAndClearsFlag()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
         await client.EnterExternalSourceAsync();
         await client.ExitExternalSourceAsync();
@@ -46,8 +42,9 @@ public class SendspinClientServiceExternalSourceTests
     {
         // A disconnected connection rejects the send, like the real transport would. The enter
         // notification is unguarded, so the throw must propagate and roll back the local flag.
-        var connection = new FakeSendspinConnection { EnforceConnectionState = true };
-        using var client = NewClient(connection);
+        var (client, connection, _) = TestClient.Create();
+        connection.EnforceConnectionState = true;
+        using var _c = client;
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => client.EnterExternalSourceAsync());
 

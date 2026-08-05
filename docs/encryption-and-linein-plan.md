@@ -135,9 +135,21 @@ CPace PAKE implementation (or vetted library), dynamic-PIN out-channel plumbing 
 5. **Windows client impact** (windowsSpin): identity persistence, pairing UX (QR display), unpaired-access toggle, and — for line-in — a WASAPI capture implementation are app-side work items to schedule alongside Phases 1–4.
 6. **Open upstream question worth filing:** the spec is silent on how a *client-initiated* connection learns it should retry after `pairing_required`; and lyrics PR #80's binary-ID collision with source confirms IDs 12–15 shouldn't be assumed stable until 1.0.
 
-## 6. Optional: version gating & downgrade (decision pending — NOT committed to)
+## 6. Version gating & downgrade — DECIDED: Option A (2026-08-04)
 
-How does a new-SDK client behave against a pre-encryption (aiosendspin < 7.0.0) server? Two options; **no decision made yet**, and the default assumption is Option A unless real-world migration pain forces Option B.
+**Decision: Option A, the clean break.** v10.0.0 speaks only the encrypted protocol. The v9.x
+line remains available for deployments whose servers predate encryption, and applications move
+to 10.x when their user base is ready for encryption.
+
+Confirmed 2026-08-04 on the evidence below plus three developments since Phase 1 exit: the
+reference client is encrypted-only and only its *server* dual-stacks (upgrade pressure is
+one-directional), the spec still has no downgrade negotiation, and aiosendspin #298 documents
+`allow_noncompliant_clients` as defaulting to `False` in a future version and being removed
+with all backwards-compat paths later.
+
+Implemented by the encrypted-only clean break (design:
+`docs/superpowers/specs/2026-08-04-encrypted-only-clean-break-design.md`), closing #78 and #83.
+Option B below is retained as a record of the rejected alternative.
 
 **Groundwork facts (measured against real servers):**
 
@@ -209,6 +221,9 @@ Noise framing, server-driven hello, 30 s provisional-activate window) and feeds
 arbitration priority from declared `server/activate` activities, falling back to the
 legacy `connection_reason` mapping. Audit finding #91 (default goodbye reason) was
 verified already satisfied — the SDK defaults to `restart`.
+
+**Correction (2026-08-04):** the `client/state` reshape to a boolean `available` was listed
+above as delivered but never landed — tracked as #77.
 
 ## 9. Suggested immediate next steps
 

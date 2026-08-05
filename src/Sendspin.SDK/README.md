@@ -26,31 +26,35 @@ dotnet add package Sendspin.SDK
 
 ## Quick Start
 
+Under the encrypted Sendspin protocol, a client's `client_id` **is** its Curve25519 public
+key, so its identity must persist across restarts — `SendspinIdentity.Generate()` below is
+for a first run only; a real app loads a saved key on every run after that.
+
 ```csharp
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
-using Sendspin.SDK.Connection;
-using Sendspin.SDK.Synchronization;
+using Sendspin.SDK.Connection.Noise;
 
-// Create dependencies
+// Load a persisted identity, or generate and save one on first run.
+var identity = SendspinIdentity.Generate();
+
 var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
-var connection = new SendspinConnection(loggerFactory.CreateLogger<SendspinConnection>());
-var clockSync = new KalmanClockSynchronizer(loggerFactory.CreateLogger<KalmanClockSynchronizer>());
 
-// Create client with device info
-var capabilities = new ClientCapabilities
-{
-    ClientName = "My Player",
-    ProductName = "My Awesome Player",
-    Manufacturer = "My Company",
-    SoftwareVersion = "1.0.0"
-};
-
-var client = new SendspinClientService(
-    loggerFactory.CreateLogger<SendspinClientService>(),
-    connection,
-    clockSync,
-    capabilities
-);
+// CreateForDial wires the identity, wire framing, and Noise session together so they
+// can't drift apart.
+var client = SendspinClientService.CreateForDial(
+    loggerFactory,
+    new SendspinClientOptions
+    {
+        Identity = identity,
+        Capabilities = new ClientCapabilities
+        {
+            ClientName = "My Player",
+            ProductName = "My Awesome Player",
+            Manufacturer = "My Company",
+            SoftwareVersion = "1.0.0"
+        }
+    });
 
 // Connect to server
 await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
@@ -309,10 +313,14 @@ public sealed class FileStaticDelayStore : IStaticDelayStore
         => File.WriteAllText(path, staticDelayMs.ToString(CultureInfo.InvariantCulture));
 }
 
-var client = new SendspinClientService(
-    logger, connection, clockSync, capabilities,
-    audioPipeline: pipeline,
-    staticDelayStore: new FileStaticDelayStore());
+var client = SendspinClientService.CreateForDial(
+    loggerFactory,
+    new SendspinClientOptions
+    {
+        Identity = identity,          // the persisted identity from Quick Start
+        AudioPipeline = pipeline,
+        StaticDelayStore = new FileStaticDelayStore(),
+    });
 ```
 
 When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
@@ -323,9 +331,9 @@ When multiple servers can reach a player (server-initiated mode via `SendspinHos
 arbitrates which one is active. It completes each server's `client/hello` ↔ `server/hello` handshake
 first, then applies the spec's decision:
 
-- connections rank by priority class (spec activity ranking): `management` > `playback` >
-  `pairing` > empty. On the legacy wire, `connection_reason: playback` maps to the playback class
-  and `discovery`/absent to empty;
+- connections rank by priority class, from the highest-priority activity declared in the
+  connection's `server/activate`: `management` > `playback` > `pairing` > empty (no
+  recognized activity declared);
 - the incoming server is accepted when its priority is **higher than or equal to** the holder's,
   with two exceptions: a pairing attempt is never displaced by incoming playback/pairing, and an
   empty-vs-empty tie admits the incoming server only when it is the persisted **last-playback**
@@ -345,6 +353,13 @@ public sealed class FileLastPlayedServerStore : ILastPlayedServerStore
 
 await using var host = new SendspinHostService(
     loggerFactory,
+    new SendspinClientOptions
+    {
+        // Generate() is for this example only — the spec requires client_id to survive
+        // reboots, so a real host loads a persisted identity and only generates (and
+        // saves) one the first time it runs.
+        Identity = SendspinIdentity.Generate(),
+    },
     lastPlayedServerStore: new FileLastPlayedServerStore());
 ```
 
@@ -455,10 +470,14 @@ var caps = new ClientCapabilities
     SourceLineSense = true,                  // optional: report signal presence
 };
 
-var client = new SendspinClientService(
-    logger, connection,
-    capabilities: caps,
-    captureDevice: myCaptureDevice);         // IAudioCaptureDevice
+var client = SendspinClientService.CreateForDial(
+    loggerFactory,
+    new SendspinClientOptions
+    {
+        Identity = identity,                 // the persisted identity from Quick Start
+        Capabilities = caps,
+        CaptureDevice = myCaptureDevice,     // IAudioCaptureDevice
+    });
 ```
 
 Streaming is **server-driven**: the source never streams until the server sends

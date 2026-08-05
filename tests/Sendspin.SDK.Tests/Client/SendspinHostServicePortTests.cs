@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Discovery;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Client;
 
@@ -13,6 +14,7 @@ public class SendspinHostServicePortTests
     {
         await using var host = new SendspinHostService(
             NullLoggerFactory.Instance,
+            new SendspinClientOptions { Identity = SendspinIdentity.Generate() },
             listenerOptions: new ListenerOptions { Port = 0 },
             advertiserOptions: new AdvertiserOptions { Enabled = false });
 

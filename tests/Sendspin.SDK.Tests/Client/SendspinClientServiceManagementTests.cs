@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Protocol.Messages;
@@ -12,32 +11,21 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceManagementTests
 {
-    private const string ServerId = "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo";
-
-    private sealed class FakeNoiseSession : INoiseSessionInfo
-    {
-        public string? ServerId { get; set; } = SendspinClientServiceManagementTests.ServerId;
-        public NoisePsk? MatchedPsk { get; set; }
-        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
-    }
+    private const string ServerId = FakeNoiseSession.FakeServerId;
 
     private static readonly byte[] SessionPsk = Enumerable.Repeat((byte)7, 32).ToArray();
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPairingRecordStore) Create(
         bool managementActive = true)
     {
-        var connection = new FakeSendspinConnection();
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, ServerId));
-        var session = new FakeNoiseSession
-        {
-            MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, ServerId),
-        };
-        var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            noiseSession: session,
-            pairingRecordStore: store);
+        var (client, connection, session) = TestClient.Create(
+            configure: options => options.PairingRecordStore = store);
+
+        // The management tests remove their own record by psk_id, so the session must be
+        // keyed with the same PSK the store holds.
+        session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, ServerId);
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         string activities = managementActive ? """["playback","management"]""" : """["playback"]""";
@@ -163,17 +151,12 @@ public class SendspinClientServiceManagementTests
     [Fact]
     public void ServerUnpair_AtTrustNone_IsIgnored()
     {
-        var connection = new FakeSendspinConnection();
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, ServerId));
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            noiseSession: new FakeNoiseSession
-            {
-                MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Sentinel),
-            },
-            pairingRecordStore: store);
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options => options.PairingRecordStore = store);
+        using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""{"type":"server/unpair","payload":{}}""");

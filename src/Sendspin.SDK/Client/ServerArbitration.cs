@@ -7,13 +7,13 @@ namespace Sendspin.SDK.Client;
 /// </summary>
 public enum ConnectionPriority
 {
-    /// <summary>Empty activity set (legacy connection_reason 'discovery' or absent).</summary>
+    /// <summary>Empty activity set: no recognized activity declared.</summary>
     Empty = 0,
 
     /// <summary>A pairing attempt.</summary>
     Pairing = 1,
 
-    /// <summary>Playback (legacy connection_reason 'playback').</summary>
+    /// <summary>Playback.</summary>
     Playback = 2,
 
     /// <summary>Management.</summary>
@@ -35,15 +35,6 @@ internal static class ServerArbitration
     private const string AnotherServer = "another_server";
     private const string UserRequest = "user_request";
     private const string ConcurrentAttempt = "concurrent_attempt";
-
-    /// <summary>
-    /// Maps a legacy connection_reason to its priority class: 'playback' ranks as
-    /// playback; anything else (including 'discovery' and absent) as empty.
-    /// </summary>
-    internal static ConnectionPriority FromConnectionReason(string? reason)
-        => string.Equals(reason ?? "discovery", "playback", StringComparison.OrdinalIgnoreCase)
-            ? ConnectionPriority.Playback
-            : ConnectionPriority.Empty;
 
     /// <summary>
     /// Maps a server/activate activities set to its priority class: the highest-ranked

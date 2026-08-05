@@ -137,4 +137,18 @@ public class MessageSerializerTests
         Assert.Null(msg.Payload.Artwork);
         Assert.NotNull(msg.Payload.Format);
     }
+
+    [Fact]
+    public void ClientHello_NeverSerializesClientIdOrVersion()
+    {
+        var hello = ClientHelloMessage.Create(
+            name: "test-client",
+            supportedRoles: ["player@v1"]);
+
+        string json = MessageSerializer.Serialize(hello);
+
+        // Under encryption both travel in client/init instead.
+        Assert.DoesNotContain("client_id", json);
+        Assert.DoesNotContain("\"version\"", json);
+    }
 }

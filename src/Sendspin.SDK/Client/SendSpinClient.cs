@@ -24,7 +24,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IClockSynchronizer _clockSynchronizer;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IStaticDelayStore? _staticDelayStore;
-    private readonly INoiseSessionInfo? _noiseSession;
+    private readonly INoiseSessionInfo _session;
     private bool _activateReceived;
     private readonly SourceStreamPipeline? _sourcePipeline;
     private readonly IAudioCaptureDevice? _captureDevice;
@@ -35,7 +35,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private PinPairingState? _pinState;
     private int _pairingCounter;
 
+    // _handshakeTcs is published by the handshake waiter and completed by the connection's
+    // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
+    // both so a permanent failure that lands before the waiter publishes its TCS is still
+    // seen by it — see SendHandshakeAsync and CompleteHandshakeWait.
+    private readonly object _handshakeLock = new();
     private TaskCompletionSource<bool>? _handshakeTcs;
+    private SendspinHandshakeException? _handshakeFailure;
     private GroupState? _currentGroup;
     private PlayerState _playerState;
     private CancellationTokenSource? _timeSyncCts;
@@ -98,12 +104,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public string? ServerId { get; private set; }
     public string? ServerName { get; private set; }
 
+    /// <summary>The Noise session this client was constructed with (test-only introspection).</summary>
+    internal INoiseSessionInfo Session => _session;
+
     /// <summary>
-    /// The connection reason provided by the server in the server/hello handshake.
-    /// Typically "discovery" (server found us via mDNS) or "playback" (server needs us for active playback).
-    /// Used for multi-server arbitration in the host service.
+    /// The connection this client was constructed with (test-only introspection). Named to
+    /// avoid shadowing the <c>Sendspin.SDK.Connection</c> namespace used elsewhere in this
+    /// file (e.g. <c>Connection.Noise.SendspinIdentity</c>).
     /// </summary>
-    public string? ConnectionReason { get; private set; }
+    internal ISendspinConnection ClientConnection => _connection;
 
     /// <inheritdoc />
     public ServerHelloPayload? LastServerHello { get; private set; }
@@ -147,27 +156,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
+    /// <summary>
+    /// Constructs a client for the encrypted Sendspin protocol.
+    /// </summary>
+    /// <param name="session">
+    /// The Noise session backing this connection. In production this is the same
+    /// <see cref="NoiseWireFraming"/> instance the connection uses for framing.
+    /// </param>
     public SendspinClientService(
         ILogger<SendspinClientService> logger,
         ISendspinConnection connection,
-        IClockSynchronizer? clockSynchronizer = null,
-        ClientCapabilities? capabilities = null,
-        IAudioPipeline? audioPipeline = null,
-        IStaticDelayStore? staticDelayStore = null,
-        INoiseSessionInfo? noiseSession = null,
-        IPairingRecordStore? pairingRecordStore = null,
-        IPinLockoutStore? pinLockoutStore = null,
-        IAudioCaptureDevice? captureDevice = null,
-        ISourceAudioEncoderFactory? sourceEncoderFactory = null)
+        INoiseSessionInfo session,
+        SendspinClientOptions options)
     {
         _logger = logger;
         _connection = connection;
-        _noiseSession = noiseSession;
-        _pairingStore = pairingRecordStore;
-        _pinLockoutStore = pinLockoutStore;
-        _captureDevice = captureDevice;
-        _sourceEncoderFactory = sourceEncoderFactory;
-        _clockSynchronizer = clockSynchronizer ?? new KalmanClockSynchronizer();
+        _session = session;
+        _capabilities = options.Capabilities;
+        _pairingStore = options.PairingRecordStore;
+        _pinLockoutStore = options.PinLockoutStore;
+        _captureDevice = options.CaptureDevice;
+        _sourceEncoderFactory = options.SourceEncoderFactory;
+        _clockSynchronizer = options.ClockSynchronizer ?? new KalmanClockSynchronizer();
 
         if (_captureDevice is not null)
         {
@@ -179,9 +189,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger,
                 _sourceEncoderFactory);
         }
-        _capabilities = capabilities ?? new ClientCapabilities();
-        _audioPipeline = audioPipeline;
-        _staticDelayStore = staticDelayStore;
+        _audioPipeline = options.AudioPipeline;
+        _staticDelayStore = options.StaticDelayStore;
 
         _requiredLeadTimeMs = Math.Max(0, _capabilities.RequiredLeadTimeMs);
         _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
@@ -208,6 +217,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         _logger.LogInformation("Connecting to {Uri}", serverUri);
 
+        // Cleared here rather than in SendHandshakeAsync: a failure raised between the dial
+        // and the handshake wait belongs to this attempt and must survive to reach the caller.
+        lock (_handshakeLock)
+        {
+            _handshakeFailure = null;
+        }
+
         await _connection.ConnectAsync(serverUri, cancellationToken);
         await SendHandshakeAsync(cancellationToken);
     }
@@ -218,31 +234,35 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
     {
-        _handshakeTcs = new TaskCompletionSource<bool>();
-        _activateReceived = false;
-
-        if (_noiseSession is null)
+        TaskCompletionSource<bool> handshakeTcs;
+        SendspinHandshakeException? alreadyFailed;
+        lock (_handshakeLock)
         {
-            // Legacy plaintext flow: the client opens with client/hello.
-            var hello = CreateClientHelloMessage();
-            var helloJson = MessageSerializer.Serialize(hello);
-            _logger.LogInformation("Sending client/hello:\n{Json}", helloJson);
-            await _connection.SendMessageAsync(hello, cancellationToken);
+            handshakeTcs = _handshakeTcs = new TaskCompletionSource<bool>();
+            alreadyFailed = _handshakeFailure;
         }
 
-        // Encrypted flow is server-driven: server/hello arrives first (after the Noise
-        // handshake), we answer with client/hello, and the initial server/activate
-        // completes the handshake. Either way, wait for completion with a timeout
-        // (30 s per the spec's recommended handshake-phase timeout; the legacy flow
-        // keeps its historical 10 s).
-        using var timeoutCts = new CancellationTokenSource(
-            TimeSpan.FromSeconds(_noiseSession is null ? 10 : 30));
+        _activateReceived = false;
+
+        // The connection's receive loop is already running when we get here, so a permanent
+        // failure can be raised before there is a TCS to fail — the continuation that resumes
+        // ConnectAsync may sit queued behind a busy UI thread while the peer is already
+        // closing. Publishing the TCS and reading the failure under the same lock the handler
+        // takes makes both interleavings equivalent: whichever side runs first, the caller
+        // still gets the diagnostic rather than a 30 s wait ending in TimeoutException.
+        if (alreadyFailed is not null)
+        {
+            throw alreadyFailed;
+        }
+
+        // 30 s per the spec's recommended handshake-phase timeout.
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         try
         {
-            await using var registration = linkedCts.Token.Register(() => _handshakeTcs.TrySetCanceled());
-            var success = await _handshakeTcs.Task;
+            await using var registration = linkedCts.Token.Register(() => handshakeTcs.TrySetCanceled());
+            var success = await handshakeTcs.Task;
 
             if (success)
             {
@@ -257,10 +277,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    /// <summary>
-    /// Creates the ClientHello message from current capabilities.
-    /// Extracted for reuse between initial connection and reconnection handshakes.
-    /// </summary>
     private bool HasSourceRole()
         => _capabilities.Roles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
 
@@ -283,6 +299,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         await _connection.SendMessageAsync(message);
     }
 
+    /// <summary>
+    /// Creates the ClientHello message from current capabilities.
+    /// Extracted for reuse between initial connection and reconnection handshakes.
+    /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
         if (_capabilities.ArtworkChannels.Count > 4)
@@ -291,11 +311,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ArtworkChannels.Count);
         }
 
-        bool encrypted = _noiseSession is not null;
         return ClientHelloMessage.Create(
             // Under the encrypted protocol client_id/version travel in client/init and
             // are omitted here; trust_level and unpaired_access are required instead.
-            clientId: encrypted ? null : _capabilities.ClientId,
             name: _capabilities.ClientName,
             supportedRoles: _capabilities.Roles,
             playerSupport: new PlayerSupport
@@ -331,12 +349,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     Features = _capabilities.SourceLineSense ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
-            trustLevel: !encrypted ? null
-                : _noiseSession?.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
-            supportedPairMethods: encrypted ? BuildPairMethods() : null,
-            unpairedAccess: encrypted
-                ? new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
-                : null
+            trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
+            supportedPairMethods: BuildPairMethods(),
+            unpairedAccess: new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
         );
     }
 
@@ -383,7 +398,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         ServerId = null;
         ServerName = null;
-        ConnectionReason = null;
         _currentGroup = null;
     }
 
@@ -566,10 +580,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Clean up client state on full disconnection
         if (e.NewState == ConnectionState.Disconnected)
         {
-            _handshakeTcs?.TrySetResult(false);
+            CompleteHandshakeWait(e.Exception as SendspinHandshakeException);
             ServerId = null;
             ServerName = null;
-            ConnectionReason = null;
         }
 
         // Re-handshake when WebSocket reconnects successfully
@@ -577,6 +590,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (e.NewState == ConnectionState.Handshaking && e.OldState == ConnectionState.Reconnecting)
         {
             PerformReconnectHandshakeAsync().SafeFireAndForget(_logger);
+        }
+    }
+
+    /// <summary>
+    /// Ends a pending handshake wait on disconnect. A permanent handshake failure is
+    /// propagated as an exception rather than a false result, so it reaches the
+    /// <see cref="ConnectAsync"/> caller: an app that never subscribed to
+    /// <see cref="ConnectionStateChanged"/> would otherwise see the connect succeed and
+    /// only find out when its first command threw "WebSocket is not connected".
+    /// </summary>
+    private void CompleteHandshakeWait(SendspinHandshakeException? failure)
+    {
+        TaskCompletionSource<bool>? tcs;
+        lock (_handshakeLock)
+        {
+            // Recorded before the TCS is read, and read by the waiter after it publishes one,
+            // so the failure cannot fall between the two.
+            if (failure is not null)
+            {
+                _handshakeFailure = failure;
+            }
+
+            tcs = _handshakeTcs;
+        }
+
+        // Completed outside the lock: the TCS runs its continuations inline, on this thread.
+        if (failure is not null)
+        {
+            tcs?.TrySetException(failure);
+        }
+        else
+        {
+            tcs?.TrySetResult(false);
         }
     }
 
@@ -682,33 +728,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         LastServerHello = payload;
         ServerName = payload.Name;
 
-        if (_noiseSession is not null)
-        {
-            // Encrypted flow: server/hello carries only the name. The server identity
-            // came from server/init, and roles arrive in the initial server/activate,
-            // which completes the handshake. Per spec, no other messages (including
-            // client/time and client/state) may be sent before that activate, so the
-            // connected tail runs in HandleServerActivate.
-            ServerId = _noiseSession.ServerId;
-            _logger.LogInformation("Server hello received (encrypted): {ServerId} ({ServerName})",
-                ServerId, ServerName);
-            SendEncryptedClientHelloAsync().SafeFireAndForget(_logger);
-            return;
-        }
-
-        ServerId = payload.ServerId;
-        ConnectionReason = payload.ConnectionReason;
-
-        _logger.LogInformation("Server hello received: {ServerId} ({ServerName}), reason: {ConnectionReason}, roles: {Roles}",
-            message.ServerId, message.Name, ConnectionReason ?? "none", string.Join(", ", message.ActiveRoles));
-
-        FinishHandshake();
-
-        // Raise the typed event after state is populated but before awaiters of
-        // ConnectAsync wake up, so handlers see a fully initialized client.
-        ServerHelloReceived?.Invoke(this, payload);
-
-        _handshakeTcs?.TrySetResult(true);
+        // Encrypted flow: server/hello carries only the name. The server identity
+        // came from server/init, and roles arrive in the initial server/activate,
+        // which completes the handshake. Per spec, no other messages (including
+        // client/time and client/state) may be sent before that activate, so the
+        // connected tail runs in HandleServerActivate.
+        ServerId = _session.ServerId;
+        _logger.LogInformation("Server hello received (encrypted): {ServerId} ({ServerName})",
+            ServerId, ServerName);
+        SendEncryptedClientHelloAsync().SafeFireAndForget(_logger);
     }
 
     /// <summary>
@@ -749,7 +777,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // activates source@v1 without user trust, refuse and close (spec).
         if (payload.ActiveRoles is not null
             && payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
-            && _noiseSession?.MatchedPsk?.Category != PskCategory.LongTerm)
+            && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
             _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
             _handshakeTcs?.TrySetResult(false);
@@ -811,11 +839,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool ValidateActivateAdmissibility(ServerActivatePayload payload, out string goodbyeReason)
     {
         goodbyeReason = string.Empty;
-        var psk = _noiseSession?.MatchedPsk;
+        var psk = _session.MatchedPsk;
         if (psk is null)
         {
-            // No session info (legacy flow or externally-managed session): no gate.
-            return true;
+            // A session always has a matched PSK once the handshake completes; reaching
+            // here means the framing surfaced an activate before transport mode.
+            goodbyeReason = "unauthorized";
+            return false;
         }
 
         var activities = payload.ActivitiesList ?? [];
@@ -872,11 +902,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Starts the client side of a pairing attempt when server/activate declares the
-    /// pairing activity. Only the (client-mandatory) Pairing PSK method is implemented:
-    /// the client generates the long-term PSK and delivers it in client/pair-finalize.
-    /// </summary>
-    /// <summary>
     /// Builds the supported_pair_methods list for the encrypted client/hello: the
     /// mandatory Pairing PSK plus any configured PIN methods with their descriptors,
     /// including current lockout state.
@@ -907,6 +932,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         return methods;
     }
 
+    /// <summary>
+    /// Starts the client side of a pairing attempt when server/activate declares the
+    /// pairing activity, dispatching on the method the server selected: Pairing PSK
+    /// generates the long-term PSK and delivers it in client/pair-finalize, and the PIN
+    /// methods begin a PIN attempt. Anything else is aborted.
+    /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
         _pinState = null;
@@ -991,7 +1022,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         state.NonceA = PinPairing.DecodeB64Url(msg.Payload.NonceA);
-        var h = _noiseSession!.HandshakeHash!.Value.ToArray();
+        var h = _session.HandshakeHash!.Value.ToArray();
         string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, pinLength);
 
         // Emit the PIN via the app's out-channel for the operator to enter into the server.
@@ -1008,7 +1039,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Static PIN: the PIN is device-printed and known from the start.
         string pin = state.Dynamic ? state.Pin! : (_capabilities.StaticPin ?? string.Empty);
-        var h = _noiseSession!.HandshakeHash!.Value.ToArray();
+        var h = _session.HandshakeHash!.Value.ToArray();
         byte[] sid = PinPairing.BuildSid(h, (uint)_pairingCounter);
 
         var cpace = CPace.Start(
@@ -1224,7 +1255,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
 
                 _pairingStore!.Remove(pskId);
-                if (_noiseSession?.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
+                if (_session.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
                 {
                     _pendingSelfRemoval = true;
                 }
@@ -1290,7 +1321,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandleServerUnpair()
     {
-        var current = _noiseSession?.MatchedPsk;
+        var current = _session.MatchedPsk;
         if (current is null || current.Category != PskCategory.LongTerm)
         {
             _logger.LogDebug("server/unpair on a non-user-trust connection; ignoring");
@@ -1317,8 +1348,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// The connected tail shared by both handshake flows: runs when the legacy
-    /// server/hello arrives, or when the encrypted flow's initial server/activate does.
+    /// The connected tail of the handshake: runs when the initial server/activate arrives,
+    /// which is the point the encrypted handshake completes and the client may start sending.
     /// </summary>
     private void FinishHandshake()
     {
@@ -2235,5 +2266,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         await _connection.SendMessageAsync(ClientStateMessage.CreateError(message));
+    }
+
+    /// <summary>
+    /// Builds a client that dials a server, wiring one <see cref="NoiseWireFraming"/> as
+    /// both the connection's framing and the client's Noise session so the two cannot
+    /// drift apart.
+    /// </summary>
+    public static SendspinClientService CreateForDial(
+        ILoggerFactory loggerFactory,
+        SendspinClientOptions options,
+        ConnectionOptions? connectionOptions = null)
+    {
+        var framing = new NoiseWireFraming(
+            options.Identity,
+            options.PairingRecordStore is null ? null : new RecordPskResolver(options.PairingRecordStore),
+            options.Suite);
+
+        var connection = new SendspinConnection(
+            loggerFactory.CreateLogger<SendspinConnection>(),
+            connectionOptions,
+            framing);
+
+        return new SendspinClientService(
+            loggerFactory.CreateLogger<SendspinClientService>(),
+            connection,
+            framing,
+            options);
     }
 }

@@ -13,7 +13,6 @@ public class DeviceInfoSerializationTests
     public void DeviceInfo_SerializesMacAddress()
     {
         var msg = ClientHelloMessage.Create(
-            clientId: "c1",
             name: "Player",
             supportedRoles: new List<string> { "player@v1" },
             deviceInfo: new DeviceInfo { MacAddress = "aa:bb:cc:dd:ee:ff" });
@@ -27,7 +26,6 @@ public class DeviceInfoSerializationTests
     public void DeviceInfo_OmitsMacAddressWhenNull()
     {
         var msg = ClientHelloMessage.Create(
-            clientId: "c1",
             name: "Player",
             supportedRoles: new List<string> { "player@v1" },
             deviceInfo: new DeviceInfo { ProductName = "Test" });

@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
@@ -13,10 +12,6 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceVisualizerTests
 {
-    private const string ServerHelloJson = """
-        { "type": "server/hello", "payload": { "server_id": "s", "version": 1, "active_roles": ["visualizer@v1"] } }
-        """;
-
     private static byte[] Frame(byte type, long ts, byte[] data)
     {
         var buf = new byte[9 + data.Length];
@@ -33,11 +28,10 @@ public class SendspinClientServiceVisualizerTests
         return b;
     }
 
-    private static SendspinClientService VisualizerClient(FakeSendspinConnection connection) =>
-        new(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: new ClientCapabilities
+    private static (SendspinClientService Client, FakeSendspinConnection Connection) VisualizerClient()
+    {
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options.Capabilities = new ClientCapabilities
             {
                 Roles = new List<string> { "visualizer@v1" },
                 VisualizerSupport = new VisualizerSupport
@@ -48,16 +42,16 @@ public class SendspinClientServiceVisualizerTests
                     Spectrum = new VisualizerSpectrum { NDispBins = 4, Scale = "log", FMin = 20, FMax = 16000 },
                 },
             });
+        return (client, connection);
+    }
 
     [Fact]
-    public async Task ClientHello_AdvertisesVisualizerSupport()
+    public void ClientHello_AdvertisesVisualizerSupport()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
-        var connectTask = client.ConnectAsync(new Uri("ws://test"));
-        connection.RaiseTextMessageReceived(ServerHelloJson);
-        await connectTask;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         var support = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.VisualizerV1Support;
         Assert.NotNull(support);
@@ -70,8 +64,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public void StreamStart_ParsesVisualizerConfig()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         connection.RaiseTextMessageReceived("""
             {
@@ -93,8 +87,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public void BinaryFrame_RaisesVisualizationReceived()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         VisualizerFrame? frame = null;
         client.VisualizationReceived += (_, f) => frame = f;
@@ -109,8 +103,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public void SpectrumFrame_ValidatedAgainstNegotiatedBinCount()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         var frames = new List<VisualizerFrame>();
         client.VisualizationReceived += (_, f) => frames.Add(f);
@@ -137,8 +131,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public void MalformedFrame_RaisesNoEvent()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         var fired = false;
         client.VisualizationReceived += (_, _) => fired = true;
@@ -150,16 +144,13 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
-    public async Task DefaultCapabilities_DoNotAdvertiseVisualizer()
+    public void DefaultCapabilities_DoNotAdvertiseVisualizer()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection); // default capabilities: no VisualizerSupport, no visualizer@v1 role
+        // Default capabilities: no VisualizerSupport, no visualizer@v1 role.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
 
-        var connectTask = client.ConnectAsync(new Uri("ws://test"));
-        connection.RaiseTextMessageReceived(ServerHelloJson);
-        await connectTask;
+        TestClient.CompleteHandshake(connection);
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
         Assert.Null(hello.Payload.VisualizerV1Support);
@@ -172,8 +163,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public void SpectrumFrame_BeforeStreamStart_IsDropped()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         var fired = false;
         client.VisualizationReceived += (_, _) => fired = true;
@@ -188,8 +179,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public void BeatFrame_DispatchedEndToEnd()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         VisualizerFrame? frame = null;
         client.VisualizationReceived += (_, f) => frame = f;
@@ -204,8 +195,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public void ThrowingVisualizationHandler_DoesNotBreakReceiveLoop()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         var calls = 0;
         client.VisualizationReceived += (_, _) =>
@@ -226,8 +217,8 @@ public class SendspinClientServiceVisualizerTests
     [Fact]
     public async Task RequestVisualizerFormatAsync_SendsRequestFormat()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = VisualizerClient(connection);
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
 
         await client.RequestVisualizerFormatAsync(
             types: new List<string> { VisualizerTypes.Loudness },

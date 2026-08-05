@@ -24,12 +24,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly SendspinListener _listener;
     private readonly MdnsServiceAdvertiser _advertiser;
     private readonly AdvertiserOptions _advertiserOptions;
-    private readonly Connection.Noise.SendspinIdentity? _identity;
-    private readonly Connection.Noise.IPairingRecordStore? _pairingRecordStore;
-    private readonly Connection.Noise.Pairing.IPinLockoutStore? _pinLockoutStore;
-    private readonly ClientCapabilities _capabilities;
-    private readonly IAudioPipeline? _audioPipeline;
-    private readonly IClockSynchronizer? _clockSynchronizer;
+    private readonly SendspinClientOptions _options;
     private readonly ILastPlayedServerStore? _lastPlayedServerStore;
 
     private readonly Dictionary<string, ActiveServerConnection> _connections = new();
@@ -143,7 +138,7 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     /// <summary>
     /// Gets the server ID of the server that most recently had playback_state "playing".
-    /// Used for tie-breaking when multiple servers with the same connection_reason try to connect.
+    /// Used to break an arbitration tie between two connections that declare no activities.
     /// </summary>
     public string? LastPlayedServerId { get; private set; }
 
@@ -200,25 +195,15 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     public SendspinHostService(
         ILoggerFactory loggerFactory,
-        ClientCapabilities? capabilities = null,
+        SendspinClientOptions options,
         ListenerOptions? listenerOptions = null,
         AdvertiserOptions? advertiserOptions = null,
-        IAudioPipeline? audioPipeline = null,
-        IClockSynchronizer? clockSynchronizer = null,
         string? lastPlayedServerId = null,
-        ILastPlayedServerStore? lastPlayedServerStore = null,
-        Connection.Noise.SendspinIdentity? identity = null,
-        Connection.Noise.IPairingRecordStore? pairingRecordStore = null,
-        Connection.Noise.Pairing.IPinLockoutStore? pinLockoutStore = null)
+        ILastPlayedServerStore? lastPlayedServerStore = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
-        _identity = identity;
-        _pairingRecordStore = pairingRecordStore;
-        _pinLockoutStore = pinLockoutStore;
-        _capabilities = capabilities ?? new ClientCapabilities();
-        _audioPipeline = audioPipeline;
-        _clockSynchronizer = clockSynchronizer;
+        _options = options;
         _lastPlayedServerStore = lastPlayedServerStore;
 
         // Explicit seed wins; otherwise fall back to the store (best-effort).
@@ -227,8 +212,8 @@ public sealed class SendspinHostService : IAsyncDisposable
         var listenOpts = listenerOptions ?? new ListenerOptions();
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
         {
-            ClientId = _capabilities.ClientId,
-            PlayerName = _capabilities.ClientName,
+            ClientId = _options.Capabilities.ClientId,
+            PlayerName = _options.Capabilities.ClientName,
             Port = listenOpts.Port,
             Path = listenOpts.Path
         };
@@ -390,33 +375,46 @@ public sealed class SendspinHostService : IAsyncDisposable
             }
             connectionId = Guid.NewGuid().ToString("N")[..8];
             _logger.LogInformation("New server connection: {ConnectionId}", connectionId);
-            // Encrypted mode: each incoming connection gets its own Noise framing; the
-            // server (dialer) is still the Noise initiator per spec, our side responds.
-            Connection.Noise.NoiseWireFraming? framing = _identity is null
-                ? null
-                : new Connection.Noise.NoiseWireFraming(
-                    _identity,
-                    _pairingRecordStore is null
-                        ? null
-                        : new Connection.Noise.RecordPskResolver(_pairingRecordStore));
+            // Each incoming connection gets its own Noise framing — the per-connection
+            // crypto state cannot be shared. The server (dialer) is the Noise initiator
+            // per spec; our side responds.
+            var framing = new Connection.Noise.NoiseWireFraming(
+                _options.Identity,
+                _options.PairingRecordStore is null
+                    ? null
+                    : new Connection.Noise.RecordPskResolver(_options.PairingRecordStore),
+                _options.Suite);
 
             var connection = new IncomingConnection(
                 _loggerFactory.CreateLogger<IncomingConnection>(),
                 webSocket,
                 framing);
 
-            // Use the shared clock synchronizer if provided, otherwise create a per-connection one.
-            var clockSync = _clockSynchronizer
-                ?? new KalmanClockSynchronizer(_loggerFactory.CreateLogger<KalmanClockSynchronizer>());
+            // SendspinClientOptions is init-only, so preserving the per-connection clock-sync
+            // fallback (a KalmanClockSynchronizer with its own logger, used when no shared
+            // synchronizer was configured) means building a fresh options instance rather than
+            // mutating the stored one.
+            var clientOptions = _options.ClockSynchronizer is null
+                ? new SendspinClientOptions
+                {
+                    Identity = _options.Identity,
+                    PairingRecordStore = _options.PairingRecordStore,
+                    Capabilities = _options.Capabilities,
+                    Suite = _options.Suite,
+                    ClockSynchronizer = new KalmanClockSynchronizer(_loggerFactory.CreateLogger<KalmanClockSynchronizer>()),
+                    AudioPipeline = _options.AudioPipeline,
+                    StaticDelayStore = _options.StaticDelayStore,
+                    PinLockoutStore = _options.PinLockoutStore,
+                    CaptureDevice = _options.CaptureDevice,
+                    SourceEncoderFactory = _options.SourceEncoderFactory,
+                }
+                : _options;
+
             client = new SendspinClientService(
                 _loggerFactory.CreateLogger<SendspinClientService>(),
                 connection,
-                clockSync,
-                _capabilities,
-                _audioPipeline,
-                noiseSession: framing,
-                pairingRecordStore: _pairingRecordStore,
-                pinLockoutStore: _pinLockoutStore);
+                framing,
+                clientOptions);
 
             client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
 
@@ -440,18 +438,11 @@ public sealed class SendspinHostService : IAsyncDisposable
 
             await connection.StartAsync();
 
-            if (framing is null)
-            {
-                // Legacy plaintext flow: client/hello is sent first by our side.
-                await SendClientHelloAsync(client, connection);
-            }
-
-            // Encrypted flow is server-driven (client/init went out in StartAsync; the
+            // The handshake is server-driven (client/init went out in StartAsync; the
             // hello/activate exchange is handled by the client service). The connection
             // is provisional until its first server/activate; the spec's provisional
             // window is 30 seconds, after which it is dropped.
-            if (!await WaitForHandshakeAsync(client, connection, connectionId,
-                    timeoutSeconds: framing is null ? 10 : 30))
+            if (!await WaitForHandshakeAsync(client, connection, connectionId, timeoutSeconds: 30))
             {
                 return;
             }
@@ -517,53 +508,6 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
     }
 
-    private async Task SendClientHelloAsync(SendspinClientService client, IncomingConnection connection)
-    {
-        if (_capabilities.ArtworkChannels.Count > 4)
-        {
-            _logger.LogWarning("ArtworkChannels has {Count} entries; only the first 4 are advertised (spec maximum).",
-                _capabilities.ArtworkChannels.Count);
-        }
-
-        // Use audio formats from capabilities (order matters - server picks first supported)
-        var hello = ClientHelloMessage.Create(
-            clientId: _capabilities.ClientId,
-            name: _capabilities.ClientName,
-            supportedRoles: _capabilities.Roles,
-            playerSupport: new PlayerSupport
-            {
-                SupportedFormats = _capabilities.AudioFormats
-                    .Select(f => new AudioFormatSpec
-                    {
-                        Codec = f.Codec,
-                        Channels = f.Channels,
-                        SampleRate = f.SampleRate,
-                        BitDepth = f.BitDepth ?? 16,
-                    })
-                    .ToList(),
-                BufferCapacity = _capabilities.BufferCapacity,
-                SupportedCommands = new List<string> { "volume", "mute" }
-            },
-            artworkSupport: new ArtworkSupport
-            {
-                // Spec allows 1-4 channels (array index = channel number).
-                Channels = _capabilities.ArtworkChannels.Take(4).ToList()
-            },
-            deviceInfo: new DeviceInfo
-            {
-                ProductName = _capabilities.ProductName,
-                Manufacturer = _capabilities.Manufacturer,
-                SoftwareVersion = _capabilities.SoftwareVersion,
-                MacAddress = _capabilities.MacAddress
-            },
-            visualizerSupport: _capabilities.VisualizerSupport
-        );
-
-        var helloJson = MessageSerializer.Serialize(hello);
-        _logger.LogInformation("Sending client/hello:\n{Json}", helloJson);
-        await connection.SendMessageAsync(hello);
-    }
-
     /// <summary>
     /// Waits for the handshake to complete with timeout.
     /// </summary>
@@ -619,6 +563,14 @@ public sealed class SendspinHostService : IAsyncDisposable
     }
 
     /// <summary>
+    /// A connection's arbitration priority, from its declared server/activate activities.
+    /// </summary>
+    private static ConnectionPriority PriorityOf(SendspinClientService client)
+        => client.LastServerActivate is { } activate
+            ? ServerArbitration.FromActivities(activate.ActivitiesList)
+            : ConnectionPriority.Empty;
+
+    /// <summary>
     /// Arbitrates whether a newly handshaked server should become the active connection
     /// (only one server is active at a time). The priority rules live in and are documented by
     /// <see cref="ServerArbitration.Decide"/>; this method applies that decision by disconnecting
@@ -628,15 +580,6 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <param name="newConnection">The new connection to disconnect if rejected.</param>
     /// <param name="newServerId">The server ID of the new connection.</param>
     /// <returns>True if the new server is accepted, false if rejected.</returns>
-    /// <summary>
-    /// A connection's arbitration priority: from its declared server/activate activities
-    /// on the encrypted flow, else mapped from the legacy connection_reason.
-    /// </summary>
-    private static ConnectionPriority PriorityOf(SendspinClientService client)
-        => client.LastServerActivate is { } activate
-            ? ServerArbitration.FromActivities(activate.ActivitiesList)
-            : ServerArbitration.FromConnectionReason(client.ConnectionReason);
-
     private async Task<bool> ArbitrateConnectionAsync(
         SendspinClientService newClient,
         IncomingConnection newConnection,
@@ -657,10 +600,9 @@ public sealed class SendspinHostService : IAsyncDisposable
             LastPlayedServerId);
 
         _logger.LogInformation(
-            "Arbitration: {Rationale}. New={NewServerId} (reason={NewReason}), Existing={ExistingServerId}",
+            "Arbitration: {Rationale}. New={NewServerId}, Existing={ExistingServerId}",
             result.Rationale,
             newServerId,
-            newClient.ConnectionReason ?? "discovery",
             existingConnection?.ServerId ?? "(none)");
 
         if (result.AcceptNew)

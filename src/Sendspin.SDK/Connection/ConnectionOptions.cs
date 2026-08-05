@@ -22,6 +22,14 @@ public sealed class ConnectionOptions
     public int MaxReconnectDelayMs { get; set; } = 30000;
 
     /// <summary>
+    /// Delay before retrying after an ambiguous handshake failure, in milliseconds.
+    /// Handshake failures are not ordinary socket drops, so they back off separately
+    /// from <see cref="ReconnectDelayMs"/>. Permanent failures (see
+    /// <see cref="SendspinHandshakeException"/>) are never retried at all.
+    /// </summary>
+    public int HandshakeFailureBackoffMs { get; set; } = 30000;
+
+    /// <summary>
     /// Multiplier for exponential backoff.
     /// </summary>
     public double ReconnectBackoffMultiplier { get; set; } = 2.0;

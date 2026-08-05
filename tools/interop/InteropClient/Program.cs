@@ -35,11 +35,14 @@ var caps = new ClientCapabilities
 
 await using var host = new SendspinHostService(
     loggerFactory,
-    capabilities: caps,
+    new SendspinClientOptions
+    {
+        Identity = identity,
+        Capabilities = caps,
+        PairingRecordStore = records,
+    },
     listenerOptions: new ListenerOptions { Port = port },
-    advertiserOptions: new AdvertiserOptions { Enabled = false },
-    identity: identity,
-    pairingRecordStore: records);
+    advertiserOptions: new AdvertiserOptions { Enabled = false });
 
 var connected = new TaskCompletionSource<ConnectedServerInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
 var paired = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);

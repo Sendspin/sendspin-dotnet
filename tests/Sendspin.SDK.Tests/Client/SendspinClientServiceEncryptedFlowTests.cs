@@ -1,5 +1,5 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
@@ -14,47 +14,24 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class SendspinClientServiceEncryptedFlowTests
 {
-    private const string FakeServerId = "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo";
-
-    private sealed class FakeNoiseSession : INoiseSessionInfo
-    {
-        public string? ServerId { get; set; } = FakeServerId;
-        public NoisePsk? MatchedPsk { get; set; }
-        public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
-    }
-
-    private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session)
-        CreateEncryptedClient(bool unpairedAccess = false, PskCategory category = PskCategory.Sentinel)
-    {
-        var connection = new FakeSendspinConnection();
-        var session = new FakeNoiseSession
-        {
-            MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), category),
-        };
-        var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection,
-            capabilities: new ClientCapabilities { UnpairedAccessEnabled = unpairedAccess },
-            noiseSession: session);
-        // Put the fake in the Connected state so admissibility outcomes are observable:
-        // inadmissible activates disconnect (with a recorded reason), admissible ones don't.
-        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
-        return (client, connection, session);
-    }
+    /// <summary>
+    /// The fake is put in the Connected state before each scenario so admissibility outcomes are
+    /// observable: inadmissible activates disconnect (with a recorded reason), admissible ones don't.
+    /// </summary>
+    private static readonly Uri ServerUri = new("ws://test.local:8927/sendspin");
 
     [Fact]
     public void ServerHello_TriggersEncryptedClientHello_WithoutClientIdOrVersion()
     {
-        var (client, connection, _) = CreateEncryptedClient();
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
             """);
 
         var hello = Assert.IsType<ClientHelloMessage>(Assert.Single(connection.SentMessages));
-        Assert.Null(hello.Payload.ClientId);
-        Assert.Null(hello.Payload.Version);
         Assert.Equal("none", hello.Payload.TrustLevel);
         Assert.NotNull(hello.Payload.UnpairedAccess);
         Assert.False(hello.Payload.UnpairedAccess.Enabled);
@@ -66,15 +43,16 @@ public class SendspinClientServiceEncryptedFlowTests
         Assert.Contains("\"trust_level\":\"none\"", json);
 
         // Identity comes from server/init via the Noise session
-        Assert.Equal(FakeServerId, client.ServerId);
+        Assert.Equal(FakeNoiseSession.FakeServerId, client.ServerId);
         Assert.Equal("srv", client.ServerName);
     }
 
     [Fact]
     public void HandshakeCompletes_OnInitialServerActivate_NotOnServerHello()
     {
-        var (client, connection, _) = CreateEncryptedClient();
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         int helloEvents = 0;
         int activateEvents = 0;
@@ -102,10 +80,65 @@ public class SendspinClientServiceEncryptedFlowTests
     }
 
     [Fact]
+    public async Task ConnectAsync_AwaitsTheServerDrivenHandshake_AndCompletesOnActivate()
+    {
+        // The client's own connect path (not just the fake's): ConnectAsync opens the
+        // connection and then parks on the handshake TCS. Because the encrypted flow is
+        // server-driven, the task must still be pending after server/hello alone.
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        using var _c = client;
+
+        var connectTask = client.ConnectAsync(ServerUri);
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+
+        Assert.False(connectTask.IsCompleted);
+        Assert.IsType<ClientHelloMessage>(Assert.Single(connection.SentMessages));
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
+            """);
+
+        await connectTask;
+
+        Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Connected, connection.State);
+        Assert.Equal(FakeNoiseSession.FakeServerId, client.ServerId);
+        Assert.NotNull(client.LastServerActivate);
+        Assert.Contains(connection.SentMessages, m => m is ClientStateMessage);
+    }
+
+    [Fact]
+    public async Task ConnectAsync_WhenCallerCancels_ThrowsCanceled_WithoutTheHandshakeTimeoutClose()
+    {
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        using var _c = client;
+        using var cts = new CancellationTokenSource();
+
+        var connectTask = client.ConnectAsync(ServerUri, cts.Token);
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+        Assert.False(connectTask.IsCompleted);
+
+        cts.Cancel();
+
+        // The caller's token is linked into the handshake wait, so cancelling it surfaces as
+        // OperationCanceledException - distinct from the TimeoutException the 30 s handshake
+        // timeout raises, and without that path's client/goodbye 'handshake_timeout' close.
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => connectTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void ActivateRoles_MirroredIntoLastServerHello_AndPersistAcrossOmission()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: true);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -127,8 +160,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_PlaybackWithoutUnpairedAccess_ClosesWithPairingRequired()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: false);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -145,8 +179,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_PlaybackWithUnpairedAccess_IsAdmissible()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: true);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -162,8 +197,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_ManagementActivity_ClosesUnauthorized()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: true);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -180,8 +216,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void LongTermPsk_PlaybackAndManagement_IsAdmissible()
     {
-        var (client, connection, _) = CreateEncryptedClient(category: PskCategory.LongTerm);
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -196,8 +233,9 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void SentinelPsk_EmptyActivitiesWithRoles_WithoutUnpairedAccess_Closes()
     {
-        var (client, connection, _) = CreateEncryptedClient(unpairedAccess: false);
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
         using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/hello","payload":{"name":"srv"}}
@@ -214,19 +252,49 @@ public class SendspinClientServiceEncryptedFlowTests
     }
 
     [Fact]
-    public void LegacyFlow_WithoutNoiseSession_IsUnchanged()
+    public void InadmissibleActivate_AlwaysDisconnects_NoBypassPath()
     {
-        var connection = new FakeSendspinConnection();
-        using var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
-            connection);
+        // A Sentinel-keyed session with unpaired access off may not be granted playback.
+        // Before the clean break, a client with no session info skipped this gate entirely.
+        var (client, connection, _) = TestClient.Create(
+            category: PskCategory.Sentinel,
+            unpairedAccess: false);
+        using var _c = client;
 
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""
-            {"type":"server/hello","payload":{"server_id":"legacy-1","name":"srv","version":1,"active_roles":["player@v1"],"connection_reason":"playback"}}
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
             """);
 
-        // Legacy: server/hello completes the handshake directly; no activate needed.
-        Assert.Equal("legacy-1", client.ServerId);
-        Assert.Contains(connection.SentMessages, m => m is ClientStateMessage);
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("pairing_required", connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void ServerActivate_WithNullMatchedPsk_AlwaysDisconnects_NoBypassPath()
+    {
+        // Before the clean break, ValidateActivateAdmissibility had a `psk is null => return
+        // true` bypass. TestClient.Create always seeds a non-null MatchedPsk, so that branch
+        // needs its own coverage: a session that somehow completed with no matched PSK must
+        // still be refused, never waved through.
+        var (client, connection, session) = TestClient.Create(
+            category: PskCategory.Sentinel,
+            unpairedAccess: false);
+        using var _c = client;
+        session.MatchedPsk = null;
+
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
+            """);
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
     }
 }

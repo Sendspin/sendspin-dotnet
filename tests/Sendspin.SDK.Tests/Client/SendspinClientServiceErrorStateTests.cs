@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol.Messages;
@@ -13,10 +12,8 @@ public class SendspinClientServiceErrorStateTests
 {
     private static async Task<(FakeSendspinConnection conn, FakeAudioPipeline pipe, SendspinClientService client)> ConnectedClientAsync()
     {
-        var conn = new FakeSendspinConnection();
         var pipe = new FakeAudioPipeline();
-        var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance, conn, audioPipeline: pipe);
+        var (client, conn, _) = TestClient.Create(configure: options => options.AudioPipeline = pipe);
         await conn.ConnectAsync(new Uri("ws://test"));
         return (conn, pipe, client);
     }
