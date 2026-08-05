@@ -217,6 +217,40 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
+    public void PostPairingPromotion_MarksTheRotatedRecordUsed_OnANonPairingActivate()
+    {
+        // The flow HandleServerPairFinalize documents: the record is persisted with
+        // used=false, the server re-handshakes onto it, and the activate that follows
+        // carries 'playback' — not 'pairing'. The used-marking is per session, so the
+        // re-handshake has to restart it here too, or this record reports used=false to
+        // the server forever and every PSK after the first is misreported.
+        var store = new InMemoryPairingRecordStore();
+        var (client, connection, session) = TestClient.Create(
+            PskCategory.Pairing,
+            configure: options => options.PairingRecordStore = store);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"pairing_psk"}}""");
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+
+        var promoted = Assert.Single(store.List());
+        Assert.False(promoted.Used, "the new record starts unused");
+
+        // The server rotates onto the new PSK in band; the framing installs a fresh hash.
+        session.MatchedPsk = new NoisePsk(promoted.Psk.ToArray(), PskCategory.LongTerm, ServerId);
+        session.HandshakeHash = Enumerable.Repeat((byte)0xAB, 32).ToArray();
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""");
+
+        Assert.True(
+            Assert.Single(store.List()).Used,
+            "the rotated-to record must be marked used once a message decrypts under it");
+    }
+
+    [Fact]
     public void MatchedPsk_IsMarkedUsed_OnceAnEncryptedMessageArrives()
     {
         // The record is marked used at the first proof the AEAD verified: an encrypted

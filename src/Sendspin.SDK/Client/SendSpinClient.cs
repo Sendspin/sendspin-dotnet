@@ -258,6 +258,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _activateReceived = false;
 
+        // A new handshake means a new session, so the record this client marked used belongs
+        // to the previous one. DetectSessionRekey covers the in-band case; this covers the
+        // per-connection one, where the identity changes without the client observing a
+        // rekey on an established session.
+        _markedPskUsed = false;
+
         // The connection's receive loop is already running when we get here, so a permanent
         // failure can be raised before there is a TCS to fail — the continuation that resumes
         // ConnectAsync may sit queued behind a busy UI thread while the peer is already
@@ -641,7 +647,33 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Marks the session's matched PSK used, once. Called on the first decrypted
+    /// Notices an in-band re-handshake and restarts the state that is scoped to one Noise
+    /// session: which record has been marked used, and the CPace pairing counter (which the
+    /// spec defines as the pairing activates since the last handshake). Re-handshakes happen
+    /// inside the framing layer, but they install a fresh handshake hash, so a change in it
+    /// is our signal that the session was re-keyed.
+    /// </summary>
+    /// <remarks>
+    /// Called for every decrypted message rather than from the pairing path, because the
+    /// re-key is not followed by a pairing activate in the flow that matters most: after a
+    /// successful pairing the server rotates onto the new long-term PSK and then activates
+    /// playback, and that record must still be marked used in its turn.
+    /// </remarks>
+    private void DetectSessionRekey()
+    {
+        var currentHash = _session.HandshakeHash?.ToArray();
+        if (currentHash is null)
+            return;
+        if (_lastHandshakeHash is not null && currentHash.AsSpan().SequenceEqual(_lastHandshakeHash))
+            return;
+
+        _lastHandshakeHash = currentHash;
+        _pairingCounter = 0;
+        _markedPskUsed = false;
+    }
+
+    /// <summary>
+    /// Marks the session's matched PSK used, once per session. Called on the first decrypted
     /// application message, which is the first proof the AEAD verified — the record
     /// must not be marked on a merely attempted connection.
     /// </summary>
@@ -679,7 +711,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        // Reaching here means the framing layer decrypted and authenticated a frame.
+        // Reaching here means the framing layer decrypted and authenticated a frame. Check
+        // for a re-key first: after one, this frame belongs to a new session, so the
+        // used-marking below applies to whichever record the session rotated onto.
+        DetectSessionRekey();
         MarkMatchedPskUsed();
 
         try
@@ -1017,19 +1052,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
-        // The spec defines the CPace counter as pairing activates since the last Noise
-        // handshake. Re-handshakes happen inside the framing layer, but they install a
-        // fresh handshake hash — so a change in it is our signal that the session was
-        // re-keyed and the counter (and the used-marking) must restart.
-        var currentHash = _session.HandshakeHash?.ToArray();
-        if (currentHash is not null
-            && (_lastHandshakeHash is null || !currentHash.AsSpan().SequenceEqual(_lastHandshakeHash)))
-        {
-            _lastHandshakeHash = currentHash;
-            _pairingCounter = 0;
-            _markedPskUsed = false;
-        }
-
+        // The counter restarts on a re-handshake, per the spec's definition of the CPace
+        // counter as pairing activates since the last Noise handshake. That reset lives in
+        // DetectSessionRekey, which has already run for this message.
         _pinState = null;
         _pairingCounter++;
 
