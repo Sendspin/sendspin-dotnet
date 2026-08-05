@@ -2,7 +2,6 @@ using System.Buffers.Binary;
 using Sendspin.SDK.Audio.Source;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
-using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -15,20 +14,6 @@ namespace Sendspin.SDK.Tests.Client;
 public class SendspinClientServiceSourceTests
 {
     private const string ServerId = FakeNoiseSession.FakeServerId;
-
-    private sealed class FakeCaptureDevice : IAudioCaptureDevice
-    {
-        public AudioFormat Format { get; } = new() { Codec = "pcm", SampleRate = 48000, Channels = 2, BitDepth = 16 };
-        public bool Capturing { get; private set; }
-        public event EventHandler<CapturedAudio>? AudioCaptured;
-
-        public Task StartAsync(CancellationToken ct = default) { Capturing = true; return Task.CompletedTask; }
-        public Task StopAsync(CancellationToken ct = default) { Capturing = false; return Task.CompletedTask; }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-
-        public void Emit(byte[] pcm, long captureTimeUs) =>
-            AudioCaptured?.Invoke(this, new CapturedAudio(pcm, captureTimeUs));
-    }
 
     private static (SendspinClientService, FakeSendspinConnection, FakeCaptureDevice) CreateSourceClient(
         bool lineSense = false, PskCategory trust = PskCategory.LongTerm, bool unpairedAccess = false)
