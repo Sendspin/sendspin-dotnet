@@ -44,13 +44,17 @@ public class IdentityStoreTests : IDisposable
     [Fact]
     public void FromStore_Twice_YieldsTheSameIdentity()
     {
-        // This is the whole point of the seam: client_id must survive a restart.
+        // This is the whole point of the seam: client_id must survive a restart. PeerId alone
+        // isn't enough to prove that — it's derived only from the public half, so a mutation
+        // that garbles the private half while leaving the public half intact would still pass
+        // a PeerId-only check, and every Noise handshake after the "restart" would then fail.
         var store = new MemoryIdentityStore();
 
-        string first = SendspinIdentity.FromStore(store).PeerId;
-        string second = SendspinIdentity.FromStore(store).PeerId;
+        var first = SendspinIdentity.FromStore(store);
+        var second = SendspinIdentity.FromStore(store);
 
-        Assert.Equal(first, second);
+        Assert.Equal(first.PeerId, second.PeerId);
+        Assert.Equal(first.PrivateKey.ToArray(), second.PrivateKey.ToArray());
         Assert.Equal(1, store.SaveCount);   // the second call loads, it does not re-save
     }
 
@@ -59,7 +63,7 @@ public class IdentityStoreTests : IDisposable
     {
         var store = new MemoryIdentityStore { Blob = [1, 2, 3] };
 
-        var ex = Assert.ThrowsAny<Exception>(() => SendspinIdentity.FromStore(store));
+        var ex = Assert.Throws<InvalidOperationException>(() => SendspinIdentity.FromStore(store));
 
         // The message must name what failed, not surface a bare FormatException from a decoder.
         Assert.Contains("identity", ex.Message, StringComparison.OrdinalIgnoreCase);
@@ -70,15 +74,32 @@ public class IdentityStoreTests : IDisposable
     {
         string path = Path.Combine(_dir, "identity.json");
 
-        string first = SendspinIdentity.FromStore(new FileSendspinIdentityStore(path)).PeerId;
-        string second = SendspinIdentity.FromStore(new FileSendspinIdentityStore(path)).PeerId;
+        var first = SendspinIdentity.FromStore(new FileSendspinIdentityStore(path));
+        var second = SendspinIdentity.FromStore(new FileSendspinIdentityStore(path));
 
-        Assert.Equal(first, second);
+        Assert.Equal(first.PeerId, second.PeerId);
+        Assert.Equal(first.PrivateKey.ToArray(), second.PrivateKey.ToArray());
     }
 
     [Fact]
     public void FileSendspinIdentityStore_Load_ReturnsNull_WhenAbsent()
     {
         Assert.Null(new FileSendspinIdentityStore(Path.Combine(_dir, "nope.json")).Load());
+    }
+
+    [Fact]
+    public void FileSendspinIdentityStore_OnGarbageContents_NamesThePath()
+    {
+        // Not a wrong-length blob (the length check already covers that) — genuine corruption,
+        // e.g. a hand-edited file or a stale file left by a consumer migrating off hand-rolled
+        // storage. This must not surface a bare FormatException from Convert.FromBase64String.
+        string path = Path.Combine(_dir, "identity.json");
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(path, "{\"identity\":\"not-base64\"}");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => SendspinIdentity.FromStore(new FileSendspinIdentityStore(path)));
+
+        Assert.Contains(path, ex.Message);
     }
 }

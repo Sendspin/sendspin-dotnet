@@ -44,10 +44,25 @@ public sealed class FileSendspinIdentityStore : ISendspinIdentityStore
     public FileSendspinIdentityStore(string path) => _path = path;
 
     /// <inheritdoc/>
+    /// <exception cref="InvalidOperationException">
+    /// The file exists but its contents are not valid base64 (hand-edited, bit-flipped, or a
+    /// stale file left by a consumer migrating off hand-rolled storage).
+    /// </exception>
     public byte[]? Load()
     {
         string? text = SecureFile.ReadAllTextOrNull(_path);
-        return text is null ? null : Convert.FromBase64String(text);
+        if (text is null)
+            return null;
+
+        try
+        {
+            return Convert.FromBase64String(text);
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidOperationException(
+                $"Sendspin identity file '{_path}' is not valid base64 and cannot be read.", ex);
+        }
     }
 
     /// <inheritdoc/>

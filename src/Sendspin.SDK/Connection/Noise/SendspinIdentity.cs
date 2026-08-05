@@ -50,7 +50,9 @@ public sealed class SendspinIdentity
     /// which the spec requires of <c>client_id</c>.
     /// </summary>
     /// <exception cref="InvalidOperationException">
-    /// The store returned a blob this SDK cannot read.
+    /// The stored data is not a readable Sendspin identity — either <paramref name="store"/>
+    /// returned a blob of the wrong length, or the store itself could not decode what it had
+    /// persisted (see e.g. <see cref="FileSendspinIdentityStore.Load"/>).
     /// </exception>
     public static SendspinIdentity FromStore(ISendspinIdentityStore store)
     {
