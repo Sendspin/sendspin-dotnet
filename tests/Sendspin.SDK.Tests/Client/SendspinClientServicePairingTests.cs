@@ -197,4 +197,44 @@ public class SendspinClientServicePairingTests
         Assert.Single(connection.SentMessages.OfType<ClientPairFinalizeMessage>());
         Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);
     }
+
+    [Fact]
+    public void Resolve_DoesNotMutateTheStore()
+    {
+        // Resolve runs inside ProcessInbound on the crypto receive path. It must be a
+        // pure lookup: no state change, no disk write, and no marking a record used
+        // before the AEAD has actually verified anything.
+        var store = new InMemoryPairingRecordStore();
+        var psk = new byte[32];
+        psk[0] = 0x42;
+        store.Upsert(new PairingRecord(psk, PskCategory.LongTerm, "srv-1"));
+
+        var resolver = new RecordPskResolver(store);
+        var resolved = resolver.Resolve(NoiseConstants.DerivePskId(psk));
+
+        Assert.NotNull(resolved);
+        Assert.False(Assert.Single(store.List()).Used, "Resolve must not mark the record used");
+    }
+
+    [Fact]
+    public void MatchedPsk_IsMarkedUsed_OnceAnEncryptedMessageArrives()
+    {
+        // The record is marked used at the first proof the AEAD verified: an encrypted
+        // application message we could actually decrypt.
+        var store = new InMemoryPairingRecordStore();
+        var psk = NoiseConstants.SentinelPsk.ToArray();
+        store.Upsert(new PairingRecord(psk, PskCategory.LongTerm, null));
+
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.LongTerm,
+            configure: options => options.PairingRecordStore = store);
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+
+        Assert.False(Assert.Single(store.List()).Used, "not used before any message arrives");
+
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        Assert.True(Assert.Single(store.List()).Used, "used once a decrypted message arrives");
+    }
 }

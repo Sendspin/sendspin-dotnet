@@ -30,6 +30,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IAudioCaptureDevice? _captureDevice;
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
+    private bool _markedPskUsed;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
     private PinPairingState? _pinState;
@@ -636,8 +637,36 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
+    /// <summary>
+    /// Marks the session's matched PSK used, once. Called on the first decrypted
+    /// application message, which is the first proof the AEAD verified — the record
+    /// must not be marked on a merely attempted connection.
+    /// </summary>
+    private void MarkMatchedPskUsed()
+    {
+        if (_markedPskUsed || _pairingStore is null)
+            return;
+        if (_session.MatchedPsk is not { } matched)
+            return;
+
+        string pskId = NoiseConstants.DerivePskId(matched.Key.Span);
+        foreach (var record in _pairingStore.List())
+        {
+            if (record.PskId == pskId && !record.Used)
+            {
+                _pairingStore.Upsert(record with { Used = true });
+                break;
+            }
+        }
+
+        _markedPskUsed = true;
+    }
+
     private void OnTextMessageReceived(object? sender, string json)
     {
+        // Reaching here means the framing layer decrypted and authenticated a frame.
+        MarkMatchedPskUsed();
+
         try
         {
             var messageType = MessageSerializer.GetMessageType(json);
