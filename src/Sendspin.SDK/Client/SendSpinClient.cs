@@ -1091,6 +1091,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case "static_pin":
                 StartPinAttempt(dynamic: false);
                 break;
+
+            default:
+                // CanOffer above and this switch are two lists of the same methods. A method
+                // added to one and not the other would otherwise fall through in silence,
+                // leaving the server waiting for a reply that never comes.
+                throw new System.Diagnostics.UnreachableException(
+                    $"CanOffer admitted pair method '{payload.SelectedPairMethod}' with no dispatch arm");
         }
     }
 

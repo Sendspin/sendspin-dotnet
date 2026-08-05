@@ -40,10 +40,17 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     public bool IsStreaming { get { lock (_lock) { return _streaming; } } }
 
     /// <summary>Creates a source pipeline bound to a capture device and the connection's send paths.</summary>
+    /// <param name="capture">The device captured audio is read from.</param>
+    /// <param name="clock">Maps capture timestamps into the server time domain.</param>
+    /// <param name="sendMessageAsync">Sends a control message (client_stream/start, client_stream/end).</param>
+    /// <param name="sendBinaryAsync">Sends an encoded binary audio chunk.</param>
+    /// <param name="logger">Logger for pipeline diagnostics.</param>
     /// <param name="canStream">
     /// Evaluated immediately before the capture device is opened. Must be false unless the
-    /// connection is at trust 'user' and the source role is currently active.
+    /// connection is at trust 'user' and the source role is currently active. Called while the
+    /// pipeline's lock is held, so it must not block, await, or take a lock of its own.
     /// </param>
+    /// <param name="encoderFactory">Chooses an encoder for the capture format; PCM by default.</param>
     public SourceStreamPipeline(
         IAudioCaptureDevice capture,
         IClockSynchronizer clock,

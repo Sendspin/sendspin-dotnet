@@ -488,8 +488,12 @@ domain (local capture time mapped through the clock filter's offset+drift). On `
 role deactivation, or disposal it sends `client_stream/end` and stops capturing.
 
 **Trust required.** A source streams potentially sensitive audio, so `source@v1` MUST
-run on a paired (`user`-trust) connection; the SDK refuses to activate it at trust
-`none` and closes the connection, per spec.
+run on a paired (`user`-trust) connection. The SDK enforces this in two places, because
+one is not enough: a `server/activate` that activates the role at trust `none` is
+refused and the connection is closed, per spec — and, independently, the capture device
+is never opened unless the connection is at trust `user` *and* the source role is
+currently in `active_roles`. The second check is what stops a `server/command
+{ source: { command: "start" } }` that skips activation entirely.
 
 **Encoders.** PCM is built in (and always accepted by servers). Supply a custom
 `ISourceAudioEncoderFactory` for Opus/FLAC. A device implementing both `source` and

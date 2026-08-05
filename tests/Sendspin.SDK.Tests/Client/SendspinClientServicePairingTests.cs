@@ -66,8 +66,11 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
-    public void UnsupportedPairMethod_SendsAbort_AndDisconnects()
+    public void KnownButUnconfiguredPairMethod_SendsAbort()
     {
+        // dynamic_pin is a method the SDK implements but this client has not enabled, so
+        // CanOffer refuses it. The unknown-method case is covered separately, at
+        // UnsupportedPairMethod_AbortsWithoutClosingTheConnection.
         var (client, connection, store) = Create();
         using var _c = client;
 
@@ -77,6 +80,7 @@ public class SendspinClientServicePairingTests
         var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
         Assert.Equal("method_not_supported", abort.Payload.Reason);
         Assert.Empty(store.List());
+        Assert.Null(connection.LastDisconnectReason);
     }
 
     [Fact]
@@ -163,10 +167,17 @@ public class SendspinClientServicePairingTests
         SendPairingActivate(connection, "pairing_psk");
 
         Assert.DoesNotContain(connection.SentMessages, m => m is ClientPairFinalizeMessage);
-        Assert.False(paired, "PairingCompleted must not fire when the record cannot be persisted");
         var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
         Assert.Equal("method_not_supported", abort.Payload.Reason);
         Assert.Equal(ConnectionState.Connected, connection.State);
+
+        // The event only ever fires from an inbound server/pair-finalize, so asserting on it
+        // without one asserts nothing. A server that finalizes anyway — it never received a
+        // client/pair-finalize, but the connection is deliberately still open — must not make
+        // this client claim a pairing it cannot authenticate against.
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+
+        Assert.False(paired, "PairingCompleted must not fire when the record cannot be persisted");
     }
 
     [Fact]
