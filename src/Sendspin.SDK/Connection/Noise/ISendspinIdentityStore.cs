@@ -16,14 +16,16 @@ namespace Sendspin.SDK.Connection.Noise;
 /// returns bytes. That is what platform key stores want, and it is what allows the raw
 /// private key to stay internal to the SDK.
 /// </para>
-/// <para><b>The blob contains a private key. Protect it as a secret.</b></para>
 /// </remarks>
 public interface ISendspinIdentityStore
 {
     /// <summary>The persisted identity blob, or <c>null</c> on first run.</summary>
     byte[]? Load();
 
-    /// <summary>Persists the identity blob. Called once, when a new identity is generated.</summary>
+    /// <summary>
+    /// Persists the identity blob. Called once, when a new identity is generated.
+    /// <b>The blob contains a private key. Protect it as a secret.</b>
+    /// </summary>
     void Save(byte[] identityBlob);
 }
 

@@ -23,16 +23,23 @@ dotnet add package Sendspin.SDK
 
 ## Example
 
-A client's `client_id` is its Curve25519 public key, so its identity must persist across
-restarts — `SendspinIdentity.Generate()` below is for a first run only; a real app loads a
-saved key on every run after that.
+A client's `client_id` **is** its Curve25519 public key, so its identity must persist across
+restarts. Load it through an `ISendspinIdentityStore` — the SDK generates one on first run and
+reuses it on every run after that, so there is no private-key persistence to hand-roll. See
+[Persisting the client identity](src/Sendspin.SDK/README.md#persisting-the-client-identity) for
+platform stores (DPAPI, Keychain, Android keystore) and the file-permission notes.
 
 ```csharp
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 
-var identity = SendspinIdentity.Generate();
+// Generates and persists an identity on first run; loads the same one afterwards.
+var identityStore = new FileSendspinIdentityStore(
+    Path.Combine(Environment.GetFolderPath(
+        Environment.SpecialFolder.LocalApplicationData), "MyApp", "identity.key"));
+var identity = SendspinIdentity.FromStore(identityStore);
+
 var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
 
 // CreateForDial wires the identity, wire framing, and Noise session together so they

@@ -39,7 +39,7 @@ using Sendspin.SDK.Connection.Noise;
 // Generates and persists an identity on first run; loads the same one afterwards.
 var identityStore = new FileSendspinIdentityStore(
     Path.Combine(Environment.GetFolderPath(
-        Environment.SpecialFolder.LocalApplicationData), "MyApp", "identity.json"));
+        Environment.SpecialFolder.LocalApplicationData), "MyApp", "identity.key"));
 var identity = SendspinIdentity.FromStore(identityStore);
 
 var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
@@ -86,7 +86,7 @@ var options = new SendspinClientOptions
     Identity = SendspinIdentity.FromStore(
         new FileSendspinIdentityStore(
             Path.Combine(Environment.GetFolderPath(
-                Environment.SpecialFolder.LocalApplicationData), "MyApp", "identity.json"))),
+                Environment.SpecialFolder.LocalApplicationData), "MyApp", "identity.key"))),
 };
 ```
 
@@ -103,9 +103,11 @@ public sealed class DpapiIdentityStore : ISendspinIdentityStore
 ```
 
 **Security note.** The identity blob contains a private key, and `FilePairingRecordStore`
-holds raw PSKs. Both are written atomically and set to owner-only (`0600`) on Unix. Windows
-has no Unix file mode, so those files inherit their parent directory's ACL — place them
-under `%LOCALAPPDATA%`, which is already user-scoped, or supply a platform store.
+holds raw PSKs. Both are written atomically and set to owner-only (`0600`) on Unix; a file
+left at looser permissions by an earlier SDK version is narrowed the first time this version
+loads it. Windows has no Unix file mode, so those files inherit their parent directory's
+ACL — place them under `%LOCALAPPDATA%`, which is already user-scoped, or supply a platform
+store.
 
 If you enable the optional PIN pairing methods via `ClientCapabilities.PinPairingMethods`,
 you must also supply an `IPinLockoutStore` — `FilePinLockoutStore` is provided. Without one
@@ -397,10 +399,9 @@ await using var host = new SendspinHostService(
     loggerFactory,
     new SendspinClientOptions
     {
-        // Generate() is for this example only — the spec requires client_id to survive
-        // reboots, so a real host loads a persisted identity and only generates (and
-        // saves) one the first time it runs.
-        Identity = SendspinIdentity.Generate(),
+        // The spec requires client_id to survive reboots, so the host loads its identity
+        // from a store — see "Persisting the client identity" above.
+        Identity = SendspinIdentity.FromStore(new FileSendspinIdentityStore(identityPath)),
     },
     lastPlayedServerStore: new FileLastPlayedServerStore());
 ```
