@@ -494,16 +494,13 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             // If the client was created but never registered in _connections,
             // dispose it to prevent leaking the WebSocket, semaphore, and CTS.
+            // No catch, deliberately: dispose parses no peer input, so there is no
+            // expected failure type to name — a throw here is a bug in our own teardown
+            // and propagates to the fire-and-forget boundary in OnServerConnected, where
+            // it is logged as the error it is rather than swallowed (#88 item 2).
             if (client is not null && !registered)
             {
-                try
-                {
-                    await client.DisposeAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "Error disposing unregistered client {ConnectionId}", connectionId);
-                }
+                await client.DisposeAsync();
             }
         }
     }

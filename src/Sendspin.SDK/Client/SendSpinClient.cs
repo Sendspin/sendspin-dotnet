@@ -797,9 +797,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or FormatException
+            or InvalidOperationException or CPaceException)
         {
-            _logger.LogError(ex, "Error processing message");
+            // This message was AEAD-authenticated by the framing layer, so a payload that
+            // fails to parse means the peer is broken or hostile; continuing would leave
+            // the connection in an undefined state. The filter names the failures a
+            // malformed payload produces: JsonException from typed deserialization,
+            // FormatException from base64url fields (pairing nonces/shares/tags),
+            // InvalidOperationException from JsonElement.GetString()/GetBoolean() on a
+            // wrong-kind element (type routing and the management fields), and
+            // CPaceException from a hostile or mis-sequenced PAKE share. The goodbye
+            // reason list is closed with no protocol-error value, so the close reuses
+            // 'unauthorized' — the reason this client already sends for peer-violation
+            // closes — rather than inventing a wire value. Anything not named here is a
+            // bug in our own handling and propagates so the receive loop surfaces it as
+            // a lost connection.
+            _logger.LogError(ex, "Malformed message from authenticated peer; closing connection");
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
         }
     }
 
@@ -2122,6 +2137,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private async Task HandleStreamStartAsync(string json)
     {
+        try
+        {
+            await HandleStreamStartCoreAsync(json);
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            // An authenticated stream/start whose payload does not parse is a protocol
+            // error: close, mirroring OnTextMessageReceived's malformed-payload handling.
+            // This handler runs on the fire-and-forget path, so the dispatch catch never
+            // sees its failures — the close must happen here. Anything else (pipeline
+            // start, event subscribers) is a local fault, not peer input, and propagates
+            // to the fire-and-forget boundary instead of being swallowed.
+            _logger.LogError(ex, "Malformed stream/start from authenticated peer; closing connection");
+            await DisconnectAsync("unauthorized");
+        }
+    }
+
+    private async Task HandleStreamStartCoreAsync(string json)
+    {
         var message = MessageSerializer.Deserialize<StreamStartMessage>(json);
         if (message is null)
         {
@@ -2162,60 +2196,64 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The continuous sync loop + sync correction will handle any residual drift
         if (_audioPipeline != null)
         {
-            try
+            // A pipeline-start failure is a local fault, not peer input: the pipeline
+            // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
+            // and it propagates from here so a real bug surfaces instead of being
+            // collapsed into a log line (#88 item 2).
+            await _audioPipeline.StartAsync(payload.Format);
+
+            // Drain any chunks that arrived during initialization
+            var drainedCount = 0;
+            while (_earlyChunkQueue.TryDequeue(out var chunk))
             {
-                await _audioPipeline.StartAsync(payload.Format);
-
-                // Drain any chunks that arrived during initialization
-                var drainedCount = 0;
-                while (_earlyChunkQueue.TryDequeue(out var chunk))
-                {
-                    _audioPipeline.ProcessAudioChunk(chunk);
-                    drainedCount++;
-                }
-
-                if (drainedCount > 0)
-                {
-                    _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
-                }
-
-                // Infer Playing state from stream/start for servers that don't send group/update
-                _currentGroup ??= new GroupState();
-                _currentGroup.PlaybackState = PlaybackState.Playing;
-                GroupStateChanged?.Invoke(this, _currentGroup);
+                _audioPipeline.ProcessAudioChunk(chunk);
+                drainedCount++;
             }
-            catch (Exception ex)
+
+            if (drainedCount > 0)
             {
-                _logger.LogError(ex, "Failed to start audio pipeline");
+                _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
             }
+
+            // Infer Playing state from stream/start for servers that don't send group/update
+            _currentGroup ??= new GroupState();
+            _currentGroup.PlaybackState = PlaybackState.Playing;
+            GroupStateChanged?.Invoke(this, _currentGroup);
         }
     }
 
     private async Task HandleStreamEndAsync(string json)
     {
-        var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
-        _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
-
-        while (_earlyChunkQueue.TryDequeue(out _))
+        try
         {
-        }
+            var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
+            _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
 
-        if (_audioPipeline != null)
-        {
-            try
+            while (_earlyChunkQueue.TryDequeue(out _))
             {
+            }
+
+            if (_audioPipeline != null)
+            {
+                // A pipeline-stop failure is a local fault, not peer input; it propagates
+                // to the fire-and-forget boundary so a real bug surfaces (#88 item 2).
                 await _audioPipeline.StopAsync();
             }
-            catch (Exception ex)
+
+            if (_currentGroup != null)
             {
-                _logger.LogError(ex, "Failed to stop audio pipeline");
+                _currentGroup.PlaybackState = PlaybackState.Idle;
+                GroupStateChanged?.Invoke(this, _currentGroup);
             }
         }
-
-        if (_currentGroup != null)
+        catch (System.Text.Json.JsonException ex)
         {
-            _currentGroup.PlaybackState = PlaybackState.Idle;
-            GroupStateChanged?.Invoke(this, _currentGroup);
+            // An authenticated stream/end whose payload does not parse is a protocol
+            // error: close, mirroring OnTextMessageReceived's malformed-payload handling.
+            // This handler runs on the fire-and-forget path, so the dispatch catch never
+            // sees its failures — the close must happen here.
+            _logger.LogError(ex, "Malformed stream/end from authenticated peer; closing connection");
+            await DisconnectAsync("unauthorized");
         }
     }
 
@@ -2237,17 +2275,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         var category = BinaryMessageParser.GetCategory(type);
 
-        // Isolate decode/dispatch so one bad binary message — or a throwing event subscriber
-        // (likely while the visualizer wire is still maturing) — cannot tear down the receive
-        // loop and stop audio/artwork. Mirrors OnTextMessageReceived's catch-all.
-        try
-        {
-            DispatchBinaryMessage(category, type, timestamp, payload, data);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error processing binary message (type {Type})", type);
-        }
+        // No catch here, deliberately: every binary parser is Try-style (a malformed frame
+        // parses to null and is dropped above or inside DispatchBinaryMessage), so nothing
+        // a hostile payload produces can throw. Anything that does throw — a buggy event
+        // subscriber or pipeline — is a bug in our own handling and must propagate so the
+        // receive loop surfaces it as a lost connection, not be collapsed into a log line
+        // (#88 item 2).
+        DispatchBinaryMessage(category, type, timestamp, payload, data);
     }
 
     private void DispatchBinaryMessage(
