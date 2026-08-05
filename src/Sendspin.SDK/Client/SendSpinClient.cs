@@ -1336,12 +1336,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             case MessageTypes.ManagementListRecords:
             {
-                var entries = (_pairingStore?.List() ?? [])
-                    .Select(r => r.ServerId is null
-                        ? $"{{\"psk_id\":\"{r.PskId}\",\"used\":{(r.Used ? "true" : "false")}}}"
-                        : $"{{\"psk_id\":\"{r.PskId}\",\"server_id\":\"{r.ServerId}\",\"used\":{(r.Used ? "true" : "false")}}}");
-                result.Data = System.Text.Json.JsonDocument
-                    .Parse($"{{\"records\":[{string.Join(",", entries)}]}}").RootElement.Clone();
+                var records = (_pairingStore?.List() ?? [])
+                    .Select(r => new ManagementRecordEntry(r.PskId, r.ServerId, r.Used))
+                    .ToList();
+                result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
+                    new ManagementRecordsData(records),
+                    MessageSerializerContext.Default.ManagementRecordsData);
                 break;
             }
 
@@ -1350,16 +1350,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 byte[] psk;
                 try
                 {
-                    psk = Connection.Noise.SendspinIdentity.DecodePeerId(
+                    psk = Connection.Noise.SendspinIdentity.DecodePsk(
                         payload.GetProperty("psk").GetString() ?? string.Empty);
                 }
-                catch (Exception)
+                catch (FormatException)
                 {
                     result.Result = "invalid";
                     break;
                 }
 
                 string? serverId = payload.TryGetProperty("server_id", out var sid) ? sid.GetString() : null;
+                if (serverId is not null && !IsValidServerId(serverId))
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
                 if (_pairingStore is null)
                 {
                     result.Result = "storage_exhausted";
@@ -1399,10 +1405,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case MessageTypes.ManagementGetPairingConfig:
             {
                 // PIN methods are not implemented, so their objects are absent per spec.
-                string enabled = _capabilities.UnpairedAccessEnabled ? "true" : "false";
-                result.Data = System.Text.Json.JsonDocument.Parse(
-                    $"{{\"pairing_psk\":{{\"enabled\":true}},\"unpaired_access\":{{\"enabled\":{enabled}}}}}")
-                    .RootElement.Clone();
+                result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
+                    new PairingConfigData(
+                        new PairingMethodState(Enabled: true),
+                        new PairingMethodState(_capabilities.UnpairedAccessEnabled)),
+                    MessageSerializerContext.Default.PairingConfigData);
                 break;
             }
 
@@ -1431,7 +1438,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         break;
                     }
 
-                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePeerId(pskEl.GetString() ?? string.Empty);
+                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
                     foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
                     {
                         _pairingStore.Remove(old.PskId);
@@ -1445,6 +1452,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// A server_id is a base64url Curve25519 public key: exactly 43 characters, no padding,
+    /// decoding to <see cref="NoiseConstants.KeySize"/> bytes. Anything else is rejected on
+    /// ingest so the record store never holds a value that is not a server id.
+    /// </summary>
+    private static bool IsValidServerId(string serverId)
+    {
+        if (serverId.Length != 43)
+            return false;
+
+        try
+        {
+            return Base64UrlText.Decode(serverId).Length == NoiseConstants.KeySize;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

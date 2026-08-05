@@ -15,7 +15,8 @@ public class SendspinClientServiceManagementTests
 
     private static readonly byte[] SessionPsk = Enumerable.Repeat((byte)7, 32).ToArray();
 
-    private static (SendspinClientService, FakeSendspinConnection, InMemoryPairingRecordStore) Create(
+    // Internal so ManagementInputValidationTests can reuse the same management-activated client.
+    internal static (SendspinClientService, FakeSendspinConnection, InMemoryPairingRecordStore) Create(
         bool managementActive = true)
     {
         var store = new InMemoryPairingRecordStore();
@@ -34,7 +35,7 @@ public class SendspinClientServiceManagementTests
         return (client, connection, store);
     }
 
-    private static ManagementResultPayload LastResult(FakeSendspinConnection connection) =>
+    internal static ManagementResultPayload LastResult(FakeSendspinConnection connection) =>
         connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
 
     [Fact]
