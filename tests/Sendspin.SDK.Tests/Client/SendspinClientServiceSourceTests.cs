@@ -221,4 +221,41 @@ public class SendspinClientServiceSourceTests
 
         Assert.True(capture.Capturing, "the legitimate case must still stream");
     }
+
+    [Fact]
+    public void SourceStart_AtSentinelTrustWithRoleGrantedOnlyInHello_NeverOpensTheCaptureDevice()
+    {
+        // The three tests above never exercise the trust half of IsSourceStreamingPermitted
+        // independently of the role half — a predicate that dropped the trust check and kept
+        // only the role check would still pass all three. This test reaches (Sentinel trust,
+        // source role active) by a route that never touches server/activate's role list:
+        // ServerHelloPayload.ActiveRoles is a plain deserialized field, so a Sentinel-keyed
+        // server can grant source@v1 in server/hello, then send an activate that OMITS
+        // active_roles entirely. HandleServerActivate only overwrites LastServerHello.ActiveRoles
+        // when the activate payload carries the field, so the hello's grant survives, and the
+        // activate-time admissibility check (keyed off the activate payload's own active_roles,
+        // not the mirrored hello) never sees it either.
+        var capture = new FakeCaptureDevice();
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options =>
+            {
+                options.CaptureDevice = capture;
+                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
+            });
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/hello","payload":{"name":"srv","active_roles":["source@v1"]}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":[]}}""");
+
+        // Confirms the route actually reaches server/command rather than disconnecting first.
+        Assert.NotEqual(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
+
+        SendSourceStart(connection);
+
+        Assert.False(capture.Capturing,
+            "the capture device must never open at Sentinel trust, even when source@v1 was granted via server/hello rather than server/activate");
+    }
 }
