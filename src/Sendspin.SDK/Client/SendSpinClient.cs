@@ -35,6 +35,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IPinLockoutStore? _pinLockoutStore;
     private PinPairingState? _pinState;
     private int _pairingCounter;
+    private byte[]? _lastHandshakeHash;
 
     // _handshakeTcs is published by the handshake waiter and completed by the connection's
     // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
@@ -997,6 +998,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
+        // The spec defines the CPace counter as pairing activates since the last Noise
+        // handshake. Re-handshakes happen inside the framing layer, but they install a
+        // fresh handshake hash — so a change in it is our signal that the session was
+        // re-keyed and the counter (and the used-marking) must restart.
+        var currentHash = _session.HandshakeHash?.ToArray();
+        if (currentHash is not null
+            && (_lastHandshakeHash is null || !currentHash.AsSpan().SequenceEqual(_lastHandshakeHash)))
+        {
+            _lastHandshakeHash = currentHash;
+            _pairingCounter = 0;
+            _markedPskUsed = false;
+        }
+
         _pinState = null;
         _pairingCounter++;
 

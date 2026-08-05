@@ -211,4 +211,37 @@ public class SendspinClientServicePinPairingTests
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
         Assert.Equal("locked_out", Last<PairAbortMessage>(connection).Payload.Reason);
     }
+
+    [Fact]
+    public void PairingCounter_RestartsAfterReHandshake()
+    {
+        // PinPairing.BuildSid defines the counter as pairing activates *since the last
+        // Noise handshake*. A client-lifetime counter diverges from a conformant
+        // server's after any key rotation, and CPace then fails.
+        var (client, connection, session) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options => options.Capabilities = new ClientCapabilities
+            {
+                PinPairingMethods = ["dynamic_pin"],
+            });
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+        var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
+        Assert.Equal(1, first.Payload.PairingIndex);
+
+        // Simulate an in-band re-handshake: the framing layer installs new transport
+        // keys and a new handshake hash.
+        session.HandshakeHash = new byte[32] { 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                               0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+        var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
+
+        Assert.Equal(1, second.Payload.PairingIndex);
+    }
 }
