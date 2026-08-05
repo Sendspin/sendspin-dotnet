@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Connection;
@@ -67,6 +68,59 @@ public class IdentityStoreTests : IDisposable
 
         // The message must name what failed, not surface a bare FormatException from a decoder.
         Assert.Contains("identity", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FromStore_WritesAVersionedChecksummedBlob_AndReadsItBack()
+    {
+        var store = new MemoryIdentityStore();
+
+        var identity = SendspinIdentity.FromStore(store);
+
+        // Format lock: [version:1][private:32][public:32][truncated SHA-256 of the key material:4].
+        byte[] blob = store.Blob!;
+        Assert.Equal(69, blob.Length);
+        Assert.Equal(1, blob[0]);
+        Assert.Equal(identity.PublicKey.ToArray(), blob[33..65]);
+        Assert.Equal(SHA256.HashData(blob[1..65])[..4], blob[65..]);
+
+        Assert.Equal(identity.PrivateKey.ToArray(), SendspinIdentity.FromStore(store).PrivateKey.ToArray());
+    }
+
+    [Fact]
+    public void FromStore_OnUnrecognisedBlobVersion_ThrowsNamingTheIdentity()
+    {
+        // A newer SDK's format, or a flipped byte in the version position. Either way, guessing
+        // at the layout is worse than refusing to load it.
+        var store = new MemoryIdentityStore();
+        SendspinIdentity.FromStore(store);
+        store.Blob![0] = 0x7F;
+
+        var ex = Assert.Throws<InvalidOperationException>(() => SendspinIdentity.FromStore(store));
+
+        Assert.Contains("identity", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("version", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FromStore_OnCorruptedKeyMaterial_IsRejected_NotSilentlyAccepted()
+    {
+        // The corruption shape nothing else catches: one flipped bit in the private half. The
+        // length is still right and the public half still decodes, so before the checksum this
+        // returned an identity whose PeerId looked correct and whose every Noise handshake
+        // failed at MAC verification, forever, with no error naming the identity or its file.
+        var store = new MemoryIdentityStore();
+        var original = SendspinIdentity.FromStore(store);
+        store.Blob![1] ^= 0x01;
+
+        // The public half - and therefore the PeerId a length-only check would hand back - is
+        // untouched, which is exactly why this needed detecting.
+        Assert.Equal(original.PeerId, Base64UrlText.Encode(store.Blob[33..65]));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => SendspinIdentity.FromStore(store));
+
+        Assert.Contains("identity", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("checksum", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

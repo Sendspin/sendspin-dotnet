@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Noise;
 
 namespace Sendspin.SDK.Connection.Noise;
@@ -44,41 +45,90 @@ public sealed class SendspinIdentity
     public static SendspinIdentity FromKeys(ReadOnlySpan<byte> privateKey, ReadOnlySpan<byte> publicKey) =>
         new(privateKey.ToArray(), publicKey.ToArray());
 
+    /// <summary>Format version of the identity blob this SDK writes and understands.</summary>
+    private const byte BlobVersion = 1;
+
+    /// <summary>Bytes of truncated SHA-256 appended to the blob's key material.</summary>
+    private const int BlobChecksumSize = 4;
+
+    private const int BlobKeyMaterialOffset = 1;
+    private const int BlobKeyMaterialSize = NoiseConstants.KeySize * 2;
+    private const int BlobSize = BlobKeyMaterialOffset + BlobKeyMaterialSize + BlobChecksumSize;
+
     /// <summary>
     /// Loads the identity from <paramref name="store"/>, generating and persisting a new one
     /// on first run. The returned identity's <see cref="PeerId"/> is stable across restarts,
     /// which the spec requires of <c>client_id</c>.
     /// </summary>
+    /// <remarks>
+    /// The blob is <c>[version:1][private key:32][public key:32][truncated SHA-256 of the key
+    /// material:4]</c>. The checksum exists because the two key halves are only meaningful
+    /// together: a corrupted private half still leaves a decodable public half, so without it
+    /// this method would happily return an identity whose <see cref="PeerId"/> looks right and
+    /// whose every Noise handshake fails at MAC verification. Verifying the private key against
+    /// the public one directly is not available — Noise.NET keeps its Curve25519 primitive
+    /// internal, and neither target framework ships a public X25519.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">
-    /// The stored data is not a readable Sendspin identity — either <paramref name="store"/>
-    /// returned a blob of the wrong length, or the store itself could not decode what it had
-    /// persisted (see e.g. <see cref="FileSendspinIdentityStore.Load"/>).
+    /// The stored data is not a readable Sendspin identity — <paramref name="store"/> returned
+    /// a blob of the wrong length, an unrecognised format version, or key material that does
+    /// not match its checksum; or the store itself could not decode what it had persisted
+    /// (see e.g. <see cref="FileSendspinIdentityStore.Load"/>).
     /// </exception>
     public static SendspinIdentity FromStore(ISendspinIdentityStore store)
     {
         ArgumentNullException.ThrowIfNull(store);
 
         if (store.Load() is { } blob)
-        {
-            // A blob is private + public key concatenated, in that order.
-            if (blob.Length != NoiseConstants.KeySize * 2)
-            {
-                throw new InvalidOperationException(
-                    $"stored Sendspin identity is {blob.Length} bytes; expected " +
-                    $"{NoiseConstants.KeySize * 2}. The identity store may be corrupt.");
-            }
-
-            return FromKeys(
-                blob.AsSpan(0, NoiseConstants.KeySize),
-                blob.AsSpan(NoiseConstants.KeySize, NoiseConstants.KeySize));
-        }
+            return FromBlob(blob);
 
         var generated = Generate();
-        byte[] fresh = new byte[NoiseConstants.KeySize * 2];
-        generated.PrivateKey.Span.CopyTo(fresh);
-        generated.PublicKey.Span.CopyTo(fresh.AsSpan(NoiseConstants.KeySize));
-        store.Save(fresh);
+        store.Save(generated.ToBlob());
         return generated;
+    }
+
+    private static SendspinIdentity FromBlob(byte[] blob)
+    {
+        if (blob.Length != BlobSize)
+        {
+            throw new InvalidOperationException(
+                $"stored Sendspin identity is {blob.Length} bytes; expected {BlobSize}. " +
+                "The identity store may be corrupt.");
+        }
+
+        if (blob[0] != BlobVersion)
+        {
+            throw new InvalidOperationException(
+                $"stored Sendspin identity has format version {blob[0]}, which this SDK does " +
+                $"not understand (it writes version {BlobVersion}). The identity store may be " +
+                "corrupt, or written by a newer SDK.");
+        }
+
+        var keyMaterial = blob.AsSpan(BlobKeyMaterialOffset, BlobKeyMaterialSize);
+        if (!blob.AsSpan(BlobKeyMaterialOffset + BlobKeyMaterialSize).SequenceEqual(
+                SHA256.HashData(keyMaterial).AsSpan(0, BlobChecksumSize)))
+        {
+            throw new InvalidOperationException(
+                "stored Sendspin identity failed its integrity check: the key material does not " +
+                "match its checksum, so the private key no longer corresponds to the public key " +
+                "the client_id is derived from. The identity store is corrupt.");
+        }
+
+        return FromKeys(
+            keyMaterial[..NoiseConstants.KeySize],
+            keyMaterial[NoiseConstants.KeySize..]);
+    }
+
+    private byte[] ToBlob()
+    {
+        byte[] blob = new byte[BlobSize];
+        blob[0] = BlobVersion;
+        PrivateKey.Span.CopyTo(blob.AsSpan(BlobKeyMaterialOffset));
+        PublicKey.Span.CopyTo(blob.AsSpan(BlobKeyMaterialOffset + NoiseConstants.KeySize));
+        SHA256.HashData(blob.AsSpan(BlobKeyMaterialOffset, BlobKeyMaterialSize))
+            .AsSpan(0, BlobChecksumSize)
+            .CopyTo(blob.AsSpan(BlobKeyMaterialOffset + BlobKeyMaterialSize));
+        return blob;
     }
 
     /// <summary>Decodes a 43-character base64url peer id into raw public-key bytes.</summary>
