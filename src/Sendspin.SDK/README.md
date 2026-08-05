@@ -27,16 +27,20 @@ dotnet add package Sendspin.SDK
 ## Quick Start
 
 Under the encrypted Sendspin protocol, a client's `client_id` **is** its Curve25519 public
-key, so its identity must persist across restarts — `SendspinIdentity.Generate()` below is
-for a first run only; a real app loads a saved key on every run after that.
+key, so its identity must persist across restarts. Load it through an
+`ISendspinIdentityStore` (see [Persisting the client identity](#persisting-the-client-identity)
+below) so the SDK generates one on first run and reuses it on every run after that.
 
 ```csharp
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 
-// Load a persisted identity, or generate and save one on first run.
-var identity = SendspinIdentity.Generate();
+// Generates and persists an identity on first run; loads the same one afterwards.
+var identityStore = new FileSendspinIdentityStore(
+    Path.Combine(Environment.GetFolderPath(
+        Environment.SpecialFolder.LocalApplicationData), "MyApp", "identity.json"));
+var identity = SendspinIdentity.FromStore(identityStore);
 
 var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
 
@@ -69,6 +73,44 @@ client.GroupStateChanged += (sender, group) =>
 await client.SendCommandAsync("play");
 await client.SetVolumeAsync(75);
 ```
+
+### Persisting the client identity
+
+`client_id` **is** the client's Curve25519 public key, and the spec requires it to survive
+reboots — a client that regenerates its identity looks like a brand-new client to every
+server it has paired with. Supply an `ISendspinIdentityStore` and let the SDK manage it:
+
+```csharp
+var options = new SendspinClientOptions
+{
+    Identity = SendspinIdentity.FromStore(
+        new FileSendspinIdentityStore(
+            Path.Combine(Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData), "MyApp", "identity.json"))),
+};
+```
+
+`FromStore` generates and persists an identity on first run, and loads the same one
+afterwards. The blob is opaque — the SDK owns its format — so a platform store (DPAPI,
+Keychain, Android keystore) only needs to protect bytes:
+
+```csharp
+public sealed class DpapiIdentityStore : ISendspinIdentityStore
+{
+    public byte[]? Load() => /* unprotect from your storage */;
+    public void Save(byte[] identityBlob) => /* protect and store */;
+}
+```
+
+**Security note.** The identity blob contains a private key, and `FilePairingRecordStore`
+holds raw PSKs. Both are written atomically and set to owner-only (`0600`) on Unix. Windows
+has no Unix file mode, so those files inherit their parent directory's ACL — place them
+under `%LOCALAPPDATA%`, which is already user-scoped, or supply a platform store.
+
+If you enable the optional PIN pairing methods via `ClientCapabilities.PinPairingMethods`,
+you must also supply an `IPinLockoutStore` — `FilePinLockoutStore` is provided. Without one
+the spec's terminal lockout after 10 failed attempts cannot be enforced, so the SDK refuses
+to offer the PIN methods rather than granting unlimited attempts.
 
 ## Architecture
 
