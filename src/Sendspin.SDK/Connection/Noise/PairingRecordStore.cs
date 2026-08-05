@@ -119,7 +119,7 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
                 "Pairing record store at {Path} could not be parsed; moved to {Target}. " +
                 "Starting with no records — the client will need to re-pair.", _path, target);
         }
-        catch (IOException moveFailure)
+        catch (Exception moveFailure) when (moveFailure is IOException or UnauthorizedAccessException)
         {
             _logger.LogError(moveFailure,
                 "Pairing record store at {Path} could not be parsed and could not be moved aside. " +
