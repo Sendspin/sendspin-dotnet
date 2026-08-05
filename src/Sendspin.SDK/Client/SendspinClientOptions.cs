@@ -42,7 +42,14 @@ public sealed class SendspinClientOptions
     /// <summary>Persistence for the player's static delay calibration.</summary>
     public IStaticDelayStore? StaticDelayStore { get; init; }
 
-    /// <summary>Lockout counter persistence for the PIN pairing methods.</summary>
+    /// <summary>
+    /// Lockout counter persistence for the PIN pairing methods. <b>Required</b> if
+    /// <see cref="ClientCapabilities.PinPairingMethods"/> is non-empty: without a store the
+    /// spec's terminal lockout after 10 failed attempts cannot survive a restart, so the SDK
+    /// declines to offer the PIN methods at all (it sends <c>pair/abort</c> and logs a warning)
+    /// rather than granting unlimited attempts. <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/>
+    /// is provided.
+    /// </summary>
     public IPinLockoutStore? PinLockoutStore { get; init; }
 
     /// <summary>Capture device for the <c>source@v1</c> role.</summary>
