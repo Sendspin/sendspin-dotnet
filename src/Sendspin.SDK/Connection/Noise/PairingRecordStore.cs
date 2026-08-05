@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Sendspin.SDK.Connection.Noise;
 
@@ -58,32 +60,91 @@ public sealed class InMemoryPairingRecordStore : IPairingRecordStore
 }
 
 /// <summary>
-/// JSON-file-backed record store. The file contains raw PSKs: protect it with
-/// filesystem permissions, or supply a platform-secure <see cref="IPairingRecordStore"/>
-/// implementation instead (DPAPI, Keychain, keystore).
+/// JSON-file-backed record store. The file contains raw PSKs; it is written atomically and
+/// restricted to owner-only access where the platform supports it. On Windows it inherits
+/// the parent directory's ACL, so place it somewhere already user-scoped such as
+/// <c>%LOCALAPPDATA%</c>. For hardware-backed protection, supply a platform
+/// <see cref="IPairingRecordStore"/> implementation instead (DPAPI, Keychain, keystore).
 /// </summary>
 public sealed class FilePairingRecordStore : IPairingRecordStore
 {
     private sealed record Entry(string Psk, string Category, string? ServerId, bool Used);
 
     private readonly string _path;
+    private readonly ILogger _logger;
     private readonly Dictionary<string, PairingRecord> _records = new();
 
-    /// <summary>Creates a store backed by the given file, loading existing records.</summary>
-    public FilePairingRecordStore(string path)
+    /// <summary>
+    /// Creates a store backed by the given file, loading existing records. A malformed
+    /// individual record is skipped; a file that cannot be parsed at all is quarantined
+    /// alongside itself and the store opens empty, so a single bad byte cannot stop the
+    /// client from starting.
+    /// </summary>
+    public FilePairingRecordStore(string path, ILogger? logger = null)
     {
         _path = path;
-        if (!File.Exists(path))
+        _logger = logger ?? NullLogger.Instance;
+
+        string? text = SecureFile.ReadAllTextOrNull(path);
+        if (text is null)
             return;
-        var entries = JsonSerializer.Deserialize<List<Entry>>(File.ReadAllText(path)) ?? [];
-        foreach (var e in entries)
+
+        List<Entry>? entries;
+        try
         {
-            var record = new PairingRecord(
-                Base64UrlText.Decode(e.Psk),
-                Enum.Parse<PskCategory>(e.Category),
-                e.ServerId,
-                e.Used);
-            _records[record.PskId] = record;
+            entries = JsonSerializer.Deserialize<List<Entry>>(text);
+        }
+        catch (JsonException ex)
+        {
+            Quarantine(ex);
+            return;
+        }
+
+        foreach (var e in entries ?? [])
+        {
+            if (TryParse(e, out var record))
+            {
+                _records[record.PskId] = record;
+            }
+        }
+    }
+
+    private void Quarantine(Exception cause)
+    {
+        string target = $"{_path}.corrupt-{DateTime.UtcNow:yyyyMMddTHHmmssZ}";
+        try
+        {
+            File.Move(_path, target, overwrite: true);
+            _logger.LogError(cause,
+                "Pairing record store at {Path} could not be parsed; moved to {Target}. " +
+                "Starting with no records — the client will need to re-pair.", _path, target);
+        }
+        catch (IOException moveFailure)
+        {
+            _logger.LogError(moveFailure,
+                "Pairing record store at {Path} could not be parsed and could not be moved aside. " +
+                "Starting with no records.", _path);
+        }
+    }
+
+    private bool TryParse(Entry entry, out PairingRecord record)
+    {
+        record = default!;
+        try
+        {
+            record = new PairingRecord(
+                Base64UrlText.Decode(entry.Psk),
+                Enum.Parse<PskCategory>(entry.Category),
+                entry.ServerId,
+                entry.Used);
+            return true;
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException)
+        {
+            _logger.LogWarning(ex,
+                "Skipping a malformed pairing record for server {ServerId} in {Path}.",
+                entry.ServerId ?? "(none)", _path);
+            return false;
         }
     }
 
@@ -109,8 +170,7 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
         var entries = _records.Values
             .Select(r => new Entry(Base64UrlText.Encode(r.Psk.Span), r.Category.ToString(), r.ServerId, r.Used))
             .ToList();
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_path))!);
-        File.WriteAllText(_path, JsonSerializer.Serialize(entries));
+        SecureFile.WriteAllTextAtomic(_path, JsonSerializer.Serialize(entries));
     }
 }
 
