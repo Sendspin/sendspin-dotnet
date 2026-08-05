@@ -933,15 +933,48 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
+    /// Whether this client can currently complete <paramref name="method"/> on this
+    /// session. The spec's check is against live capability, which may have drifted
+    /// from what supported_pair_methods advertised in client/hello.
+    /// </summary>
+    private bool CanOffer(string? method) => method switch
+    {
+        // pairing_psk is admissible only on a session already keyed by the Pairing PSK,
+        // and only when the resulting long-term record can actually be persisted.
+        "pairing_psk" => _session.MatchedPsk?.Category == PskCategory.Pairing
+                         && _pairingStore is not null,
+        "dynamic_pin" => _capabilities.PinPairingMethods.Contains("dynamic_pin"),
+        "static_pin" => _capabilities.PinPairingMethods.Contains("static_pin"),
+        _ => false,
+    };
+
+    /// <summary>
     /// Starts the client side of a pairing attempt when server/activate declares the
     /// pairing activity, dispatching on the method the server selected: Pairing PSK
     /// generates the long-term PSK and delivers it in client/pair-finalize, and the PIN
-    /// methods begin a PIN attempt. Anything else is aborted.
+    /// methods begin a PIN attempt. A method the matched PSK disallows, or that this
+    /// client cannot currently complete, is refused with pair/abort reason
+    /// 'method_not_supported' and the connection is left open (spec #123).
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
         _pinState = null;
         _pairingCounter++;
+
+        if (!CanOffer(payload.SelectedPairMethod))
+        {
+            // Spec: reply method_not_supported and LEAVE THE CONNECTION OPEN. The server
+            // may re-activate with another method, or re-handshake for a fresh
+            // supported_pair_methods advertisement.
+            _logger.LogWarning(
+                "Cannot offer pair method {Method} on this session; aborting the attempt",
+                payload.SelectedPairMethod);
+            _connection.SendMessageAsync(new PairAbortMessage
+            {
+                Payload = new PairAbortPayload { Reason = "method_not_supported" },
+            }).SafeFireAndForget(_logger);
+            return;
+        }
 
         switch (payload.SelectedPairMethod)
         {
@@ -954,22 +987,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }).SafeFireAndForget(_logger);
                 break;
 
-            case "dynamic_pin" when _capabilities.PinPairingMethods.Contains("dynamic_pin"):
+            case "dynamic_pin":
                 StartPinAttempt(dynamic: true);
                 break;
 
-            case "static_pin" when _capabilities.PinPairingMethods.Contains("static_pin"):
+            case "static_pin":
                 StartPinAttempt(dynamic: false);
-                break;
-
-            default:
-                _logger.LogWarning("Server selected unsupported pair method {Method}; aborting",
-                    payload.SelectedPairMethod);
-                _connection.SendMessageAsync(new PairAbortMessage
-                {
-                    Payload = new PairAbortPayload { Reason = "method_not_supported" },
-                }).SafeFireAndForget(_logger);
-                DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
                 break;
         }
     }
