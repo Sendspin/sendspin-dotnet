@@ -9,10 +9,12 @@ namespace Sendspin.SDK.Connection.Noise;
 /// that is interrupted leaves a corrupt file and loses every record in it; writing to a
 /// temp file and moving it over the target leaves the previous contents intact instead.
 /// <para>
-/// Permissions are set only on platforms that have them. <c>File.SetUnixFileMode</c> throws
-/// <see cref="PlatformNotSupportedException"/> on Windows, where the file instead inherits
-/// its parent directory's ACL — so place these files somewhere already user-scoped, such as
-/// <c>%LOCALAPPDATA%</c>.
+/// Permissions are set only on platforms that have them, and are applied at file-creation
+/// time via <see cref="FileStreamOptions.UnixCreateMode"/> rather than after the fact, so
+/// the temp file is never briefly readable at the platform default before being narrowed.
+/// That property throws <see cref="PlatformNotSupportedException"/> on Windows, where the
+/// file instead inherits its parent directory's ACL — so place these files somewhere
+/// already user-scoped, such as <c>%LOCALAPPDATA%</c>.
 /// </para>
 /// </remarks>
 internal static class SecureFile
@@ -30,8 +32,24 @@ internal static class SecureFile
         Directory.CreateDirectory(directory);
 
         string temp = full + ".tmp";
-        File.WriteAllText(temp, contents);
-        RestrictToOwner(temp);
+
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.Create,
+            Access = FileAccess.Write,
+        };
+        if (!OperatingSystem.IsWindows())
+        {
+            // Applied at creation time so the temp file never exists, even briefly, at the
+            // platform-default (world-readable) permissions before being narrowed.
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        using (var stream = new FileStream(temp, options))
+        using (var writer = new StreamWriter(stream))
+        {
+            writer.Write(contents);
+        }
 
         // Move last: until this succeeds, the previous file is still the valid one.
         File.Move(temp, full, overwrite: true);
@@ -43,15 +61,4 @@ internal static class SecureFile
     /// </summary>
     internal static string? ReadAllTextOrNull(string path) =>
         File.Exists(path) ? File.ReadAllText(path) : null;
-
-    private static void RestrictToOwner(string path)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            // No Unix modes here; the file inherits the parent directory's ACL.
-            return;
-        }
-
-        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-    }
 }

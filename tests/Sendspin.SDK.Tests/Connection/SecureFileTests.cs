@@ -26,6 +26,24 @@ public class SecureFileTests : IDisposable
     }
 
     [Fact]
+    public void WriteAllTextAtomic_LeavesOriginalFileIntact_WhenTempWriteFails()
+    {
+        string path = Path.Combine(_dir, "data.json");
+        SecureFile.WriteAllTextAtomic(path, "original");
+
+        // Obstruct the temp path with a directory so the temp-file write step fails before
+        // any move can happen. A direct-write implementation (skipping the temp file and
+        // writing straight to `path`) would never touch this obstruction and would silently
+        // clobber `path` instead — that's what this test needs to fail against.
+        Directory.CreateDirectory(path + ".tmp");
+
+        Exception? ex = Record.Exception(() => SecureFile.WriteAllTextAtomic(path, "corrupted"));
+
+        Assert.NotNull(ex);
+        Assert.Equal("original", File.ReadAllText(path));
+    }
+
+    [Fact]
     public void WriteAllTextAtomic_Overwrites_RatherThanAppending()
     {
         string path = Path.Combine(_dir, "data.json");
