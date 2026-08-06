@@ -376,6 +376,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// contract as <see cref="ISendspinClient.EnsurePairingPsk"/>: idempotent until the PSK
     /// is replaced, and a client over the same store and identity returns the same token.
     /// </summary>
+    /// <returns>The pairing token, for the UI to render as a QR code or display for pasting.</returns>
     /// <exception cref="InvalidOperationException">
     /// No pairing record store is configured, so a generated PSK could not be persisted.
     /// </exception>
@@ -393,6 +394,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// previously handed out stops being valid, and this exists to be called only by
     /// deliberate operator action.
     /// </summary>
+    /// <returns>The new pairing token; any token previously handed out stops being valid.</returns>
     /// <exception cref="InvalidOperationException">No pairing record store is configured.</exception>
     public string RotatePairingPsk()
     {
