@@ -9,12 +9,6 @@ namespace Sendspin.SDK.Client;
 public sealed class ClientCapabilities
 {
     /// <summary>
-    /// Unique client identifier (persisted across sessions).
-    /// Format follows reference implementation: sendspin-windows-{hostname}
-    /// </summary>
-    public string ClientId { get; set; } = $"sendspin-windows-{Environment.MachineName.ToLowerInvariant()}";
-
-    /// <summary>
     /// Human-readable client name.
     /// </summary>
     public string ClientName { get; set; } = Environment.MachineName;

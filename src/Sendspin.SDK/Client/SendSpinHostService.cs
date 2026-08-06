@@ -41,9 +41,9 @@ public sealed class SendspinHostService : IAsyncDisposable
     public bool IsAdvertising => _advertiser.IsAdvertising;
 
     /// <summary>
-    /// The client ID being advertised.
+    /// The DNS-SD instance name being advertised.
     /// </summary>
-    public string ClientId => _advertiser.ClientId;
+    public string InstanceName => _advertiser.InstanceName;
 
     /// <summary>
     /// The actual port the listener is bound to (resolves an OS-assigned port when configured as 0).
@@ -212,7 +212,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         var listenOpts = listenerOptions ?? new ListenerOptions();
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
         {
-            ClientId = _options.Capabilities.ClientId,
+            InstanceName = _options.Capabilities.ClientName,
             PlayerName = _options.Capabilities.ClientName,
             Port = listenOpts.Port,
             Path = listenOpts.Path
