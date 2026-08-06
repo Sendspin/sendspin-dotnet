@@ -68,6 +68,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _requiredLeadTimeMs;
     private int _minBufferMs;
 
+    // The effective unpaired-access setting: seeded from capabilities at construction and
+    // updated when a server changes it via management/set-pairing-config. Held here rather
+    // than written into the app-owned capabilities object, which the SDK does not mutate.
+    // PairingConfigChanged tells the app to persist the new value.
+    private bool _unpairedAccessEnabled;
+
     // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
     private const double MinStaticDelayMs = -5000.0;
@@ -170,6 +176,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
+    /// <inheritdoc />
+    public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
+
     /// <summary>
     /// Constructs a client for the encrypted Sendspin protocol.
     /// </summary>
@@ -212,6 +221,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _requiredLeadTimeMs = Math.Max(0, _capabilities.RequiredLeadTimeMs);
         _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
+        _unpairedAccessEnabled = _capabilities.UnpairedAccessEnabled;
 
         _playerState = new PlayerState
         {
@@ -335,6 +345,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Creates the ClientHello message from current capabilities.
     /// Extracted for reuse between initial connection and reconnection handshakes.
+    /// Unpaired access is advertised from the effective value rather than the app's
+    /// capabilities, since a server may have changed it via
+    /// <c>management/set-pairing-config</c>: the hello reports what this client will
+    /// actually do.
     /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
@@ -384,7 +398,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 : null,
             trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
             supportedPairMethods: BuildPairMethods(),
-            unpairedAccess: new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
+            unpairedAccess: new UnpairedAccess { Enabled = _unpairedAccessEnabled }
         );
     }
 
@@ -1058,7 +1072,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var activities = payload.ActivitiesList ?? [];
         bool hasRoles = payload.ActiveRoles is { Count: > 0 };
 
-        if (IsAdmissible(psk.Category, activities, hasRoles, _capabilities.UnpairedAccessEnabled))
+        if (IsAdmissible(psk.Category, activities, hasRoles, _unpairedAccessEnabled))
         {
             return true;
         }
@@ -1066,7 +1080,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Spec rule ordering: prefer 'pairing_required' when enabling unpaired access
         // would make the activation admissible on a Sentinel-keyed session.
         if (psk.Category == PskCategory.Sentinel
-            && !_capabilities.UnpairedAccessEnabled
+            && !_unpairedAccessEnabled
             && IsAdmissible(psk.Category, activities, hasRoles, unpairedAccessEnabled: true))
         {
             goodbyeReason = "pairing_required";
@@ -1643,7 +1657,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new PairingConfigData(
                         new PairingMethodState(Enabled: true),
-                        new PairingMethodState(_capabilities.UnpairedAccessEnabled)),
+                        new PairingMethodState(_unpairedAccessEnabled)),
                     MessageSerializerContext.Default.PairingConfigData);
                 break;
             }
@@ -1658,12 +1672,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
                 }
 
+                // Parse both fields before applying either, so a request refused partway
+                // (no store, undecodable psk) changes nothing, and the single change
+                // event below always describes a fully applied request.
+                bool? requestedUnpairedAccess = null;
                 if (payload.TryGetProperty("unpaired_access", out var ua)
                     && ua.TryGetProperty("enabled", out var uaEnabled))
                 {
-                    _capabilities.UnpairedAccessEnabled = uaEnabled.GetBoolean();
+                    requestedUnpairedAccess = uaEnabled.GetBoolean();
                 }
 
+                byte[]? newPairingPsk = null;
                 if (payload.TryGetProperty("pairing_psk", out var pp)
                     && pp.TryGetProperty("psk", out var pskEl))
                 {
@@ -1673,16 +1692,42 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         break;
                     }
 
-                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
+                    newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
+                }
+
+                // The spec permits the server to make these changes, so the SDK honours
+                // them — against its own effective state, never the app's capabilities.
+                bool unpairedAccessChanged = false;
+                if (requestedUnpairedAccess is { } enabled)
+                {
+                    unpairedAccessChanged = enabled != _unpairedAccessEnabled;
+                    _unpairedAccessEnabled = enabled;
+                }
+
+                if (newPairingPsk is not null)
+                {
                     lock (_pairingStoreLock)
                     {
-                        foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
+                        // _pairingStore (readonly) was verified non-null when the psk parsed.
+                        foreach (var old in _pairingStore!.List().Where(r => r.Category == PskCategory.Pairing))
                         {
                             _pairingStore.Remove(old.PskId);
                         }
 
-                        _pairingStore.Upsert(new PairingRecord(psk, PskCategory.Pairing));
+                        _pairingStore.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing));
                     }
+                }
+
+                if (unpairedAccessChanged || newPairingPsk is not null)
+                {
+                    // One event per request, after every change is applied, and outside
+                    // _pairingStoreLock: subscribers may call back into the client
+                    // (EnsurePairingPsk takes that lock) or run arbitrary app code.
+                    PairingConfigChanged?.Invoke(this, new PairingConfigChangedEventArgs
+                    {
+                        UnpairedAccessEnabled = _unpairedAccessEnabled,
+                        PairingPskReplaced = newPairingPsk is not null,
+                    });
                 }
 
                 break;

@@ -280,4 +280,15 @@ public interface ISendspinClient : IAsyncDisposable
     /// The payload is the same object cached on <see cref="LastStreamStart"/>.
     /// </summary>
     event EventHandler<StreamStartPayload>? StreamStartReceived;
+
+    /// <summary>
+    /// Raised when a server changes this client's pairing configuration via
+    /// <c>management/set-pairing-config</c>: the effective unpaired-access setting changed,
+    /// the stored Pairing PSK was replaced, or both. The SDK applies the change to its own
+    /// effective state — never to the <see cref="ClientCapabilities"/> instance the app
+    /// owns — so subscribe to this to persist the new configuration. When
+    /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is true, any token
+    /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
+    /// </summary>
+    event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 }
