@@ -52,6 +52,9 @@ internal sealed class FakeServer : IAsyncDisposable
         _receiveLoop = Task.Run(ReceiveLoopAsync);
     }
 
+    /// <summary>Sends an encrypted application JSON message. Valid once the handshake completed.</summary>
+    internal Task SendJsonAsync(string json) => SendEncryptedAsync(json);
+
     /// <summary>Returns the client/goodbye reason, or null if none arrives before the timeout.</summary>
     internal async Task<string?> WaitForGoodbyeAsync(TimeSpan timeout)
     {

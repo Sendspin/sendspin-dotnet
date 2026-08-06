@@ -642,50 +642,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </remarks>
     public string EnsurePairingPsk()
     {
-        if (_pairingStore is null)
-        {
-            throw new InvalidOperationException(
-                "No pairing record store is configured, so a generated Pairing PSK could not " +
-                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
-        }
-
         lock (_pairingStoreLock)
         {
-            var record = _pairingStore.List().FirstOrDefault(r => r.Category == PskCategory.Pairing);
-            if (record is null)
-            {
-                byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-                record = new PairingRecord(psk, PskCategory.Pairing);
-                _pairingStore.Upsert(record);
-            }
-
-            return PairingToken.Encode(_identity.PublicKey.Span, record.Psk.Span);
+            return PairingPskOperations.Ensure(_pairingStore, _identity);
         }
     }
 
     /// <inheritdoc />
     public string RotatePairingPsk()
     {
-        if (_pairingStore is null)
-        {
-            throw new InvalidOperationException(
-                "No pairing record store is configured, so a generated Pairing PSK could not " +
-                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
-        }
-
         lock (_pairingStoreLock)
         {
-            // Remove every Pairing record, exactly as the management/set-pairing-config handler
-            // does: a leftover second record would make EnsurePairingPsk non-deterministic about
-            // which token it returns.
-            foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
-            {
-                _pairingStore.Remove(old.PskId);
-            }
-
-            byte[] fresh = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-            _pairingStore.Upsert(new PairingRecord(fresh, PskCategory.Pairing));
-            return PairingToken.Encode(_identity.PublicKey.Span, fresh);
+            return PairingPskOperations.Rotate(_pairingStore, _identity);
         }
     }
 
