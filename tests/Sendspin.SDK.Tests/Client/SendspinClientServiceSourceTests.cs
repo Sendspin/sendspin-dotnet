@@ -22,7 +22,7 @@ public class SendspinClientServiceSourceTests
         var caps = new ClientCapabilities
         {
             Roles = { "source@v1" },
-            SourceLineSense = lineSense,
+            SourceSupport = new Sendspin.SDK.Client.SourceSupport { LineSense = lineSense },
             UnpairedAccessEnabled = unpairedAccess,
         };
         var (client, connection, session) = TestClient.Create(

@@ -131,11 +131,11 @@ public sealed class ClientCapabilities
     public bool UnpairedAccessEnabled { get; set; }
 
     /// <summary>
-    /// Whether this client's source role reports line-sense signal presence
-    /// (advertised in source@v1_support.features and reported via client/state).
-    /// Only meaningful when the 'source@v1' role and a capture device are configured.
+    /// How this client's source role behaves (line sensing, encoded codec). Null means no
+    /// source support configured. Only meaningful when the 'source@v1' role and a capture
+    /// device are configured.
     /// </summary>
-    public bool SourceLineSense { get; set; }
+    public SourceSupport? SourceSupport { get; set; }
 
     /// <summary>
     /// PIN pairing methods this client offers in addition to the mandatory Pairing PSK

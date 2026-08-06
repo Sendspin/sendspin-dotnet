@@ -30,6 +30,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     private readonly Func<byte[], Task> _sendBinaryAsync;
     private readonly Func<IMessage, Task> _sendMessageAsync;
     private readonly Func<bool> _canStream;
+    private readonly string? _configuredCodec;
     private readonly object _lock = new();
 
     private ISourceAudioEncoder? _encoder;
@@ -51,6 +52,10 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// pipeline's lock is held, so it must not block, await, or take a lock of its own.
     /// </param>
     /// <param name="encoderFactory">Chooses an encoder for the capture format; PCM by default.</param>
+    /// <param name="configuredCodec">
+    /// Codec to encode captured audio as. Null falls back to the capture device's own format,
+    /// which is the previous behaviour.
+    /// </param>
     public SourceStreamPipeline(
         IAudioCaptureDevice capture,
         IClockSynchronizer clock,
@@ -58,7 +63,8 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         Func<byte[], Task> sendBinaryAsync,
         ILogger logger,
         Func<bool> canStream,
-        ISourceAudioEncoderFactory? encoderFactory = null)
+        ISourceAudioEncoderFactory? encoderFactory = null,
+        string? configuredCodec = null)
     {
         _capture = capture;
         _clock = clock;
@@ -67,6 +73,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         _logger = logger;
         _canStream = canStream;
         _encoderFactory = encoderFactory ?? new DefaultSourceAudioEncoderFactory();
+        _configuredCodec = configuredCodec;
     }
 
     /// <summary>Handles a server <c>source</c> command ('start' or 'stop').</summary>
@@ -108,8 +115,9 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         }
 
         var format = _capture.Format;
-        // Choose an encoder for the capture format (PCM by default).
-        _encoder = _encoderFactory.Create(format.Codec, format);
+        // Prefer the configured codec; fall back to the capture format when unset.
+        string codec = _configuredCodec ?? format.Codec;
+        _encoder = _encoderFactory.Create(codec, format);
 
         var startMessage = new ClientStreamStartMessage
         {
