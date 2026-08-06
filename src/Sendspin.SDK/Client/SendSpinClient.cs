@@ -30,6 +30,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IAudioCaptureDevice? _captureDevice;
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
+
+    // Serializes this client's record-store accesses. IPairingRecordStore promises that
+    // "the SDK serializes access"; before EnsurePairingPsk/RotatePairingPsk every mutation
+    // ran on the receive path, and now app threads mutate too. Never held across an await.
+    // Boundary: RecordPskResolver.Resolve also reads the store, from the framing inbound
+    // path — a separate public object this client-private lock cannot reach — so an
+    // app-thread call can still race an in-flight re-handshake's psk_id lookup.
+    private readonly object _pairingStoreLock = new();
     private readonly SendspinIdentity _identity;
     private bool _markedPskUsed;
     private byte[]? _pendingPairingPsk;
@@ -585,6 +593,61 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _audioPipeline?.Clear();
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Per spec #122 the Pairing PSK is per-client and long-lived: a successful pairing does
+    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/> or a
+    /// server's <c>management/set-pairing-config</c> replaces the stored record.
+    /// </remarks>
+    public string EnsurePairingPsk()
+    {
+        if (_pairingStore is null)
+        {
+            throw new InvalidOperationException(
+                "No pairing record store is configured, so a generated Pairing PSK could not " +
+                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
+        }
+
+        lock (_pairingStoreLock)
+        {
+            var record = _pairingStore.List().FirstOrDefault(r => r.Category == PskCategory.Pairing);
+            if (record is null)
+            {
+                byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+                record = new PairingRecord(psk, PskCategory.Pairing);
+                _pairingStore.Upsert(record);
+            }
+
+            return PairingToken.Encode(_identity.PublicKey.Span, record.Psk.Span);
+        }
+    }
+
+    /// <inheritdoc />
+    public string RotatePairingPsk()
+    {
+        if (_pairingStore is null)
+        {
+            throw new InvalidOperationException(
+                "No pairing record store is configured, so a generated Pairing PSK could not " +
+                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
+        }
+
+        lock (_pairingStoreLock)
+        {
+            // Remove every Pairing record, exactly as the management/set-pairing-config handler
+            // does: a leftover second record would make EnsurePairingPsk non-deterministic about
+            // which token it returns.
+            foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
+            {
+                _pairingStore.Remove(old.PskId);
+            }
+
+            byte[] fresh = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            _pairingStore.Upsert(new PairingRecord(fresh, PskCategory.Pairing));
+            return PairingToken.Encode(_identity.PublicKey.Span, fresh);
+        }
+    }
+
     private void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
     {
         _logger.LogDebug("Connection state: {OldState} -> {NewState}", e.OldState, e.NewState);
@@ -687,12 +750,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
 
         string pskId = NoiseConstants.DerivePskId(matched.Key.Span);
-        foreach (var record in _pairingStore.List())
+        lock (_pairingStoreLock)
         {
-            if (record.PskId == pskId && !record.Used)
+            foreach (var record in _pairingStore.List())
             {
-                _pairingStore.Upsert(record with { Used = true });
-                break;
+                if (record.PskId == pskId && !record.Used)
+                {
+                    _pairingStore.Upsert(record with { Used = true });
+                    break;
+                }
             }
         }
 
@@ -1292,8 +1358,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (_pairingStore is not null && ServerId is not null)
         {
-            _pairingStore.Upsert(new PairingRecord(
-                _pendingPairingPsk, PskCategory.LongTerm, ServerId));
+            lock (_pairingStoreLock)
+            {
+                _pairingStore.Upsert(new PairingRecord(
+                    _pendingPairingPsk, PskCategory.LongTerm, ServerId));
+            }
+
             _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
         }
         else
@@ -1303,55 +1373,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _pendingPairingPsk = null;
         PairingCompleted?.Invoke(this, ServerId ?? string.Empty);
-    }
-
-    /// <inheritdoc />
-    /// <remarks>
-    /// Per spec #122 the Pairing PSK is per-client and long-lived: a successful pairing does
-    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/> or a
-    /// server's <c>management/set-pairing-config</c> replaces the stored record.
-    /// </remarks>
-    public string EnsurePairingPsk()
-    {
-        if (_pairingStore is null)
-        {
-            throw new InvalidOperationException(
-                "No pairing record store is configured, so a generated Pairing PSK could not " +
-                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
-        }
-
-        var record = _pairingStore.List().FirstOrDefault(r => r.Category == PskCategory.Pairing);
-        if (record is null)
-        {
-            byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-            record = new PairingRecord(psk, PskCategory.Pairing);
-            _pairingStore.Upsert(record);
-        }
-
-        return PairingToken.Encode(_identity.PublicKey.Span, record.Psk.Span);
-    }
-
-    /// <inheritdoc />
-    public string RotatePairingPsk()
-    {
-        if (_pairingStore is null)
-        {
-            throw new InvalidOperationException(
-                "No pairing record store is configured, so a generated Pairing PSK could not " +
-                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
-        }
-
-        // Remove every Pairing record, exactly as the management/set-pairing-config handler
-        // does: a leftover second record would make EnsurePairingPsk non-deterministic about
-        // which token it returns.
-        foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
-        {
-            _pairingStore.Remove(old.PskId);
-        }
-
-        byte[] fresh = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-        _pairingStore.Upsert(new PairingRecord(fresh, PskCategory.Pairing));
-        return PairingToken.Encode(_identity.PublicKey.Span, fresh);
     }
 
     /// <summary>
@@ -1405,9 +1426,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             case MessageTypes.ManagementListRecords:
             {
-                var records = (_pairingStore?.List() ?? [])
-                    .Select(r => new ManagementRecordEntry(r.PskId, r.ServerId, r.Used))
-                    .ToList();
+                List<ManagementRecordEntry> records;
+                lock (_pairingStoreLock)
+                {
+                    records = (_pairingStore?.List() ?? [])
+                        .Select(r => new ManagementRecordEntry(r.PskId, r.ServerId, r.Used))
+                        .ToList();
+                }
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new ManagementRecordsData(records),
                     MessageSerializerContext.Default.ManagementRecordsData);
@@ -1438,14 +1463,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (_pairingStore is null)
                 {
                     result.Result = "storage_exhausted";
+                    break;
                 }
-                else if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
+
+                lock (_pairingStoreLock)
                 {
-                    result.Result = "already_exists";
-                }
-                else
-                {
-                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                    if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
+                    {
+                        result.Result = "already_exists";
+                    }
+                    else
+                    {
+                        _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                    }
                 }
 
                 break;
@@ -1455,14 +1485,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 string pskId = payload.GetProperty("psk_id").GetString()
                     ?? throw new FormatException("psk_id missing");
-                var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
-                if (record is null)
+                bool removed = false;
+                if (_pairingStore is not null)
+                {
+                    lock (_pairingStoreLock)
+                    {
+                        if (_pairingStore.List().Any(r => r.PskId == pskId))
+                        {
+                            _pairingStore.Remove(pskId);
+                            removed = true;
+                        }
+                    }
+                }
+
+                if (!removed)
                 {
                     result.Result = "not_found";
                     break;
                 }
 
-                _pairingStore!.Remove(pskId);
                 if (_session.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
                 {
                     _pendingSelfRemoval = true;
@@ -1508,12 +1549,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     }
 
                     byte[] psk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
-                    foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
+                    lock (_pairingStoreLock)
                     {
-                        _pairingStore.Remove(old.PskId);
-                    }
+                        foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
+                        {
+                            _pairingStore.Remove(old.PskId);
+                        }
 
-                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.Pairing));
+                        _pairingStore.Upsert(new PairingRecord(psk, PskCategory.Pairing));
+                    }
                 }
 
                 break;
@@ -1558,10 +1602,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         string pskId = NoiseConstants.DerivePskId(current.Key.Span);
-        var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
-        if (record is not null && record.ServerId is not null)
+        bool removed = false;
+        if (_pairingStore is not null)
         {
-            _pairingStore!.Remove(pskId);
+            lock (_pairingStoreLock)
+            {
+                var record = _pairingStore.List().FirstOrDefault(r => r.PskId == pskId);
+                if (record is not null && record.ServerId is not null)
+                {
+                    _pairingStore.Remove(pskId);
+                    removed = true;
+                }
+            }
+        }
+
+        if (removed)
+        {
             _logger.LogInformation("server/unpair: removed pairing record for {ServerId}", ServerId);
         }
 
