@@ -510,7 +510,7 @@ implementation) and add `source@v1` to `Roles`:
 var caps = new ClientCapabilities
 {
     Roles = { "player@v1", "source@v1" },   // a device can be both
-    SourceLineSense = true,                  // optional: report signal presence
+    SourceSupport = new SourceSupport { LineSense = true },   // optional: report signal presence
 };
 
 var client = SendspinClientService.CreateForDial(
@@ -539,11 +539,13 @@ currently in `active_roles`. The second check is what stops a `server/command
 { source: { command: "start" } }` that skips activation entirely.
 
 **Encoders.** PCM is built in (and always accepted by servers). Supply a custom
-`ISourceAudioEncoderFactory` for Opus/FLAC. A device implementing both `source` and
+`ISourceAudioEncoderFactory` for Opus/FLAC. The encoder is created from the capture
+device's own format by default; set `SourceSupport.Codec` to encode as something else
+(e.g. a PCM capture device streaming as Opus). A device implementing both `source` and
 `player` never plays its own captured input locally — it outputs only what the server
 distributes, staying in sync with the group.
 
-**Line sensing.** When `SourceLineSense` is set, call
+**Line sensing.** When `SourceSupport.LineSense` is set, call
 `SetSourceSignalAsync(present)` to report `signal: present|absent` in `client/state`; the
 server may use it as a hint for when to start/stop.
 
