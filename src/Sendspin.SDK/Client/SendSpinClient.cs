@@ -2162,6 +2162,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // System.Text.Json does not enforce non-nullable reference annotations, so an
+        // authenticated peer can send "payload": null — or a "player" whose required
+        // "codec" is null — and typed deserialization still succeeds with a null where
+        // the model promises a value. Detect the hole before the first dereference and
+        // signal it as the JsonException the caller's catch already routes to the
+        // close; the NullReferenceException a dereference would produce instead is not
+        // named there and would die in the fire-and-forget swallow.
+        if (message.Payload is null || message.Payload.Format is { Codec: null })
+        {
+            throw new System.Text.Json.JsonException(
+                "stream/start payload is null or its player has a null codec");
+        }
+
         var payload = message.Payload;
         LastStreamStart = payload;
         StreamStartReceived?.Invoke(this, payload);
@@ -2227,6 +2240,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         try
         {
             var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
+
+            // As in HandleStreamStartCoreAsync: the serializer does not enforce the
+            // model's non-nullable Payload, and the Reason accessor below dereferences
+            // it, so a null payload must be reported as the JsonException this catch
+            // handles before that dereference throws NullReferenceException past it.
+            if (message is { Payload: null })
+            {
+                throw new System.Text.Json.JsonException("stream/end payload is null");
+            }
+
             _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
 
             while (_earlyChunkQueue.TryDequeue(out _))

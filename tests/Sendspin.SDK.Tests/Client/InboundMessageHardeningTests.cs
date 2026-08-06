@@ -60,6 +60,52 @@ public class InboundMessageHardeningTests
     }
 
     [Fact]
+    public void NullStreamStartPayload_ClosesTheConnection()
+    {
+        // System.Text.Json does not enforce non-nullable reference annotations, so
+        // "payload": null deserializes into a message whose Payload is null despite the
+        // model's promise. The handler must detect the hole before dereferencing it: the
+        // NullReferenceException a dereference produces is not JsonException, so it would
+        // escape the handler's catch and die in the fire-and-forget swallow with the
+        // connection still up.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"stream/start","payload":null}""");
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void NullStreamEndPayload_ClosesTheConnection()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"stream/end","payload":null}""");
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void NullCodecInStreamStartPlayer_ClosesTheConnection()
+    {
+        // The same annotation hole one level down: "player" is present, so the
+        // artwork-only skip does not apply, but its "codec" — declared non-nullable and
+        // dereferenced by the decoder factory when the pipeline starts — is null.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/start","payload":{"player":{"codec":null,"sample_rate":48000,"channels":2}}}""");
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void NonStringPskInManagementRequest_ClosesTheConnection()
     {
         // The management catches answer 'invalid' for JsonException/KeyNotFoundException/
