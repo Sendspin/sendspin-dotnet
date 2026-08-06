@@ -184,6 +184,25 @@ public interface ISendspinClient : IAsyncDisposable
     void ClearAudioBuffer();
 
     /// <summary>
+    /// Returns this client's pairing token, generating and persisting a Pairing PSK if none is
+    /// stored. Idempotent: repeated calls return the same token until the PSK is replaced by
+    /// <see cref="RotatePairingPsk"/> or by a server's <c>management/set-pairing-config</c>.
+    /// Hand the string to your UI to render as a QR code or to display for pasting.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// No pairing record store is configured, so a generated PSK could not be persisted.
+    /// </exception>
+    string EnsurePairingPsk();
+
+    /// <summary>
+    /// Replaces this client's Pairing PSK with a freshly generated one and returns the new
+    /// token. Any token previously handed out stops being valid. The spec forbids the client
+    /// rotating on its own, so this exists to be called only by deliberate operator action.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No pairing record store is configured.</exception>
+    string RotatePairingPsk();
+
+    /// <summary>
     /// Event raised when connection state changes.
     /// </summary>
     event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;

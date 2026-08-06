@@ -30,6 +30,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IAudioCaptureDevice? _captureDevice;
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
+    private readonly SendspinIdentity _identity;
     private bool _markedPskUsed;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
@@ -178,6 +179,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _session = session;
         _capabilities = options.Capabilities;
         _pairingStore = options.PairingRecordStore;
+        _identity = options.Identity;
         _pinLockoutStore = options.PinLockoutStore;
         _captureDevice = options.CaptureDevice;
         _sourceEncoderFactory = options.SourceEncoderFactory;
@@ -1301,6 +1303,55 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _pendingPairingPsk = null;
         PairingCompleted?.Invoke(this, ServerId ?? string.Empty);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Per spec #122 the Pairing PSK is per-client and long-lived: a successful pairing does
+    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/> or a
+    /// server's <c>management/set-pairing-config</c> replaces the stored record.
+    /// </remarks>
+    public string EnsurePairingPsk()
+    {
+        if (_pairingStore is null)
+        {
+            throw new InvalidOperationException(
+                "No pairing record store is configured, so a generated Pairing PSK could not " +
+                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
+        }
+
+        var record = _pairingStore.List().FirstOrDefault(r => r.Category == PskCategory.Pairing);
+        if (record is null)
+        {
+            byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            record = new PairingRecord(psk, PskCategory.Pairing);
+            _pairingStore.Upsert(record);
+        }
+
+        return PairingToken.Encode(_identity.PublicKey.Span, record.Psk.Span);
+    }
+
+    /// <inheritdoc />
+    public string RotatePairingPsk()
+    {
+        if (_pairingStore is null)
+        {
+            throw new InvalidOperationException(
+                "No pairing record store is configured, so a generated Pairing PSK could not " +
+                "be persisted. Set SendspinClientOptions.PairingRecordStore.");
+        }
+
+        // Remove every Pairing record, exactly as the management/set-pairing-config handler
+        // does: a leftover second record would make EnsurePairingPsk non-deterministic about
+        // which token it returns.
+        foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
+        {
+            _pairingStore.Remove(old.PskId);
+        }
+
+        byte[] fresh = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        _pairingStore.Upsert(new PairingRecord(fresh, PskCategory.Pairing));
+        return PairingToken.Encode(_identity.PublicKey.Span, fresh);
     }
 
     /// <summary>
