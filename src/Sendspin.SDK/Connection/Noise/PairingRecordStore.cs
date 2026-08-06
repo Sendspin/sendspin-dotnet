@@ -190,7 +190,7 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
 /// Resolves psk_ids against a record store, falling back to the published Sentinel PSK.
 /// This is the resolver a paired client uses.
 /// </summary>
-public sealed class RecordPskResolver : INoisePskResolver
+internal sealed class RecordPskResolver : INoisePskResolver
 {
     private readonly IPairingRecordStore _store;
 

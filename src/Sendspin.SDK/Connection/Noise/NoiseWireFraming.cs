@@ -56,7 +56,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     /// <param name="pskResolver">Resolves psk_id from Noise message 1 to a PSK candidate.
     /// Defaults to <see cref="SentinelPskResolver"/> (pre-pairing).</param>
     /// <param name="suite">Cipher suite to announce in client/init.</param>
-    public NoiseWireFraming(
+    internal NoiseWireFraming(
         SendspinIdentity identity,
         INoisePskResolver? pskResolver = null,
         NoiseCipherSuite suite = NoiseCipherSuite.ChaChaPoly)
@@ -76,7 +76,10 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     public ReadOnlyMemory<byte>? HandshakeHash => _handshakeHash;
 
     /// <summary>The PSK that authenticated the current session, once the handshake completes.</summary>
-    public NoisePsk? MatchedPsk => _matchedPsk;
+    internal NoisePsk? MatchedPsk => _matchedPsk;
+
+    /// <inheritdoc/>
+    NoisePsk? INoiseSessionInfo.MatchedPsk => _matchedPsk;
 
     /// <inheritdoc/>
     public IReadOnlyList<WireFrame> Start()

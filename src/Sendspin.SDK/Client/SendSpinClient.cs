@@ -186,7 +186,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// The Noise session backing this connection. In production this is the same
     /// <see cref="NoiseWireFraming"/> instance the connection uses for framing.
     /// </param>
-    public SendspinClientService(
+    internal SendspinClientService(
         ILogger<SendspinClientService> logger,
         ISendspinConnection connection,
         INoiseSessionInfo session,

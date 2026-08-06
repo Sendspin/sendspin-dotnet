@@ -7,7 +7,7 @@ namespace Sendspin.SDK.Connection.Noise;
 /// Wire constants for the Sendspin Noise transport, per the protocol spec's
 /// Encryption and Pre-Shared Key sections.
 /// </summary>
-public static class NoiseConstants
+internal static class NoiseConstants
 {
     /// <summary>Core protocol version carried in <c>client/init</c>.</summary>
     public const int ProtocolVersion = 1;
