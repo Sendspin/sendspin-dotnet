@@ -793,6 +793,73 @@ Closes #85 item 5."
 
 ---
 
+### Task 10: Make the shipped record stores thread-safe (from Task 2's re-review)
+
+*Added after Task 2, whose re-review found that a per-client lock structurally cannot keep `IPairingRecordStore`'s documented promise.*
+
+**Files:**
+- Modify: `src/Sendspin.SDK/Connection/Noise/PairingRecordStore.cs` — `InMemoryPairingRecordStore`, `FilePairingRecordStore`, and the `IPairingRecordStore` doc comment
+- Test: `tests/Sendspin.SDK.Tests/Connection/PairingRecordStoreConcurrencyTests.cs`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: no signature changes. Behaviour only.
+
+**Why a per-client lock is not enough.** Task 2 added `lock (_pairingStoreLock)` around the client's own store accesses, which was correct and stays. But `SendspinHostService` constructs one client per incoming connection over the **shared** `_options.PairingRecordStore` (`SendSpinHostService.cs:381-413`), each with its own private lock — N clients, N locks, one `Dictionary`. And `RecordPskResolver.Resolve` reads the store from the framing handshake path, which no client-private lock can reach.
+
+Both stores back onto a plain `Dictionary<string, PairingRecord>`, so a concurrent mutation during `List()`'s `Values.ToList()` can throw, or a lost update can hand out a token whose PSK the store no longer holds.
+
+**The two locks are complementary, not redundant.** Store-level locking makes each individual call safe. The client's lock makes multi-call *sequences* atomic — `RotatePairingPsk` removes every Pairing record and then upserts one, and that sequence must not interleave with another writer. Do not remove the client lock.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/Sendspin.SDK.Tests/Connection/PairingRecordStoreConcurrencyTests.cs`. The realistic failure is `List()` throwing while another thread mutates, so drive exactly that: one task looping `Upsert`/`Remove` with distinct psk_ids while another loops `List()`, for a few thousand iterations, and assert no exception escapes either.
+
+A concurrency test that passes by luck is worse than none, so make the window wide: run the writer and reader concurrently on `Task.Run`, and fail the test on the first exception captured from either. Run it against `InMemoryPairingRecordStore`.
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `dotnet test c:\CodeProjects\SendspinSDK\SendspinSDK.slnx -f net10.0 --nologo --filter "FullyQualifiedName~PairingRecordStoreConcurrencyTests"`
+
+Expected: fails with `InvalidOperationException` ("Collection was modified"). **If it passes, do not proceed by assuming the test is fine** — raise the iteration count until it fails, and report what it took. A test that never went red proves nothing about the fix.
+
+- [ ] **Step 3: Lock both stores**
+
+Add a private lock object to `InMemoryPairingRecordStore` and to `FilePairingRecordStore`, and take it in `List`, `Upsert` and `Remove`.
+
+For `FilePairingRecordStore`, `Save()` is called from inside `Upsert`/`Remove`, so it runs under the lock already — check that the lock is not taken twice in a way that obscures ownership, and that no `await` sits inside it (there is none today; `SecureFile.WriteAllTextAtomic` is synchronous).
+
+Keep `List()` returning a snapshot (`Values.ToList()`), which it already does — that is what makes the returned list safe to enumerate after the lock is released.
+
+- [ ] **Step 4: Reconcile the interface doc**
+
+`IPairingRecordStore`'s summary currently says "Implementations need not be thread-safe; the SDK serializes access." That promise is now false — the SDK invites app threads in through `EnsurePairingPsk` and `RotatePairingPsk`. State what is actually true: the SDK may call from an app thread and from a connection's receive thread, so an implementation **must** be safe for concurrent use; the two shipped implementations are.
+
+This is the same class of defect as #85 item 4 — a doc comment that misleads a consumer — so fixing it belongs on this branch rather than after it.
+
+- [ ] **Step 5: Run the test, then the full suite, then commit**
+
+```bash
+git add src/Sendspin.SDK/Connection/Noise/PairingRecordStore.cs tests/Sendspin.SDK.Tests/Connection/PairingRecordStoreConcurrencyTests.cs
+git commit -m "fix(pairing): make the shipped record stores safe for concurrent use
+
+IPairingRecordStore promised that the SDK serialized access, and that held while
+every mutation ran on a connection's receive path. Adding app-callable pairing
+initiation broke it: an operator displaying a QR code now writes to the store
+from an app thread while a connected server may be writing from the receive
+thread, over a plain Dictionary.
+
+A per-client lock cannot close this. The host service builds one client per
+incoming connection over one shared store, so each gets its own lock, and the
+PSK resolver reads the store from the framing path where no client lock reaches.
+Locking the stores themselves closes both, and the client's lock stays because it
+serializes multi-call sequences that per-call locking cannot.
+
+The interface doc now states what is actually true."
+```
+
+---
+
 ## Verification Checklist
 
 - [ ] Both published pairing-token KATs reproduce exactly, in both directions.
@@ -811,5 +878,6 @@ Closes #85 item 5."
 - [ ] `ClientCapabilities.cs`'s `RequiredLeadTimeMs` doc comment is well-formed.
 - [ ] `dotnet test ... -f net10.0` passes with 0 failures.
 - [ ] `dotnet build src/Sendspin.SDK/Sendspin.SDK.csproj` clean for both `net8.0` and `net10.0`; no new IL2026/IL3050.
+- [ ] Both shipped record stores survive concurrent `List`/`Upsert`/`Remove`, and `IPairingRecordStore`'s doc no longer claims the SDK serializes access.
 - [ ] `<Version>9.1.0</Version>` unchanged.
 - [ ] **Interop against `aiosendspin[server]==7.0.0` reviewed with care.** Unlike the previous slice, this branch changes values that go on the wire — the role strings — and the shape of what the app configures. Read `.github/workflows/interop.yml` and `tools/interop/` and check the harness still compiles and still advertises valid roles.
