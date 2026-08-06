@@ -32,7 +32,8 @@ public static class ClientRoles
     public const string Visualizer = "visualizer@v1";
 
     /// <summary>
-    /// Color role - receives color control updates.
+    /// Color role - receives the server-computed color palette derived from the playing
+    /// audio, for ambient lighting and UI theming.
     /// </summary>
     public const string Color = "color@v1";
 

@@ -153,6 +153,24 @@ public class PairingTokenTests
     }
 
     [Fact]
+    public void Encode_31ByteClientKey_Throws()
+    {
+        // Without the guard a short key zero-pads into a well-formed 107-character token
+        // carrying wrong key material — it must throw instead.
+        var ex = Assert.Throws<ArgumentException>(() => PairingToken.Encode(new byte[31], Kat1Psk));
+
+        Assert.Equal("clientKey", ex.ParamName);
+    }
+
+    [Fact]
+    public void Encode_31BytePairingPsk_Throws()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => PairingToken.Encode(ClientKey, new byte[31]));
+
+        Assert.Equal("pairingPsk", ex.ParamName);
+    }
+
+    [Fact]
     public void Decode_BodyWithCharacterOutsideAlphabet_Throws()
     {
         // '1' and '8' are not in the RFC 4648 base32 alphabet (A-Z2-7).
