@@ -76,6 +76,26 @@ public class ManagementInputValidationTests
     }
 
     [Fact]
+    public void AddRecord_ServerIdOfCorrectLengthButNotBase64Url_IsRejected()
+    {
+        var (client, connection, store) = SendspinClientServiceManagementTests.Create();
+        using var _c = client;
+        var before = store.List().Select(r => r.PskId).ToList();
+        string psk = EncodeKey(24);
+
+        // Exactly 43 characters — the length gate passes — but the leading quote is not
+        // base64url, so only the decode half of IsValidServerId can reject it. Every
+        // other rejection in this suite exits via the length gate, so without this case
+        // a validator reduced to length-only survives the whole suite; the decode is
+        // also what keeps a server_id carrying JSON metacharacters out of the store.
+        connection.RaiseTextMessageReceived(
+            $$$"""{"type":"management/add-record","payload":{"psk":"{{{psk}}}","server_id":"\"{{{new string('A', 42)}}}"}}""");
+
+        Assert.Equal("invalid", SendspinClientServiceManagementTests.LastResult(connection).Result);
+        Assert.Equal(before, store.List().Select(r => r.PskId).ToList());
+    }
+
+    [Fact]
     public void AddRecord_MalformedPsk_IsRejected_AndTheErrorNamesThePsk()
     {
         var (client, connection, store) = SendspinClientServiceManagementTests.Create();
