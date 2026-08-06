@@ -135,7 +135,7 @@ public sealed class ClientCapabilities
     /// source support configured. Only meaningful when the 'source@v1' role and a capture
     /// device are configured.
     /// </summary>
-    public SourceSupport? SourceSupport { get; set; }
+    public SourceRoleSupport? SourceSupport { get; set; }
 
     /// <summary>
     /// PIN pairing methods this client offers in addition to the mandatory Pairing PSK

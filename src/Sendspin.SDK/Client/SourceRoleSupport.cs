@@ -4,7 +4,7 @@ namespace Sendspin.SDK.Client;
 /// How this client's <c>source@v1</c> role behaves. Only meaningful when the role is
 /// advertised and a capture device is configured.
 /// </summary>
-public sealed class SourceSupport
+public sealed class SourceRoleSupport
 {
     /// <summary>
     /// Whether this client reports line-sense signal presence, advertised in

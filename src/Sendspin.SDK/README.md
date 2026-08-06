@@ -510,7 +510,7 @@ implementation) and add `source@v1` to `Roles`:
 var caps = new ClientCapabilities
 {
     Roles = { "player@v1", "source@v1" },   // a device can be both
-    SourceSupport = new SourceSupport { LineSense = true },   // optional: report signal presence
+    SourceSupport = new SourceRoleSupport { LineSense = true },   // optional: report signal presence
 };
 
 var client = SendspinClientService.CreateForDial(

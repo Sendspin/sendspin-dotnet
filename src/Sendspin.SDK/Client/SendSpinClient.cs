@@ -377,7 +377,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             },
             visualizerSupport: _capabilities.VisualizerSupport,
             sourceSupport: HasSourceRole()
-                ? new Protocol.Messages.SourceSupport
+                ? new SourceSupport
                 {
                     Features = _capabilities.SourceSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
                 }
