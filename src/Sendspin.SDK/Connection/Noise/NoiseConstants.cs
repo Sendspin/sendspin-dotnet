@@ -40,6 +40,14 @@ public static class NoiseConstants
     public const int MaxReassembledMessageBytes = 64 * 1024 * 1024;
 
     /// <summary>
+    /// Tighter bound on reassembly before the framing layer has surfaced its first
+    /// application message. The only legitimate content that early is <c>server/hello</c>,
+    /// so this is generous while limiting what an unauthorised peer can make us buffer.
+    /// The spec sets no maximum; this is local hardening.
+    /// </summary>
+    public const int MaxReassembledMessageBytesBeforeFirstMessage = 128 * 1024;
+
+    /// <summary>
     /// The published Sentinel PSK: <c>SHA-256("sendspin-sentinel-psk-v1")</c>.
     /// Used whenever no pairing record applies; public, so it authenticates nothing.
     /// </summary>

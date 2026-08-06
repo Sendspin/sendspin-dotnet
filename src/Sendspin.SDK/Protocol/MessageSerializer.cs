@@ -74,45 +74,47 @@ public static class MessageSerializer
     /// <summary>
     /// Gets the message type from a JSON string without full deserialization.
     /// </summary>
+    /// <exception cref="JsonException">
+    /// The document is not valid JSON, or has no <c>type</c> member. Both are malformed
+    /// input rather than an unrecognised message: an unknown-but-well-formed type is
+    /// returned as-is for the caller to ignore.
+    /// </exception>
     public static string? GetMessageType(string json)
     {
-        try
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("type", out var typeProp))
         {
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("type", out var typeProp))
-            {
-                return typeProp.GetString();
-            }
+            throw new JsonException("Message has no \"type\" member.");
         }
-        catch (JsonException)
-        {
-            // Invalid JSON
-        }
-        return null;
+
+        return typeProp.GetString();
     }
 
     /// <summary>
     /// Gets the message type from a UTF-8 byte span without full deserialization.
     /// </summary>
+    /// <exception cref="JsonException">
+    /// The document is not valid JSON, or has no <c>type</c> member. Both are malformed
+    /// input rather than an unrecognised message: an unknown-but-well-formed type is
+    /// returned as-is for the caller to ignore.
+    /// </exception>
     public static string? GetMessageType(ReadOnlySpan<byte> utf8Json)
     {
-        try
+        var reader = new Utf8JsonReader(utf8Json);
+        while (reader.Read())
         {
-            var reader = new Utf8JsonReader(utf8Json);
-            while (reader.Read())
+            // Root-only, matching the string overload: members of the root object sit at
+            // depth 1, so a "type" nested inside another member (such as a payload) must
+            // not classify the document.
+            if (reader.CurrentDepth == 1 &&
+                reader.TokenType == JsonTokenType.PropertyName &&
+                reader.ValueTextEquals("type"u8))
             {
-                if (reader.TokenType == JsonTokenType.PropertyName &&
-                    reader.ValueTextEquals("type"u8))
-                {
-                    reader.Read();
-                    return reader.GetString();
-                }
+                reader.Read();
+                return reader.GetString();
             }
         }
-        catch (JsonException)
-        {
-            // Invalid JSON
-        }
-        return null;
+
+        throw new JsonException("Message has no \"type\" member.");
     }
 }

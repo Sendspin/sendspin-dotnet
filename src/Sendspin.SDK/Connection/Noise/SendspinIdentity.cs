@@ -139,4 +139,16 @@ public sealed class SendspinIdentity
             throw new FormatException($"peer id must decode to {NoiseConstants.KeySize} bytes");
         return bytes;
     }
+
+    /// <summary>
+    /// Decodes a base64url pre-shared key into raw bytes. Distinct from
+    /// <see cref="DecodePeerId"/> so a malformed PSK does not report itself as a bad peer id.
+    /// </summary>
+    internal static byte[] DecodePsk(string encoded)
+    {
+        byte[] psk = Base64UrlText.Decode(encoded);
+        if (psk.Length != NoiseConstants.KeySize)
+            throw new FormatException($"PSK must decode to {NoiseConstants.KeySize} bytes");
+        return psk;
+    }
 }

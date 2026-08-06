@@ -193,7 +193,7 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
-    public void ThrowingVisualizationHandler_DoesNotBreakReceiveLoop()
+    public void ThrowingVisualizationHandler_PropagatesToTheReceiveLoop()
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
@@ -205,13 +205,14 @@ public class SendspinClientServiceVisualizerTests
             throw new InvalidOperationException("subscriber boom");
         };
 
-        // A throwing subscriber must be isolated so the binary receive loop survives — otherwise a
-        // buggy visualizer handler would also tear down audio/artwork. Neither raise should throw,
-        // and the second frame must still dispatch.
-        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.VisualizerLoudness, 1, U16(100)));
-        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.VisualizerLoudness, 2, U16(200)));
+        // A throwing subscriber is a bug in the app's own handling, and the inbound path
+        // no longer swallows it (#88 item 2): it escapes the receive callback, and in
+        // production the receive loop surfaces it as a lost connection an operator can
+        // see. Swallowing it here kept the visualizer alive but hid the bug.
+        Assert.Throws<InvalidOperationException>(() =>
+            connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.VisualizerLoudness, 1, U16(100))));
 
-        Assert.Equal(2, calls);
+        Assert.Equal(1, calls);
     }
 
     [Fact]

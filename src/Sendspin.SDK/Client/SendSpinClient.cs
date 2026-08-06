@@ -797,9 +797,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or FormatException
+            or InvalidOperationException or CPaceException)
         {
-            _logger.LogError(ex, "Error processing message");
+            // This message was AEAD-authenticated by the framing layer, so a payload that
+            // fails to parse means the peer is broken or hostile; continuing would leave
+            // the connection in an undefined state. The filter names the failures a
+            // malformed payload produces: JsonException from typed deserialization,
+            // FormatException from base64url fields (pairing nonces/shares/tags),
+            // InvalidOperationException from JsonElement.GetString()/GetBoolean() on a
+            // wrong-kind element (type routing and the management fields), and
+            // CPaceException from a hostile or mis-sequenced PAKE share. The goodbye
+            // reason list is closed with no protocol-error value, so the close reuses
+            // 'unauthorized' — the reason this client already sends for peer-violation
+            // closes — rather than inventing a wire value. Anything not named here is a
+            // bug in our own handling and propagates so the receive loop surfaces it as
+            // a lost connection.
+            _logger.LogError(ex, "Malformed message from authenticated peer; closing connection");
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
         }
     }
 
@@ -1291,7 +1306,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Handles a management/* request. Management is scoped to connections whose
     /// current activities include 'management'; outside that, every request answers
-    /// permission_denied. All requests are answered by exactly one management/result.
+    /// permission_denied. Every request is answered by exactly one management/result,
+    /// except one carrying a wrong-kind field (e.g. "psk":123 or a non-boolean
+    /// enabled): that throws InvalidOperationException past the local filter below,
+    /// so the dispatch catch closes the connection and no result is sent.
     /// </summary>
     private void HandleManagement(string type, string json)
     {
@@ -1336,12 +1354,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             case MessageTypes.ManagementListRecords:
             {
-                var entries = (_pairingStore?.List() ?? [])
-                    .Select(r => r.ServerId is null
-                        ? $"{{\"psk_id\":\"{r.PskId}\",\"used\":{(r.Used ? "true" : "false")}}}"
-                        : $"{{\"psk_id\":\"{r.PskId}\",\"server_id\":\"{r.ServerId}\",\"used\":{(r.Used ? "true" : "false")}}}");
-                result.Data = System.Text.Json.JsonDocument
-                    .Parse($"{{\"records\":[{string.Join(",", entries)}]}}").RootElement.Clone();
+                var records = (_pairingStore?.List() ?? [])
+                    .Select(r => new ManagementRecordEntry(r.PskId, r.ServerId, r.Used))
+                    .ToList();
+                result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
+                    new ManagementRecordsData(records),
+                    MessageSerializerContext.Default.ManagementRecordsData);
                 break;
             }
 
@@ -1350,16 +1368,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 byte[] psk;
                 try
                 {
-                    psk = Connection.Noise.SendspinIdentity.DecodePeerId(
+                    psk = Connection.Noise.SendspinIdentity.DecodePsk(
                         payload.GetProperty("psk").GetString() ?? string.Empty);
                 }
-                catch (Exception)
+                catch (FormatException)
                 {
                     result.Result = "invalid";
                     break;
                 }
 
                 string? serverId = payload.TryGetProperty("server_id", out var sid) ? sid.GetString() : null;
+                if (serverId is not null && !IsValidServerId(serverId))
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
                 if (_pairingStore is null)
                 {
                     result.Result = "storage_exhausted";
@@ -1399,10 +1423,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case MessageTypes.ManagementGetPairingConfig:
             {
                 // PIN methods are not implemented, so their objects are absent per spec.
-                string enabled = _capabilities.UnpairedAccessEnabled ? "true" : "false";
-                result.Data = System.Text.Json.JsonDocument.Parse(
-                    $"{{\"pairing_psk\":{{\"enabled\":true}},\"unpaired_access\":{{\"enabled\":{enabled}}}}}")
-                    .RootElement.Clone();
+                result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
+                    new PairingConfigData(
+                        new PairingMethodState(Enabled: true),
+                        new PairingMethodState(_capabilities.UnpairedAccessEnabled)),
+                    MessageSerializerContext.Default.PairingConfigData);
                 break;
             }
 
@@ -1431,7 +1456,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         break;
                     }
 
-                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePeerId(pskEl.GetString() ?? string.Empty);
+                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
                     foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
                     {
                         _pairingStore.Remove(old.PskId);
@@ -1445,6 +1470,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// A server_id is a base64url Curve25519 public key: exactly 43 characters, no padding,
+    /// decoding to <see cref="NoiseConstants.KeySize"/> bytes. Anything else is rejected on
+    /// ingest so the record store never holds a value that is not a server id.
+    /// </summary>
+    private static bool IsValidServerId(string serverId)
+    {
+        if (serverId.Length != 43)
+            return false;
+
+        try
+        {
+            return Base64UrlText.Decode(serverId).Length == NoiseConstants.KeySize;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -2095,10 +2140,42 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private async Task HandleStreamStartAsync(string json)
     {
+        try
+        {
+            await HandleStreamStartCoreAsync(json);
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            // An authenticated stream/start whose payload does not parse is a protocol
+            // error: close, mirroring OnTextMessageReceived's malformed-payload handling.
+            // This handler runs on the fire-and-forget path, so the dispatch catch never
+            // sees its failures — the close must happen here. Anything else (pipeline
+            // start, event subscribers) is a local fault, not peer input, and propagates
+            // to the fire-and-forget boundary instead of being swallowed.
+            _logger.LogError(ex, "Malformed stream/start from authenticated peer; closing connection");
+            await DisconnectAsync("unauthorized");
+        }
+    }
+
+    private async Task HandleStreamStartCoreAsync(string json)
+    {
         var message = MessageSerializer.Deserialize<StreamStartMessage>(json);
         if (message is null)
         {
             return;
+        }
+
+        // System.Text.Json does not enforce non-nullable reference annotations, so an
+        // authenticated peer can send "payload": null — or a "player" whose required
+        // "codec" is null — and typed deserialization still succeeds with a null where
+        // the model promises a value. Detect the hole before the first dereference and
+        // signal it as the JsonException the caller's catch already routes to the
+        // close; the NullReferenceException a dereference would produce instead is not
+        // named there and would die in the fire-and-forget swallow.
+        if (message.Payload is null || message.Payload.Format is { Codec: null })
+        {
+            throw new System.Text.Json.JsonException(
+                "stream/start payload is null or its player has a null codec");
         }
 
         var payload = message.Payload;
@@ -2135,60 +2212,74 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The continuous sync loop + sync correction will handle any residual drift
         if (_audioPipeline != null)
         {
-            try
+            // A pipeline-start failure is a local fault, not peer input: the pipeline
+            // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
+            // and it propagates from here so a real bug surfaces instead of being
+            // collapsed into a log line (#88 item 2).
+            await _audioPipeline.StartAsync(payload.Format);
+
+            // Drain any chunks that arrived during initialization
+            var drainedCount = 0;
+            while (_earlyChunkQueue.TryDequeue(out var chunk))
             {
-                await _audioPipeline.StartAsync(payload.Format);
-
-                // Drain any chunks that arrived during initialization
-                var drainedCount = 0;
-                while (_earlyChunkQueue.TryDequeue(out var chunk))
-                {
-                    _audioPipeline.ProcessAudioChunk(chunk);
-                    drainedCount++;
-                }
-
-                if (drainedCount > 0)
-                {
-                    _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
-                }
-
-                // Infer Playing state from stream/start for servers that don't send group/update
-                _currentGroup ??= new GroupState();
-                _currentGroup.PlaybackState = PlaybackState.Playing;
-                GroupStateChanged?.Invoke(this, _currentGroup);
+                _audioPipeline.ProcessAudioChunk(chunk);
+                drainedCount++;
             }
-            catch (Exception ex)
+
+            if (drainedCount > 0)
             {
-                _logger.LogError(ex, "Failed to start audio pipeline");
+                _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
             }
+
+            // Infer Playing state from stream/start for servers that don't send group/update
+            _currentGroup ??= new GroupState();
+            _currentGroup.PlaybackState = PlaybackState.Playing;
+            GroupStateChanged?.Invoke(this, _currentGroup);
         }
     }
 
     private async Task HandleStreamEndAsync(string json)
     {
-        var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
-        _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
-
-        while (_earlyChunkQueue.TryDequeue(out _))
+        try
         {
-        }
+            var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
 
-        if (_audioPipeline != null)
-        {
-            try
+            // As in HandleStreamStartCoreAsync: the serializer does not enforce the
+            // model's non-nullable Payload, and the Reason accessor below dereferences
+            // it, so a null payload must be reported as the JsonException this catch
+            // handles before that dereference throws NullReferenceException past it.
+            if (message is { Payload: null })
             {
+                throw new System.Text.Json.JsonException("stream/end payload is null");
+            }
+
+            _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
+
+            while (_earlyChunkQueue.TryDequeue(out _))
+            {
+            }
+
+            if (_audioPipeline != null)
+            {
+                // A pipeline-stop failure is a local fault, not peer input; it propagates
+                // to the fire-and-forget boundary so a real bug surfaces (#88 item 2).
                 await _audioPipeline.StopAsync();
             }
-            catch (Exception ex)
+
+            if (_currentGroup != null)
             {
-                _logger.LogError(ex, "Failed to stop audio pipeline");
+                _currentGroup.PlaybackState = PlaybackState.Idle;
+                GroupStateChanged?.Invoke(this, _currentGroup);
             }
         }
-
-        if (_currentGroup != null)
+        catch (System.Text.Json.JsonException ex)
         {
-            _currentGroup.PlaybackState = PlaybackState.Idle;
-            GroupStateChanged?.Invoke(this, _currentGroup);
+            // An authenticated stream/end whose payload does not parse is a protocol
+            // error: close, mirroring OnTextMessageReceived's malformed-payload handling.
+            // This handler runs on the fire-and-forget path, so the dispatch catch never
+            // sees its failures — the close must happen here.
+            _logger.LogError(ex, "Malformed stream/end from authenticated peer; closing connection");
+            await DisconnectAsync("unauthorized");
         }
     }
 
@@ -2210,17 +2301,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         var category = BinaryMessageParser.GetCategory(type);
 
-        // Isolate decode/dispatch so one bad binary message — or a throwing event subscriber
-        // (likely while the visualizer wire is still maturing) — cannot tear down the receive
-        // loop and stop audio/artwork. Mirrors OnTextMessageReceived's catch-all.
-        try
-        {
-            DispatchBinaryMessage(category, type, timestamp, payload, data);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error processing binary message (type {Type})", type);
-        }
+        // No catch here, deliberately: every binary parser is Try-style (a malformed frame
+        // parses to null and is dropped above or inside DispatchBinaryMessage), so nothing
+        // a hostile payload produces can throw. Anything that does throw — a buggy event
+        // subscriber or pipeline — is a bug in our own handling and must propagate so the
+        // receive loop surfaces it as a lost connection, not be collapsed into a log line
+        // (#88 item 2).
+        DispatchBinaryMessage(category, type, timestamp, payload, data);
     }
 
     private void DispatchBinaryMessage(
