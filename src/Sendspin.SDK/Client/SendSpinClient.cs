@@ -37,6 +37,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // Boundary: RecordPskResolver.Resolve also reads the store, from the framing inbound
     // path — a separate public object this client-private lock cannot reach — so an
     // app-thread call can still race an in-flight re-handshake's psk_id lookup.
+    // Boundary 2: this lock is per-client, so two clients over one shared store (as
+    // SendspinHostService builds) cannot serialize multi-call sequences against each other —
+    // two concurrent EnsurePairingPsk calls can mint two Pairing records, and Rotate's
+    // remove-then-upsert can interleave with set-pairing-config's. Every individual store
+    // operation is safe after the store-level locking, so the worst case is nondeterminism
+    // (which token wins), not corruption or lockout.
     private readonly object _pairingStoreLock = new();
     private readonly SendspinIdentity _identity;
     private bool _markedPskUsed;

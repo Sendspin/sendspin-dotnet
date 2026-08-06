@@ -112,7 +112,10 @@ store.
 If you enable the optional PIN pairing methods via `ClientCapabilities.PinPairingMethods`,
 you must also supply an `IPinLockoutStore` — `FilePinLockoutStore` is provided. Without one
 the spec's terminal lockout after 10 failed attempts cannot be enforced, so the SDK refuses
-to offer the PIN methods rather than granting unlimited attempts.
+to offer the PIN methods rather than granting unlimited attempts. Offering `dynamic_pin`
+additionally requires `SendspinClientOptions.PresentPinAsync` (the callback that shows the
+derived PIN to the operator); without it the SDK refuses that method with
+`method_not_supported` rather than pairing with a PIN nobody can see.
 
 ## Architecture
 
