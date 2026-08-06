@@ -1306,7 +1306,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Handles a management/* request. Management is scoped to connections whose
     /// current activities include 'management'; outside that, every request answers
-    /// permission_denied. All requests are answered by exactly one management/result.
+    /// permission_denied. Every request is answered by exactly one management/result,
+    /// except one carrying a wrong-kind field (e.g. "psk":123 or a non-boolean
+    /// enabled): that throws InvalidOperationException past the local filter below,
+    /// so the dispatch catch closes the connection and no result is sent.
     /// </summary>
     private void HandleManagement(string type, string json)
     {
