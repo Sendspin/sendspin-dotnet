@@ -108,6 +108,47 @@ public class SendspinClientServiceManagementTests
     }
 
     [Fact]
+    public void RemoveRecord_TargetingThePairingRecord_RaisesPairingConfigChanged_AndStalesTheToken()
+    {
+        // list-records hands every management server the Pairing record's psk_id, and
+        // remove-record removes any record by psk_id — so a server can kill the token
+        // behind a QR code an app is currently displaying. The app must hear about it.
+        var (client, connection, store) = Create();
+        using var _c = client;
+        string before = client.EnsurePairingPsk();
+        string pairingPskId = store.List().Single(r => r.Category == PskCategory.Pairing).PskId;
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        connection.RaiseTextMessageReceived(
+            $$$"""{"type":"management/remove-record","payload":{"psk_id":"{{{pairingPskId}}}"}}""");
+
+        Assert.Equal("ok", LastResult(connection).Result);
+        var change = Assert.Single(events);
+        Assert.True(change.PairingPskReplaced);
+        // The documented contract: the old token stopped being current.
+        Assert.NotEqual(before, client.EnsurePairingPsk());
+    }
+
+    [Fact]
+    public void RemoveRecord_TargetingALongTermRecord_DoesNotRaisePairingConfigChanged()
+    {
+        // Guards the positive test against an implementation that fires on every removal.
+        var (client, connection, store) = Create();
+        using var _c = client;
+        byte[] otherPsk = Enumerable.Repeat((byte)8, 32).ToArray();
+        store.Upsert(new PairingRecord(otherPsk, PskCategory.LongTerm, ServerId));
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        connection.RaiseTextMessageReceived(
+            $$$"""{"type":"management/remove-record","payload":{"psk_id":"{{{NoiseConstants.DerivePskId(otherPsk)}}}"}}""");
+
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Empty(events);
+    }
+
+    [Fact]
     public void PairingConfig_GetAndPatch()
     {
         var (client, connection, store) = Create();

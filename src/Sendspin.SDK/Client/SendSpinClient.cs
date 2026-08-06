@@ -636,8 +636,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc />
     /// <remarks>
     /// Per spec #122 the Pairing PSK is per-client and long-lived: a successful pairing does
-    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/> or a
-    /// server's <c>management/set-pairing-config</c> replaces the stored record.
+    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/>, a
+    /// server's <c>management/set-pairing-config</c>, or a server removing the record via
+    /// <c>management/remove-record</c> replaces or drops the stored record.
     /// </remarks>
     public string EnsurePairingPsk()
     {
@@ -1625,14 +1626,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 string pskId = payload.GetProperty("psk_id").GetString()
                     ?? throw new FormatException("psk_id missing");
                 bool removed = false;
+                bool removedPairing = false;
                 if (_pairingStore is not null)
                 {
                     lock (_pairingStoreLock)
                     {
-                        if (_pairingStore.List().Any(r => r.PskId == pskId))
+                        var record = _pairingStore.List().FirstOrDefault(r => r.PskId == pskId);
+                        if (record is not null)
                         {
                             _pairingStore.Remove(pskId);
                             removed = true;
+                            removedPairing = record.Category == PskCategory.Pairing;
                         }
                     }
                 }
@@ -1646,6 +1650,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (_session.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
                 {
                     _pendingSelfRemoval = true;
+                }
+
+                if (removedPairing)
+                {
+                    // The server just invalidated any token EnsurePairingPsk handed out (the
+                    // next call mints a fresh PSK), which is the same staleness
+                    // set-pairing-config's psk replacement causes — report it the same way.
+                    // Raised outside _pairingStoreLock for the same reason as there:
+                    // subscribers run arbitrary app code and must not run under the lock.
+                    PairingConfigChanged?.Invoke(this, new PairingConfigChangedEventArgs
+                    {
+                        UnpairedAccessEnabled = _unpairedAccessEnabled,
+                        PairingPskReplaced = true,
+                    });
                 }
 
                 break;
