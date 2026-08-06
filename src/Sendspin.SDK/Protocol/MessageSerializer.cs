@@ -103,7 +103,11 @@ public static class MessageSerializer
         var reader = new Utf8JsonReader(utf8Json);
         while (reader.Read())
         {
-            if (reader.TokenType == JsonTokenType.PropertyName &&
+            // Root-only, matching the string overload: members of the root object sit at
+            // depth 1, so a "type" nested inside another member (such as a payload) must
+            // not classify the document.
+            if (reader.CurrentDepth == 1 &&
+                reader.TokenType == JsonTokenType.PropertyName &&
                 reader.ValueTextEquals("type"u8))
             {
                 reader.Read();

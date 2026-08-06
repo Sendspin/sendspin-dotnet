@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -136,6 +137,19 @@ public class MessageSerializerTests
         Assert.NotNull(msg);
         Assert.Null(msg.Payload.Artwork);
         Assert.NotNull(msg.Payload.Format);
+    }
+
+    [Fact]
+    public void GetMessageType_Utf8_ReadsOnlyTheRootObject()
+    {
+        // The span overload must classify exactly like the string overload: "type" is a
+        // member of the root object, and a "type" nested inside another member (such as
+        // a payload) does not make the document a message of that type — a document with
+        // no root "type" is malformed however deep a "type" appears.
+        Assert.Equal("a/b", MessageSerializer.GetMessageType(
+            """{"payload":{"x":1},"type":"a/b"}"""u8.ToArray()));
+        Assert.Throws<JsonException>(
+            () => MessageSerializer.GetMessageType("""{"payload":{"type":"x"}}"""u8.ToArray()));
     }
 
     [Fact]
