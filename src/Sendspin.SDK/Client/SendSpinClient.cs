@@ -597,13 +597,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public string ClientId => _identity.PeerId;
 
     /// <inheritdoc />
-    public SendspinTrustLevel TrustLevel => _session.MatchedPsk?.Category switch
+    public SendspinTrustLevel TrustLevel
     {
-        null => SendspinTrustLevel.None,
-        PskCategory.Sentinel => SendspinTrustLevel.Unpaired,
-        PskCategory.Pairing => SendspinTrustLevel.Pairing,
-        PskCategory.LongTerm => SendspinTrustLevel.Paired,
-    };
+        get
+        {
+            var category = _session.MatchedPsk?.Category;
+            return category switch
+            {
+                null => SendspinTrustLevel.None,
+                PskCategory.Sentinel => SendspinTrustLevel.Unpaired,
+                PskCategory.Pairing => SendspinTrustLevel.Pairing,
+                PskCategory.LongTerm => SendspinTrustLevel.Paired,
+                // No default: an unrecognised category must never silently read as
+                // "untrusted" — that is the wrong-security-indicator failure mode this
+                // property exists to avoid. Throw and name the value instead.
+                _ => throw new InvalidOperationException($"Unhandled PSK category: {category}"),
+            };
+        }
+    }
 
     /// <inheritdoc />
     /// <remarks>
