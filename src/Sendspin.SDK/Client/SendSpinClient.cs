@@ -1721,8 +1721,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (unpairedAccessChanged || newPairingPsk is not null)
                 {
                     // One event per request, after every change is applied, and outside
-                    // _pairingStoreLock: subscribers may call back into the client
-                    // (EnsurePairingPsk takes that lock) or run arbitrary app code.
+                    // _pairingStoreLock: subscribers run arbitrary app code, and raising
+                    // under the lock would let that code block against other threads
+                    // contending for it (same-thread re-entry is safe; cross-thread
+                    // waits under the lock are the deadlock hazard).
                     PairingConfigChanged?.Invoke(this, new PairingConfigChangedEventArgs
                     {
                         UnpairedAccessEnabled = _unpairedAccessEnabled,

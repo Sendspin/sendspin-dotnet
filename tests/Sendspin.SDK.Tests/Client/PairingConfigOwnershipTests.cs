@@ -159,6 +159,63 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
+    public void CompoundRequest_RaisesOneEventDescribingBothChanges()
+    {
+        var capabilities = new ClientCapabilities();
+        var (client, connection, _, store) = CreateManagementClient(capabilities);
+        using var _c = client;
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        byte[] newPsk = Enumerable.Repeat((byte)6, 32).ToArray();
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"unpaired_access":{"enabled":true},"pairing_psk":{"psk":"PSK"}}}"""
+                .Replace("PSK", ToBase64Url(newPsk)));
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        // Exactly one event (Assert.Single fails on zero and on two), describing both
+        // changes — not one event per field.
+        var change = Assert.Single(events);
+        Assert.True(change.UnpairedAccessEnabled);
+        Assert.True(change.PairingPskReplaced);
+
+        // Both changes were applied, not merely reported.
+        var record = Assert.Single(store.List(), r => r.Category == PskCategory.Pairing);
+        Assert.Equal(newPsk, record.Psk.ToArray());
+    }
+
+    [Fact]
+    public void RequestRefusedPartway_AppliesNothing_AndRaisesNothing()
+    {
+        // A compound request whose psk is undecodable answers 'invalid' — and must not
+        // leave the unpaired_access half applied with no event to report it.
+        var capabilities = new ClientCapabilities();
+        var (client, connection, session, store) = CreateManagementClient(capabilities);
+        using var _c = client;
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"unpaired_access":{"enabled":true},"pairing_psk":{"psk":"tooshort"}}}""");
+
+        Assert.Equal("invalid", LastResult(connection).Result);
+        Assert.Empty(events);
+        Assert.DoesNotContain(store.List(), r => r.Category == PskCategory.Pairing);
+
+        // Admissibility is unchanged: the same real-handshake check the flip test uses,
+        // expecting refusal — a sentinel-keyed playback activate still closes
+        // 'pairing_required' because the flip did not stick.
+        session.MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Sentinel);
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""");
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("pairing_required", connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void ClientHello_AdvertisesTheEffectiveValue_AfterAServerChange()
     {
         // Judgement pinned deliberately: the hello reports what the client will actually
