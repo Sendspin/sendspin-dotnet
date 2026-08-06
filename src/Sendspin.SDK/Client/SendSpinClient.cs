@@ -594,6 +594,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <inheritdoc />
+    public string ClientId => _identity.PeerId;
+
+    /// <inheritdoc />
+    public SendspinTrustLevel TrustLevel => _session.MatchedPsk?.Category switch
+    {
+        null => SendspinTrustLevel.None,
+        PskCategory.Sentinel => SendspinTrustLevel.Unpaired,
+        PskCategory.Pairing => SendspinTrustLevel.Pairing,
+        PskCategory.LongTerm => SendspinTrustLevel.Paired,
+    };
+
+    /// <inheritdoc />
     /// <remarks>
     /// Per spec #122 the Pairing PSK is per-client and long-lived: a successful pairing does
     /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/> or a

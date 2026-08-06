@@ -184,6 +184,20 @@ public interface ISendspinClient : IAsyncDisposable
     void ClearAudioBuffer();
 
     /// <summary>
+    /// This client's <c>client_id</c>: the base64url-encoded Curve25519 public key of the
+    /// identity this client was constructed with. Stable across reconnects and restarts as
+    /// long as the same identity is reused.
+    /// </summary>
+    string ClientId { get; }
+
+    /// <summary>
+    /// How far the current session's peer is trusted. See <see cref="SendspinTrustLevel"/> —
+    /// in particular, <see cref="SendspinTrustLevel.Unpaired"/> describes trust, not whether
+    /// the connection is encrypted.
+    /// </summary>
+    SendspinTrustLevel TrustLevel { get; }
+
+    /// <summary>
     /// Returns this client's pairing token, generating and persisting a Pairing PSK if none is
     /// stored. Idempotent: repeated calls return the same token until the PSK is replaced by
     /// <see cref="RotatePairingPsk"/> or by a server's <c>management/set-pairing-config</c>.
