@@ -90,6 +90,8 @@ public sealed class ClientCapabilities
     /// omitted from the device info.
     /// </summary>
     public string? MacAddress { get; set; }
+
+    /// <summary>
     /// Minimum startup lead time in milliseconds reported to the server (codec init, decode
     /// warmup, audio backend buffering, DAC latency). The server schedules the first audio chunk
     /// at least this far ahead after a stream start/restart, preventing start-of-stream truncation.
@@ -138,7 +140,8 @@ public sealed class ClientCapabilities
     /// <summary>
     /// PIN pairing methods this client offers in addition to the mandatory Pairing PSK
     /// method, in the encrypted protocol. Empty by default (Pairing PSK only). Add
-    /// "dynamic_pin" and/or "static_pin". Dynamic PIN requires <see cref="EmitPin"/>.
+    /// "dynamic_pin" and/or "static_pin". Dynamic PIN requires
+    /// <see cref="SendspinClientOptions.PresentPinAsync"/>; without it the method is refused.
     /// </summary>
     public List<string> PinPairingMethods { get; set; } = new();
 
@@ -156,13 +159,6 @@ public sealed class ClientCapabilities
     /// "static_pin" is offered.
     /// </summary>
     public string? StaticPin { get; set; }
-
-    /// <summary>
-    /// Callback invoked with the derived dynamic PIN so the app can emit it via its
-    /// out-channel (display/speaker) for the operator to enter into the server.
-    /// Required when "dynamic_pin" is offered.
-    /// </summary>
-    public Action<string>? EmitPin { get; set; }
 
     /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.

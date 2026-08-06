@@ -42,6 +42,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool _markedPskUsed;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
+    private readonly Func<string, CancellationToken, ValueTask>? _presentPinAsync;
     private PinPairingState? _pinState;
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
@@ -189,6 +190,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pairingStore = options.PairingRecordStore;
         _identity = options.Identity;
         _pinLockoutStore = options.PinLockoutStore;
+        _presentPinAsync = options.PresentPinAsync;
         _captureDevice = options.CaptureDevice;
         _sourceEncoderFactory = options.SourceEncoderFactory;
         _clockSynchronizer = options.ClockSynchronizer ?? new KalmanClockSynchronizer();
@@ -683,6 +685,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (e.NewState is ConnectionState.Disconnected or ConnectionState.Reconnecting)
         {
             StopTimeSyncLoop();
+
+            // A pairing attempt cannot survive the session (the CPace counter and handshake
+            // hash reset with it), so release a presenter still showing the PIN.
+            ClearPinState();
         }
 
         // Clean up client state on full disconnection
@@ -1145,9 +1151,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                          && _pairingStore is not null,
         // A PIN method without a lockout store cannot enforce the spec's terminal lockout at
         // 10 failures — IsPinMethodLockedOut would always report false — so offering it would
-        // grant unlimited attempts. Refuse rather than fail open.
+        // grant unlimited attempts. Refuse rather than fail open. Dynamic PIN additionally
+        // requires a presenter: without PresentPinAsync the derived PIN would reach nobody,
+        // so an attempt could only proceed with a PIN the operator never saw.
         "dynamic_pin" => _capabilities.PinPairingMethods.Contains("dynamic_pin")
-                         && _pinLockoutStore is not null,
+                         && _pinLockoutStore is not null
+                         && _presentPinAsync is not null,
         "static_pin" => _capabilities.PinPairingMethods.Contains("static_pin")
                         && _pinLockoutStore is not null,
         _ => false,
@@ -1163,7 +1172,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
-        _pinState = null;
+        ClearPinState();
 
         // Only pairing activates count. The spec defines the CPace counter as the pairing
         // activates since the last Noise handshake; the restart on re-handshake lives in
@@ -1263,11 +1272,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         state.NonceA = PinPairing.DecodeB64Url(msg.Payload.NonceA);
         var h = _session.HandshakeHash!.Value.ToArray();
         string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, pinLength);
-
-        // Emit the PIN via the app's out-channel for the operator to enter into the server.
-        _capabilities.EmitPin?.Invoke(pin);
         state.Pin = pin;
+
+        // Present the PIN through the app's out-channel. Started here (this method runs on
+        // the connection's synchronous receive dispatch, which cannot await); its completion
+        // gates client/pair-auth in SendPairAuthAfterPinPresentedAsync, and its token is
+        // cancelled by ClearPinState when the attempt or the connection is torn down.
+        state.PresentPinCts = new CancellationTokenSource();
+        state.PinPresented = InvokePinPresenterAsync(pin, state.PresentPinCts.Token);
         // The PAKE begins when server/pair-auth arrives (server has the PIN by then).
+    }
+
+    /// <summary>
+    /// Invokes the app's <see cref="SendspinClientOptions.PresentPinAsync"/> presenter.
+    /// Wrapped so a synchronously-throwing presenter faults the stored task — handled where
+    /// the presentation is awaited — instead of throwing into the receive dispatch, whose
+    /// catch filter treats exceptions as hostile peer input.
+    /// </summary>
+    private async Task InvokePinPresenterAsync(string pin, CancellationToken cancellationToken)
+    {
+        // Non-null on every path that reaches a dynamic pair-init: CanOffer refuses
+        // dynamic_pin without a presenter, and without StartPinAttempt(dynamic: true)
+        // there is no { Dynamic: true } state for HandleServerPairInit to act on.
+        await _presentPinAsync!(pin, cancellationToken);
     }
 
     private void HandleServerPairAuth(string json)
@@ -1288,12 +1315,64 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             ad: PinPairing.AdClient);
         state.CPace = cpace;
         state.Sid = sid;
+
+        // Derive stays on the synchronous path: a hostile pake_msg_1 raises CPaceException
+        // into the dispatch catch, which closes the connection as with any malformed input.
         cpace.Derive(PinPairing.DecodeB64Url(msg.Payload.PakeMsg1), PinPairing.AdServer);
 
-        _connection.SendMessageAsync(new ClientPairAuthMessage
+        SendPairAuthAfterPinPresentedAsync(state, cpace.PublicShare).SafeFireAndForget(_logger);
+    }
+
+    /// <summary>
+    /// Sends client/pair-auth once the PIN presentation has completed. The share itself
+    /// leaks nothing (CPace), but the reply must not leave this client before the operator
+    /// could have seen the PIN — a presenter that has not finished displaying it cannot have
+    /// had its PIN entered — so a slow presenter delays the PAKE rather than racing it. For
+    /// static PIN (no presentation) this completes synchronously, as before. The presentation
+    /// itself is awaited and its failure handled here; the fire-and-forget boundary at the
+    /// call site observes only the send, exactly as it did when the send was unconditional.
+    /// </summary>
+    private async Task SendPairAuthAfterPinPresentedAsync(PinPairingState state, byte[] publicShare)
+    {
+        if (state.PinPresented is { } presented)
         {
-            Payload = new ClientPairAuthPayload { PakeMsg2 = B64Url(cpace.PublicShare) },
-        }).SafeFireAndForget(_logger);
+            try
+            {
+                await presented;
+            }
+            catch (Exception ex)
+            {
+                // Cancelled or failed. If the attempt was already torn down (abort,
+                // supersession, disconnect — the paths that cancel the presentation), its
+                // outcome is settled and a successor attempt's state must not be clobbered.
+                // Otherwise the app could not present the PIN, so the operator can never
+                // enter it: fail closed with the reason list's client-side-gave-up value
+                // rather than completing a PAKE nobody can win.
+                if (ReferenceEquals(_pinState, state))
+                {
+                    if (ex is not OperationCanceledException)
+                    {
+                        _logger.LogError(ex, "PresentPinAsync failed; aborting the PIN attempt");
+                    }
+
+                    AbortPin("user_cancelled");
+                }
+
+                return;
+            }
+        }
+
+        // The attempt may have been superseded or aborted while the presentation was
+        // pending; a stale share must not be sent into whatever replaced it.
+        if (!ReferenceEquals(_pinState, state))
+        {
+            return;
+        }
+
+        await _connection.SendMessageAsync(new ClientPairAuthMessage
+        {
+            Payload = new ClientPairAuthPayload { PakeMsg2 = B64Url(publicShare) },
+        });
     }
 
     private void HandleServerPairConfirm(string json)
@@ -1336,7 +1415,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void AbortPin(string reason)
     {
-        _pinState = null;
+        ClearPinState();
         _connection.SendMessageAsync(new PairAbortMessage
         {
             Payload = new PairAbortPayload { Reason = reason },
@@ -1365,6 +1444,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         public string? Pin;
         public byte[]? Sid;
         public CPace? CPace;
+
+        // Set for a dynamic attempt when server/pair-init arrives: the app's PIN
+        // presentation, awaited before client/pair-auth is sent, and the cancellation
+        // fired when the attempt or connection is torn down.
+        public Task? PinPresented;
+        public CancellationTokenSource? PresentPinCts;
+    }
+
+    /// <summary>
+    /// Drops the in-flight PIN attempt, if any, and cancels its pending PIN presentation,
+    /// so a presenter still holding the PIN (dialog, speaker) is released when the attempt
+    /// is aborted, superseded, or the connection or client goes away.
+    /// </summary>
+    private void ClearPinState()
+    {
+        var state = _pinState;
+        _pinState = null;
+        if (state?.PresentPinCts is { } cts)
+        {
+            cts.Cancel();
+            cts.Dispose();
+        }
     }
 
     /// <summary>
@@ -1652,7 +1753,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<PairAbortMessage>(json);
         _logger.LogWarning("Pairing aborted: {Reason}", message?.Payload.Reason ?? "unknown");
         _pendingPairingPsk = null;
-        _pinState = null;
+        ClearPinState();
     }
 
     /// <summary>
@@ -2518,6 +2619,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        ClearPinState();
         UnsubscribeConnectionEvents();
     }
 
@@ -2527,6 +2629,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        ClearPinState();
         UnsubscribeConnectionEvents();
 
         // NOTE: We do NOT dispose _audioPipeline here - it's a shared singleton

@@ -45,6 +45,8 @@ internal sealed class TestClientOptions
 
     public IPinLockoutStore? PinLockoutStore { get; set; }
 
+    public Func<string, CancellationToken, ValueTask>? PresentPinAsync { get; set; }
+
     public IAudioCaptureDevice? CaptureDevice { get; set; }
 
     public ISourceAudioEncoderFactory? SourceEncoderFactory { get; set; }
@@ -106,6 +108,7 @@ internal static class TestClient
             AudioPipeline = draft.AudioPipeline,
             StaticDelayStore = draft.StaticDelayStore,
             PinLockoutStore = draft.PinLockoutStore,
+            PresentPinAsync = draft.PresentPinAsync,
             CaptureDevice = draft.CaptureDevice,
             SourceEncoderFactory = draft.SourceEncoderFactory,
         };

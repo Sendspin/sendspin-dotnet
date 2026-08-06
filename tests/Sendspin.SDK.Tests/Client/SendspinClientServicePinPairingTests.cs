@@ -21,7 +21,7 @@ public class SendspinClientServicePinPairingTests
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPinLockoutStore, InMemoryPairingRecordStore)
-        CreateClient(ClientCapabilities caps)
+        CreateClient(ClientCapabilities caps, Func<string, CancellationToken, ValueTask>? presentPin = null)
     {
         var lockout = new InMemoryPinLockoutStore();
         var records = new InMemoryPairingRecordStore();
@@ -32,6 +32,7 @@ public class SendspinClientServicePinPairingTests
                 options.Capabilities = caps;
                 options.PairingRecordStore = records;
                 options.PinLockoutStore = lockout;
+                options.PresentPinAsync = presentPin;
             });
 
         // The CPace exchange is bound to the Noise handshake hash, which the test's server
@@ -54,16 +55,19 @@ public class SendspinClientServicePinPairingTests
         $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{serverKc}}}"}}""";
 
     [Fact]
-    public void DynamicPin_FullFlow_EmitsPin_CompletesPake_DeliversUnwrappablePsk()
+    public void DynamicPin_FullFlow_PresentsPin_CompletesPake_DeliversUnwrappablePsk()
     {
         string? emittedPin = null;
         var caps = new ClientCapabilities
         {
             PinPairingMethods = { "dynamic_pin" },
             MinPinLength = 6,
-            EmitPin = p => emittedPin = p,
         };
-        var (client, conn, _, _) = CreateClient(caps);
+        var (client, conn, _, _) = CreateClient(caps, (p, _) =>
+        {
+            emittedPin = p;
+            return ValueTask.CompletedTask;
+        });
         using var _c = client;
 
         // Pairing activate selects dynamic_pin.
@@ -120,8 +124,8 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void DynamicPin_PinLengthBelowMinimum_Aborts()
     {
-        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8, EmitPin = _ => { } };
-        var (client, conn, _, _) = CreateClient(caps);
+        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8 };
+        var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
@@ -225,6 +229,7 @@ public class SendspinClientServicePinPairingTests
             {
                 options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
                 options.PinLockoutStore = new InMemoryPinLockoutStore();
+                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -262,6 +267,7 @@ public class SendspinClientServicePinPairingTests
             {
                 options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
                 options.PinLockoutStore = new InMemoryPinLockoutStore();
+                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -288,9 +294,13 @@ public class SendspinClientServicePinPairingTests
         // and the spec's terminal lockout is silently inert. Refuse the method instead.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options => options.Capabilities = new ClientCapabilities
+            configure: options =>
             {
-                PinPairingMethods = ["dynamic_pin"],
+                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
+
+                // A presenter IS configured, so the refusal below is attributable to the
+                // missing lockout store alone.
+                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -316,6 +326,7 @@ public class SendspinClientServicePinPairingTests
             {
                 options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
                 options.PinLockoutStore = new InMemoryPinLockoutStore();
+                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
