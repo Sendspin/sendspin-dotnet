@@ -8,9 +8,12 @@ namespace Sendspin.SDK.Tests.Client;
 /// The client reports available: false when the audio pipeline can't keep up (underrun / sync
 /// failure), per the spec. Recovery re-sends the player-state object via
 /// <c>SendPlayerStateAckAsync</c> -&gt; <c>CreatePlayerState</c>, which deliberately omits
-/// <c>available</c> (see the §4 fix) — so recovery does not currently re-assert
-/// <c>available: true</c> on its own; a single availability publisher introduced by a later task
-/// owns that.
+/// <c>available</c> (see the §4 fix), and separately calls the availability publisher so a
+/// recovery can re-assert <c>available: true</c> once nothing else keeps the client unavailable.
+/// This fixture never establishes clock sync, so the composed availability
+/// (<c>ClientAvailabilityTests</c> covers the formula) stays <c>false</c> throughout regardless of
+/// the pipeline's error/recovery state — the tests below still hold, but see each one's comment
+/// for what it actually proves under that constraint.
 /// </summary>
 public class SendspinClientServiceErrorStateTests
 {
@@ -61,9 +64,13 @@ public class SendspinClientServiceErrorStateTests
 
             var messages = conn.SentMessages.OfType<ClientStateMessage>().ToList();
 
-            // messages[0] is the error report (available: false); messages[1] is the recovery's
-            // player-state ack, which carries the player object but no `available` — the known
-            // gap called out in this class's doc comment.
+            // messages[0] is the error report (available: false). Recovery calls both the
+            // availability publisher and the player-state ack, but this fixture's clock never
+            // converges, so the publisher's computed value is still false and its own
+            // compare-to-last-sent suppresses a second wire message — leaving messages[1] as the
+            // player-state ack, which carries the player object but no `available`
+            // (ClientAvailabilityTests exercises the synced-clock case, where recovery does send a
+            // second message with available: true).
             Assert.Equal(2, messages.Count);
             Assert.NotNull(messages[1].Payload.Player);
             Assert.Null(messages[1].Payload.Available);
@@ -109,7 +116,7 @@ public class SendspinClientServiceErrorStateTests
             await conn.DisconnectAsync();           // connection drops before the pipeline fails
             pipe.RaiseError("buffer underrun");     // error surfaces while disconnected
 
-            // ReportClientErrorAsync guards on connection state, so the error report is skipped.
+            // PublishAvailabilityAsync guards on connection state, so the error report is skipped.
             // The default (non-throwing) fake is deliberate: a removed guard would record the
             // message and fail this assertion, rather than being masked by an enforced throw.
             Assert.DoesNotContain(false, AvailableValuesSent(conn));

@@ -301,6 +301,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         => _capabilities.Roles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
 
     /// <summary>
+    /// Whether this client's clock must be synchronized with the server before it can claim
+    /// availability. True for the two roles the spec names: player and source.
+    /// </summary>
+    private bool RequiresClockSync()
+        => _capabilities.Roles.Any(r => r.StartsWith("player@", StringComparison.Ordinal)) || HasSourceRole();
+
+    /// <summary>
     /// Reports line-sense signal presence to the server via client/state (source role).
     /// No-op unless the source role is configured with line sensing.
     /// </summary>
@@ -552,20 +559,86 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public bool IsExternalSource { get; private set; }
 
+    /// <summary>
+    /// The single source of truth for client/state's <c>available</c> field: composed from the
+    /// three inputs the spec names rather than asserted independently at each call site, which is
+    /// how <see cref="SendPlayerStateAsync"/> once came to hard-code it (see the §4 fix).
+    /// </summary>
+    private bool CurrentAvailability
+        => (!RequiresClockSync() || IsClockSynced) && !IsExternalSource && !_clientErrorReported;
+
+    /// <summary>
+    /// The last availability value actually sent to the server, used by
+    /// <see cref="PublishAvailabilityAsync"/> to suppress a delta when nothing changed. Seeded
+    /// from the initial client/state in <see cref="SendInitialClientStateAsync"/> so the first
+    /// delta after it is not a spurious repeat.
+    /// </summary>
+    private bool? _lastAvailabilitySent;
+
+    /// <summary>
+    /// Publishes <see cref="CurrentAvailability"/> as a client/state delta when it differs from
+    /// the last value sent, and no-ops otherwise. This is the only place that sends
+    /// <see cref="ClientStateMessage.CreateAvailability"/> — <see cref="EnterExternalSourceAsync"/>,
+    /// <see cref="ExitExternalSourceAsync"/>, and the pipeline error/recovery handlers all set
+    /// their input and call this, so availability cannot again drift out of sync one call site at
+    /// a time.
+    /// </summary>
+    private async Task PublishAvailabilityAsync()
+    {
+        var current = CurrentAvailability;
+        if (_lastAvailabilitySent == current)
+        {
+            return;
+        }
+
+        // Guard on connection state symmetrically with the old ReportClientErrorAsync: a publish
+        // that lands mid-reconnect would hit a closed socket. The reconnect handshake re-reports
+        // availability via SendInitialClientStateAsync.
+        if (_connection.State != ConnectionState.Connected)
+        {
+            return;
+        }
+
+        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(current));
+        _lastAvailabilitySent = current;
+    }
+
     /// <inheritdoc/>
     public async Task EnterExternalSourceAsync()
     {
-        // Notify the server first; only flip local state if it succeeds (rollback on failure).
-        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(false));
+        // Sets the input, then routes the wire notification through the single availability
+        // publisher. That changes the previous "notify first" ordering (the local flag is now set
+        // before the send is attempted) — see the task report for the tradeoff. Rollback on a
+        // genuine send failure is preserved via the catch; a publish skipped because the
+        // connection is not Connected does not throw, so it cannot roll back this flag.
         IsExternalSource = true;
+        try
+        {
+            await PublishAvailabilityAsync();
+        }
+        catch
+        {
+            IsExternalSource = false;
+            throw;
+        }
+
         _logger.LogInformation("Entered external_source");
     }
 
     /// <inheritdoc/>
     public async Task ExitExternalSourceAsync()
     {
-        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(true));
         IsExternalSource = false;
+        try
+        {
+            await PublishAvailabilityAsync();
+        }
+        catch
+        {
+            IsExternalSource = true;
+            throw;
+        }
+
         _logger.LogInformation("Exited external_source (synchronized)");
     }
 
@@ -1584,6 +1657,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
             await _connection.SendMessageAsync(stateMessage);
 
+            // Seed the availability publisher's "last sent" tracker from this message, so the
+            // first delta PublishAvailabilityAsync sends afterward is not a spurious repeat.
+            _lastAvailabilitySent = true;
+
             // Also apply to audio pipeline to ensure consistency
             _audioPipeline?.SetVolume(_playerState.Volume);
             _audioPipeline?.SetMuted(_playerState.Muted);
@@ -2433,18 +2510,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Reports <c>available: false</c> when the audio pipeline raises an error (e.g. a buffer
     /// underrun or sync failure), so the server knows this player cannot keep up. Per the spec the
     /// player then buffers and recovers once it can resume playback (see
-    /// <see cref="OnPipelineStateChanged"/>).
+    /// <see cref="OnPipelineStateChanged"/>). Sets the latch and calls the publisher on every
+    /// occurrence rather than gating on <see cref="_clientErrorReported"/> first: the publisher's
+    /// own compare-to-last-sent is what suppresses the resulting wire duplicates now, so a second
+    /// error while one is already outstanding is not silently dropped before it can be composed
+    /// with other inputs (e.g. external source).
     /// </summary>
     private void OnPipelineError(object? sender, AudioPipelineError error)
     {
-        if (_clientErrorReported)
-        {
-            return;
-        }
-
         _clientErrorReported = true;
         _logger.LogWarning("Audio pipeline error; reporting available: false ({Message})", error.Message);
-        ReportClientErrorAsync(error.Message).SafeFireAndForget(_logger);
+        PublishAvailabilityAsync().SafeFireAndForget(_logger);
     }
 
     /// <summary>
@@ -2457,25 +2533,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         switch (state)
         {
-            case AudioPipelineState.Error when !_clientErrorReported:
+            case AudioPipelineState.Error:
                 _clientErrorReported = true;
                 _logger.LogWarning("Audio pipeline entered Error state; reporting available: false");
-                ReportClientErrorAsync(null).SafeFireAndForget(_logger);
+                PublishAvailabilityAsync().SafeFireAndForget(_logger);
                 break;
 
             case AudioPipelineState.Playing when _clientErrorReported:
                 _clientErrorReported = false;
+                PublishAvailabilityAsync().SafeFireAndForget(_logger);
 
-                // Guard on connection state symmetrically with ReportClientErrorAsync: a recovery
-                // that lands while disconnected/reconnecting would otherwise hit a closed socket.
+                // Guard on connection state symmetrically with the publisher: a recovery that
+                // lands while disconnected/reconnecting would otherwise hit a closed socket.
                 // The reconnect handshake re-reports availability via SendInitialClientStateAsync.
-                //
-                // NOTE: SendPlayerStateAckAsync -> SendPlayerStateAsync now sends CreatePlayerState,
-                // which deliberately omits `available` (see its doc comment). So this recovery path
-                // no longer re-asserts available: true on its own; it relies on whatever last set
-                // availability (e.g. the initial client/state, or CreateAvailability). If recovery
-                // needs to explicitly re-assert available: true, that belongs to the single publisher
-                // a later task introduces for availability — not a second path added here.
                 if (_connection.State == ConnectionState.Connected)
                 {
                     _logger.LogInformation("Audio pipeline recovered; reporting player state");
@@ -2484,16 +2554,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 break;
         }
-    }
-
-    private async Task ReportClientErrorAsync(string? message)
-    {
-        if (_connection.State != ConnectionState.Connected)
-        {
-            return;
-        }
-
-        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(false));
     }
 
     /// <summary>
