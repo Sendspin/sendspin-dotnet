@@ -40,6 +40,16 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     /// </summary>
     public TaskCompletionSource? HoldNextSend { get; set; }
 
+    /// <summary>
+    /// When true, the next <see cref="SendMessageAsync"/> call throws
+    /// <see cref="InvalidOperationException"/> without recording the message, then clears
+    /// itself. Unlike <see cref="EnforceConnectionState"/> — which can only throw while not
+    /// Connected and therefore never reaches code behind an up-front connection-state guard —
+    /// this simulates a send failing while <see cref="State"/> IS Connected (the socket dying
+    /// mid-write), which is what catch-based rollback paths need to be exercised at all.
+    /// </summary>
+    public bool ThrowOnNextSend { get; set; }
+
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
@@ -67,6 +77,12 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         if (EnforceConnectionState && State != ConnectionState.Connected)
         {
             throw new InvalidOperationException("WebSocket is not connected");
+        }
+
+        if (ThrowOnNextSend)
+        {
+            ThrowOnNextSend = false;
+            throw new InvalidOperationException("Simulated send failure");
         }
 
         // Locked so tests polling for fire-and-forget sends (see SnapshotSentMessages) can
