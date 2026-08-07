@@ -1180,9 +1180,21 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // misalignment (issue #63). Sign: offset = server - client and scheduled
         // client time is (server - offset), so a rising offset means the schedule
         // moved earlier and we are late => positive contribution.
-        if (_syncOptions.TrackClockDrift && _clockOffsetCaptured)
+        if (_syncOptions.TrackClockDrift)
         {
-            _clockDriftUs = _clockSync.GetStatus().OffsetMicroseconds - _clockOffsetAtAnchorUs;
+            if (!_clockOffsetCaptured)
+            {
+                // Deferred capture: the clock was unconverged at the last recapture
+                // point; take the reference from the first converged calculation.
+                CaptureClockOffsetReference();
+            }
+            else if (_clockSync.IsConverged)
+            {
+                _clockDriftUs = _clockSync.GetStatus().OffsetMicroseconds - _clockOffsetAtAnchorUs;
+            }
+
+            // Unconverged with a valid reference: hold the last term (never zero it
+            // mid-flight, never follow unconverged readings).
         }
 
         _currentSyncErrorMicroseconds = elapsedTimeMicroseconds - samplesReadTimeMicroseconds
@@ -1249,8 +1261,19 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// </summary>
     private void CaptureClockOffsetReference()
     {
-        _clockOffsetAtAnchorUs = _clockSync.GetStatus().OffsetMicroseconds;
-        _clockOffsetCaptured = true;
+        if (_clockSync.IsConverged)
+        {
+            _clockOffsetAtAnchorUs = _clockSync.GetStatus().OffsetMicroseconds;
+            _clockOffsetCaptured = true;
+        }
+        else
+        {
+            // Unconverged at a recapture point: defer to the first converged
+            // CalculateSyncError so the convergence step becomes the reference,
+            // not reported drift.
+            _clockOffsetCaptured = false;
+        }
+
         _clockDriftUs = 0;
     }
 

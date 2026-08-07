@@ -156,4 +156,42 @@ public class TimedAudioBufferClockDriftTests
         // ...while true misalignment reaches the full slew.
         Assert.InRange(session.TrueMisalignmentUs(), 150_000, 250_000);
     }
+
+    [Fact]
+    public void UnconvergedClock_DriftTermFrozen()
+    {
+        using var session = new Session(options: null, useRawReads: true);
+        session.Steps(300);
+
+        session.SlewOffset(totalUs: 50_000, steps: 200); // +50ms while converged
+
+        // Convergence lost; whatever the status now reports must not move the term.
+        session.ClockSync.IsConverged = false;
+        session.SlewOffset(totalUs: 100_000, steps: 200);
+
+        Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, 30_000, 70_000);
+    }
+
+    [Fact]
+    public void UnconvergedAnchor_ConvergenceStepIsNotDrift()
+    {
+        using var session = new Session(options: null, useRawReads: true);
+
+        // Rewind to an unconverged clock BEFORE the anchor: the Session constructor
+        // converged it, so un-converge and shift the reported offset; the anchor
+        // must NOT capture this unconverged value as the drift reference.
+        session.ClockSync.IsConverged = false;
+        session.ClockSync.OffsetMicroseconds += 300_000;
+
+        session.Steps(50); // anchors while unconverged
+
+        // Convergence arrives, settling 300ms away from the unconverged reading.
+        session.ClockSync.OffsetMicroseconds -= 300_000;
+        session.ClockSync.IsConverged = true;
+        session.Steps(300);
+
+        // The convergence step must be absorbed as the reference, not reported as
+        // ~300ms of drift.
+        Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, -10_000, 10_000);
+    }
 }
