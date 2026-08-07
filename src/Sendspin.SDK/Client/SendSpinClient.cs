@@ -576,6 +576,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool? _lastAvailabilitySent;
 
     /// <summary>
+    /// Whether the initial client/state for the current connection has gone out. Roles that
+    /// need clock sync defer it until the first convergence (see <see cref="ApplyBestSample"/>),
+    /// and it must be sent exactly once per connection: a later re-convergence takes the
+    /// availability-delta path instead. Reset with the rest of the per-connection state in
+    /// <see cref="FinishHandshake"/>, so a reconnect sends its initial state again.
+    /// </summary>
+    private bool _initialClientStateSent;
+
+    /// <summary>
     /// Publishes <see cref="CurrentAvailability"/> as a client/state delta when it differs from
     /// the last value sent, and no-ops otherwise. This is the only place that sends
     /// <see cref="ClientStateMessage.CreateAvailability"/> — <see cref="EnterExternalSourceAsync"/>,
@@ -592,12 +601,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         // Guard on connection state: a publish that lands mid-reconnect would hit a closed socket.
-        // Reconnect does NOT correct a publish skipped here — SendInitialClientStateAsync
-        // hard-codes available: true regardless of IsExternalSource/_clientErrorReported (Task 3's
-        // territory; see the report). Event-driven callers (OnPipelineError,
-        // OnPipelineStateChanged) rely on this guard to skip quietly; EnterExternalSourceAsync and
-        // ExitExternalSourceAsync check connection state themselves and throw before this guard
-        // would ever apply, to preserve their documented notify-first/flip-on-success contract.
+        // A publish skipped here is corrected on reconnect — SendInitialClientStateAsync reports
+        // CurrentAvailability, so the next connection's initial state carries the composed value.
+        // Event-driven callers (OnPipelineError, OnPipelineStateChanged) rely on this guard to
+        // skip quietly; EnterExternalSourceAsync and ExitExternalSourceAsync check connection
+        // state themselves and throw before this guard would ever apply, to preserve their
+        // documented notify-first/flip-on-success contract.
         if (_connection.State != ConnectionState.Connected)
         {
             return;
@@ -1641,26 +1650,52 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // sees the calibrated delay immediately on (re)connect. No-op when no store is configured.
         LoadPersistedStaticDelay();
 
-        // Send initial client state (required by protocol after the handshake completes)
-        // This tells the server we're synchronized and ready
-        SendInitialClientStateAsync().SafeFireAndForget(_logger);
+        // Per-connection latch for the initial client/state, reset here with the rest of the
+        // per-connection state so a reconnect sends its initial state again.
+        _initialClientStateSent = false;
 
-        // Start time synchronization loop with adaptive intervals
+        // The spec lets a player report available: true only once clock sync is established, so
+        // sync-requiring roles defer the initial client/state until the first convergence (see
+        // ApplyBestSample). Deliberately NOT sent as available: false in the meantime: the
+        // server moves an unavailable client into a solo group and MUST NOT auto-rejoin it, so
+        // a false during a routine reconnect would permanently drop the client from its group.
+        // Roles without player/source need no clock — for them available alone unlocks the
+        // server's streams, so their initial state goes out at once.
+        if (RequiresClockSync() && !IsClockSynced)
+        {
+            _logger.LogInformation("Deferring initial client/state until clock sync converges");
+        }
+        else
+        {
+            SendInitialClientStateAsync().SafeFireAndForget(_logger);
+        }
+
+        // Start time synchronization loop with adaptive intervals — this is what produces the
+        // convergence a deferred initial state waits for.
         StartTimeSyncLoop();
     }
 
     /// <summary>
-    /// Sends the initial client/state message after handshake.
-    /// Per the protocol, clients with player role must send their state immediately.
+    /// Sends the initial client/state message: on activate for clients that need no clock sync,
+    /// or on the first convergence for those that do (see <see cref="FinishHandshake"/>).
+    /// Reports <see cref="CurrentAvailability"/> — not an asserted <c>true</c> — so a reconnect
+    /// while the output is held by an external source (or a pipeline error is outstanding) does
+    /// not invite the server to stream into an occupied output.
     /// Uses the current <see cref="_playerState"/> which was initialized from ClientCapabilities.
     /// </summary>
     private async Task SendInitialClientStateAsync()
     {
         try
         {
+            // Latched before the send: once per connection, even if a re-convergence races a
+            // send still in flight. A send that fails here is corrected by the next reconnect,
+            // which resets the latch with the rest of the per-connection state.
+            _initialClientStateSent = true;
+
             // Send the current player state (initialized from capabilities)
+            bool available = CurrentAvailability;
             var stateMessage = ClientStateMessage.CreateInitial(
-                available: true,
+                available: available,
                 volume: _playerState.Volume,
                 muted: _playerState.Muted,
                 staticDelayMs: _clockSynchronizer.StaticDelayMs,
@@ -1671,9 +1706,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
             await _connection.SendMessageAsync(stateMessage);
 
-            // Seed the availability publisher's "last sent" tracker from this message, so the
-            // first delta PublishAvailabilityAsync sends afterward is not a spurious repeat.
-            _lastAvailabilitySent = true;
+            // Seed the availability publisher's "last sent" tracker from the value actually
+            // sent, so the first delta PublishAvailabilityAsync sends afterward is neither a
+            // spurious repeat nor a swallowed change.
+            _lastAvailabilitySent = available;
 
             // Also apply to audio pipeline to ensure consistency
             _audioPipeline?.SetVolume(_playerState.Volume);
@@ -1910,6 +1946,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _logger.LogInformation("[ClockSync] Converged after {Count} measurements", status.MeasurementCount);
             ClockSyncConverged?.Invoke(this, status);
+
+            if (!_initialClientStateSent)
+            {
+                // First convergence on this connection: release the initial client/state that
+                // FinishHandshake deferred. Later re-convergences take the delta path below.
+                SendInitialClientStateAsync().SafeFireAndForget(_logger);
+            }
+            else
+            {
+                // Regained sync mid-session: availability may have just composed back to true.
+                PublishAvailabilityAsync().SafeFireAndForget(_logger);
+            }
+        }
+        else if (wasConverged && !_clockSynchronizer.IsConverged)
+        {
+            // Lost sync mid-session: a player that cannot schedule samples anymore must tell
+            // the server it is unavailable rather than drift audibly out of the group.
+            _logger.LogWarning("[ClockSync] Convergence lost after {Count} measurements", status.MeasurementCount);
+            PublishAvailabilityAsync().SafeFireAndForget(_logger);
         }
     }
 
@@ -2567,9 +2622,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 PublishAvailabilityAsync().SafeFireAndForget(_logger);
 
                 // Guard on connection state: a recovery that lands while disconnected/reconnecting
-                // would otherwise hit a closed socket. Reconnect does NOT correct a publish skipped
-                // here — SendInitialClientStateAsync hard-codes available: true regardless of
-                // _clientErrorReported/IsExternalSource (Task 3's territory; see the report).
+                // would otherwise hit a closed socket. Reconnect corrects a report skipped here:
+                // SendInitialClientStateAsync reports CurrentAvailability, which composes
+                // _clientErrorReported/IsExternalSource back in.
                 if (_connection.State == ConnectionState.Connected)
                 {
                     _logger.LogInformation("Audio pipeline recovered; reporting player state");

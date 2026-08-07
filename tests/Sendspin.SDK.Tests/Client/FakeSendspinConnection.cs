@@ -22,6 +22,15 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     /// </summary>
     public bool EnforceConnectionState { get; set; }
 
+    /// <summary>
+    /// When true, every <see cref="ClientTimeMessage"/> probe passed to
+    /// <see cref="SendMessageAsync"/> is answered synchronously with a matching server/time
+    /// reply, so the client's time-sync bursts complete and feed measurements into its clock
+    /// synchronizer. This is how a fixture drives clock-sync convergence over the wire without
+    /// a real server. Off by default: most tests want no unsolicited inbound traffic.
+    /// </summary>
+    public bool RespondToTimeSync { get; set; }
+
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
@@ -51,8 +60,36 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
             throw new InvalidOperationException("WebSocket is not connected");
         }
 
-        SentMessages.Add(message);
+        // Locked so tests polling for fire-and-forget sends (see SnapshotSentMessages) can
+        // enumerate safely while the client's time-sync loop appends from another thread.
+        lock (SentMessages)
+        {
+            SentMessages.Add(message);
+        }
+
+        if (RespondToTimeSync && message is ClientTimeMessage probe)
+        {
+            long t1 = probe.ClientTransmitted;
+            RaiseTextMessageReceived(
+                $$$"""
+                {"type":"server/time","payload":{"client_transmitted":{{{t1}}},"server_received":{{{t1 + 10}}},"server_transmitted":{{{t1 + 20}}} }}
+                """);
+        }
+
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Copy of <see cref="SentMessages"/> taken under the same lock <see cref="SendMessageAsync"/>
+    /// appends under. Use from tests that poll while the client is still sending in the
+    /// background (e.g. the time-sync loop); plain enumeration can throw mid-append.
+    /// </summary>
+    public IReadOnlyList<IMessage> SnapshotSentMessages()
+    {
+        lock (SentMessages)
+        {
+            return SentMessages.ToList();
+        }
     }
 
     /// <summary>Binary frames sent via <see cref="SendBinaryAsync"/>, in order.</summary>
