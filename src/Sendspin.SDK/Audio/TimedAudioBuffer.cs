@@ -916,6 +916,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 TotalSamplesRead = _totalRead,
                 SyncErrorMicroseconds = _currentSyncErrorMicroseconds,
                 SmoothedSyncErrorMicroseconds = _smoothedSyncErrorMicroseconds,
+                ClockDriftMs = _clockDriftUs / 1000.0,
                 IsPlaybackActive = _playbackStarted,
                 SamplesDroppedForSync = _samplesDroppedForSync,
                 SamplesInsertedForSync = _samplesInsertedForSync,

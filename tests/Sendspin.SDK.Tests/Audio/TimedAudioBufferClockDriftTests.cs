@@ -223,4 +223,15 @@ public class TimedAudioBufferClockDriftTests
 
         Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, -10_000, 10_000);
     }
+
+    [Fact]
+    public void GetStats_ReportsClockDriftMs()
+    {
+        using var session = new Session(options: null, useRawReads: true);
+        session.Steps(300);
+
+        session.SlewOffset(totalUs: 200_000, steps: 600);
+
+        Assert.InRange(session.Buffer.GetStats().ClockDriftMs, 150, 250);
+    }
 }
