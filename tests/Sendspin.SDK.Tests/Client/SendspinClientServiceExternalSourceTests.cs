@@ -6,7 +6,7 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// Coverage for the external_source enter/exit API: availability-only client/state notifications,
-/// the IsExternalSource flag, and behavior when the server notification can't be sent.
+/// the IsExternalSource flag, and rollback when the server notification can't be sent.
 /// </summary>
 public class SendspinClientServiceExternalSourceTests
 {
@@ -50,22 +50,19 @@ public class SendspinClientServiceExternalSourceTests
     }
 
     [Fact]
-    public async Task EnterExternalSource_WhileDisconnected_UpdatesFlagWithoutNotifying()
+    public async Task EnterExternalSource_RollsBackWhenNotificationFails()
     {
-        // EnterExternalSourceAsync now routes its wire notification through the single
-        // availability publisher (PublishAvailabilityAsync), which guards on connection state the
-        // same way the pipeline error/recovery paths always have: a publish attempted while not
-        // Connected is silently skipped rather than thrown. That is a deliberate behavior change
-        // from the previous unguarded send (which threw and left IsExternalSource unset on
-        // failure) — see the task report. The reconnect handshake resynchronizes availability via
-        // SendInitialClientStateAsync, so this local flag does not go stale for long.
+        // EnterExternalSourceAsync checks connection state itself and throws before flipping
+        // IsExternalSource, rather than routing the failure through the publisher's own guard
+        // (which skips silently — right for the event-driven pipeline callers, wrong here: it
+        // would leave the flag flipped with nothing ever told to the server). The flag must stay
+        // in its prior state and no message may be sent.
         var (client, connection) = SyncedClient(connected: false);
-        connection.EnforceConnectionState = true;
         using var _c = client;
 
-        await client.EnterExternalSourceAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.EnterExternalSourceAsync());
 
-        Assert.True(client.IsExternalSource);
+        Assert.False(client.IsExternalSource);
         Assert.Empty(connection.SentMessages.OfType<ClientStateMessage>());
     }
 }

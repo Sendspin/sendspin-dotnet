@@ -591,9 +591,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        // Guard on connection state symmetrically with the old ReportClientErrorAsync: a publish
-        // that lands mid-reconnect would hit a closed socket. The reconnect handshake re-reports
-        // availability via SendInitialClientStateAsync.
+        // Guard on connection state: a publish that lands mid-reconnect would hit a closed socket.
+        // Reconnect does NOT correct a publish skipped here — SendInitialClientStateAsync
+        // hard-codes available: true regardless of IsExternalSource/_clientErrorReported (Task 3's
+        // territory; see the report). Event-driven callers (OnPipelineError,
+        // OnPipelineStateChanged) rely on this guard to skip quietly; EnterExternalSourceAsync and
+        // ExitExternalSourceAsync check connection state themselves and throw before this guard
+        // would ever apply, to preserve their documented notify-first/flip-on-success contract.
         if (_connection.State != ConnectionState.Connected)
         {
             return;
@@ -606,11 +610,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task EnterExternalSourceAsync()
     {
-        // Sets the input, then routes the wire notification through the single availability
-        // publisher. That changes the previous "notify first" ordering (the local flag is now set
-        // before the send is attempted) — see the task report for the tradeoff. Rollback on a
-        // genuine send failure is preserved via the catch; a publish skipped because the
-        // connection is not Connected does not throw, so it cannot roll back this flag.
+        // Fails fast on a disconnected connection rather than routing through the publisher's
+        // guard: that guard skips a publish silently (right for the event-driven callers), but
+        // this method's documented contract is notify-first / flip-on-success, and a silent skip
+        // would leave the flag flipped with nothing ever told to the server. Checking here, before
+        // any state changes, keeps the flag from flipping at all in that case.
+        if (_connection.State != ConnectionState.Connected)
+        {
+            throw new InvalidOperationException("WebSocket is not connected");
+        }
+
         IsExternalSource = true;
         try
         {
@@ -628,6 +637,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task ExitExternalSourceAsync()
     {
+        if (_connection.State != ConnectionState.Connected)
+        {
+            throw new InvalidOperationException("WebSocket is not connected");
+        }
+
         IsExternalSource = false;
         try
         {
@@ -2510,16 +2524,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Reports <c>available: false</c> when the audio pipeline raises an error (e.g. a buffer
     /// underrun or sync failure), so the server knows this player cannot keep up. Per the spec the
     /// player then buffers and recovers once it can resume playback (see
-    /// <see cref="OnPipelineStateChanged"/>). Sets the latch and calls the publisher on every
-    /// occurrence rather than gating on <see cref="_clientErrorReported"/> first: the publisher's
-    /// own compare-to-last-sent is what suppresses the resulting wire duplicates now, so a second
-    /// error while one is already outstanding is not silently dropped before it can be composed
-    /// with other inputs (e.g. external source).
+    /// <see cref="OnPipelineStateChanged"/>). The latch and the publisher call are unconditional on
+    /// every occurrence — the publisher's own compare-to-last-sent is what suppresses the
+    /// resulting wire duplicates, so a second error while one is already outstanding is not
+    /// silently dropped before it can be composed with other inputs (e.g. external source). Only
+    /// the log line is gated on the latch's prior value, to keep once-per-episode logging for a
+    /// sustained error.
     /// </summary>
     private void OnPipelineError(object? sender, AudioPipelineError error)
     {
+        if (!_clientErrorReported)
+        {
+            _logger.LogWarning("Audio pipeline error; reporting available: false ({Message})", error.Message);
+        }
+
         _clientErrorReported = true;
-        _logger.LogWarning("Audio pipeline error; reporting available: false ({Message})", error.Message);
         PublishAvailabilityAsync().SafeFireAndForget(_logger);
     }
 
@@ -2534,8 +2553,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         switch (state)
         {
             case AudioPipelineState.Error:
+                if (!_clientErrorReported)
+                {
+                    _logger.LogWarning("Audio pipeline entered Error state; reporting available: false");
+                }
+
                 _clientErrorReported = true;
-                _logger.LogWarning("Audio pipeline entered Error state; reporting available: false");
                 PublishAvailabilityAsync().SafeFireAndForget(_logger);
                 break;
 
@@ -2543,9 +2566,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _clientErrorReported = false;
                 PublishAvailabilityAsync().SafeFireAndForget(_logger);
 
-                // Guard on connection state symmetrically with the publisher: a recovery that
-                // lands while disconnected/reconnecting would otherwise hit a closed socket.
-                // The reconnect handshake re-reports availability via SendInitialClientStateAsync.
+                // Guard on connection state: a recovery that lands while disconnected/reconnecting
+                // would otherwise hit a closed socket. Reconnect does NOT correct a publish skipped
+                // here — SendInitialClientStateAsync hard-codes available: true regardless of
+                // _clientErrorReported/IsExternalSource (Task 3's territory; see the report).
                 if (_connection.State == ConnectionState.Connected)
                 {
                     _logger.LogInformation("Audio pipeline recovered; reporting player state");
