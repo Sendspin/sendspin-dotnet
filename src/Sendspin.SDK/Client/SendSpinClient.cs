@@ -699,6 +699,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool _hasConvergedOnce;
 
     /// <summary>
+    /// Set when the connection's first activate was a pairing one: a pairing activation
+    /// admits nothing but pairing messages onto the wire, so <see cref="FinishHandshake"/>
+    /// withholds the initial client/state entirely — even for roles that need no clock
+    /// sync, whose initial would otherwise be sent on activate. The first non-pairing
+    /// activate consumes this flag and runs the send-or-defer decision
+    /// (<see cref="SendOrDeferInitialClientState"/>) that was skipped. Assigned per
+    /// connection in <see cref="FinishHandshake"/> with the other per-connection latches.
+    /// </summary>
+    private bool _initialClientStateHeldForPairing;
+
+    /// <summary>
     /// Publishes <see cref="CurrentAvailability"/> as a client/state delta when it differs from
     /// the last value sent, and no-ops otherwise. This is the only place that sends
     /// <see cref="ClientStateMessage.CreateAvailability"/> — <see cref="EnterExternalSourceAsync"/>,
@@ -1220,7 +1231,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // The initial activate completes the encrypted handshake; only now may the
             // client start sending (client/time, client/state).
-            FinishHandshake();
+            FinishHandshake(pairing);
             if (LastServerHello is { } hello)
             {
                 ServerHelloReceived?.Invoke(this, hello);
@@ -1245,6 +1256,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         else
         {
+            // A pairing-first connection reaches its first non-pairing activate here:
+            // release the withheld initial client/state by running the send-or-defer
+            // decision FinishHandshake skipped. Guarded by _initialClientStateSent because
+            // a genuine availability flip during the pairing window (pipeline error,
+            // external source) may already have promoted the full initial onto the wire.
+            // Exactly one release can fire: this one, or — for a sync-requiring role whose
+            // clock has yet to converge — the first-convergence branch in ApplyBestSample,
+            // and the latch set inside SendInitialClientStateAsync before its first await
+            // keeps any race between them from double-sending.
+            if (_initialClientStateHeldForPairing)
+            {
+                _initialClientStateHeldForPairing = false;
+                if (!_initialClientStateSent)
+                {
+                    SendOrDeferInitialClientState();
+                }
+            }
+
             StartTimeSyncLoop();
         }
 
@@ -2028,7 +2057,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// The connected tail of the handshake: runs when the initial server/activate arrives,
     /// which is the point the encrypted handshake completes and the client may start sending.
     /// </summary>
-    private void FinishHandshake()
+    /// <param name="pairing">Whether the activate completing the handshake declares the
+    /// pairing activity. A pairing activation admits nothing but pairing messages onto the
+    /// wire, so the initial client/state is then withheld — even for roles that need no
+    /// clock sync — until the first non-pairing activate (see
+    /// <see cref="_initialClientStateHeldForPairing"/>).</param>
+    private void FinishHandshake(bool pairing)
     {
         // Mark connection as fully connected
         if (_connection is SendspinConnection conn)
@@ -2059,7 +2093,33 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // clock that reports unconverged after reset the two now agree).
         _initialClientStateSent = false;
         _hasConvergedOnce = false;
+        _initialClientStateHeldForPairing = pairing;
 
+        // When the connection's first activate is the pairing one, the send-or-defer
+        // decision is withheld wholesale: a non-sync role's initial client/state would
+        // otherwise go out right here, into a server that admits nothing but pairing
+        // messages during the attempt — poisoning the exchange exactly the way client/time
+        // probes did. The first non-pairing activate runs the decision instead.
+        if (!pairing)
+        {
+            SendOrDeferInitialClientState();
+        }
+
+        // The time-sync loop — which produces the convergence a deferred initial state
+        // waits for — is started by the caller, HandleServerActivate, not here: it runs
+        // only outside a pairing activation, and only the caller knows the activate's
+        // activities.
+    }
+
+    /// <summary>
+    /// The sending side of <see cref="FinishHandshake"/>: sends the connection's initial
+    /// client/state now, or defers it to the first convergence for sync-requiring roles.
+    /// Runs from <see cref="FinishHandshake"/> on a normal connection; on one whose first
+    /// activate was a pairing activate it runs from the first non-pairing activate instead
+    /// (see <see cref="_initialClientStateHeldForPairing"/>).
+    /// </summary>
+    private void SendOrDeferInitialClientState()
+    {
         // The spec lets a player report available: true only once clock sync is established, so
         // sync-requiring roles defer the initial client/state until the first convergence (see
         // ApplyBestSample). Deliberately NOT sent as available: false in the meantime: the
@@ -2075,11 +2135,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             SendInitialClientStateAsync().SafeFireAndForget(_logger);
         }
-
-        // The time-sync loop — which produces the convergence a deferred initial state
-        // waits for — is started by the caller, HandleServerActivate, not here: it runs
-        // only outside a pairing activation, and only the caller knows the activate's
-        // activities.
     }
 
     /// <summary>

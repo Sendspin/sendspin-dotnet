@@ -25,13 +25,18 @@ public class TimeSyncPairingGatingTests
     private const string PlaybackActivate =
         """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""";
 
+    private const string ArtworkActivate =
+        """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["artwork@v1"]}}""";
+
     /// <summary>
     /// Client able to run a real dynamic-PIN attempt (lockout store and PIN presenter
     /// configured), with a scripted clock so the time-sync loop keeps its dense initial
-    /// cadence (~one probe burst per 500 ms) for the duration of the test.
+    /// cadence (~one probe burst per 500 ms) for the duration of the test. Roles default
+    /// to the capability defaults (controller/player/...); pass <paramref name="roles"/>
+    /// to narrow them.
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, ScriptedClockSynchronizer Clock)
-        CreatePinPairableClient(PskCategory category, bool unpairedAccess = false)
+        CreatePinPairableClient(PskCategory category, bool unpairedAccess = false, string[]? roles = null)
     {
         var clock = new ScriptedClockSynchronizer();
         var (client, connection, _) = TestClient.Create(
@@ -39,7 +44,13 @@ public class TimeSyncPairingGatingTests
             unpairedAccess,
             configure: options =>
             {
-                options.Capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+                var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+                if (roles is not null)
+                {
+                    caps.Roles = [.. roles];
+                }
+
+                options.Capabilities = caps;
                 options.ClockSynchronizer = clock;
                 options.PinLockoutStore = new InMemoryPinLockoutStore();
                 options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
@@ -150,6 +161,35 @@ public class TimeSyncPairingGatingTests
         var initial = Assert.Single(ClientStates(connection));
         Assert.Equal(true, initial.Payload.Available);
         Assert.NotNull(initial.Payload.Player);
+    }
+
+    [Fact]
+    public async Task ArtworkOnlyClient_PairingFirstActivate_WithholdsInitialClientState_UntilANonPairingActivateArrives()
+    {
+        // A client with no sync-requiring role sends its initial client/state on activate
+        // rather than deferring it to convergence — so without a pairing hold it would land
+        // in the blocked reference server's buffer exactly the way client/time did. It must
+        // stay off the wire while the pairing activation is in effect, and go out exactly
+        // once when a non-pairing activate arrives: an implementation that simply never
+        // sent it would pass the first half alone.
+        var (client, connection, _) = CreatePinPairableClient(
+            PskCategory.Sentinel, unpairedAccess: true, roles: ["artwork@v1"]);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(ServerHello);
+        connection.RaiseTextMessageReceived(PairingActivate);
+
+        // The initial send is fire-and-forget; give a wrongly-unwithheld send time to land.
+        await Task.Delay(300);
+        Assert.Empty(ClientStates(connection));
+
+        connection.RaiseTextMessageReceived(ArtworkActivate);
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+
+        // And nothing further trickles out after the release.
+        await Task.Delay(200);
+        var initial = Assert.Single(ClientStates(connection));
+        Assert.Equal(true, initial.Payload.Available);
     }
 
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
