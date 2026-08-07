@@ -171,7 +171,7 @@ public interface ISendspinClient : IAsyncDisposable
     Task EnterExternalSourceAsync();
 
     /// <summary>
-    /// Leaves the <c>external_source</c> state, reporting <c>synchronized</c> so the client can
+    /// Leaves the <c>external_source</c> state, reporting <c>available: true</c> so the client can
     /// resume participating in Sendspin playback. <see cref="IsExternalSource"/> only clears if the
     /// notification succeeds.
     /// </summary>

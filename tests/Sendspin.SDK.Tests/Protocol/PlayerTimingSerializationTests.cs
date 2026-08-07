@@ -13,7 +13,7 @@ public class PlayerTimingSerializationTests
     [Fact]
     public void ClientState_SerializesTimingFields()
     {
-        var msg = ClientStateMessage.CreateSynchronized(
+        var msg = ClientStateMessage.CreatePlayerState(
             volume: 80,
             muted: false,
             staticDelayMs: 0,
@@ -33,7 +33,8 @@ public class PlayerTimingSerializationTests
     {
         // Per spec these are "always required for players", so they must serialize even at zero
         // (unlike static_delay_ms, which is omitted at its default).
-        var msg = ClientStateMessage.CreateSynchronized(requiredLeadTimeMs: 0, minBufferMs: 0);
+        var msg = ClientStateMessage.CreatePlayerState(
+            volume: 100, muted: false, staticDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0);
 
         var json = MessageSerializer.Serialize(msg);
 
@@ -44,7 +45,9 @@ public class PlayerTimingSerializationTests
     [Fact]
     public void ClientState_SupportedCommandsOmittedWhenNull()
     {
-        var msg = ClientStateMessage.CreateSynchronized(supportedCommands: null);
+        var msg = ClientStateMessage.CreatePlayerState(
+            volume: 100, muted: false, staticDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0,
+            supportedCommands: null);
 
         var json = MessageSerializer.Serialize(msg);
 

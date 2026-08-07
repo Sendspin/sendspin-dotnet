@@ -4,28 +4,28 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Coverage for the external_source enter/exit API: state-only client/state notifications, the
-/// IsExternalSource flag, and rollback when the server notification fails.
+/// Coverage for the external_source enter/exit API: availability-only client/state notifications,
+/// the IsExternalSource flag, and rollback when the server notification fails.
 /// </summary>
 public class SendspinClientServiceExternalSourceTests
 {
-    private static string? LastState(FakeSendspinConnection connection) =>
-        connection.SentMessages.OfType<ClientStateMessage>().Last().Payload.State;
+    private static bool? LastAvailable(FakeSendspinConnection connection) =>
+        connection.SentMessages.OfType<ClientStateMessage>().Last().Payload.Available;
 
     [Fact]
-    public async Task EnterExternalSource_SendsStateAndSetsFlag()
+    public async Task EnterExternalSource_SendsAvailableFalseAndSetsFlag()
     {
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
         await client.EnterExternalSourceAsync();
 
-        Assert.Equal("external_source", LastState(connection));
+        Assert.Equal(false, LastAvailable(connection));
         Assert.True(client.IsExternalSource);
     }
 
     [Fact]
-    public async Task ExitExternalSource_ReportsSynchronizedAndClearsFlag()
+    public async Task ExitExternalSource_ReportsAvailableTrueAndClearsFlag()
     {
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
@@ -33,7 +33,7 @@ public class SendspinClientServiceExternalSourceTests
         await client.EnterExternalSourceAsync();
         await client.ExitExternalSourceAsync();
 
-        Assert.Equal("synchronized", LastState(connection));
+        Assert.Equal(true, LastAvailable(connection));
         Assert.False(client.IsExternalSource);
     }
 

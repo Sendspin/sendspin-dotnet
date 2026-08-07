@@ -4,8 +4,7 @@ namespace Sendspin.SDK.Protocol.Messages;
 
 /// <summary>
 /// State update message sent from client to server.
-/// Used to report client state (synchronized, error, external_source)
-/// and player state (volume, mute).
+/// Used to report availability and player state (volume, mute).
 /// </summary>
 public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
 {
@@ -16,16 +15,18 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
     required public ClientStatePayload Payload { get; init; }
 
     /// <summary>
-    /// Creates a synchronized state message with player volume/mute and timing parameters.
+    /// Builds the initial client/state message, which per spec MUST carry every state field.
     /// This should be sent immediately after receiving server/hello.
     /// </summary>
+    /// <param name="available">Whether the client is available to participate in Sendspin playback.</param>
     /// <param name="volume">Player volume (0-100).</param>
     /// <param name="muted">Whether the player is muted.</param>
     /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
     /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds (codec init, decode warmup, backend buffering, DAC latency). Always required for players.</param>
     /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds (absorbs network jitter, primarily for live streams). Always required for players.</param>
     /// <param name="supportedCommands">Optional player commands supported via server/command (subset of: 'set_static_delay'). Omitted from the wire when null.</param>
-    public static ClientStateMessage CreateSynchronized(
+    public static ClientStateMessage CreateInitial(
+        bool available,
         int volume = 100,
         bool muted = false,
         double staticDelayMs = 0.0,
@@ -37,7 +38,7 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
         {
             Payload = new ClientStatePayload
             {
-                State = "synchronized",
+                Available = available,
                 Player = new PlayerStatePayload
                 {
                     Volume = volume,
@@ -52,28 +53,52 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
     }
 
     /// <summary>
-    /// Creates a client/state message carrying only the operational <paramref name="state"/>, with
-    /// no player object. Per the spec, subsequent client/state updates should include only the
-    /// fields that changed — so a pure operational-state change ("error", "synchronized",
-    /// "external_source") is sent without re-sending the (full) player object.
+    /// Builds a delta that reports only a change in availability, with no role objects.
     /// </summary>
-    /// <param name="state">Operational state: "synchronized", "error", or "external_source".</param>
-    public static ClientStateMessage CreateState(string state)
+    /// <param name="available">Whether the client is available to participate in Sendspin playback.</param>
+    public static ClientStateMessage CreateAvailability(bool available)
     {
         return new ClientStateMessage
         {
-            Payload = new ClientStatePayload { State = state }
+            Payload = new ClientStatePayload { Available = available }
         };
     }
 
     /// <summary>
-    /// Creates an error state message (<c>{ "state": "error" }</c>), with no player object.
+    /// Builds a delta carrying only the player object. It deliberately omits
+    /// <c>available</c>: a volume or mute change says nothing about whether the client is
+    /// available, and asserting it here would overwrite the server's view.
     /// </summary>
-    /// <param name="errorMessage">
-    /// Optional error detail for the caller's own logging. It is NOT sent on the wire — the spec
-    /// defines no error-detail field, and a state-only delta must not carry the player object.
-    /// </param>
-    public static ClientStateMessage CreateError(string? errorMessage = null) => CreateState("error");
+    /// <param name="volume">Player volume (0-100).</param>
+    /// <param name="muted">Whether the player is muted.</param>
+    /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
+    /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds (codec init, decode warmup, backend buffering, DAC latency). Always required for players.</param>
+    /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds (absorbs network jitter, primarily for live streams). Always required for players.</param>
+    /// <param name="supportedCommands">Optional player commands supported via server/command (subset of: 'set_static_delay'). Omitted from the wire when null.</param>
+    public static ClientStateMessage CreatePlayerState(
+        int volume,
+        bool muted,
+        double staticDelayMs,
+        int requiredLeadTimeMs,
+        int minBufferMs,
+        List<string>? supportedCommands = null)
+    {
+        return new ClientStateMessage
+        {
+            Payload = new ClientStatePayload
+            {
+                Player = new PlayerStatePayload
+                {
+                    Volume = volume,
+                    Muted = muted,
+                    StaticDelayMs = staticDelayMs,
+                    RequiredLeadTimeMs = requiredLeadTimeMs,
+                    MinBufferMs = minBufferMs,
+                    SupportedCommands = supportedCommands
+                }
+            }
+        };
+    }
 }
 
 /// <summary>
@@ -82,11 +107,13 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
 public sealed class ClientStatePayload
 {
     /// <summary>
-    /// Client state: "synchronized", "error", or "external_source".
+    /// Whether this client is available to participate in Sendspin playback. For a player or
+    /// source, <c>true</c> additionally means its clock is synchronized with the server.
+    /// Null omits the field, for a delta that changes only the role objects.
     /// </summary>
-    [JsonPropertyName("state")]
+    [JsonPropertyName("available")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? State { get; init; }
+    public bool? Available { get; init; }
 
     /// <summary>
     /// Player-specific state (volume, mute, buffer level).

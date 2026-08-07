@@ -522,7 +522,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public async Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0)
     {
         var clampedVolume = Math.Clamp(volume, 0, 100);
-        var stateMessage = ClientStateMessage.CreateSynchronized(
+        var stateMessage = ClientStateMessage.CreatePlayerState(
             clampedVolume, muted, staticDelayMs,
             _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
 
@@ -556,7 +556,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public async Task EnterExternalSourceAsync()
     {
         // Notify the server first; only flip local state if it succeeds (rollback on failure).
-        await _connection.SendMessageAsync(ClientStateMessage.CreateState("external_source"));
+        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(false));
         IsExternalSource = true;
         _logger.LogInformation("Entered external_source");
     }
@@ -564,7 +564,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task ExitExternalSourceAsync()
     {
-        await _connection.SendMessageAsync(ClientStateMessage.CreateState("synchronized"));
+        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(true));
         IsExternalSource = false;
         _logger.LogInformation("Exited external_source (synchronized)");
     }
@@ -1572,7 +1572,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         try
         {
             // Send the current player state (initialized from capabilities)
-            var stateMessage = ClientStateMessage.CreateSynchronized(
+            var stateMessage = ClientStateMessage.CreateInitial(
+                available: true,
                 volume: _playerState.Volume,
                 muted: _playerState.Muted,
                 staticDelayMs: _clockSynchronizer.StaticDelayMs,
@@ -2429,9 +2430,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Reports <c>client/state: 'error'</c> when the audio pipeline raises an error (e.g. a buffer
+    /// Reports <c>available: false</c> when the audio pipeline raises an error (e.g. a buffer
     /// underrun or sync failure), so the server knows this player cannot keep up. Per the spec the
-    /// player then buffers and reports <c>'synchronized'</c> once it recovers (see
+    /// player then buffers and recovers once it can resume playback (see
     /// <see cref="OnPipelineStateChanged"/>).
     /// </summary>
     private void OnPipelineError(object? sender, AudioPipelineError error)
@@ -2442,15 +2443,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         _clientErrorReported = true;
-        _logger.LogWarning("Audio pipeline error; reporting client/state: error ({Message})", error.Message);
+        _logger.LogWarning("Audio pipeline error; reporting available: false ({Message})", error.Message);
         ReportClientErrorAsync(error.Message).SafeFireAndForget(_logger);
     }
 
     /// <summary>
-    /// Tracks pipeline state to drive the error -&gt; synchronized recovery transition: once the
-    /// pipeline returns to <see cref="AudioPipelineState.Playing"/> after an error, report
-    /// <c>client/state: 'synchronized'</c>. The Error state itself is also reported here for
-    /// pipelines that surface underruns via state changes rather than <see cref="OnPipelineError"/>.
+    /// Tracks pipeline state to drive the error -&gt; recovered transition: once the pipeline
+    /// returns to <see cref="AudioPipelineState.Playing"/> after an error, report player state.
+    /// The Error state itself is also reported here for pipelines that surface underruns via
+    /// state changes rather than <see cref="OnPipelineError"/>.
     /// </summary>
     private void OnPipelineStateChanged(object? sender, AudioPipelineState state)
     {
@@ -2458,7 +2459,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             case AudioPipelineState.Error when !_clientErrorReported:
                 _clientErrorReported = true;
-                _logger.LogWarning("Audio pipeline entered Error state; reporting client/state: error");
+                _logger.LogWarning("Audio pipeline entered Error state; reporting available: false");
                 ReportClientErrorAsync(null).SafeFireAndForget(_logger);
                 break;
 
@@ -2467,10 +2468,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 // Guard on connection state symmetrically with ReportClientErrorAsync: a recovery
                 // that lands while disconnected/reconnecting would otherwise hit a closed socket.
-                // The reconnect handshake re-reports synchronized via SendInitialClientStateAsync.
+                // The reconnect handshake re-reports availability via SendInitialClientStateAsync.
+                //
+                // NOTE: SendPlayerStateAckAsync -> SendPlayerStateAsync now sends CreatePlayerState,
+                // which deliberately omits `available` (see its doc comment). So this recovery path
+                // no longer re-asserts available: true on its own; it relies on whatever last set
+                // availability (e.g. the initial client/state, or CreateAvailability). If recovery
+                // needs to explicitly re-assert available: true, that belongs to the single publisher
+                // a later task introduces for availability — not a second path added here.
                 if (_connection.State == ConnectionState.Connected)
                 {
-                    _logger.LogInformation("Audio pipeline recovered; reporting client/state: synchronized");
+                    _logger.LogInformation("Audio pipeline recovered; reporting player state");
                     SendPlayerStateAckAsync().SafeFireAndForget(_logger);
                 }
 
@@ -2485,7 +2493,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        await _connection.SendMessageAsync(ClientStateMessage.CreateError(message));
+        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(false));
     }
 
     /// <summary>
