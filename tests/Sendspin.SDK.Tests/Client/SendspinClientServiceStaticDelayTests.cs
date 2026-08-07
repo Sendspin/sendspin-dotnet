@@ -100,13 +100,18 @@ public class SendspinClientServiceStaticDelayTests
     [Fact]
     public async Task InitialClientState_ReportsTimingFieldsAndSupportedCommands()
     {
+        // Clock already converged: the initial client/state these tests inspect is otherwise
+        // deferred until sync convergence (see InitialClientStateGatingTests).
         var (client, connection, _) = TestClient.Create(configure: options =>
+        {
+            options.ClockSynchronizer = new ConvergedClockSynchronizer();
             options.Capabilities = new ClientCapabilities
             {
                 RequiredLeadTimeMs = 200,
                 MinBufferMs = 150,
                 SupportsSetStaticDelay = true,
-            });
+            };
+        });
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "player@v1");
@@ -122,7 +127,10 @@ public class SendspinClientServiceStaticDelayTests
     public async Task InitialClientState_OmitsSupportedCommandsWhenCapabilityDisabled()
     {
         var (client, connection, _) = TestClient.Create(configure: options =>
-            options.Capabilities = new ClientCapabilities { SupportsSetStaticDelay = false });
+        {
+            options.ClockSynchronizer = new ConvergedClockSynchronizer();
+            options.Capabilities = new ClientCapabilities { SupportsSetStaticDelay = false };
+        });
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "player@v1");
@@ -135,7 +143,10 @@ public class SendspinClientServiceStaticDelayTests
     public async Task UpdateTimingAsync_WhenConnected_ResendsStateWithNewValues()
     {
         var (client, connection, _) = TestClient.Create(configure: options =>
-            options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 });
+        {
+            options.ClockSynchronizer = new ConvergedClockSynchronizer();
+            options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 };
+        });
         using var _c = client;
 
         // UpdateTimingAsync only re-sends while connected; the handshake flips the fake to Connected.
@@ -155,7 +166,10 @@ public class SendspinClientServiceStaticDelayTests
     {
         var (client, connection, _) = TestClient.Create(
             configure: options =>
-                options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 },
+            {
+                options.ClockSynchronizer = new ConvergedClockSynchronizer();
+                options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 };
+            },
             connected: false);
         using var _c = client;
 
@@ -174,7 +188,9 @@ public class SendspinClientServiceStaticDelayTests
     [Fact]
     public void ThrowingStore_OnLoad_DoesNotAbortHandshake()
     {
-        var sync = new KalmanClockSynchronizer { StaticDelayMs = 12.0 };
+        // Converged fake rather than the Kalman used elsewhere in this file: the assertion
+        // needs the initial client/state actually sent, which a player defers until sync.
+        var sync = new ConvergedClockSynchronizer { StaticDelayMs = 12.0 };
         var store = new FakeStaticDelayStore { ThrowOnLoad = true };
         var (client, connection, _) = TestClient.Create(configure: options =>
         {

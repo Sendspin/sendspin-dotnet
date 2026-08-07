@@ -22,6 +22,34 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     /// </summary>
     public bool EnforceConnectionState { get; set; }
 
+    /// <summary>
+    /// When true, every <see cref="ClientTimeMessage"/> probe passed to
+    /// <see cref="SendMessageAsync"/> is answered synchronously with a matching server/time
+    /// reply, so the client's time-sync bursts complete and feed measurements into its clock
+    /// synchronizer. This is how a fixture drives clock-sync convergence over the wire without
+    /// a real server. Off by default: most tests want no unsolicited inbound traffic.
+    /// </summary>
+    public bool RespondToTimeSync { get; set; }
+
+    /// <summary>
+    /// When set, the next message passed to <see cref="SendMessageAsync"/> is recorded (it hit
+    /// the wire) but the send does not complete until the given source is resolved. Consumed by
+    /// that one send — cleared before awaiting — so anything sent meanwhile passes straight
+    /// through. Lets a test interleave another send while one is mid-flight, which a fake whose
+    /// sends complete synchronously could never produce.
+    /// </summary>
+    public TaskCompletionSource? HoldNextSend { get; set; }
+
+    /// <summary>
+    /// When true, the next <see cref="SendMessageAsync"/> call throws
+    /// <see cref="InvalidOperationException"/> without recording the message, then clears
+    /// itself. Unlike <see cref="EnforceConnectionState"/> — which can only throw while not
+    /// Connected and therefore never reaches code behind an up-front connection-state guard —
+    /// this simulates a send failing while <see cref="State"/> IS Connected (the socket dying
+    /// mid-write), which is what catch-based rollback paths need to be exercised at all.
+    /// </summary>
+    public bool ThrowOnNextSend { get; set; }
+
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
@@ -43,7 +71,7 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         return Task.CompletedTask;
     }
 
-    public Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default)
+    public async Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default)
         where T : IMessage
     {
         if (EnforceConnectionState && State != ConnectionState.Connected)
@@ -51,8 +79,46 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
             throw new InvalidOperationException("WebSocket is not connected");
         }
 
-        SentMessages.Add(message);
-        return Task.CompletedTask;
+        if (ThrowOnNextSend)
+        {
+            ThrowOnNextSend = false;
+            throw new InvalidOperationException("Simulated send failure");
+        }
+
+        // Locked so tests polling for fire-and-forget sends (see SnapshotSentMessages) can
+        // enumerate safely while the client's time-sync loop appends from another thread.
+        lock (SentMessages)
+        {
+            SentMessages.Add(message);
+        }
+
+        if (HoldNextSend is { } hold)
+        {
+            HoldNextSend = null;
+            await hold.Task;
+        }
+
+        if (RespondToTimeSync && message is ClientTimeMessage probe)
+        {
+            long t1 = probe.ClientTransmitted;
+            RaiseTextMessageReceived(
+                $$$"""
+                {"type":"server/time","payload":{"client_transmitted":{{{t1}}},"server_received":{{{t1 + 10}}},"server_transmitted":{{{t1 + 20}}} }}
+                """);
+        }
+    }
+
+    /// <summary>
+    /// Copy of <see cref="SentMessages"/> taken under the same lock <see cref="SendMessageAsync"/>
+    /// appends under. Use from tests that poll while the client is still sending in the
+    /// background (e.g. the time-sync loop); plain enumeration can throw mid-append.
+    /// </summary>
+    public IReadOnlyList<IMessage> SnapshotSentMessages()
+    {
+        lock (SentMessages)
+        {
+            return SentMessages.ToList();
+        }
     }
 
     /// <summary>Binary frames sent via <see cref="SendBinaryAsync"/>, in order.</summary>

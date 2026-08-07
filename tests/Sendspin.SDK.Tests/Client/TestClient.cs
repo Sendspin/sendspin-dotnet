@@ -148,3 +148,33 @@ internal static class TestClient
             """);
     }
 }
+
+/// <summary>
+/// Clock synchronizer that reports converged from construction and stays converged across the
+/// per-connection <see cref="Reset"/> in the client's activate handler. For tests whose subject
+/// is not the clock-sync gate on the initial client/state: injecting this makes the client see
+/// sync as already established at activate, so the initial state is sent immediately —
+/// <c>InitialClientStateGatingTests</c> covers the deferred path itself.
+/// </summary>
+internal sealed class ConvergedClockSynchronizer : IClockSynchronizer
+{
+    public bool IsConverged => true;
+
+    public bool HasMinimalSync => true;
+
+    public double StaticDelayMs { get; set; }
+
+    public long ServerToClientTime(long serverTime) => serverTime;
+
+    public long ClientToServerTime(long clientTime) => clientTime;
+
+    public void ProcessMeasurement(long t1, long t2, long t3, long t4)
+    {
+    }
+
+    public void Reset()
+    {
+    }
+
+    public ClockSyncStatus GetStatus() => new() { IsConverged = true };
+}

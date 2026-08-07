@@ -50,7 +50,12 @@ public class SendspinClientServiceEncryptedFlowTests
     [Fact]
     public void HandshakeCompletes_OnInitialServerActivate_NotOnServerHello()
     {
-        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
+        // Clock already converged: this test asserts the connected tail ran (initial
+        // client/state), which a sync-requiring client otherwise defers until convergence —
+        // InitialClientStateGatingTests owns that gate.
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options => options.ClockSynchronizer = new ConvergedClockSynchronizer());
         using var _c = client;
         connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
@@ -85,7 +90,11 @@ public class SendspinClientServiceEncryptedFlowTests
         // The client's own connect path (not just the fake's): ConnectAsync opens the
         // connection and then parks on the handshake TCS. Because the encrypted flow is
         // server-driven, the task must still be pending after server/hello alone.
-        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        // Clock already converged so the final assertion (initial client/state sent) is not
+        // deferred behind sync convergence.
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.LongTerm,
+            configure: options => options.ClockSynchronizer = new ConvergedClockSynchronizer());
         using var _c = client;
 
         var connectTask = client.ConnectAsync(ServerUri);

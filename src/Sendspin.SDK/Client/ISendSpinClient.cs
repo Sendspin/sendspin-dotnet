@@ -137,6 +137,14 @@ public interface ISendspinClient : IAsyncDisposable
     /// Sends the current player state (volume, muted) to the server.
     /// This is used to report local state changes to Music Assistant.
     /// </summary>
+    /// <remarks>
+    /// The reported volume and mute also become the client's persisted player state, so later
+    /// full-state sends (e.g. a reconnect's initial client/state) carry them. While the
+    /// connection's initial client/state is still deferred pending clock sync, the call sends
+    /// the full initial message instead of a player-only delta — or nothing yet, when the
+    /// converging clock alone holds availability false; the deferred initial then reports the
+    /// persisted values.
+    /// </remarks>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
     /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
@@ -149,7 +157,9 @@ public interface ISendspinClient : IAsyncDisposable
     /// Use this when measured conditions change (e.g. empirically measured lead time after warmup,
     /// or a link-type change). Per the Sendspin spec, callers should debounce updates locally and
     /// report only sustained changes — the SDK sends each call verbatim. No-op on the wire when the
-    /// client is not currently connected; the new values are still applied to subsequent state sends.
+    /// client is not currently connected, and also while the connection's initial client/state is
+    /// still deferred pending clock sync; the new values are still applied and the next state
+    /// send (including that deferred initial) carries them.
     /// </remarks>
     /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds.</param>
     /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds.</param>
@@ -171,7 +181,7 @@ public interface ISendspinClient : IAsyncDisposable
     Task EnterExternalSourceAsync();
 
     /// <summary>
-    /// Leaves the <c>external_source</c> state, reporting <c>synchronized</c> so the client can
+    /// Leaves the <c>external_source</c> state, reporting <c>available: true</c> so the client can
     /// resume participating in Sendspin playback. <see cref="IsExternalSource"/> only clears if the
     /// notification succeeds.
     /// </summary>
