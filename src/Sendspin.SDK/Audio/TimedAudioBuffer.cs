@@ -1175,6 +1175,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // LatencyMicroseconds, an immediate seed). The self-measured baseline then trims
         // any residual constant offset (engine overhead, resampler priming, undeclared
         // prefill) so the error reflects drift/fluctuations only.
+        //
         // Post-anchor server-clock movement. The pace terms above hold consumption
         // to the LOCAL clock; without this term the Kalman offset's movement since
         // anchor (relative crystal drift) accumulates as invisible absolute
@@ -1258,6 +1259,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// (Re)captures the Kalman offset used as the drift reference and zeroes the
     /// drift term. Called wherever the sync-error baseline is established or
     /// absorbed, so constant offsets rebase while later movement counts as drift.
+    /// When the clock is not converged, the capture is deferred to the first converged error calculation instead.
     /// Must be called under lock.
     /// </summary>
     private void CaptureClockOffsetReference()

@@ -45,7 +45,7 @@ In `CalculateSyncError`:
 
 ```
 if (TrackClockDrift && _clockSync.IsConverged)
-    _clockDriftUs = _clockOffsetAtAnchorUs - currentOffset;   // else: hold last value
+    _clockDriftUs = currentOffset - _clockOffsetAtAnchorUs;   // else: hold last value
 
 _currentSyncErrorMicroseconds = elapsed - samplesReadTime - baseline + (long)_clockDriftUs;
 ```
@@ -54,6 +54,7 @@ Sign convention (schedule moved earlier -> playing late -> positive error -> spe
 verified by the red test, not by argument. The exact semantics of
 `ClockSyncStatus.OffsetMicroseconds` (server-client vs client-server) are confirmed during
 implementation; the red test fails loudly if the sign is wrong.
+Post-implementation note: the red test confirmed the shipped order is `currentOffset - _clockOffsetAtAnchorUs` (offset = server - client rises => schedule earlier => positive error), as reflected above.
 
 **Offset recapture rule:** `_clockOffsetAtAnchorUs` is recaptured at exactly the places
 that already establish or absorb the error baseline — playback anchor (`_playbackStarted`
