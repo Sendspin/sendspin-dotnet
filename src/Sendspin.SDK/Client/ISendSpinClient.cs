@@ -157,7 +157,9 @@ public interface ISendspinClient : IAsyncDisposable
     /// Use this when measured conditions change (e.g. empirically measured lead time after warmup,
     /// or a link-type change). Per the Sendspin spec, callers should debounce updates locally and
     /// report only sustained changes — the SDK sends each call verbatim. No-op on the wire when the
-    /// client is not currently connected; the new values are still applied to subsequent state sends.
+    /// client is not currently connected, and also while the connection's initial client/state is
+    /// still deferred pending clock sync; the new values are still applied and the next state
+    /// send (including that deferred initial) carries them.
     /// </remarks>
     /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds.</param>
     /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds.</param>

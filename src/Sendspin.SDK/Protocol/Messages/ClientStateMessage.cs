@@ -16,7 +16,8 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
 
     /// <summary>
     /// Builds the initial client/state message, which per spec MUST carry every state field.
-    /// This should be sent immediately after receiving server/hello.
+    /// Sent once per connection after server/activate — immediately for clients that need no
+    /// clock sync, deferred until the first sync convergence for those that do.
     /// </summary>
     /// <param name="available">Whether the client is available to participate in Sendspin playback.</param>
     /// <param name="volume">Player volume (0-100).</param>

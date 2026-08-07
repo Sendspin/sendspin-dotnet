@@ -49,8 +49,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private CancellationTokenSource? _timeSyncCts;
     private bool _disposed;
 
-    // Whether we have reported client/state: 'error' to the server and are awaiting recovery.
-    // Guards against duplicate error reports and gates the synchronized report on actual recovery.
+    // Whether a pipeline error is currently outstanding: one of the three inputs composed into
+    // CurrentAvailability. Set by the pipeline error handlers, cleared when the pipeline returns
+    // to Playing; also gates the recovery player-state ack (and the once-per-episode error log)
+    // on an actual prior error.
     private bool _clientErrorReported;
 
     // Player timing parameters reported in client/state. Seeded from capabilities and updatable
@@ -396,8 +398,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Called from OnConnectionStateChanged when entering Handshaking state during reconnection.
     /// </summary>
     /// <remarks>
-    /// Clock synchronizer is reset in HandleServerHello when the handshake completes,
-    /// so we don't need to reset it here.
+    /// Clock synchronizer is reset in FinishHandshake when the initial server/activate
+    /// arrives, so we don't need to reset it here.
     /// </remarks>
     private async Task PerformReconnectHandshakeAsync(CancellationToken cancellationToken = default)
     {
@@ -740,7 +742,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             throw;
         }
 
-        _logger.LogInformation("Exited external_source (synchronized)");
+        _logger.LogInformation("Exited external_source");
     }
 
     /// <summary>
