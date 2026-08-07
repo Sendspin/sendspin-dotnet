@@ -194,4 +194,33 @@ public class TimedAudioBufferClockDriftTests
         // ~300ms of drift.
         Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, -10_000, 10_000);
     }
+
+    [Fact]
+    public void StaticDelayChange_DoesNotEnterDriftTerm()
+    {
+        using var session = new Session(options: null, useRawReads: true);
+        session.Steps(300);
+
+        // A 150ms static-delay change re-schedules via explicit re-anchor in real
+        // clients; the drift term must not react to it (Kalman offset unchanged).
+        session.ClockSync.StaticDelayMs = 150;
+        session.Steps(200);
+
+        Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, -5_000, 5_000);
+    }
+
+    [Fact]
+    public void ReconnectStabilization_OffsetStepAbsorbedNotCorrected()
+    {
+        using var session = new Session(options: null, useRawReads: true);
+        session.Steps(300);
+
+        // Reconnect: Kalman resets and re-converges 80ms away inside the
+        // stabilization window. The window-end recapture must absorb the step.
+        session.Buffer.NotifyReconnect();
+        session.ClockSync.OffsetMicroseconds += 80_000;
+        session.Steps(250); // > 2s stabilization window at 10ms steps
+
+        Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, -10_000, 10_000);
+    }
 }
