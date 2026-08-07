@@ -1,3 +1,4 @@
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Synchronization;
@@ -24,6 +25,19 @@ public class InitialClientStateGatingTests
         var clock = new ScriptedClockSynchronizer();
         var (client, connection, _) = TestClient.Create(configure: options => options.ClockSynchronizer = clock);
         return (client, connection, clock);
+    }
+
+    private static (SendspinClientService Client, FakeSendspinConnection Connection, ScriptedClockSynchronizer Clock, FakeAudioPipeline Pipeline)
+        CreatePlayerClientWithPipeline()
+    {
+        var clock = new ScriptedClockSynchronizer();
+        var pipe = new FakeAudioPipeline();
+        var (client, connection, _) = TestClient.Create(configure: options =>
+        {
+            options.ClockSynchronizer = clock;
+            options.AudioPipeline = pipe;
+        });
+        return (client, connection, clock, pipe);
     }
 
     private static List<ClientStateMessage> ClientStates(FakeSendspinConnection connection) =>
@@ -228,6 +242,111 @@ public class InitialClientStateGatingTests
         Assert.NotNull(initial.Payload.Player);
         Assert.Equal(80, initial.Payload.Player!.RequiredLeadTimeMs);
         Assert.Equal(40, initial.Payload.Player.MinBufferMs);
+    }
+
+    [Fact]
+    public async Task PlayerStateWhileConverging_SendsNothing_DeferredInitialCarriesTheValues()
+    {
+        var (client, connection, _) = CreatePlayerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+
+        // Volume restored at connect, inside the converging window: a player-only delta must
+        // not become the server's "initial" client/state, and with nothing but the converging
+        // clock holding availability false, promoting the full initial now would carry the
+        // spurious available: false the deferral forbids. The call stays silent instead.
+        await client.SendPlayerStateAsync(volume: 55, muted: true);
+
+        await Task.Delay(100);
+        Assert.Empty(ClientStates(connection));
+
+        // Nothing is lost: the values were persisted into the player state, which the
+        // deferred initial reads live.
+        connection.RespondToTimeSync = true;
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(8));
+
+        var initial = Assert.Single(ClientStates(connection));
+        Assert.Equal(true, initial.Payload.Available);
+        Assert.Equal(55, initial.Payload.Player!.Volume);
+        Assert.Equal(true, initial.Payload.Player.Muted);
+    }
+
+    [Fact]
+    public async Task ReconnectAfterError_RecoveryInsideConvergingWindow_FirstClientStateIsTheFullInitial()
+    {
+        // The cross-connection shape of the promotion guarantee. On connection 1 a pipeline
+        // error publishes available: false, leaving the last-sent tracker false. On
+        // connection 2 the pipeline recovers inside the converging window (e.g. an audio-sink
+        // retry playing already-buffered samples, needing no server audio), which fires the
+        // recovery player-state ack — and with the stale tracker suppressing the availability
+        // publish, that ack's bare player delta used to be the first client/state the server
+        // saw on the new connection.
+        var (client, connection, _, pipe) = CreatePlayerClientWithPipeline();
+        using var _c = client;
+        connection.RespondToTimeSync = true;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+
+        pipe.RaiseError();
+        await WaitForAsync(
+            () => ClientStates(connection).Any(m => m.Payload.Available == false),
+            TimeSpan.FromSeconds(5));
+
+        // Drop and reconnect; the clock resets, and unanswered probes hold the converging
+        // window open.
+        connection.RespondToTimeSync = false;
+        await connection.DisconnectAsync("network_drop");
+        int sentOnConnection1 = ClientStates(connection).Count;
+        await ReconnectAsync(client, connection);
+
+        // Recovery inside the window: the ack path must not put a bare player delta on the wire.
+        pipe.SetState(AudioPipelineState.Playing);
+        await Task.Delay(200);
+        Assert.Equal(sentOnConnection1, ClientStates(connection).Count);
+
+        // Convergence releases the deferred initial: the first client/state of connection 2
+        // is the full message — available again, carrying the player object.
+        connection.RespondToTimeSync = true;
+        await WaitForAsync(() => ClientStates(connection).Count > sentOnConnection1, TimeSpan.FromSeconds(8));
+
+        var first = ClientStates(connection)[sentOnConnection1];
+        Assert.Equal(true, first.Payload.Available);
+        Assert.NotNull(first.Payload.Player);
+    }
+
+    [Fact]
+    public async Task ReconnectWithErrorOutstanding_PlayerStateCallPromotesTheFullInitial()
+    {
+        // Same cross-connection staleness, but the error never recovers: a direct
+        // SendPlayerStateAsync call (an app restoring volume on connect) inside the
+        // converging window must promote the full initial. Availability is genuinely false
+        // here — the outstanding error, not the converging clock — so the promotion carries
+        // it rather than staying silent.
+        var (client, connection, _, pipe) = CreatePlayerClientWithPipeline();
+        using var _c = client;
+        connection.RespondToTimeSync = true;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+
+        pipe.RaiseError();
+        await WaitForAsync(
+            () => ClientStates(connection).Any(m => m.Payload.Available == false),
+            TimeSpan.FromSeconds(5));
+
+        connection.RespondToTimeSync = false;
+        await connection.DisconnectAsync("network_drop");
+        int sentOnConnection1 = ClientStates(connection).Count;
+        await ReconnectAsync(client, connection);
+
+        await client.SendPlayerStateAsync(volume: 55, muted: true);
+
+        var first = ClientStates(connection)[sentOnConnection1];
+        Assert.Equal(false, first.Payload.Available);
+        Assert.Equal(55, first.Payload.Player!.Volume);
+        Assert.Equal(true, first.Payload.Player.Muted);
     }
 
     [Fact]

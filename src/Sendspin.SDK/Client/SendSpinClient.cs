@@ -538,6 +538,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public async Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0)
     {
         var clampedVolume = Math.Clamp(volume, 0, 100);
+
+        // Persist the caller's values: SendInitialClientStateAsync reads _playerState, so
+        // without this a reconnect's initial message would revert an app-set volume to the
+        // last server-commanded value — and the pre-latch promotion below would put the old
+        // volume on the wire with nothing scheduled to correct it.
+        _playerState.Volume = clampedVolume;
+        _playerState.Muted = muted;
+
+        // Before the connection's initial client/state has gone out, a player-only delta must
+        // not hit the wire: the server treats the first client/state it receives as the
+        // initial one, which per spec MUST carry all state fields. Promote to the full
+        // initial message — it reads the values persisted above — unless the still-converging
+        // clock is the only input holding availability false, in which case stay silent like
+        // UpdateTimingAsync does: an initial sent now would carry exactly the spurious
+        // available: false the deferral exists to prevent, and the deferred initial reads the
+        // persisted values live, so nothing is lost.
+        if (!_initialClientStateSent)
+        {
+            if (!OnlyConvergenceHoldsAvailabilityFalse)
+            {
+                await SendInitialClientStateAsync();
+            }
+
+            return;
+        }
+
         var stateMessage = ClientStateMessage.CreatePlayerState(
             clampedVolume, muted, staticDelayMs,
             _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
@@ -581,6 +607,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         => (!RequiresClockSync() || IsClockSynced) && !IsExternalSource && !_clientErrorReported;
 
     /// <summary>
+    /// True while the still-converging clock is the only input composing availability to
+    /// false (nothing else is wrong). Pre-latch senders stay silent in this state rather
+    /// than promote the initial client/state: an initial carrying that spurious
+    /// <c>available: false</c> would make the server move the client to a solo group it
+    /// MUST NOT auto-rejoin — exactly what the deferral in <see cref="FinishHandshake"/>
+    /// exists to prevent. The first convergence releases the initial state instead.
+    /// </summary>
+    private bool OnlyConvergenceHoldsAvailabilityFalse
+        => !CurrentAvailability && !IsExternalSource && !_clientErrorReported;
+
+    /// <summary>
     /// The last availability value actually sent to the server, used by
     /// <see cref="PublishAvailabilityAsync"/> to suppress a delta when nothing changed. Seeded
     /// from the initial client/state in <see cref="SendInitialClientStateAsync"/> so the first
@@ -603,17 +640,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <see cref="ClientStateMessage.CreateAvailability"/> — <see cref="EnterExternalSourceAsync"/>,
     /// <see cref="ExitExternalSourceAsync"/>, and the pipeline error/recovery handlers all set
     /// their input and call this, so availability cannot again drift out of sync one call site at
-    /// a time. Before the connection's initial client/state has gone out, a changed value is
+    /// a time. Before the connection's initial client/state has gone out, the publish is
     /// promoted to the full initial message instead of a bare delta (see below).
     /// </summary>
     private async Task PublishAvailabilityAsync()
     {
-        var current = CurrentAvailability;
-        if (_lastAvailabilitySent == current)
-        {
-            return;
-        }
-
         // Guard on connection state: a publish that lands mid-reconnect would hit a closed socket.
         // A publish skipped here is corrected on reconnect — SendInitialClientStateAsync reports
         // CurrentAvailability, so the next connection's initial state carries the composed value.
@@ -630,21 +661,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // pipeline error or external-source enter inside the converging window). A bare delta
         // must not hit the wire here: the server treats the first client/state it receives as
         // the initial one, which per spec MUST carry all state fields. Promote the publish to
-        // the full initial message — it reads CurrentAvailability and every player field live,
-        // so it carries this same composed value — and the latch then routes the eventual
-        // convergence through the delta path.
+        // the full initial message — it reads CurrentAvailability and every player field live —
+        // and the latch then routes the eventual convergence through the delta path. Decided
+        // BEFORE the compare-to-last-sent below: pre-latch, the tracker can only hold another
+        // connection's stale value (or null), and comparing against that once let a stale
+        // false suppress the promotion entirely, leaving a later player delta to become the
+        // connection's first client/state.
         if (!_initialClientStateSent)
         {
             // ...unless the only input holding availability false is the still-converging
             // clock (nothing else is wrong). That is exactly the spurious false the deferral
             // exists to prevent — the server would solo-group the client and never auto-rejoin
             // it — so stay silent and let the first convergence release the initial state.
-            if (!current && !IsExternalSource && !_clientErrorReported)
+            if (OnlyConvergenceHoldsAvailabilityFalse)
             {
                 return;
             }
 
             await SendInitialClientStateAsync();
+            return;
+        }
+
+        // Post-latch the tracker was seeded by this connection's initial send, so this
+        // compares against a value the server was actually told.
+        var current = CurrentAvailability;
+        if (_lastAvailabilitySent == current)
+        {
             return;
         }
 

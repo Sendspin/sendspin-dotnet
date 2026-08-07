@@ -137,6 +137,14 @@ public interface ISendspinClient : IAsyncDisposable
     /// Sends the current player state (volume, muted) to the server.
     /// This is used to report local state changes to Music Assistant.
     /// </summary>
+    /// <remarks>
+    /// The reported volume and mute also become the client's persisted player state, so later
+    /// full-state sends (e.g. a reconnect's initial client/state) carry them. While the
+    /// connection's initial client/state is still deferred pending clock sync, the call sends
+    /// the full initial message instead of a player-only delta — or nothing yet, when the
+    /// converging clock alone holds availability false; the deferred initial then reports the
+    /// persisted values.
+    /// </remarks>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
     /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
