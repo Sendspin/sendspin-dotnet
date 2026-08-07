@@ -28,6 +28,9 @@ public class TimeSyncPairingGatingTests
     private const string ArtworkActivate =
         """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["artwork@v1"]}}""";
 
+    private const string StreamStart =
+        """{"type":"stream/start","payload":{"player":{"codec":"pcm","channels":2,"sample_rate":48000,"bit_depth":16}}}""";
+
     /// <summary>
     /// Client able to run a real dynamic-PIN attempt (lockout store and PIN presenter
     /// configured), with a scripted clock so the time-sync loop keeps its dense initial
@@ -164,6 +167,49 @@ public class TimeSyncPairingGatingTests
     }
 
     [Fact]
+    public async Task StreamStartSmartSyncBurst_DoesNotFire_WhileAPairingActivationIsInEffect()
+    {
+        // The second client/time source: HandleStreamStartCoreAsync fires a smart-sync
+        // burst with CancellationToken.None when the clock lacks minimal sync, so
+        // StopTimeSyncLoop cannot reach it and it fires without app action. A stream/start
+        // crossing a mid-session pairing activate must stay silent — but the same
+        // stream/start outside a pairing window must still burst, because that burst is
+        // what lets playback start before full convergence.
+        var (client, connection, clock) = CreatePinPairableClient(PskCategory.LongTerm);
+        using var _c = client;
+        connection.RespondToTimeSync = true;
+        clock.ConvergeOnMeasurement = false;      // HasMinimalSync stays false: burst-eligible
+        clock.ReportedMeasurementCount = 10;      // loop reports good quality and sleeps
+        clock.ReportedUncertaintyMicroseconds = 500; // ~10 s between loop bursts
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+
+        // The loop's first burst completes, then it sleeps ~10 s: until it wakes, any new
+        // probe is attributable to the stream-start smart-sync trigger alone.
+        await WaitForAsync(() => clock.Measurements > 0, TimeSpan.FromSeconds(5));
+        int probesAfterLoopBurst = Probes(connection).Count;
+
+        // Pairing arrives mid-session; the sleeping loop is stopped for good.
+        connection.RaiseTextMessageReceived(PairingActivate);
+        await Task.Delay(100);
+
+        // stream/start inside the pairing window, clock without minimal sync: no burst.
+        connection.RaiseTextMessageReceived(StreamStart);
+        await Task.Delay(500);
+        Assert.Equal(probesAfterLoopBurst, Probes(connection).Count);
+
+        // Leave pairing: the restarted loop bursts once and goes back to sleep.
+        connection.RaiseTextMessageReceived(PlaybackActivate);
+        int measured = clock.Measurements;
+        await WaitForAsync(() => clock.Measurements > measured, TimeSpan.FromSeconds(5));
+        int probesAfterResume = Probes(connection).Count;
+
+        // The same stream/start outside a pairing window still bursts.
+        connection.RaiseTextMessageReceived(StreamStart);
+        await WaitForAsync(() => Probes(connection).Count > probesAfterResume, TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
     public async Task ArtworkOnlyClient_PairingFirstActivate_WithholdsInitialClientState_UntilANonPairingActivateArrives()
     {
         // A client with no sync-requiring role sends its initial client/state on activate
@@ -208,15 +254,21 @@ public class TimeSyncPairingGatingTests
 
     /// <summary>
     /// Clock synchronizer the test scripts: each processed measurement copies
-    /// <see cref="ConvergeOnMeasurement"/> into <see cref="IsConverged"/>, and the reported
-    /// status never accumulates a measurement count, so the client's time-sync loop keeps
-    /// its dense initial cadence instead of backing off to 10 s intervals.
+    /// <see cref="ConvergeOnMeasurement"/> into <see cref="IsConverged"/>. By default the
+    /// reported status carries no measurement count, so the client's time-sync loop keeps
+    /// its dense initial cadence instead of backing off to 10 s intervals; a test that
+    /// wants the loop asleep between bursts scripts <see cref="ReportedMeasurementCount"/>
+    /// and <see cref="ReportedUncertaintyMicroseconds"/> instead.
     /// </summary>
     private sealed class ScriptedClockSynchronizer : IClockSynchronizer
     {
         public bool ConvergeOnMeasurement { get; set; } = true;
 
         public int Measurements { get; private set; }
+
+        public int ReportedMeasurementCount { get; set; }
+
+        public double ReportedUncertaintyMicroseconds { get; set; }
 
         public bool IsConverged { get; private set; }
 
@@ -236,6 +288,11 @@ public class TimeSyncPairingGatingTests
 
         public long ClientToServerTime(long clientTime) => clientTime;
 
-        public ClockSyncStatus GetStatus() => new() { IsConverged = IsConverged };
+        public ClockSyncStatus GetStatus() => new()
+        {
+            IsConverged = IsConverged,
+            MeasurementCount = ReportedMeasurementCount,
+            OffsetUncertaintyMicroseconds = ReportedUncertaintyMicroseconds,
+        };
     }
 }

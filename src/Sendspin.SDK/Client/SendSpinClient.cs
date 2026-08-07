@@ -2826,7 +2826,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Smart sync burst: only trigger if clock isn't already synced
         // If we've been connected for a while, the continuous sync loop has already converged
-        if (!_clockSynchronizer.HasMinimalSync)
+        if (LastServerActivate?.ActivitiesList.Contains(Activities.Pairing) == true)
+        {
+            // Same rule as the time-sync loop's gate in HandleServerActivate: no
+            // client/time may leave the client while a pairing activation is in effect —
+            // the reference server would read the probe where it requires the next pairing
+            // message and abort the attempt. This burst is not the loop (its token is
+            // CancellationToken.None, so StopTimeSyncLoop cannot reach it) and it fires
+            // without app action, so it is gated at the source: a stream/start crossing a
+            // mid-session pairing activate on a clock without minimal sync must stay
+            // silent. The loop's restart on the next non-pairing activate covers the
+            // re-sync this burst would have provided.
+            _logger.LogDebug("Pairing activation in effect, skipping stream-start sync burst");
+        }
+        else if (!_clockSynchronizer.HasMinimalSync)
         {
             _logger.LogDebug("Clock not synced, triggering re-sync burst (fire-and-forget)");
             _ = SendTimeSyncBurstAsync(CancellationToken.None);
