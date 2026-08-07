@@ -1783,14 +1783,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             requiredLeadTimeMs: _requiredLeadTimeMs,
             minBufferMs: _minBufferMs,
             supportedCommands: GetPlayerSupportedCommands());
+
+        // Seed the availability publisher's "last sent" tracker from the value this message
+        // carries, so the first delta PublishAvailabilityAsync sends afterward is neither a
+        // spurious repeat nor a swallowed change. Seeded before the send, not after: written
+        // after the await, it would overwrite — with a by-then stale value — a tracker that a
+        // delta publishing while this send was in flight has already advanced, and the next
+        // genuine change would be suppressed as a repeat while the server believes otherwise.
+        _lastAvailabilitySent = available;
+
         var stateJson = MessageSerializer.Serialize(stateMessage);
         _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
         await _connection.SendMessageAsync(stateMessage);
-
-        // Seed the availability publisher's "last sent" tracker from the value actually
-        // sent, so the first delta PublishAvailabilityAsync sends afterward is neither a
-        // spurious repeat nor a swallowed change.
-        _lastAvailabilitySent = available;
 
         // Also apply to audio pipeline to ensure consistency
         _audioPipeline?.SetVolume(_playerState.Volume);

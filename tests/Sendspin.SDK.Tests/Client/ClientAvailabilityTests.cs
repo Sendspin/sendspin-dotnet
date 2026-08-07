@@ -90,6 +90,36 @@ public class ClientAvailabilityTests
     }
 
     [Fact]
+    public async Task DeltaSentWhileInitialInFlight_NextGenuineChangeIsStillPublished()
+    {
+        // The initial client/state seeds the publisher's last-sent tracker. Seeded after the
+        // send's await, a delta publishing while the initial was in flight had its fresher
+        // tracker value overwritten by the stale seed — and the next genuine change was then
+        // suppressed as a repeat while the server believed the delta's value, with nothing
+        // scheduled to ever correct the divergence.
+        var (client, connection, _) = SyncedClient();
+        using var _c = client;
+
+        // Hold the promoted initial (available: false) in flight.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        connection.HoldNextSend = gate;
+        var enterTask = client.EnterExternalSourceAsync();
+
+        // While it is in flight, a delta publishes: exit reports available: true.
+        await client.ExitExternalSourceAsync();
+
+        // The initial's send completes after the delta went out; its seed must not clobber
+        // the tracker the delta has since written.
+        gate.SetResult();
+        await enterTask;
+
+        // The next genuine false must reach the wire, not be suppressed as a repeat.
+        await client.EnterExternalSourceAsync();
+
+        Assert.Equal(new bool?[] { false, true, false }, AvailableValuesSent(connection));
+    }
+
+    [Fact]
     public async Task VolumeChangeWhileExternalSource_DeltaOmitsAvailable()
     {
         var (client, connection, _) = SyncedClient();

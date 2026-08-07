@@ -31,6 +31,15 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     /// </summary>
     public bool RespondToTimeSync { get; set; }
 
+    /// <summary>
+    /// When set, the next message passed to <see cref="SendMessageAsync"/> is recorded (it hit
+    /// the wire) but the send does not complete until the given source is resolved. Consumed by
+    /// that one send — cleared before awaiting — so anything sent meanwhile passes straight
+    /// through. Lets a test interleave another send while one is mid-flight, which a fake whose
+    /// sends complete synchronously could never produce.
+    /// </summary>
+    public TaskCompletionSource? HoldNextSend { get; set; }
+
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
@@ -52,7 +61,7 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         return Task.CompletedTask;
     }
 
-    public Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default)
+    public async Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default)
         where T : IMessage
     {
         if (EnforceConnectionState && State != ConnectionState.Connected)
@@ -67,6 +76,12 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
             SentMessages.Add(message);
         }
 
+        if (HoldNextSend is { } hold)
+        {
+            HoldNextSend = null;
+            await hold.Task;
+        }
+
         if (RespondToTimeSync && message is ClientTimeMessage probe)
         {
             long t1 = probe.ClientTransmitted;
@@ -75,8 +90,6 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
                 {"type":"server/time","payload":{"client_transmitted":{{{t1}}},"server_received":{{{t1 + 10}}},"server_transmitted":{{{t1 + 20}}} }}
                 """);
         }
-
-        return Task.CompletedTask;
     }
 
     /// <summary>
