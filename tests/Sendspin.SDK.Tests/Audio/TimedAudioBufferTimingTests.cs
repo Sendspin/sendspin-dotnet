@@ -57,7 +57,7 @@ public class TimedAudioBufferTimingTests
         // Clock sync converges: the first burst segment maps to 400ms in the past
         // (we joined mid-track; the first 400ms of the burst has already played
         // elsewhere). The remaining 1200ms is the only copy of upcoming audio.
-        clockSync.OffsetMicroseconds = LocalNow - 400_000 - ServerT0;
+        clockSync.OffsetMicroseconds = ServerT0 - (LocalNow - 400_000);
         clockSync.IsConverged = true;
         clockSync.HasMinimalSync = true;
 
@@ -82,7 +82,7 @@ public class TimedAudioBufferTimingTests
 
         // After convergence the first segment is 100ms in the future:
         // we should wait silently, not discard anything.
-        clockSync.OffsetMicroseconds = LocalNow + 100_000 - ServerT0;
+        clockSync.OffsetMicroseconds = ServerT0 - (LocalNow + 100_000);
         clockSync.IsConverged = true;
         clockSync.HasMinimalSync = true;
 
@@ -107,7 +107,7 @@ public class TimedAudioBufferTimingTests
         var buffer = CreateBuffer(clockSync);
 
         // Segments map to "now": first chunk is due immediately
-        clockSync.OffsetMicroseconds = LocalNow - ServerT0;
+        clockSync.OffsetMicroseconds = ServerT0 - LocalNow;
         clockSync.IsConverged = true;
         clockSync.HasMinimalSync = true;
 
@@ -141,7 +141,7 @@ public class TimedAudioBufferTimingTests
     {
         var buffer = CreateBuffer(clockSync);
 
-        clockSync.OffsetMicroseconds = LocalNow - ServerT0;
+        clockSync.OffsetMicroseconds = ServerT0 - LocalNow;
         clockSync.IsConverged = true;
         clockSync.HasMinimalSync = true;
 
@@ -204,7 +204,7 @@ public class TimedAudioBufferTimingTests
         var buffer = new TimedAudioBuffer(Format, clockSync, bufferCapacityMs: 8000);
         using (buffer)
         {
-            clockSync.OffsetMicroseconds = LocalNow - ServerT0;
+            clockSync.OffsetMicroseconds = ServerT0 - LocalNow;
             clockSync.IsConverged = true;
             clockSync.HasMinimalSync = true;
 
@@ -283,7 +283,7 @@ public class TimedAudioBufferTimingTests
         // 100ms early so it reaches the speaker on the server's clock — so playback begins immediately.
         var clockSync = new FakeClockSynchronizer
         {
-            OffsetMicroseconds = LocalNow + 100_000 - ServerT0,
+            OffsetMicroseconds = ServerT0 - (LocalNow + 100_000),
             IsConverged = true,
             HasMinimalSync = true,
         };
