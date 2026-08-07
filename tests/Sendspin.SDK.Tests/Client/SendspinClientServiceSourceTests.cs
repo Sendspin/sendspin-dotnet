@@ -32,6 +32,11 @@ public class SendspinClientServiceSourceTests
             {
                 options.Capabilities = caps;
                 options.CaptureDevice = capture;
+
+                // Clock already converged: source@v1 requires sync, so the initial client/state
+                // (and with it the line-sense reporting gate) would otherwise stay deferred —
+                // InitialClientStateGatingTests owns the deferred path.
+                options.ClockSynchronizer = new ConvergedClockSynchronizer();
             });
 
         // The source trust gate reads the matched PSK, which is bound to the server id.

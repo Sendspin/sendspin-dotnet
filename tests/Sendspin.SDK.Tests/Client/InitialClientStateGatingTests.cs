@@ -171,6 +171,95 @@ public class InitialClientStateGatingTests
         Assert.Single(states, m => m.Payload.Player is not null);
     }
 
+    [Fact]
+    public async Task AvailabilityFlipWhileConverging_PromotesTheFullInitialState_NotABareDelta()
+    {
+        var (client, connection, _) = CreatePlayerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+
+        // A genuine availability input flips inside the converging window. The server treats
+        // the first client/state it receives as the initial one, which MUST carry all state
+        // fields — so the publish must be promoted to the full initial message with the
+        // composed available, never a bare availability delta.
+        await client.EnterExternalSourceAsync();
+
+        var first = Assert.Single(ClientStates(connection));
+        Assert.Equal(false, first.Payload.Available);
+        Assert.NotNull(first.Payload.Player);
+
+        // Exiting while still unconverged stays silent: the clock alone now holds availability
+        // false, which is exactly the spurious false the deferral forbids.
+        await client.ExitExternalSourceAsync();
+        Assert.Single(ClientStates(connection));
+
+        // The latch then routes the eventual convergence through the delta path — one full
+        // initial message per connection, recovery as an availability-only delta.
+        connection.RespondToTimeSync = true;
+        await WaitForAsync(() => ClientStates(connection).Count >= 2, TimeSpan.FromSeconds(8));
+
+        var states = ClientStates(connection);
+        Assert.Equal(new bool?[] { false, true }, states.Select(m => m.Payload.Available).ToArray());
+        Assert.Single(states, m => m.Payload.Player is not null);
+    }
+
+    [Fact]
+    public async Task UpdateTimingWhileConverging_SendsNothing_DeferredInitialCarriesTheNewValues()
+    {
+        var (client, connection, _) = CreatePlayerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+
+        // Timing configured at connect, inside the converging window: a player-only delta must
+        // not become the server's "initial" client/state.
+        await client.UpdateTimingAsync(requiredLeadTimeMs: 80, minBufferMs: 40);
+
+        await Task.Delay(100);
+        Assert.Empty(ClientStates(connection));
+
+        // Nothing is lost: the deferred initial reads the timing fields live.
+        connection.RespondToTimeSync = true;
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(8));
+
+        var initial = Assert.Single(ClientStates(connection));
+        Assert.Equal(true, initial.Payload.Available);
+        Assert.NotNull(initial.Payload.Player);
+        Assert.Equal(80, initial.Payload.Player!.RequiredLeadTimeMs);
+        Assert.Equal(40, initial.Payload.Player.MinBufferMs);
+    }
+
+    [Fact]
+    public async Task SourceSignalWhileConverging_SendsNothing_AndResumesAfterTheInitialState()
+    {
+        var clock = new ScriptedClockSynchronizer();
+        var (client, connection, _) = TestClient.Create(configure: options =>
+        {
+            options.ClockSynchronizer = clock;
+            options.Capabilities = new ClientCapabilities { Roles = ["source@v1"], SourceLineSense = true };
+        });
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "source@v1");
+
+        // A source-only delta inside the converging window would become the server's
+        // "initial" client/state; it must be skipped.
+        await client.SetSourceSignalAsync(present: true);
+
+        await Task.Delay(100);
+        Assert.Empty(ClientStates(connection));
+
+        connection.RespondToTimeSync = true;
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(8));
+
+        // After the initial state is out, signal reporting works again.
+        await client.SetSourceSignalAsync(present: true);
+
+        var signal = ClientStates(connection).Last();
+        Assert.Equal("present", signal.Payload.Source!.Signal);
+    }
+
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;

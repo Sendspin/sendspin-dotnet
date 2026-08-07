@@ -309,12 +309,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Reports line-sense signal presence to the server via client/state (source role).
-    /// No-op unless the source role is configured with line sensing.
+    /// No-op unless the source role is configured with line sensing, and skipped while the
+    /// connection's initial client/state is still deferred pending clock sync — a source-only
+    /// delta must not become the first client/state the server sees. The initial message does
+    /// not carry the signal, so a change made inside that window is reported by the app's next
+    /// call after sync converges.
     /// </summary>
     public async Task SetSourceSignalAsync(bool present)
     {
         if (!HasSourceRole() || !_capabilities.SourceLineSense)
             return;
+
+        if (!_initialClientStateSent)
+        {
+            return;
+        }
 
         var message = new ClientStateMessage
         {
@@ -550,7 +559,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Re-report the player state so the server picks up the new timing for subsequent playback.
         // Callers should debounce updates locally per spec; the SDK reports each call verbatim.
-        if (_connection.State == ConnectionState.Connected)
+        // Not before the connection's initial client/state has gone out, though: a player-only
+        // delta must not become the first client/state the server sees (the initial MUST carry
+        // all state fields). Nothing is lost — the deferred initial reads
+        // _requiredLeadTimeMs/_minBufferMs live, so it carries the values applied above.
+        if (_connection.State == ConnectionState.Connected && _initialClientStateSent)
         {
             await SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.StaticDelayMs);
         }
@@ -590,7 +603,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <see cref="ClientStateMessage.CreateAvailability"/> — <see cref="EnterExternalSourceAsync"/>,
     /// <see cref="ExitExternalSourceAsync"/>, and the pipeline error/recovery handlers all set
     /// their input and call this, so availability cannot again drift out of sync one call site at
-    /// a time.
+    /// a time. Before the connection's initial client/state has gone out, a changed value is
+    /// promoted to the full initial message instead of a bare delta (see below).
     /// </summary>
     private async Task PublishAvailabilityAsync()
     {
@@ -609,6 +623,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // documented notify-first/flip-on-success contract.
         if (_connection.State != ConnectionState.Connected)
         {
+            return;
+        }
+
+        // An availability input flipped while the initial client/state is still deferred (e.g. a
+        // pipeline error or external-source enter inside the converging window). A bare delta
+        // must not hit the wire here: the server treats the first client/state it receives as
+        // the initial one, which per spec MUST carry all state fields. Promote the publish to
+        // the full initial message — it reads CurrentAvailability and every player field live,
+        // so it carries this same composed value — and the latch then routes the eventual
+        // convergence through the delta path.
+        if (!_initialClientStateSent)
+        {
+            // ...unless the only input holding availability false is the still-converging
+            // clock (nothing else is wrong). That is exactly the spurious false the deferral
+            // exists to prevent — the server would solo-group the client and never auto-rejoin
+            // it — so stay silent and let the first convergence release the initial state.
+            if (!current && !IsExternalSource && !_clientErrorReported)
+            {
+                return;
+            }
+
+            await SendInitialClientStateAsync();
             return;
         }
 
@@ -1677,48 +1713,46 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Sends the initial client/state message: on activate for clients that need no clock sync,
-    /// or on the first convergence for those that do (see <see cref="FinishHandshake"/>).
-    /// Reports <see cref="CurrentAvailability"/> — not an asserted <c>true</c> — so a reconnect
-    /// while the output is held by an external source (or a pipeline error is outstanding) does
-    /// not invite the server to stream into an occupied output.
-    /// Uses the current <see cref="_playerState"/> which was initialized from ClientCapabilities.
+    /// on the first convergence for those that do (see <see cref="FinishHandshake"/>), or
+    /// promoted from <see cref="PublishAvailabilityAsync"/> when an availability input flips
+    /// inside the converging window. Reports <see cref="CurrentAvailability"/> — not an asserted
+    /// <c>true</c> — so a reconnect while the output is held by an external source (or a
+    /// pipeline error is outstanding) does not invite the server to stream into an occupied
+    /// output. Uses the current <see cref="_playerState"/> which was initialized from
+    /// ClientCapabilities. Failures propagate: the fire-and-forget call sites log them via
+    /// <c>SafeFireAndForget</c>, and the promoted path must throw into
+    /// <see cref="EnterExternalSourceAsync"/>/<see cref="ExitExternalSourceAsync"/> so their
+    /// notify-first rollback still runs.
     /// </summary>
     private async Task SendInitialClientStateAsync()
     {
-        try
-        {
-            // Latched before the send: once per connection, even if a re-convergence races a
-            // send still in flight. A send that fails here is corrected by the next reconnect,
-            // which resets the latch with the rest of the per-connection state.
-            _initialClientStateSent = true;
+        // Latched before the send: once per connection, even if a re-convergence races a
+        // send still in flight. A send that fails here is corrected by the next reconnect,
+        // which resets the latch with the rest of the per-connection state.
+        _initialClientStateSent = true;
 
-            // Send the current player state (initialized from capabilities)
-            bool available = CurrentAvailability;
-            var stateMessage = ClientStateMessage.CreateInitial(
-                available: available,
-                volume: _playerState.Volume,
-                muted: _playerState.Muted,
-                staticDelayMs: _clockSynchronizer.StaticDelayMs,
-                requiredLeadTimeMs: _requiredLeadTimeMs,
-                minBufferMs: _minBufferMs,
-                supportedCommands: GetPlayerSupportedCommands());
-            var stateJson = MessageSerializer.Serialize(stateMessage);
-            _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
-            await _connection.SendMessageAsync(stateMessage);
+        // Send the current player state (initialized from capabilities)
+        bool available = CurrentAvailability;
+        var stateMessage = ClientStateMessage.CreateInitial(
+            available: available,
+            volume: _playerState.Volume,
+            muted: _playerState.Muted,
+            staticDelayMs: _clockSynchronizer.StaticDelayMs,
+            requiredLeadTimeMs: _requiredLeadTimeMs,
+            minBufferMs: _minBufferMs,
+            supportedCommands: GetPlayerSupportedCommands());
+        var stateJson = MessageSerializer.Serialize(stateMessage);
+        _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
+        await _connection.SendMessageAsync(stateMessage);
 
-            // Seed the availability publisher's "last sent" tracker from the value actually
-            // sent, so the first delta PublishAvailabilityAsync sends afterward is neither a
-            // spurious repeat nor a swallowed change.
-            _lastAvailabilitySent = available;
+        // Seed the availability publisher's "last sent" tracker from the value actually
+        // sent, so the first delta PublishAvailabilityAsync sends afterward is neither a
+        // spurious repeat nor a swallowed change.
+        _lastAvailabilitySent = available;
 
-            // Also apply to audio pipeline to ensure consistency
-            _audioPipeline?.SetVolume(_playerState.Volume);
-            _audioPipeline?.SetMuted(_playerState.Muted);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to send initial client state");
-        }
+        // Also apply to audio pipeline to ensure consistency
+        _audioPipeline?.SetVolume(_playerState.Volume);
+        _audioPipeline?.SetMuted(_playerState.Muted);
     }
 
     private void StartTimeSyncLoop()
