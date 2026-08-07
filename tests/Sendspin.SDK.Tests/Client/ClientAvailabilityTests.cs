@@ -6,10 +6,10 @@ using Sendspin.SDK.Tests.Audio;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Availability is a single computed value — <c>(!RequiresClockSync || IsClockSynced) &amp;&amp;
-/// !IsExternalSource &amp;&amp; !pipelineErrored</c> — published only when it changes, rather than
-/// three call sites each asserting it independently (the shape that let the
-/// <c>SendPlayerStateAsync</c> defect happen). These tests exercise the composition and the
+/// Availability is a single computed value — <c>!IsExternalSource &amp;&amp; !pipelineErrored</c>
+/// (clock sync gates only the initial client/state, not ongoing availability) — published only
+/// when it changes, rather than call sites each asserting it independently (the shape that let
+/// the <c>SendPlayerStateAsync</c> defect happen). These tests exercise the composition and the
 /// publish-on-change suppression that a set of independent booleans could not provide.
 /// </summary>
 public class ClientAvailabilityTests

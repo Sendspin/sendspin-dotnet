@@ -141,9 +141,9 @@ public interface ISendspinClient : IAsyncDisposable
     /// The reported volume and mute also become the client's persisted player state, so later
     /// full-state sends (e.g. a reconnect's initial client/state) carry them. While the
     /// connection's initial client/state is still deferred pending clock sync, the call sends
-    /// the full initial message instead of a player-only delta — or nothing yet, when the
-    /// converging clock alone holds availability false; the deferred initial then reports the
-    /// persisted values.
+    /// nothing yet — the deferred initial reports the persisted values once sync converges —
+    /// unless something genuinely holds availability false, in which case it sends the full
+    /// initial message instead of a player-only delta.
     /// </remarks>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>

@@ -584,14 +584,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Before the connection's initial client/state has gone out, a player-only delta must
         // not hit the wire: the server treats the first client/state it receives as the
         // initial one, which per spec MUST carry all state fields. Promote to the full
-        // initial message — it reads the values persisted above — unless the still-converging
-        // clock is the only input holding availability false, in which case stay silent like
-        // UpdateTimingAsync does: an initial sent now would carry exactly the spurious
-        // available: false the deferral exists to prevent, and the deferred initial reads the
-        // persisted values live, so nothing is lost.
+        // initial message — it reads the values persisted above — unless the initial is still
+        // deferred for clock sync with nothing genuinely wrong, in which case stay silent like
+        // UpdateTimingAsync does: an initial sent now would claim available: true before the
+        // spec permits it, and the deferred initial reads the persisted values live, so
+        // nothing is lost.
         if (!_initialClientStateSent)
         {
-            if (!OnlyConvergenceHoldsAvailabilityFalse)
+            if (!InitialStateStillDeferredForClockSync)
             {
                 await SendInitialClientStateAsync();
             }
@@ -634,23 +634,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public bool IsExternalSource { get; private set; }
 
     /// <summary>
-    /// The single source of truth for client/state's <c>available</c> field: composed from the
-    /// three inputs the spec names rather than asserted independently at each call site, which is
-    /// how <see cref="SendPlayerStateAsync"/> once came to hard-code it (see the §4 fix).
+    /// The single source of truth for client/state's <c>available</c> field: composed from its
+    /// inputs rather than asserted independently at each call site, which is how
+    /// <see cref="SendPlayerStateAsync"/> once came to hard-code it (see the §4 fix).
+    /// Clock synchronization is deliberately not an input: it gates only the <em>initial</em>
+    /// client/state (see <see cref="FinishHandshake"/>). Convergence is a statistical threshold
+    /// that oscillates under routine RTT jitter while playback carries on — the pipeline gates
+    /// on minimal sync, not convergence — so composing it here reported a still-playing client
+    /// as not participating in playback, and the server moves an unavailable client to a solo
+    /// group it MUST NOT auto-rejoin.
     /// </summary>
     private bool CurrentAvailability
-        => (!RequiresClockSync() || IsClockSynced) && !IsExternalSource && !_clientErrorReported;
+        => !IsExternalSource && !_clientErrorReported;
 
     /// <summary>
-    /// True while the still-converging clock is the only input composing availability to
-    /// false (nothing else is wrong). Pre-latch senders stay silent in this state rather
-    /// than promote the initial client/state: an initial carrying that spurious
-    /// <c>available: false</c> would make the server move the client to a solo group it
-    /// MUST NOT auto-rejoin — exactly what the deferral in <see cref="FinishHandshake"/>
-    /// exists to prevent. The first convergence releases the initial state instead.
+    /// True while <see cref="FinishHandshake"/>'s clock-sync deferral still holds this
+    /// connection's initial client/state back and no input composes availability to false
+    /// (nothing is genuinely wrong). Pre-latch senders stay silent in this state rather than
+    /// promote the initial: the spec lets a sync-requiring client claim <c>available: true</c>
+    /// only once synchronized, so an initial promoted now would put that claim on the wire
+    /// early — exactly what the deferral exists to prevent. The first convergence releases the
+    /// initial state instead. When an input genuinely holds availability false, promotion goes
+    /// ahead and the initial carries that false.
     /// </summary>
-    private bool OnlyConvergenceHoldsAvailabilityFalse
-        => !CurrentAvailability && !IsExternalSource && !_clientErrorReported;
+    private bool InitialStateStillDeferredForClockSync
+        => RequiresClockSync() && !IsClockSynced && CurrentAvailability;
 
     /// <summary>
     /// The last availability value actually sent to the server, used by
@@ -704,11 +712,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // connection's first client/state.
         if (!_initialClientStateSent)
         {
-            // ...unless the only input holding availability false is the still-converging
-            // clock (nothing else is wrong). That is exactly the spurious false the deferral
-            // exists to prevent — the server would solo-group the client and never auto-rejoin
-            // it — so stay silent and let the first convergence release the initial state.
-            if (OnlyConvergenceHoldsAvailabilityFalse)
+            // ...unless the initial is still deferred for clock sync and nothing else is
+            // wrong (e.g. a pipeline recovery landed inside the converging window). An
+            // initial promoted now would claim available: true before sync is established —
+            // exactly the early claim the deferral exists to prevent — so stay silent and
+            // let the first convergence release the initial state.
+            if (InitialStateStillDeferredForClockSync)
             {
                 return;
             }
@@ -2308,16 +2317,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
             else
             {
-                // Regained sync mid-session: availability may have just composed back to true.
+                // Regained sync mid-session. Availability no longer composes the clock, so
+                // this publish sends nothing unless some other input's own publish was
+                // skipped; the compare-to-last-sent makes it a safe no-op otherwise.
                 PublishAvailabilityAsync().SafeFireAndForget(_logger);
             }
         }
         else if (wasConverged && !_clockSynchronizer.IsConverged)
         {
-            // Lost sync mid-session: a player that cannot schedule samples anymore must tell
-            // the server it is unavailable rather than drift audibly out of the group.
+            // Worth an operator's attention, but deliberately kept off the wire: convergence
+            // is a statistical threshold that oscillates under routine RTT jitter, and
+            // playback carries on regardless (the pipeline gates on minimal sync, not
+            // convergence). Clock sync gates only the initial client/state — publishing
+            // available: false here told the server a still-playing client had left playback,
+            // and the server moves an unavailable client to a solo group it MUST NOT
+            // auto-rejoin, so one RTT spike permanently ejected a speaker from its group.
             _logger.LogWarning("[ClockSync] Convergence lost after {Count} measurements", status.MeasurementCount);
-            PublishAvailabilityAsync().SafeFireAndForget(_logger);
         }
     }
 
