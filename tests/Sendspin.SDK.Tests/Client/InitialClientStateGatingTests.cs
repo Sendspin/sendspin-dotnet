@@ -356,7 +356,11 @@ public class InitialClientStateGatingTests
         var (client, connection, _) = TestClient.Create(configure: options =>
         {
             options.ClockSynchronizer = clock;
-            options.Capabilities = new ClientCapabilities { Roles = ["source@v1"], SourceLineSense = true };
+            options.Capabilities = new ClientCapabilities
+            {
+                Roles = ["source@v1"],
+                SourceSupport = new SourceRoleSupport { LineSense = true }
+            };
         });
         using var _c = client;
 
