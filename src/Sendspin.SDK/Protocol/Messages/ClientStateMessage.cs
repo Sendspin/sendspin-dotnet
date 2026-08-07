@@ -109,7 +109,9 @@ public sealed class ClientStatePayload
 {
     /// <summary>
     /// Whether this client is available to participate in Sendspin playback. For a player or
-    /// source, <c>true</c> additionally means its clock is synchronized with the server.
+    /// source, <c>true</c> additionally means its clock has synchronized with the server on
+    /// this connection — latched at the first convergence rather than tracking the live
+    /// convergence statistic, so a transient convergence dip does not withdraw the claim.
     /// Null omits the field, for a delta that changes only the role objects.
     /// </summary>
     [JsonPropertyName("available")]

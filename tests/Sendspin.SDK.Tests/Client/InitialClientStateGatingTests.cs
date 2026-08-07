@@ -43,6 +43,11 @@ public class InitialClientStateGatingTests
     private static List<ClientStateMessage> ClientStates(FakeSendspinConnection connection) =>
         connection.SnapshotSentMessages().OfType<ClientStateMessage>().ToList();
 
+    /// <summary>Everything sent except the time-sync probes, which are the machinery driving
+    /// convergence rather than traffic under test.</summary>
+    private static List<IMessage> NonTimeSyncMessages(FakeSendspinConnection connection) =>
+        connection.SnapshotSentMessages().Where(m => m is not ClientTimeMessage).ToList();
+
     /// <summary>Reconnects after a drop via the client's own connect path, which resets the
     /// per-connection handshake state (<c>TestClient.CompleteHandshake</c> alone cannot: the
     /// activate would not count as the connection's first).</summary>
@@ -158,11 +163,47 @@ public class InitialClientStateGatingTests
     }
 
     [Fact]
-    public async Task SyncLoss_PublishesAvailableFalse_AndRegainRecoversWithoutResendingInitial()
+    public async Task SyncLossAfterInitialState_ProducesNoWireTraffic()
     {
-        // Both directions of the convergence input flow through the availability publisher:
-        // losing sync mid-session reports available: false, regaining it reports true — as
-        // deltas, never as a second copy of the initial full state.
+        // The live defect this pins against: one RTT spike can push the Kalman offset
+        // uncertainty over the convergence threshold, flipping IsConverged false mid-session.
+        // Playback carries on regardless — the pipeline gates on minimal sync, not
+        // convergence — so a client that published available: false here kept streaming
+        // audio while telling the server it was not participating in playback, and the
+        // server moves an unavailable client to a solo group it MUST NOT auto-rejoin.
+        // Sync establishment is latched per connection at the first convergence: once the
+        // initial state is out, a convergence loss must produce no wire traffic at all.
+        var (client, connection, clock) = CreatePlayerClient();
+        using var _c = client;
+        connection.RespondToTimeSync = true;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+
+        int sentBeforeLoss = NonTimeSyncMessages(connection).Count;
+
+        clock.ConvergeOnMeasurement = false; // the next burst loses convergence
+        int measured = clock.Measurements;
+
+        // Let the loss apply and a further burst complete, so a wrongly-published message
+        // (fire-and-forget) has ample time to land before the absence is asserted.
+        await WaitForAsync(() => clock.Measurements >= measured + 2, TimeSpan.FromSeconds(5));
+
+        // Nothing but the time-sync probes themselves reaches the wire after the loss.
+        Assert.Equal(sentBeforeLoss, NonTimeSyncMessages(connection).Count);
+    }
+
+    [Fact]
+    public async Task SyncLossAndRegain_AfterInitialState_SendNoAvailabilityTraffic()
+    {
+        // Converted from the test that pinned the defect (it demanded a true/false/true
+        // availability sequence over a loss/regain cycle). The contract now: availability
+        // composes the per-connection ClockSyncEstablished latch, set at the first
+        // convergence and never cleared. IsConverged is a statistical threshold that oscillates under RTT
+        // jitter in normal operation, so neither losing it mid-session nor regaining it may
+        // put anything on the wire — no available: false (the server would solo-group the
+        // client and never auto-rejoin it), no availability delta on the regain, and no
+        // second copy of the initial full state.
         var (client, connection, clock) = CreatePlayerClient();
         using var _c = client;
         connection.RespondToTimeSync = true;
@@ -171,24 +212,64 @@ public class InitialClientStateGatingTests
         await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
 
         clock.ConvergeOnMeasurement = false; // the next burst loses convergence
-        await WaitForAsync(
-            () => ClientStates(connection).Any(m => m.Payload.Available == false),
-            TimeSpan.FromSeconds(5));
+        int measured = clock.Measurements;
+        await WaitForAsync(() => clock.Measurements > measured, TimeSpan.FromSeconds(5));
 
         clock.ConvergeOnMeasurement = true; // and a later one regains it
-        await WaitForAsync(() => ClientStates(connection).Count >= 3, TimeSpan.FromSeconds(5));
+        measured = clock.Measurements;
+        await WaitForAsync(() => clock.Measurements >= measured + 2, TimeSpan.FromSeconds(5));
+
+        // The only client/state on the wire is still the one initial full state.
+        var state = Assert.Single(ClientStates(connection));
+        Assert.Equal(true, state.Payload.Available);
+        Assert.NotNull(state.Payload.Player);
+    }
+
+    [Fact]
+    public async Task RecoveryBeforeFirstConvergence_WithholdsAvailableTrue_UntilConvergenceReleasesIt()
+    {
+        // The spec ties a player's available: true to a synchronized clock, and that is not
+        // scoped to the initial message — so when a genuine false promotes the initial inside
+        // the converging window and the condition then clears, the recovery's true must NOT
+        // go out while sync has never been established on this connection. The second half
+        // matters as much: once convergence lands, the pending true must be released — an
+        // implementation that never sends it would leave the server believing a recovered
+        // client unavailable forever.
+        var (client, connection, clock, pipe) = CreatePlayerClientWithPipeline();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+
+        // Pipeline error inside the converging window: promotes the initial with the genuine
+        // available: false.
+        pipe.RaiseError();
+        var first = Assert.Single(ClientStates(connection));
+        Assert.Equal(false, first.Payload.Available);
+
+        // The pipeline recovers, still before any convergence. The recovery ack (a player
+        // delta without `available`) may go out, but no available: true may reach the wire.
+        pipe.SetState(AudioPipelineState.Playing);
+        await Task.Delay(200);
+        Assert.DoesNotContain(ClientStates(connection), m => m.Payload.Available == true);
+
+        // First convergence: the pending true is released, exactly once.
+        connection.RespondToTimeSync = true;
+        await WaitForAsync(
+            () => ClientStates(connection).Any(m => m.Payload.Available == true),
+            TimeSpan.FromSeconds(8));
+
+        int measured = clock.Measurements;
+        await WaitForAsync(() => clock.Measurements >= measured + 2, TimeSpan.FromSeconds(5));
 
         var states = ClientStates(connection);
-        Assert.Equal(new bool?[] { true, false, true }, states.Select(m => m.Payload.Available).ToArray());
-
-        // Exactly one full initial state; the loss/regain travel as availability-only deltas.
-        Assert.Single(states, m => m.Payload.Player is not null);
+        Assert.Single(states, m => m.Payload.Available == true);
+        Assert.Single(states, m => m.Payload.Available == false);
     }
 
     [Fact]
     public async Task AvailabilityFlipWhileConverging_PromotesTheFullInitialState_NotABareDelta()
     {
-        var (client, connection, _) = CreatePlayerClient();
+        var (client, connection, clock) = CreatePlayerClient();
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "player@v1");
@@ -203,15 +284,21 @@ public class InitialClientStateGatingTests
         Assert.Equal(false, first.Payload.Available);
         Assert.NotNull(first.Payload.Player);
 
-        // Exiting while still unconverged stays silent: the clock alone now holds availability
-        // false, which is exactly the spurious false the deferral forbids.
+        // Exiting while sync has never been established on this connection stays silent: the
+        // spec ties a player's available: true to a synchronized clock, so the recovery is
+        // withheld — availability composes the per-connection ClockSyncEstablished latch,
+        // still unset here.
         await client.ExitExternalSourceAsync();
         Assert.Single(ClientStates(connection));
 
-        // The latch then routes the eventual convergence through the delta path — one full
-        // initial message per connection, recovery as an availability-only delta.
+        // The first convergence releases the withheld true — as an availability-only delta:
+        // one full initial message per connection.
         connection.RespondToTimeSync = true;
         await WaitForAsync(() => ClientStates(connection).Count >= 2, TimeSpan.FromSeconds(8));
+
+        // And a further burst adds nothing more.
+        int measured = clock.Measurements;
+        await WaitForAsync(() => clock.Measurements >= measured + 2, TimeSpan.FromSeconds(5));
 
         var states = ClientStates(connection);
         Assert.Equal(new bool?[] { false, true }, states.Select(m => m.Payload.Available).ToArray());

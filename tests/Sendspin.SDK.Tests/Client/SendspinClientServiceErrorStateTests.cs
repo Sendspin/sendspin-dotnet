@@ -10,10 +10,12 @@ namespace Sendspin.SDK.Tests.Client;
 /// <c>SendPlayerStateAckAsync</c> -&gt; <c>CreatePlayerState</c>, which deliberately omits
 /// <c>available</c> (see the §4 fix), and separately calls the availability publisher so a
 /// recovery can re-assert <c>available: true</c> once nothing else keeps the client unavailable.
-/// This fixture never establishes clock sync, so the composed availability
-/// (<c>ClientAvailabilityTests</c> covers the formula) stays <c>false</c> throughout regardless of
-/// the pipeline's error/recovery state — the tests below still hold, but see each one's comment
-/// for what it actually proves under that constraint.
+/// This fixture never completes a handshake or establishes clock sync: the first error
+/// therefore promotes the full initial client/state (carrying the genuine available: false),
+/// and a recovery's available: true is withheld — availability composes the per-connection
+/// ClockSyncEstablished latch, which this fixture never sets, and the spec ties a player's
+/// true to a synchronized clock (<c>ClientAvailabilityTests</c> covers the composition
+/// itself; the gating suite covers the release of a withheld true at first convergence).
 /// </summary>
 public class SendspinClientServiceErrorStateTests
 {
@@ -54,7 +56,7 @@ public class SendspinClientServiceErrorStateTests
     }
 
     [Fact]
-    public async Task RecoveryToPlaying_SendsPlayerStateAck_ButNotAvailability()
+    public async Task RecoveryToPlaying_BeforeSyncEstablished_WithholdsAvailableTrue_SendsAckOnly()
     {
         var (conn, pipe, client) = await ConnectedClientAsync();
         using (client)
@@ -64,13 +66,15 @@ public class SendspinClientServiceErrorStateTests
 
             var messages = conn.SentMessages.OfType<ClientStateMessage>().ToList();
 
-            // messages[0] is the error report (available: false). Recovery calls both the
-            // availability publisher and the player-state ack, but this fixture's clock never
-            // converges, so the publisher's computed value is still false and its own
-            // compare-to-last-sent suppresses a second wire message — leaving messages[1] as the
-            // player-state ack, which carries the player object but no `available`
-            // (ClientAvailabilityTests exercises the synced-clock case, where recovery does send a
-            // second message with available: true).
+            // messages[0] is the error report (the promoted full initial, available: false).
+            // Recovery calls both the availability publisher and the player-state ack, but
+            // this fixture's clock never converges, so ClockSyncEstablished is unset and the
+            // recovery's available: true is withheld — the spec ties a player's true to a
+            // synchronized clock, and the first convergence would release it (the gating
+            // suite's RecoveryBeforeFirstConvergence test covers that release; the synced
+            // recovery path is ClientAvailabilityTests'). messages[1] is therefore the
+            // player-state ack alone, carrying the player object but no `available` (the §4
+            // fix).
             Assert.Equal(2, messages.Count);
             Assert.NotNull(messages[1].Payload.Player);
             Assert.Null(messages[1].Payload.Available);
