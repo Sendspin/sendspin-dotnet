@@ -92,6 +92,8 @@ var client = new SendspinClientService(logger, connection,
     clockSync, capabilities, pipeline);
 ```
 
+> **Note:** the `SendspinClientService` constructor is no longer public — the snippets in this historical guide predate that; construct dial-mode clients with `SendspinClientService.CreateForDial` instead.
+
 These values are:
 1. Sent to the server in the initial `client/state` handshake
 2. Applied to the audio pipeline on connection

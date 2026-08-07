@@ -5,7 +5,7 @@ namespace Sendspin.SDK.Connection.Noise;
 /// drive the encrypted protocol flow (server identity from <c>server/init</c>, and the
 /// matched PSK category for <c>server/activate</c> admissibility checks).
 /// </summary>
-public interface INoiseSessionInfo
+internal interface INoiseSessionInfo
 {
     /// <summary>The server's id (its static public key) from server/init, once received.</summary>
     string? ServerId { get; }

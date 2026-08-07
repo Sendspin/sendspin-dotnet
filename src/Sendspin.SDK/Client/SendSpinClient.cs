@@ -30,9 +30,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IAudioCaptureDevice? _captureDevice;
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
+
+    // Serializes this client's record-store accesses. IPairingRecordStore promises that
+    // "the SDK serializes access"; before EnsurePairingPsk/RotatePairingPsk every mutation
+    // ran on the receive path, and now app threads mutate too. Never held across an await.
+    // Boundary: RecordPskResolver.Resolve also reads the store, from the framing inbound
+    // path — a separate public object this client-private lock cannot reach — so an
+    // app-thread call can still race an in-flight re-handshake's psk_id lookup.
+    // Boundary 2: this lock is per-client, so two clients over one shared store (as
+    // SendspinHostService builds) cannot serialize multi-call sequences against each other —
+    // two concurrent EnsurePairingPsk calls can mint two Pairing records, and Rotate's
+    // remove-then-upsert can interleave with set-pairing-config's. Every individual store
+    // operation is safe after the store-level locking, so the worst case is nondeterminism
+    // (which token wins), not corruption or lockout.
+    private readonly object _pairingStoreLock = new();
+    private readonly SendspinIdentity _identity;
     private bool _markedPskUsed;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
+    private readonly Func<string, CancellationToken, ValueTask>? _presentPinAsync;
     private PinPairingState? _pinState;
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
@@ -59,6 +75,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // at runtime via UpdateTimingAsync (e.g. after measuring lead time or a link-type change).
     private int _requiredLeadTimeMs;
     private int _minBufferMs;
+
+    // The effective unpaired-access setting: seeded from capabilities at construction and
+    // updated when a server changes it via management/set-pairing-config. Held here rather
+    // than written into the app-owned capabilities object, which the SDK does not mutate.
+    // PairingConfigChanged tells the app to persist the new value.
+    private bool _unpairedAccessEnabled;
 
     // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
@@ -162,6 +184,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
+    /// <inheritdoc />
+    public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
+
     /// <summary>
     /// Constructs a client for the encrypted Sendspin protocol.
     /// </summary>
@@ -169,7 +194,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// The Noise session backing this connection. In production this is the same
     /// <see cref="NoiseWireFraming"/> instance the connection uses for framing.
     /// </param>
-    public SendspinClientService(
+    internal SendspinClientService(
         ILogger<SendspinClientService> logger,
         ISendspinConnection connection,
         INoiseSessionInfo session,
@@ -180,7 +205,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _session = session;
         _capabilities = options.Capabilities;
         _pairingStore = options.PairingRecordStore;
+        _identity = options.Identity;
         _pinLockoutStore = options.PinLockoutStore;
+        _presentPinAsync = options.PresentPinAsync;
         _captureDevice = options.CaptureDevice;
         _sourceEncoderFactory = options.SourceEncoderFactory;
         _clockSynchronizer = options.ClockSynchronizer ?? new KalmanClockSynchronizer();
@@ -194,13 +221,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 data => _connection.SendBinaryAsync(data),
                 _logger,
                 IsSourceStreamingPermitted,
-                _sourceEncoderFactory);
+                _sourceEncoderFactory,
+                _capabilities.SourceSupport?.Codec);
         }
         _audioPipeline = options.AudioPipeline;
         _staticDelayStore = options.StaticDelayStore;
 
         _requiredLeadTimeMs = Math.Max(0, _capabilities.RequiredLeadTimeMs);
         _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
+        _unpairedAccessEnabled = _capabilities.UnpairedAccessEnabled;
 
         _playerState = new PlayerState
         {
@@ -319,7 +348,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public async Task SetSourceSignalAsync(bool present)
     {
-        if (!HasSourceRole() || !_capabilities.SourceLineSense)
+        if (!HasSourceRole() || _capabilities.SourceSupport?.LineSense != true)
             return;
 
         if (!_initialClientStateSent)
@@ -340,6 +369,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Creates the ClientHello message from current capabilities.
     /// Extracted for reuse between initial connection and reconnection handshakes.
+    /// Unpaired access is advertised from the effective value rather than the app's
+    /// capabilities, since a server may have changed it via
+    /// <c>management/set-pairing-config</c>: the hello reports what this client will
+    /// actually do.
     /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
@@ -384,12 +417,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             sourceSupport: HasSourceRole()
                 ? new SourceSupport
                 {
-                    Features = _capabilities.SourceLineSense ? new SourceFeatures { LineSense = true } : null,
+                    Features = _capabilities.SourceSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
             trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
             supportedPairMethods: BuildPairMethods(),
-            unpairedAccess: new UnpairedAccess { Enabled = _capabilities.UnpairedAccessEnabled }
+            unpairedAccess: new UnpairedAccess { Enabled = _unpairedAccessEnabled }
         );
     }
 
@@ -759,6 +792,53 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _audioPipeline?.Clear();
     }
 
+    /// <inheritdoc />
+    public string ClientId => _identity.PeerId;
+
+    /// <inheritdoc />
+    public SendspinTrustLevel TrustLevel
+    {
+        get
+        {
+            var category = _session.MatchedPsk?.Category;
+            return category switch
+            {
+                null => SendspinTrustLevel.None,
+                PskCategory.Sentinel => SendspinTrustLevel.Unpaired,
+                PskCategory.Pairing => SendspinTrustLevel.Pairing,
+                PskCategory.LongTerm => SendspinTrustLevel.Paired,
+                // No default: an unrecognised category must never silently read as
+                // "untrusted" — that is the wrong-security-indicator failure mode this
+                // property exists to avoid. Throw and name the value instead.
+                _ => throw new InvalidOperationException($"Unhandled PSK category: {category}"),
+            };
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Per spec #122 the Pairing PSK is per-client and long-lived: a successful pairing does
+    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/>, a
+    /// server's <c>management/set-pairing-config</c>, or a server removing the record via
+    /// <c>management/remove-record</c> replaces or drops the stored record.
+    /// </remarks>
+    public string EnsurePairingPsk()
+    {
+        lock (_pairingStoreLock)
+        {
+            return PairingPskOperations.Ensure(_pairingStore, _identity);
+        }
+    }
+
+    /// <inheritdoc />
+    public string RotatePairingPsk()
+    {
+        lock (_pairingStoreLock)
+        {
+            return PairingPskOperations.Rotate(_pairingStore, _identity);
+        }
+    }
+
     private void OnConnectionStateChanged(object? sender, ConnectionStateChangedEventArgs e)
     {
         _logger.LogDebug("Connection state: {OldState} -> {NewState}", e.OldState, e.NewState);
@@ -771,6 +851,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (e.NewState is ConnectionState.Disconnected or ConnectionState.Reconnecting)
         {
             StopTimeSyncLoop();
+
+            // A pairing attempt cannot survive the session (the CPace counter and handshake
+            // hash reset with it), so release a presenter still showing the PIN.
+            ClearPinState();
         }
 
         // Clean up client state on full disconnection
@@ -861,12 +945,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
 
         string pskId = NoiseConstants.DerivePskId(matched.Key.Span);
-        foreach (var record in _pairingStore.List())
+        lock (_pairingStoreLock)
         {
-            if (record.PskId == pskId && !record.Used)
+            foreach (var record in _pairingStore.List())
             {
-                _pairingStore.Upsert(record with { Used = true });
-                break;
+                if (record.PskId == pskId && !record.Used)
+                {
+                    _pairingStore.Upsert(record with { Used = true });
+                    break;
+                }
             }
         }
 
@@ -1136,7 +1223,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var activities = payload.ActivitiesList ?? [];
         bool hasRoles = payload.ActiveRoles is { Count: > 0 };
 
-        if (IsAdmissible(psk.Category, activities, hasRoles, _capabilities.UnpairedAccessEnabled))
+        if (IsAdmissible(psk.Category, activities, hasRoles, _unpairedAccessEnabled))
         {
             return true;
         }
@@ -1144,7 +1231,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Spec rule ordering: prefer 'pairing_required' when enabling unpaired access
         // would make the activation admissible on a Sentinel-keyed session.
         if (psk.Category == PskCategory.Sentinel
-            && !_capabilities.UnpairedAccessEnabled
+            && !_unpairedAccessEnabled
             && IsAdmissible(psk.Category, activities, hasRoles, unpairedAccessEnabled: true))
         {
             goodbyeReason = "pairing_required";
@@ -1230,9 +1317,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                          && _pairingStore is not null,
         // A PIN method without a lockout store cannot enforce the spec's terminal lockout at
         // 10 failures — IsPinMethodLockedOut would always report false — so offering it would
-        // grant unlimited attempts. Refuse rather than fail open.
+        // grant unlimited attempts. Refuse rather than fail open. Dynamic PIN additionally
+        // requires a presenter: without PresentPinAsync the derived PIN would reach nobody,
+        // so an attempt could only proceed with a PIN the operator never saw.
         "dynamic_pin" => _capabilities.PinPairingMethods.Contains("dynamic_pin")
-                         && _pinLockoutStore is not null,
+                         && _pinLockoutStore is not null
+                         && _presentPinAsync is not null,
         "static_pin" => _capabilities.PinPairingMethods.Contains("static_pin")
                         && _pinLockoutStore is not null,
         _ => false,
@@ -1248,7 +1338,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
-        _pinState = null;
+        ClearPinState();
 
         // Only pairing activates count. The spec defines the CPace counter as the pairing
         // activates since the last Noise handshake; the restart on re-handshake lives in
@@ -1348,11 +1438,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         state.NonceA = PinPairing.DecodeB64Url(msg.Payload.NonceA);
         var h = _session.HandshakeHash!.Value.ToArray();
         string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, pinLength);
-
-        // Emit the PIN via the app's out-channel for the operator to enter into the server.
-        _capabilities.EmitPin?.Invoke(pin);
         state.Pin = pin;
+
+        // Present the PIN through the app's out-channel. Started here (this method runs on
+        // the connection's synchronous receive dispatch, which cannot await); its completion
+        // gates client/pair-auth in SendPairAuthAfterPinPresentedAsync, and its token is
+        // cancelled by ClearPinState when the attempt or the connection is torn down.
+        state.PresentPinCts = new CancellationTokenSource();
+        state.PinPresented = InvokePinPresenterAsync(pin, state.PresentPinCts.Token);
         // The PAKE begins when server/pair-auth arrives (server has the PIN by then).
+    }
+
+    /// <summary>
+    /// Invokes the app's <see cref="SendspinClientOptions.PresentPinAsync"/> presenter.
+    /// Wrapped so a synchronously-throwing presenter faults the stored task — handled where
+    /// the presentation is awaited — instead of throwing into the receive dispatch, whose
+    /// catch filter treats exceptions as hostile peer input.
+    /// </summary>
+    private async Task InvokePinPresenterAsync(string pin, CancellationToken cancellationToken)
+    {
+        // Non-null on every path that reaches a dynamic pair-init: CanOffer refuses
+        // dynamic_pin without a presenter, and without StartPinAttempt(dynamic: true)
+        // there is no { Dynamic: true } state for HandleServerPairInit to act on.
+        await _presentPinAsync!(pin, cancellationToken);
     }
 
     private void HandleServerPairAuth(string json)
@@ -1373,12 +1481,64 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             ad: PinPairing.AdClient);
         state.CPace = cpace;
         state.Sid = sid;
+
+        // Derive stays on the synchronous path: a hostile pake_msg_1 raises CPaceException
+        // into the dispatch catch, which closes the connection as with any malformed input.
         cpace.Derive(PinPairing.DecodeB64Url(msg.Payload.PakeMsg1), PinPairing.AdServer);
 
-        _connection.SendMessageAsync(new ClientPairAuthMessage
+        SendPairAuthAfterPinPresentedAsync(state, cpace.PublicShare).SafeFireAndForget(_logger);
+    }
+
+    /// <summary>
+    /// Sends client/pair-auth once the PIN presentation has completed. The share itself
+    /// leaks nothing (CPace), but the reply must not leave this client before the operator
+    /// could have seen the PIN — a presenter that has not finished displaying it cannot have
+    /// had its PIN entered — so a slow presenter delays the PAKE rather than racing it. For
+    /// static PIN (no presentation) this completes synchronously, as before. The presentation
+    /// itself is awaited and its failure handled here; the fire-and-forget boundary at the
+    /// call site observes only the send, exactly as it did when the send was unconditional.
+    /// </summary>
+    private async Task SendPairAuthAfterPinPresentedAsync(PinPairingState state, byte[] publicShare)
+    {
+        if (state.PinPresented is { } presented)
         {
-            Payload = new ClientPairAuthPayload { PakeMsg2 = B64Url(cpace.PublicShare) },
-        }).SafeFireAndForget(_logger);
+            try
+            {
+                await presented;
+            }
+            catch (Exception ex)
+            {
+                // Cancelled or failed. If the attempt was already torn down (abort,
+                // supersession, disconnect — the paths that cancel the presentation), its
+                // outcome is settled and a successor attempt's state must not be clobbered.
+                // Otherwise the app could not present the PIN, so the operator can never
+                // enter it: fail closed with the reason list's client-side-gave-up value
+                // rather than completing a PAKE nobody can win.
+                if (ReferenceEquals(_pinState, state))
+                {
+                    if (ex is not OperationCanceledException)
+                    {
+                        _logger.LogError(ex, "PresentPinAsync failed; aborting the PIN attempt");
+                    }
+
+                    AbortPin("user_cancelled");
+                }
+
+                return;
+            }
+        }
+
+        // The attempt may have been superseded or aborted while the presentation was
+        // pending; a stale share must not be sent into whatever replaced it.
+        if (!ReferenceEquals(_pinState, state))
+        {
+            return;
+        }
+
+        await _connection.SendMessageAsync(new ClientPairAuthMessage
+        {
+            Payload = new ClientPairAuthPayload { PakeMsg2 = B64Url(publicShare) },
+        });
     }
 
     private void HandleServerPairConfirm(string json)
@@ -1421,7 +1581,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void AbortPin(string reason)
     {
-        _pinState = null;
+        ClearPinState();
         _connection.SendMessageAsync(new PairAbortMessage
         {
             Payload = new PairAbortPayload { Reason = reason },
@@ -1450,6 +1610,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         public string? Pin;
         public byte[]? Sid;
         public CPace? CPace;
+
+        // Set for a dynamic attempt when server/pair-init arrives: the app's PIN
+        // presentation, awaited before client/pair-auth is sent, and the cancellation
+        // fired when the attempt or connection is torn down.
+        public Task? PinPresented;
+        public CancellationTokenSource? PresentPinCts;
+    }
+
+    /// <summary>
+    /// Drops the in-flight PIN attempt, if any, and cancels its pending PIN presentation,
+    /// so a presenter still holding the PIN (dialog, speaker) is released when the attempt
+    /// is aborted, superseded, or the connection or client goes away.
+    /// </summary>
+    private void ClearPinState()
+    {
+        var state = _pinState;
+        _pinState = null;
+        if (state?.PresentPinCts is { } cts)
+        {
+            cts.Cancel();
+            cts.Dispose();
+        }
     }
 
     /// <summary>
@@ -1466,8 +1648,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (_pairingStore is not null && ServerId is not null)
         {
-            _pairingStore.Upsert(new PairingRecord(
-                _pendingPairingPsk, PskCategory.LongTerm, ServerId));
+            lock (_pairingStoreLock)
+            {
+                _pairingStore.Upsert(new PairingRecord(
+                    _pendingPairingPsk, PskCategory.LongTerm, ServerId));
+            }
+
             _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
         }
         else
@@ -1530,9 +1716,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             case MessageTypes.ManagementListRecords:
             {
-                var records = (_pairingStore?.List() ?? [])
-                    .Select(r => new ManagementRecordEntry(r.PskId, r.ServerId, r.Used))
-                    .ToList();
+                List<ManagementRecordEntry> records;
+                lock (_pairingStoreLock)
+                {
+                    records = (_pairingStore?.List() ?? [])
+                        .Select(r => new ManagementRecordEntry(r.PskId, r.ServerId, r.Used))
+                        .ToList();
+                }
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new ManagementRecordsData(records),
                     MessageSerializerContext.Default.ManagementRecordsData);
@@ -1563,14 +1753,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (_pairingStore is null)
                 {
                     result.Result = "storage_exhausted";
+                    break;
                 }
-                else if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
+
+                lock (_pairingStoreLock)
                 {
-                    result.Result = "already_exists";
-                }
-                else
-                {
-                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                    if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
+                    {
+                        result.Result = "already_exists";
+                    }
+                    else
+                    {
+                        _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                    }
                 }
 
                 break;
@@ -1580,17 +1775,45 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 string pskId = payload.GetProperty("psk_id").GetString()
                     ?? throw new FormatException("psk_id missing");
-                var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
-                if (record is null)
+                bool removed = false;
+                bool removedPairing = false;
+                if (_pairingStore is not null)
+                {
+                    lock (_pairingStoreLock)
+                    {
+                        var record = _pairingStore.List().FirstOrDefault(r => r.PskId == pskId);
+                        if (record is not null)
+                        {
+                            _pairingStore.Remove(pskId);
+                            removed = true;
+                            removedPairing = record.Category == PskCategory.Pairing;
+                        }
+                    }
+                }
+
+                if (!removed)
                 {
                     result.Result = "not_found";
                     break;
                 }
 
-                _pairingStore!.Remove(pskId);
                 if (_session.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
                 {
                     _pendingSelfRemoval = true;
+                }
+
+                if (removedPairing)
+                {
+                    // The server just invalidated any token EnsurePairingPsk handed out (the
+                    // next call mints a fresh PSK), which is the same staleness
+                    // set-pairing-config's psk replacement causes — report it the same way.
+                    // Raised outside _pairingStoreLock for the same reason as there:
+                    // subscribers run arbitrary app code and must not run under the lock.
+                    PairingConfigChanged?.Invoke(this, new PairingConfigChangedEventArgs
+                    {
+                        UnpairedAccessEnabled = _unpairedAccessEnabled,
+                        PairingPskReplaced = true,
+                    });
                 }
 
                 break;
@@ -1602,7 +1825,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new PairingConfigData(
                         new PairingMethodState(Enabled: true),
-                        new PairingMethodState(_capabilities.UnpairedAccessEnabled)),
+                        new PairingMethodState(_unpairedAccessEnabled)),
                     MessageSerializerContext.Default.PairingConfigData);
                 break;
             }
@@ -1617,12 +1840,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
                 }
 
+                // Parse both fields before applying either, so a request refused partway
+                // (no store, undecodable psk) changes nothing, and the single change
+                // event below always describes a fully applied request.
+                bool? requestedUnpairedAccess = null;
                 if (payload.TryGetProperty("unpaired_access", out var ua)
                     && ua.TryGetProperty("enabled", out var uaEnabled))
                 {
-                    _capabilities.UnpairedAccessEnabled = uaEnabled.GetBoolean();
+                    requestedUnpairedAccess = uaEnabled.GetBoolean();
                 }
 
+                byte[]? newPairingPsk = null;
                 if (payload.TryGetProperty("pairing_psk", out var pp)
                     && pp.TryGetProperty("psk", out var pskEl))
                 {
@@ -1632,13 +1860,44 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         break;
                     }
 
-                    byte[] psk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
-                    foreach (var old in _pairingStore.List().Where(r => r.Category == PskCategory.Pairing))
-                    {
-                        _pairingStore.Remove(old.PskId);
-                    }
+                    newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
+                }
 
-                    _pairingStore.Upsert(new PairingRecord(psk, PskCategory.Pairing));
+                // The spec permits the server to make these changes, so the SDK honours
+                // them — against its own effective state, never the app's capabilities.
+                bool unpairedAccessChanged = false;
+                if (requestedUnpairedAccess is { } enabled)
+                {
+                    unpairedAccessChanged = enabled != _unpairedAccessEnabled;
+                    _unpairedAccessEnabled = enabled;
+                }
+
+                if (newPairingPsk is not null)
+                {
+                    lock (_pairingStoreLock)
+                    {
+                        // _pairingStore (readonly) was verified non-null when the psk parsed.
+                        foreach (var old in _pairingStore!.List().Where(r => r.Category == PskCategory.Pairing))
+                        {
+                            _pairingStore.Remove(old.PskId);
+                        }
+
+                        _pairingStore.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing));
+                    }
+                }
+
+                if (unpairedAccessChanged || newPairingPsk is not null)
+                {
+                    // One event per request, after every change is applied, and outside
+                    // _pairingStoreLock: subscribers run arbitrary app code, and raising
+                    // under the lock would let that code block against other threads
+                    // contending for it (same-thread re-entry is safe; cross-thread
+                    // waits under the lock are the deadlock hazard).
+                    PairingConfigChanged?.Invoke(this, new PairingConfigChangedEventArgs
+                    {
+                        UnpairedAccessEnabled = _unpairedAccessEnabled,
+                        PairingPskReplaced = newPairingPsk is not null,
+                    });
                 }
 
                 break;
@@ -1683,10 +1942,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         string pskId = NoiseConstants.DerivePskId(current.Key.Span);
-        var record = _pairingStore?.List().FirstOrDefault(r => r.PskId == pskId);
-        if (record is not null && record.ServerId is not null)
+        bool removed = false;
+        if (_pairingStore is not null)
         {
-            _pairingStore!.Remove(pskId);
+            lock (_pairingStoreLock)
+            {
+                var record = _pairingStore.List().FirstOrDefault(r => r.PskId == pskId);
+                if (record is not null && record.ServerId is not null)
+                {
+                    _pairingStore.Remove(pskId);
+                    removed = true;
+                }
+            }
+        }
+
+        if (removed)
+        {
             _logger.LogInformation("server/unpair: removed pairing record for {ServerId}", ServerId);
         }
 
@@ -1698,7 +1969,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<PairAbortMessage>(json);
         _logger.LogWarning("Pairing aborted: {Reason}", message?.Payload.Reason ?? "unknown");
         _pendingPairingPsk = null;
-        _pinState = null;
+        ClearPinState();
     }
 
     /// <summary>
@@ -2617,6 +2888,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        ClearPinState();
         UnsubscribeConnectionEvents();
     }
 
@@ -2626,6 +2898,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        ClearPinState();
         UnsubscribeConnectionEvents();
 
         // NOTE: We do NOT dispose _audioPipeline here - it's a shared singleton

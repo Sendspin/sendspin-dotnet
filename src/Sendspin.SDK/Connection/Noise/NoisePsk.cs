@@ -20,12 +20,12 @@ public enum PskCategory
 /// For stored-pubkey records, the server id the PSK is bound to; the handshake fails if
 /// it does not match the connected server. Null for shared-PSK records and the sentinel.
 /// </param>
-public sealed record NoisePsk(ReadOnlyMemory<byte> Key, PskCategory Category, string? ServerId = null);
+internal sealed record NoisePsk(ReadOnlyMemory<byte> Key, PskCategory Category, string? ServerId = null);
 
 /// <summary>
 /// Resolves the psk_id received in Noise handshake message 1 to a PSK candidate.
 /// </summary>
-public interface INoisePskResolver
+internal interface INoisePskResolver
 {
     /// <summary>Returns the PSK whose derived psk_id matches, or null for a lookup miss.</summary>
     NoisePsk? Resolve(string pskId);
@@ -34,7 +34,7 @@ public interface INoisePskResolver
 /// <summary>
 /// A resolver that knows only the published Sentinel PSK - the pre-pairing default.
 /// </summary>
-public sealed class SentinelPskResolver : INoisePskResolver
+internal sealed class SentinelPskResolver : INoisePskResolver
 {
     /// <summary>Shared stateless instance.</summary>
     public static SentinelPskResolver Instance { get; } = new();

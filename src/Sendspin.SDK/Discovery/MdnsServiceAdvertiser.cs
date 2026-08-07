@@ -26,9 +26,9 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
     public bool IsAdvertising { get; private set; }
 
     /// <summary>
-    /// The client ID being advertised.
+    /// The DNS-SD instance name being advertised.
     /// </summary>
-    public string ClientId => _options.ClientId;
+    public string InstanceName => _options.InstanceName;
 
     public MdnsServiceAdvertiser(ILogger<MdnsServiceAdvertiser> logger, AdvertiserOptions? options = null)
     {
@@ -102,9 +102,9 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
                 throw new InvalidOperationException("No valid network addresses found for mDNS advertising");
             }
 
-            // Service type _sendspin._tcp.local., instance name = client ID.
+            // Service type _sendspin._tcp.local., instance name = DNS-SD instance label.
             _serviceProfile = new ServiceProfile(
-                instanceName: _options.ClientId,
+                instanceName: _options.InstanceName,
                 serviceName: "_sendspin._tcp",
                 port: (ushort)_options.Port,
                 addresses: addresses);
@@ -137,8 +137,8 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
 
             IsAdvertising = true;
             _logger.LogInformation(
-                "Advertising Sendspin client: {ClientId} on port {Port} (path={Path})",
-                _options.ClientId, _options.Port, _options.Path);
+                "Advertising Sendspin client: {InstanceName} on port {Port} (path={Path})",
+                _options.InstanceName, _options.Port, _options.Path);
 
             return Task.CompletedTask;
         }
@@ -157,7 +157,7 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
         if (!IsAdvertising)
             return Task.CompletedTask;
 
-        _logger.LogInformation("Stopping mDNS advertisement for {ClientId}", _options.ClientId);
+        _logger.LogInformation("Stopping mDNS advertisement for {InstanceName}", _options.InstanceName);
 
         try
         {
@@ -250,10 +250,13 @@ public sealed class AdvertiserOptions
     public bool Enabled { get; set; } = true;
 
     /// <summary>
-    /// Unique client identifier.
+    /// The DNS-SD service instance label (the first component of the advertised
+    /// <c>&lt;instance&gt;._sendspin._tcp.local.</c> name). This is not a protocol identifier —
+    /// the Sendspin spec's client mDNS advertisement carries no <c>client_id</c> at all, only
+    /// the service type, port, and the <c>path</c>/<c>name</c> TXT records.
     /// Default: sendspin-windows-{hostname}
     /// </summary>
-    public string ClientId { get; set; } = $"sendspin-windows-{Environment.MachineName.ToLowerInvariant()}";
+    public string InstanceName { get; set; } = $"sendspin-windows-{Environment.MachineName.ToLowerInvariant()}";
 
     /// <summary>
     /// Human-readable player name (advertised in TXT record as "name").

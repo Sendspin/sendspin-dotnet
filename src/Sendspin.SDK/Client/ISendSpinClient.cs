@@ -194,6 +194,42 @@ public interface ISendspinClient : IAsyncDisposable
     void ClearAudioBuffer();
 
     /// <summary>
+    /// This client's <c>client_id</c>: the base64url-encoded Curve25519 public key of the
+    /// identity this client was constructed with. Stable across reconnects and restarts as
+    /// long as the same identity is reused.
+    /// </summary>
+    string ClientId { get; }
+
+    /// <summary>
+    /// How far the current session's peer is trusted. See <see cref="SendspinTrustLevel"/> —
+    /// in particular, <see cref="SendspinTrustLevel.Unpaired"/> describes trust, not whether
+    /// the connection is encrypted.
+    /// </summary>
+    SendspinTrustLevel TrustLevel { get; }
+
+    /// <summary>
+    /// Returns this client's pairing token, generating and persisting a Pairing PSK if none is
+    /// stored. Idempotent: repeated calls return the same token until the PSK is replaced by
+    /// <see cref="RotatePairingPsk"/>, by a server's <c>management/set-pairing-config</c>, or
+    /// by a server removing the Pairing record via <c>management/remove-record</c>. Each of
+    /// those raises <see cref="PairingConfigChanged"/> with
+    /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> set.
+    /// Hand the string to your UI to render as a QR code or to display for pasting.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// No pairing record store is configured, so a generated PSK could not be persisted.
+    /// </exception>
+    string EnsurePairingPsk();
+
+    /// <summary>
+    /// Replaces this client's Pairing PSK with a freshly generated one and returns the new
+    /// token. Any token previously handed out stops being valid. The spec forbids the client
+    /// rotating on its own, so this exists to be called only by deliberate operator action.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No pairing record store is configured.</exception>
+    string RotatePairingPsk();
+
+    /// <summary>
     /// Event raised when connection state changes.
     /// </summary>
     event EventHandler<ConnectionStateChangedEventArgs>? ConnectionStateChanged;
@@ -257,4 +293,16 @@ public interface ISendspinClient : IAsyncDisposable
     /// The payload is the same object cached on <see cref="LastStreamStart"/>.
     /// </summary>
     event EventHandler<StreamStartPayload>? StreamStartReceived;
+
+    /// <summary>
+    /// Raised when a server changes this client's pairing configuration via
+    /// <c>management/set-pairing-config</c> — the effective unpaired-access setting changed,
+    /// the stored Pairing PSK was replaced, or both — or removes the stored Pairing record
+    /// via <c>management/remove-record</c>. The SDK applies the change to its own
+    /// effective state — never to the <see cref="ClientCapabilities"/> instance the app
+    /// owns — so subscribe to this to persist the new configuration. When
+    /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is true, any token
+    /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
+    /// </summary>
+    event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 }

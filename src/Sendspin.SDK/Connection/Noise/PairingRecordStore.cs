@@ -30,7 +30,10 @@ public sealed record PairingRecord(
 
 /// <summary>
 /// Stores the client's pairing records (long-term PSKs and staged Pairing PSKs).
-/// Implementations need not be thread-safe; the SDK serializes access.
+/// The SDK may call an implementation from an app thread (<c>EnsurePairingPsk</c>,
+/// <c>RotatePairingPsk</c>) concurrently with a connection's receive thread, so an
+/// implementation must be safe for concurrent use. Both implementations shipped in this
+/// package are.
 /// </summary>
 public interface IPairingRecordStore
 {
@@ -48,15 +51,28 @@ public interface IPairingRecordStore
 public sealed class InMemoryPairingRecordStore : IPairingRecordStore
 {
     private readonly Dictionary<string, PairingRecord> _records = new();
+    private readonly object _lock = new();
 
     /// <inheritdoc/>
-    public IReadOnlyList<PairingRecord> List() => _records.Values.ToList();
+    public IReadOnlyList<PairingRecord> List()
+    {
+        lock (_lock)
+            return _records.Values.ToList();
+    }
 
     /// <inheritdoc/>
-    public void Upsert(PairingRecord record) => _records[record.PskId] = record;
+    public void Upsert(PairingRecord record)
+    {
+        lock (_lock)
+            _records[record.PskId] = record;
+    }
 
     /// <inheritdoc/>
-    public void Remove(string pskId) => _records.Remove(pskId);
+    public void Remove(string pskId)
+    {
+        lock (_lock)
+            _records.Remove(pskId);
+    }
 }
 
 /// <summary>
@@ -73,6 +89,7 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
     private readonly string _path;
     private readonly ILogger _logger;
     private readonly Dictionary<string, PairingRecord> _records = new();
+    private readonly object _lock = new();
 
     /// <summary>
     /// Creates a store backed by the given file, loading existing records. A malformed
@@ -161,22 +178,35 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
     }
 
     /// <inheritdoc/>
-    public IReadOnlyList<PairingRecord> List() => _records.Values.ToList();
+    public IReadOnlyList<PairingRecord> List()
+    {
+        lock (_lock)
+            return _records.Values.ToList();
+    }
 
     /// <inheritdoc/>
     public void Upsert(PairingRecord record)
     {
-        _records[record.PskId] = record;
-        Save();
+        lock (_lock)
+        {
+            _records[record.PskId] = record;
+            Save();
+        }
     }
 
     /// <inheritdoc/>
     public void Remove(string pskId)
     {
-        if (_records.Remove(pskId))
-            Save();
+        lock (_lock)
+        {
+            if (_records.Remove(pskId))
+                Save();
+        }
     }
 
+    // Called only from Upsert/Remove above, always under _lock — it must not take the lock
+    // itself, or re-entrancy would obscure who owns it. SecureFile.WriteAllTextAtomic is
+    // synchronous, so nothing awaits while the lock is held.
     private void Save()
     {
         var entries = _records.Values
@@ -190,7 +220,7 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
 /// Resolves psk_ids against a record store, falling back to the published Sentinel PSK.
 /// This is the resolver a paired client uses.
 /// </summary>
-public sealed class RecordPskResolver : INoisePskResolver
+internal sealed class RecordPskResolver : INoisePskResolver
 {
     private readonly IPairingRecordStore _store;
 

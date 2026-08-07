@@ -52,6 +52,15 @@ public sealed class SendspinClientOptions
     /// </summary>
     public IPinLockoutStore? PinLockoutStore { get; init; }
 
+    /// <summary>
+    /// Presents a derived dynamic PIN to the operator through the app's out-channel (display,
+    /// speaker) so it can be entered into the server. Required when <c>"dynamic_pin"</c> is
+    /// offered in <see cref="ClientCapabilities.PinPairingMethods"/>; pairing fails closed
+    /// without it. Awaited before the client proceeds, so a slow presenter delays pairing
+    /// rather than racing it.
+    /// </summary>
+    public Func<string, CancellationToken, ValueTask>? PresentPinAsync { get; init; }
+
     /// <summary>Capture device for the <c>source@v1</c> role.</summary>
     public IAudioCaptureDevice? CaptureDevice { get; init; }
 

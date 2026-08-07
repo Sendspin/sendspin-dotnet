@@ -9,27 +9,38 @@ public static class ClientRoles
     /// <summary>
     /// Player role - outputs synchronized audio.
     /// </summary>
-    public const string Player = "player";
+    public const string Player = "player@v1";
 
     /// <summary>
     /// Controller role - can control group playback (play, pause, volume, etc.).
     /// </summary>
-    public const string Controller = "controller";
+    public const string Controller = "controller@v1";
 
     /// <summary>
     /// Metadata role - receives track metadata updates.
     /// </summary>
-    public const string Metadata = "metadata";
+    public const string Metadata = "metadata@v1";
 
     /// <summary>
     /// Artwork role - receives album artwork.
     /// </summary>
-    public const string Artwork = "artwork";
+    public const string Artwork = "artwork@v1";
 
     /// <summary>
     /// Visualizer role - receives audio visualization data.
     /// </summary>
-    public const string Visualizer = "visualizer";
+    public const string Visualizer = "visualizer@v1";
+
+    /// <summary>
+    /// Color role - receives the server-computed color palette derived from the playing
+    /// audio, for ambient lighting and UI theming.
+    /// </summary>
+    public const string Color = "color@v1";
+
+    /// <summary>
+    /// Source role - captures audio from an input device and sends it to the server.
+    /// </summary>
+    public const string Source = "source@v1";
 }
 
 /// <summary>

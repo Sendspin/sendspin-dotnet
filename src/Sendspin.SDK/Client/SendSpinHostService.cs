@@ -30,6 +30,12 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly Dictionary<string, ActiveServerConnection> _connections = new();
     private readonly object _connectionsLock = new();
 
+    // Serializes this host's EnsurePairingPsk/RotatePairingPsk sequences. The per-connection
+    // clients hold their own private locks over the same shared store, so cross-object
+    // sequences can still interleave — every individual store operation is safe (the shipped
+    // stores lock internally), so the worst case is nondeterminism, not corruption.
+    private readonly object _pairingStoreLock = new();
+
     /// <summary>
     /// Whether the host is running (listening and advertising).
     /// </summary>
@@ -41,9 +47,9 @@ public sealed class SendspinHostService : IAsyncDisposable
     public bool IsAdvertising => _advertiser.IsAdvertising;
 
     /// <summary>
-    /// The client ID being advertised.
+    /// The DNS-SD instance name being advertised.
     /// </summary>
-    public string ClientId => _advertiser.ClientId;
+    public string InstanceName => _advertiser.InstanceName;
 
     /// <summary>
     /// The actual port the listener is bound to (resolves an OS-assigned port when configured as 0).
@@ -137,6 +143,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<string>? PairingCompleted;
 
     /// <summary>
+    /// Raised when a server on any connection changes this client's pairing configuration
+    /// via <c>management/set-pairing-config</c>, or removes the stored Pairing record via
+    /// <c>management/remove-record</c>. Forwarded from the per-connection client — see
+    /// <see cref="ISendspinClient.PairingConfigChanged"/>. Subscribe to persist the new
+    /// effective configuration; without that, a server-made change reverts on restart.
+    /// </summary>
+    public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
+
+    /// <summary>
     /// Gets the server ID of the server that most recently had playback_state "playing".
     /// Used to break an arbitration tie between two connections that declare no activities.
     /// </summary>
@@ -212,7 +227,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         var listenOpts = listenerOptions ?? new ListenerOptions();
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
         {
-            ClientId = _options.Capabilities.ClientId,
+            InstanceName = _options.Capabilities.ClientName,
             PlayerName = _options.Capabilities.ClientName,
             Port = listenOpts.Port,
             Path = listenOpts.Path
@@ -354,6 +369,41 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Returns this client's pairing token, generating and persisting a Pairing PSK if none
+    /// is stored. Works before and between connections — in host mode the QR code has to be
+    /// shown before a server dials in, when no per-connection client exists yet. Same
+    /// contract as <see cref="ISendspinClient.EnsurePairingPsk"/>: idempotent until the PSK
+    /// is replaced, and a client over the same store and identity returns the same token.
+    /// </summary>
+    /// <returns>The pairing token, for the UI to render as a QR code or display for pasting.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// No pairing record store is configured, so a generated PSK could not be persisted.
+    /// </exception>
+    public string EnsurePairingPsk()
+    {
+        lock (_pairingStoreLock)
+        {
+            return PairingPskOperations.Ensure(_options.PairingRecordStore, _options.Identity);
+        }
+    }
+
+    /// <summary>
+    /// Replaces this client's Pairing PSK with a freshly generated one and returns the new
+    /// token. Same contract as <see cref="ISendspinClient.RotatePairingPsk"/>: any token
+    /// previously handed out stops being valid, and this exists to be called only by
+    /// deliberate operator action.
+    /// </summary>
+    /// <returns>The new pairing token; any token previously handed out stops being valid.</returns>
+    /// <exception cref="InvalidOperationException">No pairing record store is configured.</exception>
+    public string RotatePairingPsk()
+    {
+        lock (_pairingStoreLock)
+        {
+            return PairingPskOperations.Rotate(_options.PairingRecordStore, _options.Identity);
+        }
+    }
+
     private void OnServerConnected(object? sender, WebSocketClientConnection webSocket)
     {
         HandleServerConnectedAsync(webSocket).SafeFireAndForget(_logger);
@@ -417,6 +467,7 @@ public sealed class SendspinHostService : IAsyncDisposable
                 clientOptions);
 
             client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
+            client.PairingConfigChanged += (s, e) => PairingConfigChanged?.Invoke(this, e);
 
             client.GroupStateChanged += (s, g) =>
             {
