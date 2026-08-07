@@ -1207,7 +1207,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             string.Join(", ", payload.ActivitiesList),
             string.Join(", ", payload.ActiveRoles ?? LastServerHello?.ActiveRoles ?? []));
 
-        if (payload.ActivitiesList.Contains(Activities.Pairing))
+        bool pairing = payload.ActivitiesList.Contains(Activities.Pairing);
+        if (pairing)
         {
             HandlePairingActivate(payload);
         }
@@ -1224,6 +1225,27 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 ServerHelloReceived?.Invoke(this, hello);
             }
+        }
+
+        // The time-sync loop runs only outside a pairing activation. A pairing activate
+        // grants no roles, so there is nothing to synchronize a clock for — and the
+        // reference server stops reading the socket while the operator enters the PIN,
+        // then treats the first buffered frame as the next pairing message, so a probe
+        // sent during that window aborts the attempt as a protocol error. Stopping here
+        // covers a pairing activate arriving mid-session with the loop already running.
+        // Starting on every non-pairing activate (idempotent — StartTimeSyncLoop stops
+        // any running loop first) is what resumes it afterwards, and what starts it at
+        // all when the connection's FIRST activate was the pairing one and FinishHandshake
+        // therefore could not. The clock synchronizer is deliberately NOT reset when
+        // stopping: its measurements remain valid across the pairing window, so playback
+        // resumes without re-converging.
+        if (pairing)
+        {
+            StopTimeSyncLoop();
+        }
+        else
+        {
+            StartTimeSyncLoop();
         }
 
         ServerActivateReceived?.Invoke(this, payload);
@@ -2054,9 +2076,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             SendInitialClientStateAsync().SafeFireAndForget(_logger);
         }
 
-        // Start time synchronization loop with adaptive intervals — this is what produces the
-        // convergence a deferred initial state waits for.
-        StartTimeSyncLoop();
+        // The time-sync loop — which produces the convergence a deferred initial state
+        // waits for — is started by the caller, HandleServerActivate, not here: it runs
+        // only outside a pairing activation, and only the caller knows the activate's
+        // activities.
     }
 
     /// <summary>
