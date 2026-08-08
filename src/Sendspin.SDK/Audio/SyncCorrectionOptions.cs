@@ -67,6 +67,15 @@ public sealed class SyncCorrectionOptions
     public long ReconnectStabilizationMicroseconds { get; set; } = 2_000_000;
 
     /// <summary>
+    /// When true (default), the sync error tracks post-anchor movement of the Kalman
+    /// clock offset, so absolute alignment to the server schedule holds over long
+    /// gapless streams instead of drifting with relative crystal error. Static delay
+    /// is excluded; delay changes keep their explicit re-anchor semantics.
+    /// Set false to restore the pre-9.2 pace-only behavior.
+    /// </summary>
+    public bool TrackClockDrift { get; set; } = true;
+
+    /// <summary>
     /// Tolerance window around the scheduled start time. Compensates for audio
     /// callback timing granularity. Default 10 ms.
     /// </summary>
@@ -167,6 +176,7 @@ public sealed class SyncCorrectionOptions
         StartupGracePeriodMicroseconds = StartupGracePeriodMicroseconds,
         ScheduledStartGraceWindowMicroseconds = ScheduledStartGraceWindowMicroseconds,
         ReconnectStabilizationMicroseconds = ReconnectStabilizationMicroseconds,
+        TrackClockDrift = TrackClockDrift,
     };
 
     /// <summary>

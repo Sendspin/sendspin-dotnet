@@ -11,7 +11,8 @@ namespace Sendspin.SDK.Tests.Audio;
 internal sealed class FakeClockSynchronizer : IClockSynchronizer
 {
     /// <summary>
-    /// Offset applied in conversions: client_time = server_time + offset.
+    /// Offset applied in conversions, matching KalmanClockSynchronizer's convention:
+    /// offset = server_time - client_time, so client_time = server_time - offset.
     /// Zero mimics the pre-sync state (raw server timestamps pass through).
     /// </summary>
     public long OffsetMicroseconds { get; set; }
@@ -23,10 +24,10 @@ internal sealed class FakeClockSynchronizer : IClockSynchronizer
     public double StaticDelayMs { get; set; }
 
     public long ServerToClientTime(long serverTime) =>
-        serverTime + OffsetMicroseconds - (long)(StaticDelayMs * 1000);
+        serverTime - OffsetMicroseconds - (long)(StaticDelayMs * 1000);
 
     public long ClientToServerTime(long clientTime) =>
-        clientTime - OffsetMicroseconds + (long)(StaticDelayMs * 1000);
+        clientTime + OffsetMicroseconds;
 
     public void ProcessMeasurement(long t1, long t2, long t3, long t4)
     {

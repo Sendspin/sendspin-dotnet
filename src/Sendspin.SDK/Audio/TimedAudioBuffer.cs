@@ -111,6 +111,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     // snapshot and still get corrected. See CaptureSyncErrorBaseline.
     private double _syncErrorBaselineMicroseconds;
     private bool _syncErrorBaselineCaptured;
+
+    // Post-anchor clock-drift tracking (SyncCorrectionOptions.TrackClockDrift):
+    // the Kalman offset captured when the sync-error reference was (re)established,
+    // and the latest drift term (current offset - anchor offset). A rising offset
+    // moves the schedule earlier => playing late => positive error contribution.
+    private double _clockOffsetAtAnchorUs;
+    private double _clockDriftUs;
+    private bool _clockOffsetCaptured;
     private long _samplesReadSinceStart;        // Total samples READ (consumed) since playback started
     private long _samplesOutputSinceStart;      // Total samples OUTPUT since playback started (for stats)
     private double _microsecondsPerSample;      // Duration of one sample in microseconds
@@ -391,6 +399,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 _playbackStartLocalTime = currentLocalTime - CalibratedStartupLatencyMicroseconds;
                 _samplesReadSinceStart = 0;
                 _samplesOutputSinceStart = 0;
+                CaptureClockOffsetReference();
             }
 
             // Check for re-anchor condition before reading
@@ -543,6 +552,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 _playbackStartLocalTime = currentLocalTime - CalibratedStartupLatencyMicroseconds;
                 _samplesReadSinceStart = 0;
                 _samplesOutputSinceStart = 0;
+                CaptureClockOffsetReference();
             }
 
             // Check for re-anchor condition
@@ -769,6 +779,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _smoothedSyncErrorMicroseconds = 0;
             _syncErrorBaselineMicroseconds = 0;
             _syncErrorBaselineCaptured = false;
+            _clockOffsetCaptured = false;
+            _clockDriftUs = 0;
 
             // Reset sync correction state
             _dropEveryNFrames = 0;
@@ -825,6 +837,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _smoothedSyncErrorMicroseconds = 0;
             _syncErrorBaselineMicroseconds = 0;
             _syncErrorBaselineCaptured = false;
+            _clockOffsetCaptured = false;
+            _clockDriftUs = 0;
 
             // Reset sync correction state
             _dropEveryNFrames = 0;
@@ -902,6 +916,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 TotalSamplesRead = _totalRead,
                 SyncErrorMicroseconds = _currentSyncErrorMicroseconds,
                 SmoothedSyncErrorMicroseconds = _smoothedSyncErrorMicroseconds,
+                ClockDriftMs = _clockDriftUs / 1000.0,
                 IsPlaybackActive = _playbackStarted,
                 SamplesDroppedForSync = _samplesDroppedForSync,
                 SamplesInsertedForSync = _samplesInsertedForSync,
@@ -1160,8 +1175,32 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // LatencyMicroseconds, an immediate seed). The self-measured baseline then trims
         // any residual constant offset (engine overhead, resampler priming, undeclared
         // prefill) so the error reflects drift/fluctuations only.
+        //
+        // Post-anchor server-clock movement. The pace terms above hold consumption
+        // to the LOCAL clock; without this term the Kalman offset's movement since
+        // anchor (relative crystal drift) accumulates as invisible absolute
+        // misalignment (issue #63). Sign: offset = server - client and scheduled
+        // client time is (server - offset), so a rising offset means the schedule
+        // moved earlier and we are late => positive contribution.
+        if (_syncOptions.TrackClockDrift)
+        {
+            if (!_clockOffsetCaptured)
+            {
+                // Deferred capture: the clock was unconverged at the last recapture
+                // point; take the reference from the first converged calculation.
+                CaptureClockOffsetReference();
+            }
+            else if (_clockSync.IsConverged)
+            {
+                _clockDriftUs = _clockSync.GetStatus().OffsetMicroseconds - _clockOffsetAtAnchorUs;
+            }
+
+            // Unconverged with a valid reference: hold the last term (never zero it
+            // mid-flight, never follow unconverged readings).
+        }
+
         _currentSyncErrorMicroseconds = elapsedTimeMicroseconds - samplesReadTimeMicroseconds
-            - (long)_syncErrorBaselineMicroseconds;
+            - (long)_syncErrorBaselineMicroseconds + (long)_clockDriftUs;
 
         // Apply EMA smoothing to filter measurement jitter.
         // This prevents rapid correction changes from noisy measurements while still
@@ -1191,6 +1230,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <param name="reason">Window that just ended, for diagnostics.</param>
     private void CaptureSyncErrorBaseline(string reason)
     {
+        // Remove the drift contribution before snapshotting: post-anchor clock
+        // movement is handled by re-referencing the offset (below), not by folding
+        // it into the pace baseline - otherwise the same microseconds would be
+        // absorbed twice and reappear as an equal-and-opposite error once the
+        // drift term resets to zero.
+        _smoothedSyncErrorMicroseconds -= _clockDriftUs;
+        _currentSyncErrorMicroseconds -= (long)_clockDriftUs;
+        CaptureClockOffsetReference();
+
         var delta = _smoothedSyncErrorMicroseconds;
         _syncErrorBaselineMicroseconds += delta;
         _smoothedSyncErrorMicroseconds = 0;
@@ -1205,6 +1253,31 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 delta / 1000.0,
                 _syncErrorBaselineMicroseconds / 1000.0);
         }
+    }
+
+    /// <summary>
+    /// (Re)captures the Kalman offset used as the drift reference and zeroes the
+    /// drift term. Called wherever the sync-error baseline is established or
+    /// absorbed, so constant offsets rebase while later movement counts as drift.
+    /// When the clock is not converged, the capture is deferred to the first converged error calculation instead.
+    /// Must be called under lock.
+    /// </summary>
+    private void CaptureClockOffsetReference()
+    {
+        if (_clockSync.IsConverged)
+        {
+            _clockOffsetAtAnchorUs = _clockSync.GetStatus().OffsetMicroseconds;
+            _clockOffsetCaptured = true;
+        }
+        else
+        {
+            // Unconverged at a recapture point: defer to the first converged
+            // CalculateSyncError so the convergence step becomes the reference,
+            // not reported drift.
+            _clockOffsetCaptured = false;
+        }
+
+        _clockDriftUs = 0;
     }
 
     /// <summary>
