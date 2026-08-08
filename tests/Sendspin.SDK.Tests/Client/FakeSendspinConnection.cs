@@ -150,6 +150,20 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
+    /// <summary>
+    /// Simulates the socket dropping with auto-reconnect: the connection moves to
+    /// <see cref="ConnectionState.Reconnecting"/>, as <see cref="SendspinConnection"/>
+    /// does when the WebSocket dies.
+    /// </summary>
+    public void SimulateConnectionLoss() => SetState(ConnectionState.Reconnecting);
+
+    /// <summary>
+    /// Simulates the redial succeeding after <see cref="SimulateConnectionLoss"/>:
+    /// Reconnecting → Handshaking, the transition the client's reconnect handshake
+    /// listens for.
+    /// </summary>
+    public void SimulateReconnected() => SetState(ConnectionState.Handshaking);
+
     public void RaiseTextMessageReceived(string json)
         => TextMessageReceived?.Invoke(this, json);
 

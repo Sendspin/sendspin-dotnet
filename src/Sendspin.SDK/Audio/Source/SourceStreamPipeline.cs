@@ -20,6 +20,9 @@ namespace Sendspin.SDK.Audio.Source;
 /// opens: it refuses to stream unless <c>canStream</c> reports user trust and an active
 /// source role. Activate-time checking alone is insufficient, because server/command
 /// reaches this pipeline without passing through server/activate.
+/// Start, stop, and the per-connection reset (<see cref="ResetForConnectionLossAsync"/>)
+/// run one at a time in arrival order, so commands are idempotent against the stream's
+/// actual state rather than a mid-transition snapshot of it.
 /// </remarks>
 public sealed class SourceStreamPipeline : IAsyncDisposable
 {
@@ -46,8 +49,8 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     private ISourceAudioEncoder? _encoder;
     private Channel<CapturedAudio>? _captureChannel;
     private Task? _consumerTask;
+    private Task _commandChain = Task.CompletedTask;
     private bool _streaming;
-    private bool _starting;
     private bool _disposed;
 
     /// <summary>Whether the source is currently capturing and streaming.</summary>
@@ -90,27 +93,54 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     }
 
     /// <summary>Handles a server <c>source</c> command ('start' or 'stop').</summary>
-    public async Task HandleCommandAsync(string? command)
+    /// <remarks>
+    /// Commands are chained so they execute one at a time, in arrival order. Without
+    /// this, a stop dispatched while a start was still mid-flight saw "not streaming"
+    /// and no-opped, leaving the stream up although the server's last word was stop.
+    /// The returned task completes (or faults) with that command's own execution.
+    /// </remarks>
+    public Task HandleCommandAsync(string? command)
     {
         switch (command)
         {
             case "start":
-                await StartStreamingAsync();
-                break;
+                return EnqueueAsync(StartStreamingCoreAsync);
             case "stop":
-                await StopStreamingAsync();
-                break;
+                return EnqueueAsync(() => StopStreamingCoreAsync(sendEnd: true));
             default:
                 _logger.LogWarning("Unknown source command '{Command}'", command);
-                break;
+                return Task.CompletedTask;
         }
     }
 
-    private async Task StartStreamingAsync()
+    /// <summary>
+    /// Appends a command to the serial chain. FIFO by construction — the chain is
+    /// advanced under the lock in call order — which is what makes start/stop/reset
+    /// mutually exclusive and keeps them in wire order. A predecessor's failure is
+    /// swallowed here (it already faulted its own caller's task); each command's own
+    /// failure still faults the task returned to its caller.
+    /// </summary>
+    private Task EnqueueAsync(Func<Task> command)
     {
         lock (_lock)
         {
-            if (_streaming || _starting || _disposed)
+            Task run = RunAfterAsync(_commandChain, command);
+            _commandChain = run;
+            return run;
+        }
+
+        static async Task RunAfterAsync(Task previous, Func<Task> command)
+        {
+            await previous.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            await command().ConfigureAwait(false);
+        }
+    }
+
+    private async Task StartStreamingCoreAsync()
+    {
+        lock (_lock)
+        {
+            if (_streaming || _disposed)
                 return;
 
             // Trust gate. Enforced here rather than at the command dispatch so that every
@@ -123,11 +153,6 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
                     "Refusing to stream: source@v1 requires user trust and an active source role");
                 return;
             }
-
-            // _streaming stays false until the stream is genuinely open: "already
-            // streaming" must never mean "a start once failed halfway". _starting keeps a
-            // second concurrent start out in the meantime.
-            _starting = true;
         }
 
         ISourceAudioEncoder? encoder = null;
@@ -257,17 +282,23 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
 
             throw;
         }
-        finally
-        {
-            lock (_lock)
-            {
-                _starting = false;
-            }
-        }
     }
 
     /// <summary>Stops streaming and ends the input stream. Idempotent.</summary>
-    public async Task StopStreamingAsync()
+    /// <remarks>Chained with any in-flight command, so a stop issued during a start
+    /// takes effect once the start completes rather than being lost.</remarks>
+    public Task StopStreamingAsync() => EnqueueAsync(() => StopStreamingCoreAsync(sendEnd: true));
+
+    /// <summary>
+    /// Per-connection reset (spec: streaming state does not survive reconnection). Tears
+    /// down capture and the consumer exactly like a stop, but sends no
+    /// <c>client_stream/end</c>: the stream it would end died with the connection, and on
+    /// the next connection no input stream is open until the server sends a fresh start.
+    /// </summary>
+    /// <returns>A task that completes once the reset has been applied.</returns>
+    public Task ResetForConnectionLossAsync() => EnqueueAsync(() => StopStreamingCoreAsync(sendEnd: false));
+
+    private async Task StopStreamingCoreAsync(bool sendEnd)
     {
         ISourceAudioEncoder? encoder;
         Channel<CapturedAudio>? channel;
@@ -311,7 +342,11 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
             }
         }
 
-        await _sendMessageAsync(new ClientStreamEndMessage());
+        if (sendEnd)
+        {
+            await _sendMessageAsync(new ClientStreamEndMessage());
+        }
+
         encoder?.Dispose();
         _logger.LogInformation("Source streaming stopped");
     }

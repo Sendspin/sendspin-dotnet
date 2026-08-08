@@ -114,8 +114,10 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
 
     /// <summary>
     /// True when the drift estimate is statistically significant (z-score above the
-    /// configured threshold, default 2σ ≈ 95% confidence). When false, time
-    /// conversions skip drift compensation. See upstream time-filter PR #5.
+    /// configured threshold, default 2σ ≈ 95% confidence). Diagnostic only: the time
+    /// conversions apply offset and drift unconditionally, per the spec's source
+    /// timestamp rule ("apply both offset and drift, not offset alone").
+    /// See upstream time-filter PR #5.
     /// </summary>
     public bool IsDriftReliable
     {
@@ -356,9 +358,9 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             {
                 _driftReliableLogged = true;
                 _logger?.LogInformation(
-                    "[ClockSync] Drift reliable: drift={Drift:F2}μs/s (±{Uncertainty:F1}μs/s), " +
-                    "offset={Offset:F0}μs, measurements={Count}. " +
-                    "Future timestamps will include drift compensation.",
+                    "[ClockSync] Drift estimate now statistically significant: " +
+                    "drift={Drift:F2}μs/s (±{Uncertainty:F1}μs/s), " +
+                    "offset={Offset:F0}μs, measurements={Count}.",
                     _drift,
                     Math.Sqrt(_driftVariance),
                     _offset,
@@ -372,22 +374,24 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// </summary>
     /// <param name="clientTime">Client time in microseconds.</param>
     /// <returns>Estimated server time in microseconds.</returns>
+    /// <remarks>
+    /// The filter's mapping is <c>t_server = t_client + offset + drift·elapsed</c> with
+    /// <c>elapsed</c> measured from the last update in client time. Both terms are applied
+    /// unconditionally, per the spec ("apply both offset and drift, not offset alone");
+    /// the drift-significance test remains a diagnostic only (<see cref="IsDriftReliable"/>).
+    /// Exact inverse of <see cref="ServerToClientTime"/> up to integer rounding, ignoring
+    /// <see cref="StaticDelayMs"/> which only the server→client direction applies.
+    /// </remarks>
     public long ClientToServerTime(long clientTime)
     {
         lock (_lock)
         {
-            // Account for drift since last update, but only if drift estimate is reliable
-            // Early drift estimates are essentially noise and can make timing worse
             if (_lastUpdateTime > 0)
             {
                 double elapsedSeconds = (clientTime - _lastUpdateTime) / 1_000_000.0;
-
-                double currentOffset = IsDriftStatisticallySignificantUnsafe()
-                    ? _offset + _drift * elapsedSeconds
-                    : _offset;
-
-                return clientTime + (long)currentOffset;
+                return clientTime + (long)Math.Round(_offset + _drift * elapsedSeconds);
             }
+
             return clientTime + (long)_offset;
         }
     }
@@ -398,9 +402,18 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// <param name="serverTime">Server time in microseconds.</param>
     /// <returns>Estimated client time in microseconds, with <see cref="StaticDelayMs"/> applied.</returns>
     /// <remarks>
+    /// <para>
+    /// Solves the filter's linear mapping <c>t_server = t_client + offset +
+    /// drift·(t_client − t_lastUpdate)/1e6</c> for <c>t_client</c> exactly, rather than
+    /// evaluating the drift term at an approximated client time: the mapping is linear, so
+    /// its inverse is well-defined (spec), and the approximation left a residual of
+    /// drift²·elapsed that broke round-tripping with <see cref="ClientToServerTime"/>.
+    /// </para>
+    /// <para>
     /// Subtracts <see cref="StaticDelayMs"/> from the converted client time per the Sendspin
     /// protocol spec (positive value compensates for hardware delay; audio is scheduled earlier
     /// from the digital pipeline so it emerges from external speakers/amplifiers on time).
+    /// </para>
     /// </remarks>
     public long ServerToClientTime(long serverTime)
     {
@@ -408,15 +421,10 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
         {
             if (_lastUpdateTime > 0)
             {
-                // Approximate client time used only to compute elapsed seconds for drift extrapolation.
-                long approxClientTime = serverTime - (long)_offset;
-                double elapsedSeconds = (approxClientTime - _lastUpdateTime) / 1_000_000.0;
-
-                double currentOffset = IsDriftStatisticallySignificantUnsafe()
-                    ? _offset + _drift * elapsedSeconds
-                    : _offset;
-
-                return serverTime - (long)currentOffset - _staticDelayMicroseconds;
+                // t_client = t_last + (t_server − t_last − offset) / (1 + drift/1e6).
+                double clientRelative = (serverTime - _lastUpdateTime - _offset)
+                                        / (1.0 + _drift / 1_000_000.0);
+                return _lastUpdateTime + (long)Math.Round(clientRelative) - _staticDelayMicroseconds;
             }
 
             return serverTime - (long)_offset - _staticDelayMicroseconds;

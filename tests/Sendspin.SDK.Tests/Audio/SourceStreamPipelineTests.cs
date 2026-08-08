@@ -243,6 +243,94 @@ public class SourceStreamPipelineTests
         Assert.Equal(2, sent.OfType<ClientStreamStartMessage>().Count());
     }
 
+    [Fact]
+    public async Task StartWhileStreaming_DoesNotRestartTheStream()
+    {
+        var capture = new FakeCaptureDevice();
+        var sent = new List<IMessage>();
+        var frames = new List<byte[]>();
+        var pipeline = CreatePipeline(capture, Collect(sent), Collect(frames));
+
+        await pipeline.HandleCommandAsync("start");
+        await pipeline.HandleCommandAsync("start");
+
+        // Spec: a start received while the input stream is open MUST NOT restart it —
+        // one announce, no end, and the stream stays up.
+        Assert.True(pipeline.IsStreaming);
+        Assert.True(capture.Capturing);
+        Assert.Single(sent.OfType<ClientStreamStartMessage>());
+        Assert.DoesNotContain(sent, m => m is ClientStreamEndMessage);
+    }
+
+    [Fact]
+    public async Task StopWhileStopped_IsIgnored()
+    {
+        var capture = new FakeCaptureDevice();
+        var sent = new List<IMessage>();
+        var frames = new List<byte[]>();
+        var pipeline = CreatePipeline(capture, Collect(sent), Collect(frames));
+
+        // Never started: a stop must not end a stream that never opened.
+        await pipeline.HandleCommandAsync("stop");
+        Assert.DoesNotContain(sent, m => m is ClientStreamEndMessage);
+
+        // Started then stopped twice: the second stop must not send a second end.
+        await pipeline.HandleCommandAsync("start");
+        await pipeline.HandleCommandAsync("stop");
+        await pipeline.HandleCommandAsync("stop");
+        Assert.Single(sent.OfType<ClientStreamEndMessage>());
+    }
+
+    [Fact]
+    public async Task StopArrivingDuringAnInFlightStart_StopsTheStream()
+    {
+        var capture = new FakeCaptureDevice();
+        var wire = new List<string>();
+        var frames = new List<byte[]>();
+        var startSendEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Func<IMessage, Task> sendMessage = async m =>
+        {
+            bool park;
+            lock (wire)
+            {
+                park = m is ClientStreamStartMessage && !wire.Contains("client_stream/start");
+                wire.Add(m switch
+                {
+                    ClientStreamStartMessage => "client_stream/start",
+                    ClientStreamEndMessage => "client_stream/end",
+                    _ => m.GetType().Name,
+                });
+            }
+
+            if (park)
+            {
+                startSendEntered.TrySetResult();
+                await gate.Task;
+            }
+        };
+        var pipeline = CreatePipeline(capture, sendMessage, Collect(frames));
+
+        Task startTask = pipeline.HandleCommandAsync("start");
+        await startSendEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The stop lands while client_stream/start is still in flight. The server's
+        // last word is stop, so it must not be lost against the not-yet-open stream:
+        // once the start completes, the stream comes straight back down.
+        Task stopTask = pipeline.HandleCommandAsync("stop");
+        gate.TrySetResult();
+
+        await startTask.WaitAsync(TimeSpan.FromSeconds(5));
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(pipeline.IsStreaming);
+        Assert.False(capture.Capturing);
+        lock (wire)
+        {
+            Assert.Equal(new[] { "client_stream/start", "client_stream/end" }, wire);
+        }
+    }
+
     private static SourceStreamPipeline CreatePipeline(
         IAudioCaptureDevice capture,
         Func<IMessage, Task> sendMessage,

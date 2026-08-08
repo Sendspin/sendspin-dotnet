@@ -397,6 +397,62 @@ public class KalmanClockSynchronizerTests
         Assert.Equal(0.0, status.DriftMicrosecondsPerSecond, precision: 0);
     }
 
+    // =========================================================================
+    // Spec conformance (#82, roles/source/v1.md): timestamps invert the filter's
+    // linear mapping and "apply both offset and drift, not offset alone". The
+    // significance gate (IsDriftReliable) remains a diagnostic only — it must not
+    // change what the conversions compute.
+    // =========================================================================
+
+    [Fact]
+    public void ClientToServerTime_AppliesOffsetAndDrift_EvenBeforeSignificance()
+    {
+        // Two measurements bootstrap an exact drift of 1000 µs/s (see
+        // DriftBootstrap_AfterTwoMeasurements): offset = 5050 µs at
+        // lastUpdate = 1_002_000, drift = 1000 µs/s — but with only 2 measurements
+        // the estimate is below the significance threshold, the regime in which the
+        // old code fell back to offset alone.
+        _sync.ProcessMeasurement(0, 5000, 5100, 2000);
+        _sync.ProcessMeasurement(1_000_000, 1_006_000, 1_006_100, 1_002_000);
+        Assert.False(_sync.IsDriftReliable);
+        Assert.Equal(1000.0, _sync.Drift, precision: 0);
+
+        // 10 s past the last update: the spec's mapping gives
+        // offset + drift·elapsed = 5050 + 1000·10 = 15_050 µs, not 5050.
+        long clientTime = 1_002_000 + 10_000_000;
+        long serverTime = _sync.ClientToServerTime(clientTime);
+
+        long expected = clientTime + 5050 + 10_000;
+        Assert.InRange(serverTime, expected - 2, expected + 2);
+    }
+
+    [Fact]
+    public void TimeConversions_AreExactInverses_UnderSignificantDrift()
+    {
+        // Strong linear drift (~1000 µs/s) over 50 measurements: statistically
+        // significant, so even the old gated code applied drift in both directions —
+        // but it evaluated the server→client drift term at an approximated client
+        // time instead of solving the linear mapping, leaving a residual of
+        // drift²·elapsed (≈100 µs at 1000 µs/s over 100 s). The spec says the
+        // mapping is linear and its inverse well-defined, so the round trip must
+        // come back exact up to integer rounding.
+        for (int i = 0; i < 50; i++)
+        {
+            long t1 = i * 1_000_000L;
+            long offsetMicros = 5000 + (1000L * i);
+            _sync.ProcessMeasurement(t1, t1 + offsetMicros, t1 + offsetMicros + 100, t1 + 2000);
+        }
+
+        Assert.True(_sync.IsDriftReliable);
+
+        long lastUpdate = (49 * 1_000_000L) + 2000;
+        long clientTime = lastUpdate + 100_000_000; // 100 s past the last update
+        long serverTime = _sync.ClientToServerTime(clientTime);
+        long roundTripped = _sync.ServerToClientTime(serverTime);
+
+        Assert.InRange(Math.Abs(roundTripped - clientTime), 0, 2);
+    }
+
     [Fact]
     public void DriftSignificanceThreshold_LowerThresholdAcceptsWeakerSignals()
     {

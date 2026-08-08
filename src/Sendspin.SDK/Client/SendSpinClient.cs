@@ -896,6 +896,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // A pairing attempt cannot survive the session (the CPace counter and handshake
             // hash reset with it), so release a presenter still showing the PIN.
             ClearPinState();
+
+            // Streaming state is per-connection (spec): a start from the old connection
+            // must not survive into the next one, so tear capture down now, without a
+            // client_stream/end — the stream it would end died with the connection.
+            _sourcePipeline?.ResetForConnectionLossAsync().SafeFireAndForget(_logger);
         }
 
         // Clean up client state on full disconnection
