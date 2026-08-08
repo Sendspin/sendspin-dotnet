@@ -185,9 +185,12 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
             announced = true;
 
             // Captures flow through this bounded channel to one consumer, which is what
-            // keeps encode and framing strictly capture-ordered and single-threaded (the
-            // wire framing is not thread-safe; under encryption, concurrent sends race
-            // its AEAD nonce counter). DropOldest sheds the stalest backlog when the send
+            // keeps encode and framing strictly capture-ordered and single-threaded. The
+            // encoder interface promises no thread safety (PCM happens to be stateless;
+            // Opus will not be), and two sessions' chunks interleaving on the wire is
+            // indistinguishable to the server. Note the nonce counter is NOT at risk here:
+            // EncodeBinary returns a lazy sequence, so the encrypt runs inside the
+            // connection's send lock. DropOldest sheds the stalest backlog when the send
             // path falls behind, so the stream resumes from live capture instead of
             // bursting stale audio — and TryWrite never blocks the capture callback.
             channel = Channel.CreateBounded<CapturedAudio>(
