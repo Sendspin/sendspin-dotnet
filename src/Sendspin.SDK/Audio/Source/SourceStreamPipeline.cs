@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Synchronization;
 
@@ -9,7 +10,8 @@ namespace Sendspin.SDK.Audio.Source;
 /// <summary>
 /// Drives the <c>source</c> role: on the server's <c>start</c> it opens the capture
 /// device, announces the format with <c>client_stream/start</c>, then encodes each
-/// captured buffer and streams it as a binary type-12 chunk timestamped in the server
+/// captured buffer and streams it as one or more binary type-12 chunks — none carrying
+/// more than <see cref="MaxChunkMilliseconds"/> of audio — each timestamped in the server
 /// time domain; on <c>stop</c> it ends the stream. Server-initiated only — a source
 /// never streams unsolicited.
 /// </summary>
@@ -35,6 +37,13 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// from live capture rather than burst stale audio.
     /// </summary>
     internal const int MaxBufferedCaptures = 16;
+
+    /// <summary>
+    /// Most audio one binary chunk may carry, per the spec's MUST. The capture device chooses
+    /// its buffer size and the SDK does not control it, so an oversized buffer is split to this
+    /// ceiling rather than assumed never to arrive.
+    /// </summary>
+    internal const int MaxChunkMilliseconds = 150;
 
     private readonly IAudioCaptureDevice _capture;
     private readonly ISourceAudioEncoderFactory _encoderFactory;
@@ -204,7 +213,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
                     "Source send path fell behind; dropped a captured buffer ({Bytes} bytes at {CaptureTimeUs}µs) to resume from live capture",
                     dropped.Pcm.Length,
                     dropped.CaptureTimeMicroseconds));
-            consumer = ConsumeCapturesAsync(channel.Reader, encoder);
+            consumer = ConsumeCapturesAsync(channel.Reader, encoder, format);
 
             lock (_lock)
             {
@@ -375,32 +384,83 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// <summary>
     /// The single consumer: encodes and frames captures strictly in capture order, so the
     /// encoder (stateful for codecs like Opus) and the wire framing (not thread-safe) are
-    /// only ever driven from one task at a time. A chunk that fails to encode or send is
-    /// logged and skipped — the same per-chunk error surface the fire-and-forget path had
-    /// — so one bad buffer or transient send failure does not kill the stream.
+    /// only ever driven from one task at a time. A capture longer than
+    /// <see cref="MaxChunkMilliseconds"/> is split across several chunks here. A chunk that
+    /// fails to encode or send is logged and the rest of that capture skipped — the same
+    /// per-chunk error surface the fire-and-forget path had — so one bad buffer or transient
+    /// send failure does not kill the stream.
     /// </summary>
-    private async Task ConsumeCapturesAsync(ChannelReader<CapturedAudio> reader, ISourceAudioEncoder encoder)
+    private async Task ConsumeCapturesAsync(ChannelReader<CapturedAudio> reader, ISourceAudioEncoder encoder, AudioFormat format)
     {
+        int bytesPerFrame = format.Channels * ((format.BitDepth ?? 16) / 8);
+        int maxChunkBytes = format.SampleRate * MaxChunkMilliseconds / 1000 * bytesPerFrame;
+
+        // A format that cannot express a chunk duration has no ceiling to enforce against;
+        // its captures pass through whole. Also what keeps the split arithmetic below —
+        // which divides by both terms — off a zero divisor.
+        if (maxChunkBytes <= 0)
+        {
+            maxChunkBytes = int.MaxValue;
+        }
+
         await foreach (CapturedAudio captured in reader.ReadAllAsync())
         {
             try
             {
-                byte[] encoded = encoder.Encode(captured.Pcm.Span);
-                long serverTimestamp = _clock.ClientToServerTime(captured.CaptureTimeMicroseconds);
+                if (captured.Pcm.Length <= maxChunkBytes)
+                {
+                    await SendChunkAsync(encoder.Encode(captured.Pcm.Span), captured.CaptureTimeMicroseconds);
+                    continue;
+                }
 
-                // Binary source chunk: [type 12][int64 BE server timestamp][encoded audio].
-                var frame = new byte[9 + encoded.Length];
-                frame[0] = BinaryMessageTypes.SourceAudio0;
-                BinaryPrimitives.WriteInt64BigEndian(frame.AsSpan(1, 8), serverTimestamp);
-                encoded.CopyTo(frame.AsSpan(9));
+                // Over the ceiling. Split on whole-frame boundaries into equal pieces rather
+                // than greedy full-size ones: 400 ms becomes three 133 ms chunks, not
+                // 150 + 150 + 100, so a buffer that overshoots the ceiling by a hair cannot
+                // leave a sliver of a chunk behind it — the same spec line sets a 5 ms floor.
+                // A partial trailing frame, from a device that under-delivers, rides along on
+                // the last piece.
+                int maxChunkFrames = maxChunkBytes / bytesPerFrame;
+                int totalFrames = (captured.Pcm.Length + bytesPerFrame - 1) / bytesPerFrame;
+                int pieces = (totalFrames + maxChunkFrames - 1) / maxChunkFrames;
+                int framesPerPiece = (totalFrames + pieces - 1) / pieces;
 
-                await _sendBinaryAsync(frame);
+                for (int piece = 0; piece < pieces; piece++)
+                {
+                    int offset = piece * framesPerPiece * bytesPerFrame;
+                    int length = Math.Min(framesPerPiece * bytesPerFrame, captured.Pcm.Length - offset);
+                    byte[] encoded = encoder.Encode(captured.Pcm.Span.Slice(offset, length));
+
+                    // Each piece is timestamped at the instant it was captured, not at the
+                    // whole buffer's, or the server would resample several chunks onto one
+                    // point on its timeline.
+                    await SendChunkAsync(
+                        encoded,
+                        captured.CaptureTimeMicroseconds + ((long)piece * framesPerPiece * 1_000_000 / format.SampleRate));
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to encode or send a source chunk captured at {CaptureTimeUs}µs", captured.CaptureTimeMicroseconds);
             }
         }
+    }
+
+    /// <summary>
+    /// Frames one encoded chunk as a binary type-12 message and sends it, timestamped in the
+    /// server time domain. Called only from the single consumer, so the framing stays
+    /// single-threaded.
+    /// </summary>
+    private async Task SendChunkAsync(byte[] encoded, long captureTimeMicroseconds)
+    {
+        long serverTimestamp = _clock.ClientToServerTime(captureTimeMicroseconds);
+
+        // Binary source chunk: [type 12][int64 BE server timestamp][encoded audio].
+        var frame = new byte[9 + encoded.Length];
+        frame[0] = BinaryMessageTypes.SourceAudio0;
+        BinaryPrimitives.WriteInt64BigEndian(frame.AsSpan(1, 8), serverTimestamp);
+        encoded.CopyTo(frame.AsSpan(9));
+
+        await _sendBinaryAsync(frame);
     }
 
     /// <inheritdoc/>

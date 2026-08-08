@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Audio.Source;
 using Sendspin.SDK.Models;
@@ -14,6 +15,18 @@ namespace Sendspin.SDK.Tests.Audio;
 /// </summary>
 public class SourceStreamPipelineTests
 {
+    /// <summary>Binary chunk layout is [type 12][int64 BE server timestamp][payload].</summary>
+    private const int ChunkHeaderBytes = 9;
+
+    // FakeCaptureDevice's format: 48 kHz stereo 16-bit, so 4 bytes per interleaved frame
+    // and 192 bytes per millisecond of audio.
+    private const int SampleRate = 48000;
+    private const int BytesPerFrame = 2 * (16 / 8);
+    private const int BytesPerMillisecond = SampleRate * BytesPerFrame / 1000;
+
+    /// <summary>The spec's 150 ms chunk ceiling, in bytes of this format's PCM.</summary>
+    private const int CeilingBytes = 150 * BytesPerMillisecond;
+
     [Fact]
     public async Task OverlappingCaptures_EncodeSequentially_AndReachTheFramingInCaptureOrder()
     {
@@ -456,6 +469,75 @@ public class SourceStreamPipelineTests
         Assert.Equal(
             new[] { "start-entered", "start-returned", "stopped", "disposed" },
             capture.OperationsSnapshot());
+    }
+
+    [Fact]
+    public async Task ACaptureLongerThanTheChunkCeiling_IsSplitSoNoChunkExceedsIt()
+    {
+        // The buffer size is the capture device's choice, so a capture can arrive longer
+        // than the spec's 150 ms chunk ceiling (roles/source/v1.md:96, a MUST). It has to
+        // be split rather than assumed away — and the split must lose no audio and
+        // timestamp each piece at the instant that piece was captured.
+        var capture = new FakeCaptureDevice();
+        var frames = new List<byte[]>();
+        var pipeline = CreatePipeline(capture, Collect(new List<IMessage>()), Collect(frames));
+        await pipeline.HandleCommandAsync("start");
+
+        // 400 ms in one buffer: over the ceiling, and not a whole multiple of it.
+        var pcm = new byte[400 * BytesPerMillisecond];
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            pcm[i] = (byte)(i % 251);
+        }
+
+        capture.Emit(pcm, 1_000_000);
+
+        // The stop drains the consumer before it returns, so every chunk this capture
+        // produced is on the wire by the time it completes — no polling needed.
+        await pipeline.StopStreamingAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        byte[][] sent;
+        lock (frames)
+        {
+            sent = frames.ToArray();
+        }
+
+        Assert.All(sent, frame => Assert.True(
+            frame.Length - ChunkHeaderBytes <= CeilingBytes,
+            $"a chunk of {(frame.Length - ChunkHeaderBytes) / (double)BytesPerMillisecond:F2} ms exceeds the 150 ms ceiling"));
+
+        // Nothing dropped, duplicated, or reordered by the split.
+        Assert.Equal(pcm, sent.SelectMany(frame => frame.Skip(ChunkHeaderBytes)).ToArray());
+
+        // Each piece carries its own capture instant, not the whole buffer's.
+        long framesEmitted = 0;
+        foreach (byte[] chunk in sent)
+        {
+            Assert.Equal(
+                1_000_000 + (framesEmitted * 1_000_000 / SampleRate),
+                BinaryPrimitives.ReadInt64BigEndian(chunk.AsSpan(1, 8)));
+            framesEmitted += (chunk.Length - ChunkHeaderBytes) / BytesPerFrame;
+        }
+    }
+
+    [Fact]
+    public async Task ACaptureAtTheChunkCeiling_IsSentWhole()
+    {
+        // The boundary, and the positive control for the split: a capture that already
+        // fits must reach the wire as one chunk at its own timestamp. Without this a
+        // pipeline that split every capture would pass the ceiling test above.
+        var capture = new FakeCaptureDevice();
+        var frames = new List<byte[]>();
+        var pipeline = CreatePipeline(capture, Collect(new List<IMessage>()), Collect(frames));
+        await pipeline.HandleCommandAsync("start");
+
+        var pcm = new byte[CeilingBytes];
+        capture.Emit(pcm, 7_000);
+        await pipeline.StopStreamingAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        byte[] chunk = Assert.Single(frames);
+        Assert.Equal(CeilingBytes, chunk.Length - ChunkHeaderBytes);
+        Assert.Equal(7_000, BinaryPrimitives.ReadInt64BigEndian(chunk.AsSpan(1, 8)));
     }
 
     private static SourceStreamPipeline CreatePipeline(
