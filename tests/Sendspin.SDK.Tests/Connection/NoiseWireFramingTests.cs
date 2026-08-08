@@ -45,6 +45,45 @@ public class NoiseWireFramingTests
     }
 
     [Fact]
+    public void Handshake_PrologueIsByteConcatenationOfWireCapturedInitPayloads()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        byte[] clientInitBytes = clientInit.Payload.ToArray();
+
+        // server/init carrying a multi-byte UTF-8 sequence ('é' is two bytes in UTF-8).
+        // A lossy prologue construction (decode then re-encode) would still round-trip
+        // this correctly, which is exactly why the comparison below must not recompute
+        // the expected prologue from strings either -- it uses the same wire bytes the
+        // framing received.
+        string serverInitText =
+            "{\"type\":\"server/init\",\"payload\":{\"server_id\":\"" + server.ServerId +
+            "\",\"version\":" + NoiseConstants.ProtocolVersion + ",\"note\":\"café\"}}";
+        var serverInitFrame = WireFrame.FromText(serverInitText);
+        byte[] serverInitBytes = serverInitFrame.Payload.ToArray();
+        Assert.Null(framing.ProcessInbound(serverInitFrame).FatalReason);
+
+        // Expected prologue: byte concatenation of the two payloads exactly as they
+        // crossed the wire, not re-derived from the JSON strings.
+        byte[] expectedPrologue = [.. clientInitBytes, .. serverInitBytes];
+
+        // Drive the responder handshake with that exact prologue. This only completes
+        // if the framing computed the identical prologue internally -- a mismatched
+        // prologue diverges the Noise transcript hash and message 1 fails to
+        // authenticate, so this is a cryptographic equality check, not a string one.
+        string msg1Text = server.RespondWithPrologue(expectedPrologue);
+        var result = framing.ProcessInbound(WireFrame.FromText(msg1Text));
+
+        Assert.Null(result.FatalReason);
+        var reply = Assert.Single(result.Replies!);
+        server.CompleteHandshake(reply.PayloadAsText());
+        Assert.True(framing.IsTransportReady);
+    }
+
+    [Fact]
     public void Handshake_UnknownPskId_IsFatal()
     {
         var identity = SendspinIdentity.Generate();
@@ -194,6 +233,43 @@ public class NoiseWireFramingTests
         var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, new byte[64]));
 
         Assert.NotNull(result.FatalReason);
+    }
+
+    [Fact]
+    public void Inbound_ApplicationJsonContainingHandshakeLiteral_WithNoRootType_Surfaces()
+    {
+        var (framing, server) = CompleteHandshake();
+
+        // Application content whose value happens to equal the literal "noise/handshake"
+        // (e.g. a management record field) and which has no root "type" member at all.
+        // Routing by substring sniff sends this into HandleRehandshakeMessage, which does
+        // doc.RootElement.GetProperty("type") and throws KeyNotFoundException -- fatal to
+        // the connection under the current (pre-fix) code.
+        const string json = """{"track_title":"noise/handshake"}""";
+        var frame = server.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)]);
+
+        var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, frame));
+
+        Assert.Null(result.FatalReason);
+        Assert.Equal(json, result.Text);
+        Assert.True(framing.IsTransportReady);
+    }
+
+    [Fact]
+    public void Inbound_ApplicationJsonWithOtherRootType_ContainingHandshakeLiteral_Surfaces()
+    {
+        var (framing, server) = CompleteHandshake();
+
+        // Root type is an ordinary application type; the literal only appears inside the
+        // body. Must surface, not route to the re-handshake handler.
+        const string json = """{"type":"server/hello","payload":{"note":"noise/handshake"}}""";
+        var frame = server.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)]);
+
+        var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, frame));
+
+        Assert.Null(result.FatalReason);
+        Assert.Equal(json, result.Text);
+        Assert.True(framing.IsTransportReady);
     }
 
     [Fact]

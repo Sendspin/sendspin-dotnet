@@ -37,7 +37,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     private readonly NoiseCipherSuite _suite;
 
     private HandshakePhase _phase = HandshakePhase.AwaitingStart;
-    private string? _clientInitText;
+    private byte[]? _clientInitBytes;
     private Transport? _transport;
     private byte[]? _handshakeHash;
     private string? _serverId;
@@ -84,7 +84,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     /// <inheritdoc/>
     public IReadOnlyList<WireFrame> Start()
     {
-        _clientInitText = JsonSerializer.Serialize(new Dictionary<string, object>
+        string clientInitText = JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["type"] = "client/init",
             ["payload"] = new Dictionary<string, object>
@@ -94,8 +94,11 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
                 ["suite"] = _suite.ToWireName(),
             },
         });
+        var frame = WireFrame.FromText(clientInitText);
+        // Prologue binds the exact wire bytes of both init messages.
+        _clientInitBytes = frame.Payload.ToArray();
         _phase = HandshakePhase.AwaitingServerInit;
-        return [WireFrame.FromText(_clientInitText)];
+        return [frame];
     }
 
     /// <inheritdoc/>
@@ -145,7 +148,8 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         _transport?.Dispose();
         _transport = null;
         _phase = HandshakePhase.AwaitingStart;
-        _clientInitText = null;
+        _clientInitBytes = null;
+        _serverInitBytes = null;
         _handshakeHash = null;
         _serverId = null;
         _matchedPsk = null;
@@ -161,8 +165,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (frame.Kind != WireFrameKind.Text)
             return Fail("expected server/init text frame");
 
-        string serverInitText = frame.PayloadAsText();
-        using var doc = JsonDocument.Parse(serverInitText);
+        using var doc = JsonDocument.Parse(frame.PayloadAsText());
         if (doc.RootElement.GetProperty("type").GetString() != "server/init")
             return Fail("expected server/init message");
 
@@ -175,12 +178,12 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             ?? throw new FormatException("server_id missing");
 
         // Prologue binds the exact wire bytes of both init messages.
-        _serverInitText = serverInitText;
+        _serverInitBytes = frame.Payload.ToArray();
         _phase = HandshakePhase.AwaitingNoiseMessage1;
         return InboundFrameResult.None;
     }
 
-    private string? _serverInitText;
+    private byte[]? _serverInitBytes;
 
     private InboundFrameResult HandleNoiseMessage1(WireFrame frame)
     {
@@ -193,7 +196,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         byte[] msg1 = Base64UrlText.Decode(
             doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
 
-        byte[] prologue = Encoding.UTF8.GetBytes(_clientInitText + _serverInitText);
+        byte[] prologue = [.. _clientInitBytes!, .. _serverInitBytes!];
         return RunResponderExchange(msg1, prologue, out _);
 
     }
@@ -343,18 +346,10 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     /// suite carry over, and the reply travels encrypted under the old session keys.
     /// The framing consumes these messages; they never surface to the application.
     /// </summary>
-    private InboundFrameResult HandleRehandshakeMessage(string json)
+    private InboundFrameResult HandleRehandshakeMessage(JsonElement root)
     {
-        using var doc = JsonDocument.Parse(json);
-        if (doc.RootElement.GetProperty("type").GetString() != "noise/handshake")
-        {
-            // Sniff false positive: not actually a re-handshake, so it surfaces.
-            _surfacedApplicationMessage = true;
-            return InboundFrameResult.ForText(json);
-        }
-
         byte[] msg1 = Base64UrlText.Decode(
-            doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
+            root.GetProperty("payload").GetProperty("data").GetString()!);
         byte[] prologue = _handshakeHash
             ?? throw new InvalidOperationException("re-handshake before initial handshake");
         return RunResponderExchange(msg1, prologue, out _);
@@ -365,11 +360,24 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (type == NoiseConstants.MessageTypeJsonBody)
         {
             string json = Encoding.UTF8.GetString(payload.Span);
-            if (json.Contains("\"noise/handshake\"", StringComparison.Ordinal))
+            try
             {
-                // Re-handshakes are consumed by the framing and never surface, so
-                // they must not count as the first application message.
-                return HandleRehandshakeMessage(json);
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("type", out var typeProp)
+                    && typeProp.ValueKind == JsonValueKind.String
+                    && typeProp.GetString() == "noise/handshake")
+                {
+                    // Re-handshakes are consumed by the framing and never surface, so
+                    // they must not count as the first application message.
+                    return HandleRehandshakeMessage(doc.RootElement);
+                }
+            }
+            catch (JsonException)
+            {
+                // Not JSON at all: an ordinary application message as far as this
+                // layer is concerned. Surface it below and let the client's own
+                // dispatch judge whether it is well-formed -- this layer does not.
             }
 
             _surfacedApplicationMessage = true;
