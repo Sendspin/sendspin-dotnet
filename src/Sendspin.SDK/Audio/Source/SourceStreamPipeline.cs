@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Protocol.Messages;
-using Sendspin.SDK.Extensions;
 using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Audio.Source;
@@ -23,6 +23,16 @@ namespace Sendspin.SDK.Audio.Source;
 /// </remarks>
 public sealed class SourceStreamPipeline : IAsyncDisposable
 {
+    /// <summary>
+    /// Most captured buffers the pipeline will hold while the send path is slow. Typical
+    /// capture devices deliver 10–20 ms buffers, so this is roughly 160–320 ms of backlog:
+    /// enough to ride out a brief network stall without dropping, small enough that a
+    /// resumed send never bursts more than a fraction of a second of stale audio. Beyond
+    /// it the oldest buffer is dropped, per the spec's rule to drop backlog and resume
+    /// from live capture rather than burst stale audio.
+    /// </summary>
+    internal const int MaxBufferedCaptures = 16;
+
     private readonly IAudioCaptureDevice _capture;
     private readonly ISourceAudioEncoderFactory _encoderFactory;
     private readonly IClockSynchronizer _clock;
@@ -34,7 +44,10 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     private readonly object _lock = new();
 
     private ISourceAudioEncoder? _encoder;
+    private Channel<CapturedAudio>? _captureChannel;
+    private Task? _consumerTask;
     private bool _streaming;
+    private bool _starting;
     private bool _disposed;
 
     /// <summary>Whether the source is currently capturing and streaming.</summary>
@@ -97,7 +110,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     {
         lock (_lock)
         {
-            if (_streaming || _disposed)
+            if (_streaming || _starting || _disposed)
                 return;
 
             // Trust gate. Enforced here rather than at the command dispatch so that every
@@ -111,48 +124,167 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
                 return;
             }
 
-            _streaming = true;
+            // _streaming stays false until the stream is genuinely open: "already
+            // streaming" must never mean "a start once failed halfway". _starting keeps a
+            // second concurrent start out in the meantime.
+            _starting = true;
         }
 
-        var format = _capture.Format;
-        // Prefer the configured codec; fall back to the capture format when unset.
-        string codec = _configuredCodec ?? format.Codec;
-        _encoder = _encoderFactory.Create(codec, format);
-
-        var startMessage = new ClientStreamStartMessage
+        ISourceAudioEncoder? encoder = null;
+        Channel<CapturedAudio>? channel = null;
+        Task? consumer = null;
+        bool announced = false;
+        bool captureStarted = false;
+        try
         {
-            Payload = new ClientStreamStartPayload
-            {
-                Source = new SourceStreamFormat
-                {
-                    Codec = _encoder.Codec,
-                    Channels = format.Channels,
-                    SampleRate = format.SampleRate,
-                    BitDepth = format.BitDepth ?? 16,
-                    CodecHeader = _encoder.CodecHeader,
-                },
-            },
-        };
-        await _sendMessageAsync(startMessage);
+            var format = _capture.Format;
+            // Prefer the configured codec; fall back to the capture format when unset.
+            string codec = _configuredCodec ?? format.Codec;
+            encoder = _encoderFactory.Create(codec, format);
 
-        _capture.AudioCaptured += OnAudioCaptured;
-        await _capture.StartAsync();
-        _logger.LogInformation("Source streaming started ({Codec} {SampleRate}Hz x{Channels})",
-            _encoder.Codec, format.SampleRate, format.Channels);
+            var startMessage = new ClientStreamStartMessage
+            {
+                Payload = new ClientStreamStartPayload
+                {
+                    Source = new SourceStreamFormat
+                    {
+                        Codec = encoder.Codec,
+                        Channels = format.Channels,
+                        SampleRate = format.SampleRate,
+                        BitDepth = format.BitDepth ?? 16,
+                        CodecHeader = encoder.CodecHeader,
+                    },
+                },
+            };
+            await _sendMessageAsync(startMessage);
+            announced = true;
+
+            // Captures flow through this bounded channel to one consumer, which is what
+            // keeps encode and framing strictly capture-ordered and single-threaded (the
+            // wire framing is not thread-safe; under encryption, concurrent sends race
+            // its AEAD nonce counter). DropOldest sheds the stalest backlog when the send
+            // path falls behind, so the stream resumes from live capture instead of
+            // bursting stale audio — and TryWrite never blocks the capture callback.
+            channel = Channel.CreateBounded<CapturedAudio>(
+                new BoundedChannelOptions(MaxBufferedCaptures)
+                {
+                    SingleReader = true,
+                    SingleWriter = false,
+                    FullMode = BoundedChannelFullMode.DropOldest,
+                },
+                dropped => _logger.LogWarning(
+                    "Source send path fell behind; dropped a captured buffer ({Bytes} bytes at {CaptureTimeUs}µs) to resume from live capture",
+                    dropped.Pcm.Length,
+                    dropped.CaptureTimeMicroseconds));
+            consumer = ConsumeCapturesAsync(channel.Reader, encoder);
+
+            lock (_lock)
+            {
+                _encoder = encoder;
+                _captureChannel = channel;
+                _consumerTask = consumer;
+            }
+
+            _capture.AudioCaptured += OnAudioCaptured;
+            await _capture.StartAsync();
+            captureStarted = true;
+
+            lock (_lock)
+            {
+                // Disposed while starting: the capture device is about to be (or already
+                // was) disposed under us, so fail the start and roll back below.
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _streaming = true;
+            }
+
+            _logger.LogInformation("Source streaming started ({Codec} {SampleRate}Hz x{Channels})",
+                encoder.Codec, format.SampleRate, format.Channels);
+        }
+        catch (Exception)
+        {
+            // Restore the pre-start state so the failure cannot wedge the pipeline: a
+            // later start must not be refused as already-streaming, and a later stop must
+            // not end a stream that never began. The failure itself is rethrown, never
+            // swallowed — callers (SafeFireAndForget at the dispatch sites) log it.
+            _capture.AudioCaptured -= OnAudioCaptured;
+            lock (_lock)
+            {
+                _encoder = null;
+                _captureChannel = null;
+                _consumerTask = null;
+            }
+
+            if (captureStarted)
+            {
+                try
+                {
+                    await _capture.StopAsync();
+                }
+                catch (Exception stopEx)
+                {
+                    _logger.LogWarning(stopEx, "Error stopping capture device while rolling back a failed start");
+                }
+            }
+
+            channel?.Writer.TryComplete();
+            if (consumer is not null)
+            {
+                try
+                {
+                    await consumer;
+                }
+                catch (Exception consumerEx)
+                {
+                    _logger.LogWarning(consumerEx, "Source consumer failed while rolling back a failed start");
+                }
+            }
+
+            encoder?.Dispose();
+
+            if (announced)
+            {
+                // client_stream/start already hit the wire, so the server believes an
+                // input stream is open; close it as part of restoring the pre-start state.
+                try
+                {
+                    await _sendMessageAsync(new ClientStreamEndMessage());
+                }
+                catch (Exception endEx)
+                {
+                    _logger.LogWarning(endEx, "Failed to end the half-open source stream while rolling back a failed start");
+                }
+            }
+
+            throw;
+        }
+        finally
+        {
+            lock (_lock)
+            {
+                _starting = false;
+            }
+        }
     }
 
     /// <summary>Stops streaming and ends the input stream. Idempotent.</summary>
     public async Task StopStreamingAsync()
     {
-        bool wasStreaming;
+        ISourceAudioEncoder? encoder;
+        Channel<CapturedAudio>? channel;
+        Task? consumer;
         lock (_lock)
         {
-            wasStreaming = _streaming;
-            _streaming = false;
-        }
+            if (!_streaming)
+                return;
 
-        if (!wasStreaming)
-            return;
+            _streaming = false;
+            encoder = _encoder;
+            channel = _captureChannel;
+            consumer = _consumerTask;
+            _encoder = null;
+            _captureChannel = null;
+            _consumerTask = null;
+        }
 
         _capture.AudioCaptured -= OnAudioCaptured;
         try
@@ -164,40 +296,73 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
             _logger.LogWarning(ex, "Error stopping capture device");
         }
 
+        // Let the single consumer drain what was captured before the stop, so every chunk
+        // reaches the wire ahead of the end-of-stream message.
+        channel?.Writer.TryComplete();
+        if (consumer is not null)
+        {
+            try
+            {
+                await consumer;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Source consumer completed with an error while stopping");
+            }
+        }
+
         await _sendMessageAsync(new ClientStreamEndMessage());
-        _encoder?.Dispose();
-        _encoder = null;
+        encoder?.Dispose();
         _logger.LogInformation("Source streaming stopped");
     }
 
     private void OnAudioCaptured(object? sender, CapturedAudio captured)
     {
-        SourceChunkAsync(captured).SafeFireAndForget(_logger);
-    }
-
-    private async Task SourceChunkAsync(CapturedAudio captured)
-    {
-        ISourceAudioEncoder? encoder;
+        ChannelWriter<CapturedAudio>? writer;
         lock (_lock)
         {
-            if (!_streaming)
-                return;
-            encoder = _encoder;
+            writer = _captureChannel?.Writer;
         }
 
-        if (encoder is null)
+        if (writer is null)
             return;
 
-        byte[] encoded = encoder.Encode(captured.Pcm.Span);
-        long serverTimestamp = _clock.ClientToServerTime(captured.CaptureTimeMicroseconds);
+        // Copy the PCM: the device may reuse its buffer once this handler returns, and
+        // encoding now happens later on the consumer. TryWrite on a DropOldest channel
+        // always succeeds without blocking — the capture callback must never stall the
+        // audio device, so a full channel drops the oldest buffered capture instead.
+        writer.TryWrite(new CapturedAudio(captured.Pcm.ToArray(), captured.CaptureTimeMicroseconds));
+    }
 
-        // Binary source chunk: [type 12][int64 BE server timestamp][encoded audio].
-        var frame = new byte[9 + encoded.Length];
-        frame[0] = BinaryMessageTypes.SourceAudio0;
-        BinaryPrimitives.WriteInt64BigEndian(frame.AsSpan(1, 8), serverTimestamp);
-        encoded.CopyTo(frame.AsSpan(9));
+    /// <summary>
+    /// The single consumer: encodes and frames captures strictly in capture order, so the
+    /// encoder (stateful for codecs like Opus) and the wire framing (not thread-safe) are
+    /// only ever driven from one task at a time. A chunk that fails to encode or send is
+    /// logged and skipped — the same per-chunk error surface the fire-and-forget path had
+    /// — so one bad buffer or transient send failure does not kill the stream.
+    /// </summary>
+    private async Task ConsumeCapturesAsync(ChannelReader<CapturedAudio> reader, ISourceAudioEncoder encoder)
+    {
+        await foreach (CapturedAudio captured in reader.ReadAllAsync())
+        {
+            try
+            {
+                byte[] encoded = encoder.Encode(captured.Pcm.Span);
+                long serverTimestamp = _clock.ClientToServerTime(captured.CaptureTimeMicroseconds);
 
-        await _sendBinaryAsync(frame);
+                // Binary source chunk: [type 12][int64 BE server timestamp][encoded audio].
+                var frame = new byte[9 + encoded.Length];
+                frame[0] = BinaryMessageTypes.SourceAudio0;
+                BinaryPrimitives.WriteInt64BigEndian(frame.AsSpan(1, 8), serverTimestamp);
+                encoded.CopyTo(frame.AsSpan(9));
+
+                await _sendBinaryAsync(frame);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to encode or send a source chunk captured at {CaptureTimeUs}µs", captured.CaptureTimeMicroseconds);
+            }
+        }
     }
 
     /// <inheritdoc/>
