@@ -126,6 +126,56 @@ public class SendspinClientServiceSourceTests
     }
 
     [Fact]
+    public async Task AvailabilityGoingFalseWhileStreaming_EndsTheStreamBeforeReportingUnavailable()
+    {
+        // The server rejects chunks whenever the client is not available, and it treats
+        // client_stream/end as an implicit stop. So losing availability has to close the
+        // input stream first: a client/state carrying available: false ahead of the end
+        // leaves the server holding an open stream it has already decided to reject audio
+        // for, and the chunks still in flight behind the drain are exactly that audio.
+        var (client, connection, capture) = CreateSourceClient();
+        using var _c = client;
+        Activate(connection);
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+        Assert.True(capture.Capturing);
+
+        await client.EnterExternalSourceAsync();
+
+        var wire = connection.SnapshotSentMessages().ToList();
+        int end = wire.FindIndex(m => m is ClientStreamEndMessage);
+        int unavailable = wire.FindIndex(m => m is ClientStateMessage { Payload.Available: false });
+
+        Assert.True(end >= 0, "losing availability must end the open input stream");
+        Assert.True(unavailable >= 0, "the availability drop must still be reported");
+        Assert.True(end < unavailable, "client_stream/end must precede the client/state carrying available: false");
+        Assert.False(capture.Capturing, "the capture device must actually close, not merely be announced closed");
+
+        // Regaining availability is not a start: the server is the only initiator, so
+        // nothing re-announces and no second end goes out. Without this an implementation
+        // that ended the stream on every availability publish would pass the ordering above.
+        await client.ExitExternalSourceAsync();
+        Assert.Single(connection.SnapshotSentMessages().OfType<ClientStreamEndMessage>());
+        Assert.Single(connection.SnapshotSentMessages().OfType<ClientStreamStartMessage>());
+        Assert.False(capture.Capturing);
+    }
+
+    [Fact]
+    public async Task AvailabilityGoingFalseWithNoOpenStream_SendsNoClientStreamEnd()
+    {
+        // Nothing was started, so there is no stream to end. An unconditional end here
+        // would be an end for a stream the server never saw opened.
+        var (client, connection, capture) = CreateSourceClient();
+        using var _c = client;
+        Activate(connection);
+        Assert.False(capture.Capturing);
+
+        await client.EnterExternalSourceAsync();
+
+        Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientStreamEndMessage);
+        Assert.Contains(connection.SnapshotSentMessages(), m => m is ClientStateMessage { Payload.Available: false });
+    }
+
+    [Fact]
     public async Task RoleDeactivation_StopsStreaming()
     {
         var (client, connection, capture) = CreateSourceClient();

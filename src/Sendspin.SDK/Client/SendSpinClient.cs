@@ -732,6 +732,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // Read the composed value once and act on that one value throughout: deciding whether
+        // to end the source stream from one read and publishing another would be the same
+        // drift between a flag and the thing it describes that this publisher exists to stop.
+        var current = CurrentAvailability;
+
         // An availability input flipped while the initial client/state is still deferred (e.g. a
         // pipeline error or external-source enter inside the converging window). A bare delta
         // must not hit the wire here: the server treats the first client/state it receives as
@@ -754,21 +759,43 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 return;
             }
 
+            await EndSourceStreamIfUnavailableAsync(current);
             await SendInitialClientStateAsync();
             return;
         }
 
         // Post-latch the tracker was seeded by this connection's initial send, so this
         // compares against a value the server was actually told.
-        var current = CurrentAvailability;
         if (_lastAvailabilitySent == current)
         {
             return;
         }
 
+        await EndSourceStreamIfUnavailableAsync(current);
         await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(current));
         _lastAvailabilitySent = current;
     }
+
+    /// <summary>
+    /// Closes an open source input stream before this client reports <c>available: false</c>.
+    /// The server rejects source chunks whenever the client is not available and treats
+    /// <c>client_stream/end</c> as an implicit stop, so the end MUST precede the state: the
+    /// other order leaves the server holding a stream open across the window in which it has
+    /// already begun rejecting that stream's audio.
+    /// </summary>
+    /// <param name="available">The availability value about to be reported to the server.</param>
+    /// <remarks>
+    /// Enqueued unconditionally rather than gated on <c>IsStreaming</c>. A start still in
+    /// flight — parked inside the capture device — has not set that flag yet, so the gate
+    /// would skip it and let the start finish and stream on after the client had declared
+    /// itself unavailable. The pipeline's command chain instead runs this stop after any such
+    /// start, whatever stage it had reached; stopping a pipeline that is not streaming sends
+    /// nothing, so the no-stream case costs one no-op through the chain.
+    /// </remarks>
+    private Task EndSourceStreamIfUnavailableAsync(bool available)
+        => available || _sourcePipeline is null
+            ? Task.CompletedTask
+            : _sourcePipeline.StopStreamingAsync();
 
     /// <inheritdoc/>
     public async Task EnterExternalSourceAsync()
