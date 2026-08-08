@@ -126,11 +126,43 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
 
     public Task SendBinaryAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
-        SentBinary.Add(data.ToArray());
+        // Locked for the same reason as SentMessages: the source pipeline's chunk
+        // consumer appends from a background task while tests poll.
+        lock (SentBinary)
+        {
+            SentBinary.Add(data.ToArray());
+        }
+
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Copy of <see cref="SentBinary"/> taken under the same lock <see cref="SendBinaryAsync"/>
+    /// appends under, for tests that poll while chunks are still being sent in the background.
+    /// </summary>
+    public IReadOnlyList<byte[]> SnapshotSentBinary()
+    {
+        lock (SentBinary)
+        {
+            return SentBinary.ToList();
+        }
+    }
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    /// <summary>
+    /// Simulates the socket dropping with auto-reconnect: the connection moves to
+    /// <see cref="ConnectionState.Reconnecting"/>, as <see cref="SendspinConnection"/>
+    /// does when the WebSocket dies.
+    /// </summary>
+    public void SimulateConnectionLoss() => SetState(ConnectionState.Reconnecting);
+
+    /// <summary>
+    /// Simulates the redial succeeding after <see cref="SimulateConnectionLoss"/>:
+    /// Reconnecting → Handshaking, the transition the client's reconnect handshake
+    /// listens for.
+    /// </summary>
+    public void SimulateReconnected() => SetState(ConnectionState.Handshaking);
 
     public void RaiseTextMessageReceived(string json)
         => TextMessageReceived?.Invoke(this, json);

@@ -51,6 +51,16 @@ public class SendspinClientServiceSourceTests
             """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":ROLES}}"""
                 .Replace("ROLES", roles));
 
+    private static async Task WaitUntilAsync(Func<bool> condition, string because)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"Timed out waiting for {because}");
+            await Task.Delay(10);
+        }
+    }
+
     [Fact]
     public void Hello_AdvertisesSourceSupport_WithLineSense()
     {
@@ -64,7 +74,7 @@ public class SendspinClientServiceSourceTests
     }
 
     [Fact]
-    public void SourceStart_SendsClientStreamStart_ThenTimestampedChunks()
+    public async Task SourceStart_SendsClientStreamStart_ThenTimestampedChunks()
     {
         var (client, connection, capture) = CreateSourceClient();
         using var _c = client;
@@ -82,9 +92,11 @@ public class SendspinClientServiceSourceTests
         Assert.Equal(48000, start.Payload.Source.SampleRate);
 
         // A captured buffer becomes a type-12 chunk: [12][int64 BE server ts][pcm].
+        // Chunks are framed by the pipeline's consumer task, so the send is asynchronous.
         byte[] pcm = [0x11, 0x22, 0x33, 0x44];
         capture.Emit(pcm, captureTimeUs: 5000);
-        byte[] chunk = connection.SentBinary.Last();
+        await WaitUntilAsync(() => connection.SnapshotSentBinary().Count == 1, "the captured buffer to be framed and sent");
+        byte[] chunk = connection.SnapshotSentBinary().Last();
         Assert.Equal(12, chunk[0]);
         long serverTs = BinaryPrimitives.ReadInt64BigEndian(chunk.AsSpan(1, 8));
         Assert.Equal(client.CurrentGroup is null ? serverTs : serverTs, serverTs); // present
@@ -92,7 +104,7 @@ public class SendspinClientServiceSourceTests
     }
 
     [Fact]
-    public void SourceStop_EndsStream_AndCeasesChunks()
+    public async Task SourceStop_EndsStream_AndCeasesChunks()
     {
         var (client, connection, capture) = CreateSourceClient();
         using var _c = client;
@@ -101,15 +113,20 @@ public class SendspinClientServiceSourceTests
 
         connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"stop"}}}""");
         Assert.False(capture.Capturing);
-        Assert.Contains(connection.SentMessages, m => m is ClientStreamEndMessage);
 
-        int binaryBefore = connection.SentBinary.Count;
+        // The stop drains the chunk consumer before ending the stream, so the end message
+        // lands asynchronously.
+        await WaitUntilAsync(
+            () => connection.SnapshotSentMessages().Any(m => m is ClientStreamEndMessage),
+            "client_stream/end after the stop");
+
+        int binaryBefore = connection.SnapshotSentBinary().Count;
         capture.Emit([9, 9], 6000);
-        Assert.Equal(binaryBefore, connection.SentBinary.Count); // no chunk after stop
+        Assert.Equal(binaryBefore, connection.SnapshotSentBinary().Count); // no chunk after stop
     }
 
     [Fact]
-    public void RoleDeactivation_StopsStreaming()
+    public async Task RoleDeactivation_StopsStreaming()
     {
         var (client, connection, capture) = CreateSourceClient();
         using var _c = client;
@@ -120,7 +137,59 @@ public class SendspinClientServiceSourceTests
         // A later activate that drops source@v1 ends streaming.
         Activate(connection, roles: "[]");
         Assert.False(capture.Capturing);
-        Assert.Contains(connection.SentMessages, m => m is ClientStreamEndMessage);
+        await WaitUntilAsync(
+            () => connection.SnapshotSentMessages().Any(m => m is ClientStreamEndMessage),
+            "client_stream/end after the role deactivation");
+    }
+
+    [Fact]
+    public async Task ReconnectAfterStart_DoesNotResumeStreaming_UntilTheServerStartsAgain()
+    {
+        var (client, connection, capture) = CreateSourceClient();
+        using var _c = client;
+        Activate(connection);
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+        Assert.True(capture.Capturing);
+
+        // The connection drops and the socket auto-reconnects. Streaming state is
+        // per-connection (spec): the old connection's start must not survive into
+        // the new one — and given #123, a post-pairing promote looks exactly like
+        // this reconnect.
+        connection.SimulateConnectionLoss();
+        await WaitUntilAsync(() => !capture.Capturing, "the per-connection streaming reset after the connection drop");
+
+        // Encrypted flow: the server speaks first, the client answers with its hello,
+        // and the reconnect handshake completes on the activate.
+        connection.SimulateReconnected();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        await WaitUntilAsync(
+            () => connection.SnapshotSentMessages().OfType<ClientHelloMessage>().Count() == 2,
+            "the reconnect handshake's client/hello");
+        int announcesBefore = connection.SnapshotSentMessages().OfType<ClientStreamStartMessage>().Count();
+        Activate(connection);
+
+        // Nothing streams on the strength of the previous connection's start: no
+        // capture, no unsolicited client_stream/start (a protocol error the server
+        // should close on), and a captured buffer goes nowhere.
+        Assert.False(capture.Capturing);
+        Assert.Equal(announcesBefore, connection.SnapshotSentMessages().OfType<ClientStreamStartMessage>().Count());
+        int binaryBefore = connection.SnapshotSentBinary().Count;
+        capture.Emit([5, 5], 7000);
+        Assert.Equal(binaryBefore, connection.SnapshotSentBinary().Count);
+
+        // No client_stream/end either: the old stream died with its connection, and
+        // this connection never opened one to end.
+        Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientStreamEndMessage);
+
+        // Positive control: a fresh start on the new connection streams. Without
+        // this, an implementation that never streams would pass everything above.
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+        await WaitUntilAsync(() => capture.Capturing, "capture to open after the fresh start");
+        Assert.Equal(announcesBefore + 1, connection.SnapshotSentMessages().OfType<ClientStreamStartMessage>().Count());
+        capture.Emit([6, 6], 8000);
+        await WaitUntilAsync(
+            () => connection.SnapshotSentBinary().Count == binaryBefore + 1,
+            "a chunk to flow after the fresh start");
     }
 
     [Fact]
@@ -201,6 +270,7 @@ public class SendspinClientServiceSourceTests
         SendSourceStart(connection);
 
         Assert.False(capture.Capturing, "the capture device must never open at trust 'none'");
+        Assert.DoesNotContain(connection.SentMessages, m => m is ClientStreamStartMessage);
     }
 
     [Fact]
