@@ -331,6 +331,133 @@ public class SourceStreamPipelineTests
         }
     }
 
+    [Fact]
+    public async Task StartWhileAStopIsStillDraining_DoesNotOverlapSessions_AndEndPrecedesTheNextStart()
+    {
+        // A stop's core does real async work after flipping the flags: it drains the
+        // consumer before sending client_stream/end. A start arriving in that window must
+        // not build a second encoder/consumer or announce a second session before the
+        // first session's end has gone out — sessions must never overlap on the wire.
+        var capture = new FakeCaptureDevice();
+        var factory = new CountingEncoderFactory();
+        var wire = new List<string>();
+        var firstSendEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int sends = 0;
+        Func<byte[], Task> sendBinary = async data =>
+        {
+            if (Interlocked.Increment(ref sends) == 1)
+            {
+                firstSendEntered.TrySetResult();
+                await gate.Task;
+            }
+
+            lock (wire)
+            {
+                wire.Add($"chunk:{data[9]}");
+            }
+        };
+        Func<IMessage, Task> sendMessage = m =>
+        {
+            lock (wire)
+            {
+                wire.Add(m switch
+                {
+                    ClientStreamStartMessage => "start",
+                    ClientStreamEndMessage => "end",
+                    _ => m.GetType().Name,
+                });
+            }
+
+            return Task.CompletedTask;
+        };
+        var pipeline = CreatePipeline(capture, sendMessage, sendBinary, factory);
+        await pipeline.HandleCommandAsync("start");
+        Assert.Equal(1, factory.CreateCalls);
+
+        Task stopTask;
+        Task startTask;
+        try
+        {
+            // Park the first session's consumer mid-send, then stop: the stop's core runs
+            // to its drain await and is provably mid-drain when the next start arrives.
+            capture.Emit([1], 1_000);
+            await firstSendEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            stopTask = pipeline.HandleCommandAsync("stop");
+
+            startTask = pipeline.HandleCommandAsync("start");
+
+            // While the drain gate is held nothing can legally advance, so these are
+            // deterministic: the racing start must not have built a second session.
+            Assert.Equal(1, factory.CreateCalls);
+            lock (wire)
+            {
+                Assert.Equal(1, wire.Count(op => op == "start"));
+            }
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(5));
+        await startTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Positive control: the queued start genuinely opened a second session that streams.
+        Assert.True(pipeline.IsStreaming);
+        Assert.True(capture.Capturing);
+        Assert.Equal(2, factory.CreateCalls);
+        capture.Emit([9], 9_000);
+        await WaitUntilAsync(
+            () =>
+            {
+                lock (wire)
+                {
+                    return wire.Count == 5;
+                }
+            },
+            "the second session's chunk to be sent");
+        lock (wire)
+        {
+            // The first session closes completely — its chunk, then its end — before the
+            // second session's start announces, and the new session's chunks follow it.
+            Assert.Equal(new[] { "start", "chunk:1", "end", "start", "chunk:9" }, wire);
+        }
+    }
+
+    [Fact]
+    public async Task DisposeRacingAnInFlightStart_DoesNotDisposeTheCaptureDeviceUnderIt()
+    {
+        var capture = new GatedStartCaptureDevice();
+        var sent = new List<IMessage>();
+        var frames = new List<byte[]>();
+        var pipeline = CreatePipeline(capture, Collect(sent), Collect(frames));
+
+        // Hold the start inside the capture device's own StartAsync, then dispose.
+        Task startTask = pipeline.HandleCommandAsync("start");
+        await capture.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Task disposeTask = pipeline.DisposeAsync().AsTask();
+
+        // Deterministic: nothing can legally advance until the start gate is released, so
+        // a dispose that does not wait for the in-flight start has already disposed the
+        // device by now — from under its still-executing StartAsync.
+        Assert.False(
+            capture.Disposed,
+            "the capture device must not be disposed while its StartAsync is still in flight");
+
+        capture.ReleaseStart.TrySetResult();
+
+        // The start observes the disposal once its device call returns, rolls back, and
+        // surfaces why it did not start.
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => startTask.WaitAsync(TimeSpan.FromSeconds(5)));
+        await disposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(pipeline.IsStreaming);
+        Assert.Equal(
+            new[] { "start-entered", "start-returned", "stopped", "disposed" },
+            capture.OperationsSnapshot());
+    }
+
     private static SourceStreamPipeline CreatePipeline(
         IAudioCaptureDevice capture,
         Func<IMessage, Task> sendMessage,
@@ -476,6 +603,100 @@ public class SourceStreamPipelineTests
             ThrowOnCreate
                 ? throw new NotSupportedException("Simulated encoder creation failure")
                 : new PcmSourceEncoder();
+    }
+
+    /// <summary>
+    /// Counts encoder creations. Each streaming session builds exactly one encoder, so the
+    /// count is how a test observes a second session being built while the first is still
+    /// draining — without inferring it from wire output.
+    /// </summary>
+    private sealed class CountingEncoderFactory : ISourceAudioEncoderFactory
+    {
+        private int _createCalls;
+
+        public int CreateCalls => Volatile.Read(ref _createCalls);
+
+        public ISourceAudioEncoder Create(string codec, AudioFormat format)
+        {
+            Interlocked.Increment(ref _createCalls);
+            return new PcmSourceEncoder();
+        }
+    }
+
+    /// <summary>
+    /// Capture device that parks inside StartAsync on a gate and records every lifecycle
+    /// call in order, so a test can hold a start provably inside the device and assert
+    /// nothing disposes it from under that call. Never emits.
+    /// </summary>
+    private sealed class GatedStartCaptureDevice : IAudioCaptureDevice
+    {
+        private readonly object _sync = new object();
+        private readonly List<string> _operations = new List<string>();
+
+        // Explicit no-op accessors: subscribe/unsubscribe are accepted and ignored,
+        // since these tests never deliver a capture through it.
+        public event EventHandler<CapturedAudio>? AudioCaptured
+        {
+            add { /* ignored */ }
+            remove { /* ignored */ }
+        }
+
+        public AudioFormat Format { get; } = new AudioFormat { Codec = "pcm", SampleRate = 48000, Channels = 2, BitDepth = 16 };
+
+        /// <summary>Completed the moment StartAsync is entered.</summary>
+        public TaskCompletionSource StartEntered { get; } =
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Releases the StartAsync call parked on it.</summary>
+        public TaskCompletionSource ReleaseStart { get; } =
+            new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Disposed
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _operations.Contains("disposed");
+                }
+            }
+        }
+
+        public async Task StartAsync(CancellationToken cancellationToken = default)
+        {
+            Record("start-entered");
+            StartEntered.TrySetResult();
+            await ReleaseStart.Task;
+            Record("start-returned");
+        }
+
+        public Task StopAsync(CancellationToken cancellationToken = default)
+        {
+            Record("stopped");
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            Record("disposed");
+            return ValueTask.CompletedTask;
+        }
+
+        public string[] OperationsSnapshot()
+        {
+            lock (_sync)
+            {
+                return _operations.ToArray();
+            }
+        }
+
+        private void Record(string operation)
+        {
+            lock (_sync)
+            {
+                _operations.Add(operation);
+            }
+        }
     }
 
     /// <summary>Capture device whose StartAsync fails once, then works. Never emits.</summary>
