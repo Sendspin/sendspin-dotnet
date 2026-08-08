@@ -320,6 +320,15 @@ public record AudioBufferStats
     public double SmoothedSyncErrorMs => SmoothedSyncErrorMicroseconds / 1000.0;
 
     /// <summary>
+    /// Gets the post-anchor clock-drift term currently applied to the sync error,
+    /// in milliseconds (see <see cref="SyncCorrectionOptions.TrackClockDrift"/>).
+    /// Non-zero values show the server-client clock relationship moving since the
+    /// playback anchor; sustained growth indicates relative crystal drift being
+    /// actively compensated. Always 0 when drift tracking is disabled.
+    /// </summary>
+    public double ClockDriftMs { get; init; }
+
+    /// <summary>
     /// Gets whether playback is currently active.
     /// </summary>
     public bool IsPlaybackActive { get; init; }

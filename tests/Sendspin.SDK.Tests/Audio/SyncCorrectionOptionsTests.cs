@@ -21,4 +21,17 @@ public class SyncCorrectionOptionsTests
         var options = new SyncCorrectionOptions();
         options.Validate(); // must not throw with the new threshold
     }
+
+    [Fact]
+    public void TrackClockDrift_DefaultsToTrue()
+    {
+        Assert.True(SyncCorrectionOptions.Default.TrackClockDrift);
+    }
+
+    [Fact]
+    public void Clone_CopiesTrackClockDrift()
+    {
+        var options = new SyncCorrectionOptions { TrackClockDrift = false };
+        Assert.False(options.Clone().TrackClockDrift);
+    }
 }
