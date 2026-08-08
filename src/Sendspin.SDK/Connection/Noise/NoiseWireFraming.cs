@@ -43,6 +43,15 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     private string? _serverId;
     private NoisePsk? _matchedPsk;
 
+    // Deferred re-handshake swap (#81): computed on the receive path, committed on the
+    // connection's send path by EncodeDeferredReply. A non-null _pendingTransport marks
+    // an uncommitted swap; until the commit, _transport/_handshakeHash/_matchedPsk keep
+    // the pre-re-handshake session.
+    private Transport? _pendingTransport;
+    private byte[]? _pendingHandshakeHash;
+    private NoisePsk? _pendingMatchedPsk;
+    private string? _pendingReplyJson;
+
     // Fragment reassembly state (one in-flight message per connection, per spec).
     private MemoryStream? _reassemblyBuffer;
     private byte _reassemblyOrigType;
@@ -122,6 +131,40 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     }
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Encodes the pending re-handshake reply under the keys being retired and commits
+    /// the deferred key swap, in one call, so a transmitted reply can never leave the
+    /// swap uncommitted. Must run on the connection's send path under its send lock:
+    /// that lock is what serializes this against concurrent application encodes, and
+    /// what guarantees the reply reaches the wire before any new-key frame.
+    /// </remarks>
+    public IReadOnlyList<WireFrame> EncodeDeferredReply()
+    {
+        if (_pendingTransport is null || _pendingReplyJson is null)
+            throw new InvalidOperationException("no deferred re-handshake reply is pending");
+
+        byte[] utf8 = Encoding.UTF8.GetBytes(_pendingReplyJson);
+        var plaintext = new byte[1 + utf8.Length];
+        plaintext[0] = NoiseConstants.MessageTypeJsonBody;
+        utf8.CopyTo(plaintext, 1);
+
+        // Materialize the ciphertext before committing: EncryptOutbound is lazy, and
+        // the reply must be encrypted under the OLD transport.
+        var frames = EncryptOutbound(plaintext).ToList();
+
+        // Commit: retire the old keys; every encode after this uses the new ones.
+        _transport!.Dispose();
+        _transport = _pendingTransport;
+        _handshakeHash = _pendingHandshakeHash;
+        _matchedPsk = _pendingMatchedPsk;
+        _pendingTransport = null;
+        _pendingHandshakeHash = null;
+        _pendingMatchedPsk = null;
+        _pendingReplyJson = null;
+        return frames;
+    }
+
+    /// <inheritdoc/>
     public InboundFrameResult ProcessInbound(WireFrame frame)
     {
         try
@@ -147,6 +190,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     {
         _transport?.Dispose();
         _transport = null;
+        ClearPendingSwap();
         _phase = HandshakePhase.AwaitingStart;
         _clientInitBytes = null;
         _serverInitBytes = null;
@@ -197,18 +241,20 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
 
         byte[] prologue = [.. _clientInitBytes!, .. _serverInitBytes!];
-        return RunResponderExchange(msg1, prologue, out _);
-
+        return RunResponderExchange(msg1, prologue);
     }
 
     /// <summary>
     /// Runs the responder side of one KKpsk2 exchange (initial handshake or in-band
-    /// re-handshake): resolves the psk_id from message 1, completes the handshake, and
-    /// installs the new transport keys. Outputs the noise/handshake reply JSON.
+    /// re-handshake): resolves the psk_id from message 1 and completes the handshake.
+    /// On the initial handshake the new transport is installed immediately and the
+    /// reply returned as a cleartext frame; on a re-handshake the new transport and the
+    /// reply are held pending for the connection's send path to encode and commit via
+    /// <see cref="EncodeDeferredReply"/> -- nothing is encrypted here, on the receive
+    /// path, because a concurrent send may be using the current transport (#81).
     /// </summary>
-    private InboundFrameResult RunResponderExchange(byte[] msg1, byte[] prologue, out string replyJson)
+    private InboundFrameResult RunResponderExchange(byte[] msg1, byte[] prologue)
     {
-        replyJson = string.Empty;
         byte[] serverPub = SendspinIdentity.DecodePeerId(_serverId!);
         var protocol = NoiseProtocol.Parse(_suite.ToProtocolName().AsSpan());
 
@@ -247,36 +293,32 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (transport is null)
             return Fail("handshake did not complete after message 2");
 
-        var previousTransport = _transport;
-        _transport = transport;
-        _handshakeHash = handshakeHash;
-        _matchedPsk = resolved;
-        _phase = HandshakePhase.TransportMode;
-
-        replyJson = JsonSerializer.Serialize(new Dictionary<string, object>
+        string replyJson = JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["type"] = "noise/handshake",
             ["payload"] = new Dictionary<string, object> { ["data"] = Base64UrlText.Encode(buf.AsSpan(0, msg2Len)) },
         });
 
-        if (previousTransport is null)
+        if (_transport is null)
         {
-            // Initial handshake: the reply travels as a cleartext text frame.
+            // Initial handshake: install the keys immediately (no application traffic
+            // can be in flight yet) and reply as a cleartext text frame.
+            _transport = transport;
+            _handshakeHash = handshakeHash;
+            _matchedPsk = resolved;
+            _phase = HandshakePhase.TransportMode;
             return new InboundFrameResult { Replies = [WireFrame.FromText(replyJson)] };
         }
 
-        // Re-handshake: the reply travels encrypted under the OLD session keys; the new
-        // keys take effect for all traffic after it.
-        byte[] replyPlain = new byte[1 + Encoding.UTF8.GetByteCount(replyJson)];
-        replyPlain[0] = NoiseConstants.MessageTypeJsonBody;
-        Encoding.UTF8.GetBytes(replyJson, replyPlain.AsSpan(1));
-        var ciphertext = new byte[replyPlain.Length + 16];
-        int written = previousTransport.WriteMessage(replyPlain, ciphertext);
-        previousTransport.Dispose();
-        return new InboundFrameResult
-        {
-            Replies = [new WireFrame(WireFrameKind.Binary, ciphertext.AsMemory(0, written))],
-        };
+        // Re-handshake: the reply must travel encrypted under the OLD session keys and
+        // reach the wire before any frame under the new ones. Both are enforced by the
+        // connection's send path: hold everything pending and let EncodeDeferredReply,
+        // under the connection's send lock, encode the reply and commit the swap.
+        _pendingTransport = transport;
+        _pendingHandshakeHash = handshakeHash;
+        _pendingMatchedPsk = resolved;
+        _pendingReplyJson = replyJson;
+        return InboundFrameResult.ForDeferredReply();
     }
 
     // --- Transport mode ---
@@ -348,11 +390,17 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     /// </summary>
     private InboundFrameResult HandleRehandshakeMessage(JsonElement root)
     {
+        // The server cannot start another exchange before it has received message 2,
+        // and message 2 has not been sent while the swap is uncommitted. Failing loudly
+        // here also catches a connection that dropped a deferred reply on the floor.
+        if (_pendingTransport is not null)
+            return Fail("re-handshake message 1 received while a prior key swap is uncommitted");
+
         byte[] msg1 = Base64UrlText.Decode(
             root.GetProperty("payload").GetProperty("data").GetString()!);
         byte[] prologue = _handshakeHash
             ?? throw new InvalidOperationException("re-handshake before initial handshake");
-        return RunResponderExchange(msg1, prologue, out _);
+        return RunResponderExchange(msg1, prologue);
     }
 
     private InboundFrameResult DispatchMessage(byte type, ReadOnlyMemory<byte> payload)
@@ -438,7 +486,17 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         _phase = HandshakePhase.Failed;
         _transport?.Dispose();
         _transport = null;
+        ClearPendingSwap();
         return InboundFrameResult.Fatal(reason);
+    }
+
+    private void ClearPendingSwap()
+    {
+        _pendingTransport?.Dispose();
+        _pendingTransport = null;
+        _pendingHandshakeHash = null;
+        _pendingMatchedPsk = null;
+        _pendingReplyJson = null;
     }
 
     private void ThrowIfNotReady()

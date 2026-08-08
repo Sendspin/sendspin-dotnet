@@ -36,6 +36,19 @@ public interface IWireFraming
     /// <summary>Processes one received wire frame.</summary>
     InboundFrameResult ProcessInbound(WireFrame frame);
 
+    /// <summary>
+    /// Encodes the reply a prior <see cref="ProcessInbound"/> deferred (signalled via
+    /// <see cref="InboundFrameResult.HasDeferredReply"/>) and commits the framing's
+    /// pending key swap, as one inseparable operation. Connections must call this on
+    /// their send path and transmit the returned frames within the same send-lock
+    /// acquisition: the frames are encoded under the keys being retired, and every
+    /// encode after this call uses the new keys. Framings that never defer a reply
+    /// keep the default, which throws.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">No deferred reply is pending.</exception>
+    IReadOnlyList<WireFrame> EncodeDeferredReply() =>
+        throw new InvalidOperationException("this framing does not defer replies");
+
     /// <summary>Resets all per-connection state. Called before each (re)connect.</summary>
     void Reset();
 }

@@ -147,21 +147,26 @@ public sealed class IncomingConnection : ISendspinConnection
         await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            foreach (var frame in frames)
-            {
-                if (frame.Kind == WireFrameKind.Text)
-                {
-                    await _socket.SendAsync(frame.PayloadAsText()).ConfigureAwait(false);
-                }
-                else
-                {
-                    await _socket.SendAsync(frame.Payload.ToArray()).ConfigureAwait(false);
-                }
-            }
+            await SendFramesHoldingLockAsync(frames).ConfigureAwait(false);
         }
         finally
         {
             _sendLock.Release();
+        }
+    }
+
+    private async Task SendFramesHoldingLockAsync(IEnumerable<WireFrame> frames)
+    {
+        foreach (var frame in frames)
+        {
+            if (frame.Kind == WireFrameKind.Text)
+            {
+                await _socket.SendAsync(frame.PayloadAsText()).ConfigureAwait(false);
+            }
+            else
+            {
+                await _socket.SendAsync(frame.Payload.ToArray()).ConfigureAwait(false);
+            }
         }
     }
 
@@ -210,6 +215,13 @@ public sealed class IncomingConnection : ISendspinConnection
             return;
         }
 
+        if (inbound.HasDeferredReply)
+        {
+            // Re-handshake reply: encoded and committed on the send path under the send
+            // lock, but dispatched without blocking the receive path, same as Replies.
+            _ = SendDeferredReplySafeAsync();
+        }
+
         if (inbound.Replies is { Count: > 0 } replies)
         {
             // Replies only occur for handshaking framings; the socket callbacks are
@@ -251,6 +263,31 @@ public sealed class IncomingConnection : ISendspinConnection
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to send framing reply frames");
+        }
+    }
+
+    private async Task SendDeferredReplySafeAsync()
+    {
+        try
+        {
+            await _sendLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // EncodeDeferredReply encodes the re-handshake reply under the retiring
+                // keys and commits the pending key swap in one call. Encoding, sending,
+                // and the commit all happen inside this single lock acquisition, so a
+                // concurrent application send either fully precedes the reply (old keys)
+                // or queues behind it and encodes under the new keys (#81).
+                await SendFramesHoldingLockAsync(_framing.EncodeDeferredReply()).ConfigureAwait(false);
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to send deferred framing reply");
         }
     }
 
