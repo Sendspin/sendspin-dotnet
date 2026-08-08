@@ -236,14 +236,37 @@ public sealed class SendspinConnection : ISendspinConnection
         await _sendLock.WaitAsync(cancellationToken);
         try
         {
-            foreach (var frame in frames)
-            {
-                await _webSocket!.SendAsync(
-                    frame.Payload,
-                    frame.Kind == WireFrameKind.Text ? WebSocketMessageType.Text : WebSocketMessageType.Binary,
-                    endOfMessage: true,
-                    cancellationToken);
-            }
+            await SendFramesHoldingLockAsync(frames, cancellationToken);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    private async Task SendFramesHoldingLockAsync(IEnumerable<WireFrame> frames, CancellationToken cancellationToken)
+    {
+        foreach (var frame in frames)
+        {
+            await _webSocket!.SendAsync(
+                frame.Payload,
+                frame.Kind == WireFrameKind.Text ? WebSocketMessageType.Text : WebSocketMessageType.Binary,
+                endOfMessage: true,
+                cancellationToken);
+        }
+    }
+
+    private async Task SendDeferredReplyAsync(CancellationToken cancellationToken)
+    {
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            // EncodeDeferredReply encodes the re-handshake reply under the retiring
+            // keys and commits the pending key swap in one call. Encoding, sending, and
+            // the commit all happen inside this single lock acquisition, so a concurrent
+            // application send either fully precedes the reply (old keys) or queues
+            // behind it and encodes under the new keys (#81).
+            await SendFramesHoldingLockAsync(_framing.EncodeDeferredReply(), cancellationToken);
         }
         finally
         {
@@ -335,6 +358,11 @@ public sealed class SendspinConnection : ISendspinConnection
                     await FailPermanentlyAsync(
                         new SendspinHandshakeException(HandshakeFailureKind.HandshakeRejected, fatal));
                     return;
+                }
+
+                if (inbound.HasDeferredReply)
+                {
+                    await SendDeferredReplyAsync(cancellationToken);
                 }
 
                 if (inbound.Replies is { Count: > 0 })

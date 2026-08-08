@@ -17,6 +17,17 @@ public readonly struct InboundFrameResult
     public IReadOnlyList<WireFrame>? Replies { get; init; }
 
     /// <summary>
+    /// When true, the framing holds a reply that must not be produced on the receive
+    /// path: the connection must call <see cref="IWireFraming.EncodeDeferredReply"/>
+    /// on its send path and transmit the returned frames within the same send-lock
+    /// acquisition. Encoding the reply and committing the framing's pending key swap
+    /// happen inside that single call, so a sent reply cannot leave the swap
+    /// uncommitted. Used for the Noise re-handshake reply, which must travel under
+    /// the retiring keys and precede every frame encrypted under the new ones.
+    /// </summary>
+    public bool HasDeferredReply { get; init; }
+
+    /// <summary>
     /// When set, the framing layer hit an unrecoverable protocol/crypto failure. The
     /// connection must close the socket without sending any application-level error
     /// (per the spec's handshake failure-handling rules). The value is a log-only reason.
@@ -31,6 +42,12 @@ public readonly struct InboundFrameResult
 
     /// <summary>A result surfacing nothing (the frame was fully consumed by the framing layer).</summary>
     public static InboundFrameResult None => default;
+
+    /// <summary>
+    /// A result whose reply must be encoded and committed on the connection's send path
+    /// via <see cref="IWireFraming.EncodeDeferredReply"/>.
+    /// </summary>
+    public static InboundFrameResult ForDeferredReply() => new() { HasDeferredReply = true };
 
     /// <summary>A result signaling an unrecoverable framing failure.</summary>
     public static InboundFrameResult Fatal(string reason) => new() { FatalReason = reason };

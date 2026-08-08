@@ -74,6 +74,36 @@ internal sealed class TestNoiseServer
         _state.Dispose();
     }
 
+    /// <summary>
+    /// Like <see cref="Respond"/>, but drives the responder handshake with a caller-supplied
+    /// prologue instead of recomputing one from the init texts. Lets a test prove the client
+    /// computed the identical prologue by completing a real handshake against a prologue built
+    /// from bytes the test captured off the wire, rather than by re-deriving the expected value
+    /// from strings and comparing that -- the failure mode this exists to catch.
+    /// </summary>
+    internal string RespondWithPrologue(byte[] prologue)
+    {
+        var protocol = NoiseProtocol.Parse("Noise_KKpsk2_25519_ChaChaPoly_SHA256".AsSpan());
+        _state = protocol.Create(
+            initiator: true, prologue: prologue,
+            s: (byte[])_keys.PrivateKey.Clone(),
+            rs: _clientPublicKey.ToArray(),
+            psks: [_psk]);
+
+        string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
+        {
+            ["psk_id"] = NoiseConstants.DerivePskId(_psk),
+        });
+        var buf = new byte[NoiseProtocol.MaxMessageLength];
+        var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(msg1Payload), buf);
+
+        return JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["type"] = "noise/handshake",
+            ["payload"] = new Dictionary<string, object> { ["data"] = Base64Url.EncodeToString(buf.AsSpan(0, len)) },
+        });
+    }
+
     /// <summary>Initiates an in-band re-handshake to a new PSK; returns the encrypted msg1 frame.</summary>
     internal byte[] StartRehandshake(byte[] newPsk)
     {

@@ -45,6 +45,45 @@ public class NoiseWireFramingTests
     }
 
     [Fact]
+    public void Handshake_PrologueIsByteConcatenationOfWireCapturedInitPayloads()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        byte[] clientInitBytes = clientInit.Payload.ToArray();
+
+        // server/init carrying a multi-byte UTF-8 sequence ('é' is two bytes in UTF-8).
+        // A lossy prologue construction (decode then re-encode) would still round-trip
+        // this correctly, which is exactly why the comparison below must not recompute
+        // the expected prologue from strings either -- it uses the same wire bytes the
+        // framing received.
+        string serverInitText =
+            "{\"type\":\"server/init\",\"payload\":{\"server_id\":\"" + server.ServerId +
+            "\",\"version\":" + NoiseConstants.ProtocolVersion + ",\"note\":\"café\"}}";
+        var serverInitFrame = WireFrame.FromText(serverInitText);
+        byte[] serverInitBytes = serverInitFrame.Payload.ToArray();
+        Assert.Null(framing.ProcessInbound(serverInitFrame).FatalReason);
+
+        // Expected prologue: byte concatenation of the two payloads exactly as they
+        // crossed the wire, not re-derived from the JSON strings.
+        byte[] expectedPrologue = [.. clientInitBytes, .. serverInitBytes];
+
+        // Drive the responder handshake with that exact prologue. This only completes
+        // if the framing computed the identical prologue internally -- a mismatched
+        // prologue diverges the Noise transcript hash and message 1 fails to
+        // authenticate, so this is a cryptographic equality check, not a string one.
+        string msg1Text = server.RespondWithPrologue(expectedPrologue);
+        var result = framing.ProcessInbound(WireFrame.FromText(msg1Text));
+
+        Assert.Null(result.FatalReason);
+        var reply = Assert.Single(result.Replies!);
+        server.CompleteHandshake(reply.PayloadAsText());
+        Assert.True(framing.IsTransportReady);
+    }
+
+    [Fact]
     public void Handshake_UnknownPskId_IsFatal()
     {
         var identity = SendspinIdentity.Generate();
@@ -197,6 +236,43 @@ public class NoiseWireFramingTests
     }
 
     [Fact]
+    public void Inbound_ApplicationJsonContainingHandshakeLiteral_WithNoRootType_Surfaces()
+    {
+        var (framing, server) = CompleteHandshake();
+
+        // Application content whose value happens to equal the literal "noise/handshake"
+        // (e.g. a management record field) and which has no root "type" member at all.
+        // Routing by substring sniff sends this into HandleRehandshakeMessage, which does
+        // doc.RootElement.GetProperty("type") and throws KeyNotFoundException -- fatal to
+        // the connection under the current (pre-fix) code.
+        const string json = """{"track_title":"noise/handshake"}""";
+        var frame = server.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)]);
+
+        var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, frame));
+
+        Assert.Null(result.FatalReason);
+        Assert.Equal(json, result.Text);
+        Assert.True(framing.IsTransportReady);
+    }
+
+    [Fact]
+    public void Inbound_ApplicationJsonWithOtherRootType_ContainingHandshakeLiteral_Surfaces()
+    {
+        var (framing, server) = CompleteHandshake();
+
+        // Root type is an ordinary application type; the literal only appears inside the
+        // body. Must surface, not route to the re-handshake handler.
+        const string json = """{"type":"server/hello","payload":{"note":"noise/handshake"}}""";
+        var frame = server.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)]);
+
+        var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, frame));
+
+        Assert.Null(result.FatalReason);
+        Assert.Equal(json, result.Text);
+        Assert.True(framing.IsTransportReady);
+    }
+
+    [Fact]
     public void Rehandshake_SwapsKeys_AndTrafficContinues()
     {
         var identity = SendspinIdentity.Generate();
@@ -219,7 +295,11 @@ public class NoiseWireFramingTests
 
         Assert.Null(result.FatalReason);
         Assert.Null(result.Text); // consumed by the framing, never surfaced
-        var reply = Assert.Single(result.Replies!);
+        Assert.True(result.HasDeferredReply);
+        Assert.Null(result.Replies); // the reply must NOT be produced on the receive path
+
+        // The connection encodes the reply on its send path; the same call commits the swap.
+        var reply = Assert.Single(framing.EncodeDeferredReply());
         server.CompleteRehandshake(reply.Payload.ToArray());
         Assert.Equal(PskCategory.LongTerm, framing.MatchedPsk!.Category);
 
@@ -230,6 +310,108 @@ public class NoiseWireFramingTests
         Assert.Equal(json, inbound.Text);
         var outFrame = Assert.Single(framing.EncodeText(json).ToList());
         Assert.Equal(json, Encoding.UTF8.GetString(server.DecryptFrame(outFrame.Payload.ToArray())[1..]));
+    }
+
+    /// <summary>
+    /// Spec [#122]: message 2 travels under the pre-re-handshake keys and the new keys
+    /// take effect only afterwards. Until the connection's send path encodes the deferred
+    /// reply, the swap must not be observable anywhere -- outbound frames still encrypt
+    /// under the old keys and the session still reports the old authentication. This is
+    /// what lets a send racing the re-handshake land entirely before the reply (#81).
+    /// </summary>
+    [Fact]
+    public void Rehandshake_SwapIsNotObservableBeforeTheDeferredReplyIsEncoded()
+    {
+        var identity = SendspinIdentity.Generate();
+        var store = new InMemoryPairingRecordStore();
+        byte[] newPsk = RandomNumberGenerator.GetBytes(32);
+        store.Upsert(new PairingRecord(newPsk, PskCategory.LongTerm));
+        var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var hs = framing.ProcessInbound(WireFrame.FromText(msg1));
+        server.CompleteHandshake(Assert.Single(hs.Replies!).PayloadAsText());
+
+        var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, server.StartRehandshake(newPsk)));
+        Assert.Null(result.FatalReason);
+        Assert.True(result.HasDeferredReply);
+
+        // Before the reply is encoded: outbound frames must still decrypt under the
+        // server's OLD transport (a frame under the new keys would fail AEAD here)...
+        const string before = """{"type":"client/time","payload":{"seq":1}}""";
+        var beforeFrame = Assert.Single(framing.EncodeText(before).ToList());
+        Assert.Equal(before, Encoding.UTF8.GetString(server.DecryptFrame(beforeFrame.Payload.ToArray())[1..]));
+
+        // ...and the session still reports the OLD authentication.
+        Assert.Equal(PskCategory.Sentinel, framing.MatchedPsk!.Category);
+
+        // EncodeDeferredReply encodes under the old keys and commits the swap, in one call.
+        var reply = Assert.Single(framing.EncodeDeferredReply());
+        server.CompleteRehandshake(reply.Payload.ToArray());
+        Assert.Equal(PskCategory.LongTerm, framing.MatchedPsk!.Category);
+
+        // After the commit, outbound traffic is under the NEW keys.
+        const string after = """{"type":"client/time","payload":{"seq":2}}""";
+        var afterFrame = Assert.Single(framing.EncodeText(after).ToList());
+        Assert.Equal(after, Encoding.UTF8.GetString(server.DecryptFrame(afterFrame.Payload.ToArray())[1..]));
+    }
+
+    /// <summary>
+    /// Regression guard for the branch the deferred swap does not touch: the initial
+    /// handshake reply is an immediate cleartext text frame -- there are no prior
+    /// session keys for it to travel under, and no swap to defer.
+    /// </summary>
+    [Fact]
+    public void InitialHandshake_ReplyIsCleartext_AndNothingIsDeferred()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        Assert.Null(framing.ProcessInbound(WireFrame.FromText(serverInit)).FatalReason);
+        var result = framing.ProcessInbound(WireFrame.FromText(msg1));
+
+        Assert.False(result.HasDeferredReply);
+        var reply = Assert.Single(result.Replies!);
+        Assert.Equal(WireFrameKind.Text, reply.Kind);
+        Assert.Throws<InvalidOperationException>(() => framing.EncodeDeferredReply());
+
+        server.CompleteHandshake(reply.PayloadAsText());
+        Assert.True(framing.IsTransportReady);
+    }
+
+    /// <summary>
+    /// A second re-handshake before the pending swap is committed is a protocol
+    /// violation -- the server cannot have received message 2 yet -- and must fail
+    /// loudly rather than silently overwriting the pending keys.
+    /// </summary>
+    [Fact]
+    public void Rehandshake_SecondMessage1BeforeTheReplyIsCommitted_IsFatal()
+    {
+        var identity = SendspinIdentity.Generate();
+        var store = new InMemoryPairingRecordStore();
+        byte[] newPsk = RandomNumberGenerator.GetBytes(32);
+        store.Upsert(new PairingRecord(newPsk, PskCategory.LongTerm));
+        var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var hs = framing.ProcessInbound(WireFrame.FromText(msg1));
+        server.CompleteHandshake(Assert.Single(hs.Replies!).PayloadAsText());
+
+        var first = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, server.StartRehandshake(newPsk)));
+        Assert.True(first.HasDeferredReply);
+
+        var second = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, server.StartRehandshake(newPsk)));
+        Assert.NotNull(second.FatalReason);
+        Assert.Contains("uncommitted", second.FatalReason);
     }
 
     // --- Harness ---

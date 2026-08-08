@@ -155,7 +155,8 @@ public class FragmentationConformanceTests
         var rehs = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, server.StartRehandshake(newPsk)));
         Assert.Null(rehs.FatalReason);
         Assert.Null(rehs.Text);
-        server.CompleteRehandshake(Assert.Single(rehs.Replies!).Payload.ToArray());
+        Assert.True(rehs.HasDeferredReply);
+        server.CompleteRehandshake(Assert.Single(framing.EncodeDeferredReply()).Payload.ToArray());
         Assert.Equal(PskCategory.LongTerm, framing.MatchedPsk!.Category);
 
         // Still before the first application message: the tight cap must apply, or a
