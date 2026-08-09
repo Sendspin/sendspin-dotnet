@@ -117,6 +117,21 @@ additionally requires `SendspinClientOptions.PresentPinAsync` (the callback that
 derived PIN to the operator); without it the SDK refuses that method with
 `method_not_supported` rather than pairing with a PIN nobody can see.
 
+**Runtime reconfiguration.** `ClientCapabilities` only seeds the client's *initial* pairing
+config. Once paired, a management-activated server can enable, disable, and reconfigure each
+pairing method at runtime via `management/set-pairing-config` — the Pairing PSK, dynamic PIN
+(including its minimum length), static PIN (including its value), unpaired access, and the
+record-mode fallback record. The SDK tracks this effective state itself and never writes it
+back to your `ClientCapabilities` instance, so it lives in memory only: subscribe to
+`ISendspinClient.PairingConfigChanged` to observe every change.
+
+Only three of the six values the event reports have a `ClientCapabilities` property to seed
+them back on the next startup — `UnpairedAccessEnabled`, `MinPinLength`, and `StaticPin`.
+Reapply those three and that part of the server's change survives a restart. The other
+three — whether Pairing PSK, dynamic PIN, or static PIN is *enabled*, and the record-mode
+`psk_id` — have no `ClientCapabilities` counterpart today, so a server-side change to any of
+them is always lost on restart no matter what your app persists.
+
 ## Architecture
 
 ```
