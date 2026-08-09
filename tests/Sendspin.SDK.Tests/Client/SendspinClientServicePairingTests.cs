@@ -99,6 +99,57 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
+    public void PendingPairingPsk_AbandonedAcrossAReconnect_DoesNotFinalizeOnTheNewSession()
+    {
+        // Finding 2 (trust-boundary residuals): _pendingPairingPsk is a per-session
+        // artifact — the long-term PSK a still-open attempt generated — but nothing
+        // cleared it on reconnect or re-key. HandleServerPairFinalize's entire gate is
+        // "_pendingPairingPsk is not null": no activity, trust, or session check. So an
+        // abandoned attempt followed by a bare server/pair-finalize on ANY later session —
+        // even one an anonymous Sentinel-keyed peer opened — would persist a permanent
+        // LongTerm record.
+        var (client, connection, store) = Create();
+        using var _c = client;
+
+        // Positive control first: within the attempt's own session, a finalize genuinely
+        // persists the record. Without this, an implementation that broke pairing
+        // entirely (e.g. never sets _pendingPairingPsk) would also pass the assertion
+        // below for the wrong reason.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+        Assert.Single(store.List());
+
+        // A second, abandoned attempt: the server activates pairing again — a fresh
+        // client/pair-finalize goes out, setting _pendingPairingPsk again — but the
+        // connection drops before server/pair-finalize arrives.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+        connection.SimulateConnectionLoss();
+        connection.SimulateReconnected();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        // Completes the reconnect handshake (any admissible activate does, per
+        // FinishHandshake) without leaving it hanging on the 30s handshake timeout, and
+        // without itself touching _pendingPairingPsk: an unknown pair method is admissible
+        // (activities:["pairing"] alone is enough) but CanOffer refuses it before the
+        // pairing_psk case — the only case that sets the field — is ever reached, so this
+        // activate is not itself an activate the new session ever granted a fresh attempt
+        // from. See UnsupportedPairMethod_AbortsWithoutClosingTheConnection for the same
+        // "unknown method aborts, connection stays open" shape.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"telepathy"}}""");
+
+        // The new session's peer sends a bare finalize, with no pairing_psk activate of
+        // its own.
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+
+        // Still just the one record from the positive control above: the abandoned
+        // attempt's PSK must not be persisted on a session it was never generated for.
+        Assert.Single(store.List());
+    }
+
+    [Fact]
     public void EncryptedHello_AdvertisesPairingPskMethod()
     {
         var (client, connection, _) = Create();

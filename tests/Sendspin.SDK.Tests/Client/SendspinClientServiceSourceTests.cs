@@ -193,6 +193,98 @@ public class SendspinClientServiceSourceTests
     }
 
     [Fact]
+    public async Task StreamingPermittedBeforeReconnect_IsNotHonouredBeforeTheNewSessionsHelloArrives()
+    {
+        // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles, which
+        // is the other half of IsSourceStreamingPermitted's gate (the trust half is covered
+        // by the tests below). SendHandshakeAsync clears LastServerActivate as soon as the
+        // reconnect handshake begins, but before this fix left the mirror standing until the
+        // new session's own server/hello happened to replace LastServerHello wholesale.
+        // OnTextMessageReceived drops nothing while Handshaking (only on Disconnected or
+        // Disconnecting), so a peer that sends server/command before its own server/hello —
+        // a spec violation this client must not reward — could ride the stale mirror to
+        // stream on the strength of the PREVIOUS session's grant. Deliberately sends no
+        // server/hello before the server/command: unlike
+        // ReconnectAfterStart_DoesNotResumeStreaming_UntilTheServerStartsAgain above, whose
+        // server/hello (with no active_roles) would itself replace LastServerHello and so
+        // could not distinguish a correct implementation from a broken one here.
+        var (client, connection, capture) = CreateSourceClient();
+        using var _c = client;
+        Activate(connection);
+
+        // Positive control: streaming is genuinely permitted on this session.
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+        Assert.True(capture.Capturing);
+
+        connection.SimulateConnectionLoss();
+        await WaitUntilAsync(() => !capture.Capturing, "the per-connection streaming reset after the connection drop");
+
+        // The reconnect handshake begins synchronously here — SendHandshakeAsync resets
+        // LastServerActivate (and, with the fix, the ActiveRoles mirror) before any message
+        // from the new session has arrived.
+        connection.SimulateReconnected();
+
+        // No server/hello on the new session yet — the command lands straight into the gap
+        // the finding describes.
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+
+        // The source command dispatch is fire-and-forget (HandleServerCommand ->
+        // SafeFireAndForget), so give a wrongly-honoured start ample time to actually open
+        // the capture device before asserting it never did.
+        await Task.Delay(300);
+        Assert.False(capture.Capturing,
+            "streaming must not resume from a stale LastServerHello.ActiveRoles before this session's own server/hello, let alone its activate");
+    }
+
+    [Fact]
+    public async Task StreamingPermittedBeforeAnInBandRekey_IsNotHonouredAfterItWithNoActivate()
+    {
+        // The in-band twin of the test above: after a re-key there is no bounding
+        // server/hello at all (unlike a reconnect), so without DetectSessionRekey also
+        // clearing the ActiveRoles mirror, a LongTerm-to-LongTerm re-key would carry the
+        // source@v1 grant forward indefinitely rather than just until the next reconnect.
+        var capture = new FakeCaptureDevice();
+        var (client, connection, session) = TestClient.Create(
+            PskCategory.LongTerm,
+            configure: options =>
+            {
+                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
+                options.CaptureDevice = capture;
+                options.ClockSynchronizer = new ConvergedClockSynchronizer();
+            });
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        Activate(connection);
+
+        // Positive control: streaming is genuinely permitted on the pre-rekey session.
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+        Assert.True(capture.Capturing);
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"stop"}}}""");
+
+        // The stop's own drain is fire-and-forget too; wait for its client_stream/end so the
+        // pipeline's serial command chain is settled before the next command is enqueued —
+        // otherwise a stray "start" queued right behind an unsettled "stop" could still be
+        // pending, not yet refused, when the assertion below runs.
+        await WaitUntilAsync(
+            () => connection.SnapshotSentMessages().Any(m => m is ClientStreamEndMessage),
+            "client_stream/end after the stop");
+        Assert.False(capture.Capturing);
+
+        // An in-band re-key installs a fresh handshake hash. Nothing else about the
+        // connection changes — this is the same WebSocket.
+        session.HandshakeHash = Enumerable.Repeat((byte)0xAB, 32).ToArray();
+
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+
+        // Fire-and-forget dispatch again: give a wrongly-honoured start ample time to
+        // actually open the capture device before asserting it never did.
+        await Task.Delay(300);
+        Assert.False(capture.Capturing,
+            "streaming must not resume from a stale LastServerHello.ActiveRoles after an in-band re-key with no new activate");
+    }
+
+    [Fact]
     public void SourceActivatedWithoutUserTrust_ClosesUnauthorized()
     {
         // Unpaired access on: playback+roles is otherwise admissible, so the source

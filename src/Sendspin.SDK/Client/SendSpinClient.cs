@@ -323,10 +323,35 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // on — not the next one. Left standing, it permitted management/* in the window
         // between this handshake completing and this session's first server/activate, with no
         // admissibility check for the new session's PSK. Cleared here rather than on
-        // disconnect because SendHandshakeAsync is private to the dial path
-        // (ConnectAsync and the reconnect handshake), so the listen path's arbitration —
-        // SendspinHostService.PriorityOf, which also reads LastServerActivate — is untouched.
+        // disconnect because SendHandshakeAsync is private to the dial path (ConnectAsync and
+        // the reconnect handshake): this particular clear does not reach the listen path's
+        // arbitration, SendspinHostService.PriorityOf, which also reads LastServerActivate.
+        // That is no longer the whole story, though — DetectSessionRekey clears the same
+        // field for the in-band re-key case, and it runs from OnTextMessageReceived, which
+        // both paths share, so THAT clear does reach PriorityOf. In the window between a
+        // re-key and the new session's next activate, PriorityOf reads Empty, which changes
+        // two ServerArbitration.Decide rules — see DetectSessionRekey's own comment.
         LastServerActivate = null;
+
+        // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles so
+        // IsSourceStreamingPermitted has a single field to read the source-role grant from.
+        // That mirror is the other half of the grant LastServerActivate carries and must not
+        // survive into the next session either — left standing, a server/command arriving
+        // before this session's own activate would stream captured audio on a grant the
+        // previous session made.
+        if (LastServerHello is not null)
+        {
+            LastServerHello.ActiveRoles = [];
+        }
+
+        // A pairing attempt cannot survive the session it was made on (the disconnect
+        // handler's ClearPinState comment states the same principle for the PIN half): the
+        // PSK here was generated for, and delivered by, a specific handshake, and
+        // HandleServerPairFinalize's only gate is "this field is not null" — no activity,
+        // trust, or session check. Left standing, an abandoned attempt followed by a bare
+        // server/pair-finalize on a later session — even one an anonymous Sentinel-keyed peer
+        // opened — would persist a permanent LongTerm record.
+        _pendingPairingPsk = null;
 
         // The connection's receive loop is already running when we get here, so a permanent
         // failure can be raised before there is a TCS to fail — the continuation that resumes
@@ -988,10 +1013,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Notices an in-band re-handshake and restarts the state that is scoped to one Noise
     /// session: which record has been marked used, the CPace pairing counter (which the
-    /// spec defines as the pairing activates since the last handshake), and the accepted
-    /// server/activate grant. Re-handshakes happen inside the framing layer, but they
-    /// install a fresh handshake hash, so a change in it is our signal that the session was
-    /// re-keyed.
+    /// spec defines as the pairing activates since the last handshake), the accepted
+    /// server/activate grant (including its ActiveRoles mirror on LastServerHello), any
+    /// pending pairing PSK, and an in-flight PIN attempt. Re-handshakes happen inside the
+    /// framing layer, but they install a fresh handshake hash, so a change in it is our
+    /// signal that the session was re-keyed.
     /// </summary>
     /// <remarks>
     /// Called for every decrypted message rather than from the pairing path, because the
@@ -1011,12 +1037,45 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pairingCounter = 0;
         _markedPskUsed = false;
 
+        // A PIN attempt's CPace state is bound to a sid built from _pairingCounter (see
+        // HandleServerPairAuth), which was just reset above. An attempt straddling a re-key
+        // would otherwise keep a CPace transcript computed against a counter value the next
+        // pairing activate on this session will reuse for something unrelated — the same
+        // per-session principle the disconnect handler applies via this same helper.
+        ClearPinState();
+
         // An activate authorises the Noise session it arrived on. A re-key replaces that
         // session — including downward, since the spec has the server re-handshake to the
         // Pairing PSK before a pairing_psk flow — so the grant does not carry over. Without
         // this, a management grant from the retired session was honoured on the new one until
         // its first activate, on a PSK that could never have been granted management.
+        //
+        // Unlike SendHandshakeAsync's clear of the same field, this one reaches both the dial
+        // and listen paths — DetectSessionRekey runs from OnTextMessageReceived, which both
+        // share — so it also reaches SendspinHostService.PriorityOf's read of this field. In
+        // the window between a re-key and this session's next activate, PriorityOf reports
+        // ConnectionPriority.Empty, which changes two ServerArbitration.Decide rules: a
+        // Management-priority holder becomes displaceable by incoming Playback, and Exception
+        // 1 ("a pairing attempt is not displaced") stops applying — during a pairing.md:63
+        // re-handshake, which is exactly when a pairing attempt is in flight. Whether
+        // PriorityOf should tolerate this transient is filed separately; this comment records
+        // that the gap exists, not that it is fine.
         LastServerActivate = null;
+
+        // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles (see
+        // SendHandshakeAsync's comment on the same clear). The in-band case has no bounding
+        // server/hello to reset that mirror on its own, so without this a source@v1 grant
+        // from a retired session would carry forward indefinitely, rather than just until the
+        // next reconnect.
+        if (LastServerHello is not null)
+        {
+            LastServerHello.ActiveRoles = [];
+        }
+
+        // Same reasoning as SendHandshakeAsync's clear of this field: the PSK belongs to the
+        // attempt that generated it, not to whatever session happens to be current when
+        // server/pair-finalize arrives.
+        _pendingPairingPsk = null;
     }
 
     /// <summary>
