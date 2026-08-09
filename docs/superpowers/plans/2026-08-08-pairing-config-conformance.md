@@ -172,7 +172,16 @@ Update `CanOffer`'s two PIN arms to require enablement as well as implementation
 
 Replace the two `_capabilities.MinPinLength` reads at `:1518` and any other site with `_effectiveMinPinLength`, and `_capabilities.StaticPin` at `:1559` with `_effectiveStaticPin`.
 
-Note: this step also drops the non-spec `LockedOut` assignment from both descriptors — `locked_out` appears nowhere in the spec (checked across `README.md`, `connection.md`, `management.md`, `messaging.md`, `pairing.md`). Leave the `PairMethodDescriptor.LockedOut` property itself in place; Task 8 removes it once nothing assigns it.
+This step also drops the non-spec `locked_out` field, which appears nowhere in the spec (checked across `README.md`, `connection.md`, `management.md`, `messaging.md`, `pairing.md`). The rewritten `BuildPairMethods` above no longer assigns it, and it has no other assignment, so delete the property outright in this task — `src/Sendspin.SDK/Protocol/Messages/PairingMessages.cs:92-95`:
+
+```csharp
+    /// <summary>Whether the method is in terminal lockout (PIN methods only).</summary>
+    [JsonPropertyName("locked_out")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? LockedOut { get; set; }
+```
+
+Leaving it dead for later tasks would be carrying a field no code sets. The abort-reason side of the same divergence (`SendSpinClient.cs:1490` sends `pair/abort` reason `locked_out`) is **not** this PR's to fix — it belongs to the escalation work in #127, which replaces the refusal with gesture-gating. Leave it alone.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -628,8 +637,9 @@ git commit -m "fix: accept static_pin enablement and rotation in set-pairing-con
 
 **Files:**
 - Modify: `src/Sendspin.SDK/Client/SendSpinClient.cs` (`ManagementSetPairingConfig` case, `CanOffer:1398`)
-- Modify: whichever site assembles handshake PSK candidates from `IPairingRecordStore` — locate with `rg "PskCategory.Pairing" src/Sendspin.SDK/Connection`
 - Test: `tests/Sendspin.SDK.Tests/Client/PairingConfigOwnershipTests.cs`
+
+**Do not touch the PSK resolver.** `RecordPskResolver` (`Connection/Noise/PairingRecordStore.cs:222`) is a pure lookup over the record store, constructed in a *static* factory at `SendSpinClient.cs:3152` — before the client instance exists — so it cannot read `_pairingPskEnabled` without a new shared holder threaded through `NoiseWireFraming`. It also does not need to: the spec's obligation (`pairing.md:67`) is that the client keeps its Pairing PSK among the candidates *whenever the method is enabled*, which this client does. Nothing requires withdrawing the candidate when disabled, and the disabled case already fails safe — the method is unadvertised and `CanOffer` refuses the flow with `method_not_supported`, so a server that still holds the PSK can complete a handshake but cannot pair.
 
 **Interfaces:**
 - Consumes: `_pairingPskEnabled`
@@ -941,7 +951,6 @@ git commit -m "fix: implement record_mode configuration and its referential cons
 
 **Files:**
 - Modify: `src/Sendspin.SDK/Client/PairingConfigChangedEventArgs.cs`
-- Modify: `src/Sendspin.SDK/Protocol/Messages/PairingMessages.cs:92-95`
 - Modify: `src/Sendspin.SDK/Client/ISendSpinClient.cs:299-307` (event doc)
 - Modify: `src/Sendspin.SDK/README.md` (PIN pairing section at `:112`)
 - Test: `tests/Sendspin.SDK.Tests/Client/PairingConfigOwnershipTests.cs`
@@ -1000,8 +1009,6 @@ private PairingConfigChangedEventArgs CurrentPairingConfig(bool pairingPskReplac
     RecordModePskId = _recordModePskId,
 };
 ```
-
-Delete `PairMethodDescriptor.LockedOut` (`PairingMessages.cs:92-95`) — Task 1 removed its last assignment and the field appears nowhere in the spec. Update the `PairAbortPayload.Reason` doc comment at `:65-66` to the spec's six reasons, and note in the summary that `locked_out` is not among them (the abort site itself is the escalation follow-up's to fix).
 
 Update `src/Sendspin.SDK/README.md`'s PIN pairing section to document that a paired management server can enable, disable, and configure each method at runtime, and that `PairingConfigChanged` must be persisted.
 
