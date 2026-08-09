@@ -344,9 +344,14 @@ public sealed class IncomingConnection : ISendspinConnection
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        _disposed = true;
 
-        await DisconnectAsync("disposing");
+        // Same ordering rule as SendspinConnection.DisposeAsync: the send guards below key off
+        // _disposed, so setting it before the goodbye threw ObjectDisposedException into
+        // DisconnectAsync's catch and the connection closed without a word. See that method
+        // for why an unparseable or absent reason makes a conformant server auto-reconnect.
+        await DisconnectAsync(GoodbyeReasons.Shutdown);
+
+        _disposed = true;
         _sendLock.Dispose();
     }
 }

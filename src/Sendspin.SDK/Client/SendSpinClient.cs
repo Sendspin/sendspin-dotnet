@@ -381,7 +381,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
             _logger.LogError("Handshake timeout - server did not complete the hello exchange");
-            await _connection.DisconnectAsync("handshake_timeout");
+
+            // 'restart' rather than a bespoke "handshake_timeout": the reason is a closed set
+            // (messaging.md:426) and a server cannot act on a string outside it. The client
+            // will try again, so inviting the server to reconnect is the accurate signal.
+            await _connection.DisconnectAsync(GoodbyeReasons.Restart);
             throw new TimeoutException("Server did not respond to handshake");
         }
     }
@@ -511,7 +515,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "Reconnect handshake failed");
-            await _connection.DisconnectAsync("handshake_failed");
+
+            // Closed set again (messaging.md:426) — "handshake_failed" is not in it. The
+            // reconnect loop keeps trying, so 'restart' describes what is actually happening.
+            await _connection.DisconnectAsync(GoodbyeReasons.Restart);
         }
     }
 
