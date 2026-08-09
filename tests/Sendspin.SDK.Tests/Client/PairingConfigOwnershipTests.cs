@@ -258,4 +258,34 @@ public class PairingConfigOwnershipTests
             hello.Payload.SupportedPairMethods!, m => m.Method == "dynamic_pin");
         Assert.Equal(7, dynamicPin.MinPinLength);
     }
+
+    [Fact]
+    public void GetPairingConfig_ReportsTheImplementedPinMethods_NotAnEmptySurface()
+    {
+        // #122: the client advertised dynamic_pin in client/hello while telling a management
+        // server it had no PIN methods at all. Same source of truth, so same answer.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8 };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/get-pairing-config","payload":{}}""");
+
+        var result = LastResult(connection);
+        Assert.Equal("ok", result.Result);
+        var data = result.Data!.Value;
+
+        Assert.True(data.GetProperty("pairing_psk").GetProperty("enabled").GetBoolean());
+        var dynamicPin = data.GetProperty("dynamic_pin");
+        Assert.True(dynamicPin.GetProperty("enabled").GetBoolean());
+        Assert.Equal(8, dynamicPin.GetProperty("min_pin_length").GetInt32());
+        Assert.False(dynamicPin.GetProperty("escalated").GetBoolean());
+
+        // static_pin is not implemented by this client, so per spec its object is absent —
+        // absent for the right reason, which the dynamic_pin clause above proves.
+        Assert.False(data.TryGetProperty("static_pin", out _));
+
+        // record_mode is not optional in the spec's data shape.
+        Assert.True(data.TryGetProperty("record_mode", out _));
+    }
 }

@@ -17,12 +17,34 @@ internal sealed record ManagementRecordEntry(
 
 /// <summary>
 /// Data payload of <c>management/result</c> for <c>management/get-pairing-config</c>.
-/// PIN methods are not implemented, so their objects are absent per spec.
+/// A PIN-method object is absent only when the client does not implement that method;
+/// an implemented method that is merely disabled still reports itself with
+/// <c>enabled: false</c>.
 /// </summary>
 internal sealed record PairingConfigData(
     [property: JsonPropertyName("pairing_psk")] PairingMethodState PairingPsk,
+    [property: JsonPropertyName("static_pin")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] PairingMethodState? StaticPin,
+    [property: JsonPropertyName("dynamic_pin")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] DynamicPinConfigState? DynamicPin,
+    [property: JsonPropertyName("record_mode")] RecordModeState RecordMode,
     [property: JsonPropertyName("unpaired_access")] PairingMethodState UnpairedAccess);
 
 /// <summary>Enablement state of one pairing method.</summary>
 internal sealed record PairingMethodState(
     [property: JsonPropertyName("enabled")] bool Enabled);
+
+/// <summary>
+/// Dynamic-PIN state. <c>escalated</c> is the spec's name for the failure counter having
+/// reached 10 (pairing.md:182) — the method stays offered but every attempt is
+/// gesture-gated.
+/// </summary>
+internal sealed record DynamicPinConfigState(
+    [property: JsonPropertyName("enabled")] bool Enabled,
+    [property: JsonPropertyName("min_pin_length")] int MinPinLength,
+    [property: JsonPropertyName("escalated")] bool Escalated);
+
+/// <summary>The shared-PSK record used as the storage-exhaustion fallback.</summary>
+internal sealed record RecordModeState(
+    [property: JsonPropertyName("psk_id")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PskId);

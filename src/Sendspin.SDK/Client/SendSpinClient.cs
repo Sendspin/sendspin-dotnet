@@ -93,6 +93,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _effectiveMinPinLength;
     private string? _effectiveStaticPin;
 
+    // record_mode.psk_id: the shared-PSK record admitted as the storage-exhaustion fallback.
+    // Null until a server sets one; the spec's default is a pre-provisioned shared-PSK
+    // record, which for an SDK is the app's to provision.
+    private string? _recordModePskId;
+
     // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
     private const double MinStaticDelayMs = -5000.0;
@@ -1946,10 +1951,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             case MessageTypes.ManagementGetPairingConfig:
             {
-                // PIN methods are not implemented, so their objects are absent per spec.
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new PairingConfigData(
-                        new PairingMethodState(Enabled: true),
+                        new PairingMethodState(_pairingPskEnabled),
+                        IsMethodImplemented("static_pin") ? new PairingMethodState(_staticPinEnabled) : null,
+                        IsMethodImplemented("dynamic_pin")
+                            ? new DynamicPinConfigState(
+                                _dynamicPinEnabled,
+                                _effectiveMinPinLength,
+                                IsPinMethodLockedOut("dynamic_pin"))
+                            : null,
+                        new RecordModeState(_recordModePskId),
                         new PairingMethodState(_unpairedAccessEnabled)),
                     MessageSerializerContext.Default.PairingConfigData);
                 break;
