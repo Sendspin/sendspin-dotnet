@@ -1971,20 +1971,56 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 // Patch semantics: only fields present are applied. Setting fields on an
                 // unimplemented PIN method returns invalid.
-                if (payload.TryGetProperty("static_pin", out _) || payload.TryGetProperty("dynamic_pin", out _))
-                {
-                    result.Result = "invalid";
-                    break;
-                }
 
-                // Parse both fields before applying either, so a request refused partway
-                // (no store, undecodable psk) changes nothing, and the single change
-                // event below always describes a fully applied request.
+                // Parse every field before applying any, so a request refused partway
+                // (no store, undecodable psk, unimplemented method, out-of-range value)
+                // changes nothing, and the single change event below always describes a
+                // fully applied request.
                 bool? requestedUnpairedAccess = null;
                 if (payload.TryGetProperty("unpaired_access", out var ua)
                     && ua.TryGetProperty("enabled", out var uaEnabled))
                 {
                     requestedUnpairedAccess = uaEnabled.GetBoolean();
+                }
+
+                // dynamic_pin. Parsed here with the other fields so a request refused partway
+                // changes nothing and the single change event below always describes a fully
+                // applied request.
+                bool? requestedDynamicPinEnabled = null;
+                int? requestedMinPinLength = null;
+                if (payload.TryGetProperty("dynamic_pin", out var dp))
+                {
+                    if (!IsMethodImplemented("dynamic_pin"))
+                    {
+                        result.Result = "invalid";
+                        break;
+                    }
+
+                    if (dp.TryGetProperty("enabled", out var dpEnabled))
+                    {
+                        requestedDynamicPinEnabled = dpEnabled.GetBoolean();
+                    }
+
+                    if (dp.TryGetProperty("min_pin_length", out var minLen))
+                    {
+                        int value = minLen.GetInt32();
+                        if (value < 4 || value > 12)
+                        {
+                            result.Result = "invalid";
+                            break;
+                        }
+
+                        requestedMinPinLength = value;
+                    }
+                }
+
+                // static_pin's own patch semantics land in a later task, but the
+                // unimplemented-method rule applies to it the same as dynamic_pin: a field
+                // set on a method this client cannot run must not silently no-op to "ok".
+                if (payload.TryGetProperty("static_pin", out _) && !IsMethodImplemented("static_pin"))
+                {
+                    result.Result = "invalid";
+                    break;
                 }
 
                 byte[]? newPairingPsk = null;
@@ -2009,6 +2045,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _unpairedAccessEnabled = enabled;
                 }
 
+                bool dynamicPinChanged = false;
+                if (requestedDynamicPinEnabled is { } dpe)
+                {
+                    dynamicPinChanged |= dpe != _dynamicPinEnabled;
+                    _dynamicPinEnabled = dpe;
+                }
+
+                if (requestedMinPinLength is { } minPin)
+                {
+                    dynamicPinChanged |= minPin != _effectiveMinPinLength;
+                    _effectiveMinPinLength = minPin;
+                }
+
                 if (newPairingPsk is not null)
                 {
                     lock (_pairingStoreLock)
@@ -2023,7 +2072,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     }
                 }
 
-                if (unpairedAccessChanged || newPairingPsk is not null)
+                if (unpairedAccessChanged || dynamicPinChanged || newPairingPsk is not null)
                 {
                     // One event per request, after every change is applied, and outside
                     // _pairingStoreLock: subscribers run arbitrary app code, and raising

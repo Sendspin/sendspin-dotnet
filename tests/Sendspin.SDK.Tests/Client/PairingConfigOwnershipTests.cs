@@ -288,4 +288,100 @@ public class PairingConfigOwnershipTests
         // record_mode is not optional in the spec's data shape.
         Assert.True(data.TryGetProperty("record_mode", out _));
     }
+
+    [Fact]
+    public void SetDynamicPinMinLength_TakesEffect_AndIsRangeChecked()
+    {
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"min_pin_length":9}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Single(events);
+
+        // The app's object is untouched; the effective value moved.
+        Assert.Equal(6, capabilities.MinPinLength);
+        connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
+        Assert.Equal(9, LastResult(connection).Data!.Value
+            .GetProperty("dynamic_pin").GetProperty("min_pin_length").GetInt32());
+
+        // Out of the spec's 4-12 range is invalid, and changes nothing.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"min_pin_length":13}}}""");
+        Assert.Equal("invalid", LastResult(connection).Result);
+        connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
+        Assert.Equal(9, LastResult(connection).Data!.Value
+            .GetProperty("dynamic_pin").GetProperty("min_pin_length").GetInt32());
+    }
+
+    [Fact]
+    public void DisabledDynamicPin_IsOmittedFromTheHelloAdvertisement()
+    {
+        // messaging.md:194 — "An implemented method that is disabled is omitted." This is the
+        // end-to-end proof that Task 1's effective state is what the advertisement reads:
+        // a set-pairing-config change reaches client/hello without touching capabilities.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        // Positive control first: while enabled, the method is advertised.
+        Assert.Contains(
+            connection.SentMessages.OfType<ClientHelloMessage>().Last().Payload.SupportedPairMethods!,
+            m => m.Method == "dynamic_pin");
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":false}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        // Reconnect so a fresh client/hello is built from the effective state.
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        var afterDisable = connection.SentMessages.OfType<ClientHelloMessage>().Last()
+            .Payload.SupportedPairMethods!.Select(m => m.Method).ToList();
+        Assert.DoesNotContain("dynamic_pin", afterDisable);
+        Assert.Contains("pairing_psk", afterDisable); // the mandatory method survives
+        Assert.Equal(["dynamic_pin"], capabilities.PinPairingMethods); // app's object untouched
+    }
+
+    [Fact]
+    public void SetFieldsOnAnUnimplementedMethod_IsInvalid()
+    {
+        // The one case the old blanket rejection got right, kept as a control so the fix
+        // cannot over-correct into accepting configuration for a method that cannot run.
+        var capabilities = new ClientCapabilities(); // no PIN methods
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":true}}}""");
+
+        Assert.Equal("invalid", LastResult(connection).Result);
+    }
+
+    [Fact]
+    public void DisabledDynamicPin_IsStillReportedByGetPairingConfig_WithEnabledFalse()
+    {
+        // A disabled method is still an implemented one: absence in get-pairing-config
+        // means "this client cannot do it at all", which would be a different and
+        // wrong answer. Only client/hello omits a disabled method.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":false}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
+        var data = LastResult(connection).Data!.Value;
+
+        Assert.True(data.TryGetProperty("dynamic_pin", out var dynamicPin),
+            "a disabled method is still implemented and must still be reported");
+        Assert.False(dynamicPin.GetProperty("enabled").GetBoolean());
+    }
 }
