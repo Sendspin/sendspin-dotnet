@@ -556,6 +556,43 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
+    public void SetStaticPinEnabled_RaisesEventExactlyOnce_AndNotOnANoOpSet()
+    {
+        // static_pin's changed-flag guards the same final event condition as every other
+        // section, but had no independent single-section test: the only existing test that
+        // sends static_pin also sends record_mode in the same request, so recordModeChanged
+        // alone was enough to keep that test's Assert.Single(events) green. This isolates
+        // static_pin the way SetPairingPskEnabled_RaisesEventExactlyOnce_... does for
+        // pairing_psk.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "11111111" };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        // No-op: static_pin.enabled already defaults to true, so re-asserting true changes
+        // nothing and must not raise.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Empty(events);
+
+        // A real change raises exactly once.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":false}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Single(events);
+
+        // Positive control: re-enabling raises again, proving the single event above
+        // reflects the flip and is not dead event-wiring that fires once regardless of
+        // what changed.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Equal(2, events.Count);
+    }
+
+    [Fact]
     public void RotatingThePairingPsk_ToAPskIdInAnotherCategory_IsAlreadyExists()
     {
         // management.md:98 — a rotation that collides with the Sentinel PSK or a stored
