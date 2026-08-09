@@ -364,6 +364,32 @@ public class SendspinClientServiceManagementTests
     }
 
     [Fact]
+    public void ManagementPermittedOnOneConnection_IsNotPermittedOnTheNextBeforeItsOwnActivate()
+    {
+        // A permission decision must be read from the session it was made for. Nothing
+        // cleared LastServerActivate on reconnect, so the window between a new handshake
+        // completing and that session's first server/activate honoured the PREVIOUS
+        // session's grant — even when the new session is keyed differently.
+        var (client, connection, _) = Create();
+        using var _c = client;
+
+        // Positive control first: management is genuinely permitted on this connection.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/list-records","payload":{}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        // Reconnect. No server/activate arrives on the new connection.
+        connection.SimulateConnectionLoss();
+        connection.SimulateReconnected();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/list-records","payload":{}}""");
+
+        Assert.Equal("permission_denied", LastResult(connection).Result);
+    }
+
+    [Fact]
     public void MessageArrivingAfterTheClientClosed_IsDropped_WithNoReply()
     {
         // Defence in depth for the same window: neither receive path stops when the client

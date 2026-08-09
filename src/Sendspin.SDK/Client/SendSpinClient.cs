@@ -319,6 +319,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // rekey on an established session.
         _markedPskUsed = false;
 
+        // A new handshake is a new session, and an activate authorises the session it arrived
+        // on — not the next one. Left standing, it permitted management/* in the window
+        // between this handshake completing and this session's first server/activate, with no
+        // admissibility check for the new session's PSK. Cleared here rather than on
+        // disconnect because SendHandshakeAsync is private to the dial path
+        // (ConnectAsync and the reconnect handshake), so the listen path's arbitration —
+        // SendspinHostService.PriorityOf, which also reads LastServerActivate — is untouched.
+        LastServerActivate = null;
+
         // The connection's receive loop is already running when we get here, so a permanent
         // failure can be raised before there is a TCS to fail — the continuation that resumes
         // ConnectAsync may sit queued behind a busy UI thread while the peer is already
