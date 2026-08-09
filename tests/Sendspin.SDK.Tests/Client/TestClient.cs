@@ -167,9 +167,22 @@ internal sealed class ConvergedClockSynchronizer : IClockSynchronizer
 
     public double StaticDelayMs { get; set; }
 
-    public long ServerToClientTime(long serverTime) => serverTime;
+    /// <summary>
+    /// Offset applied in conversions, following KalmanClockSynchronizer's convention:
+    /// offset = server_time − client_time. Defaults to 0, which maps the two domains
+    /// identically — convenient, but it makes a caller that forgets to convert
+    /// indistinguishable from one that converts correctly. A test whose subject IS the
+    /// conversion should set a non-zero value so the difference is observable.
+    /// </summary>
+    public long OffsetMicroseconds { get; set; }
 
-    public long ClientToServerTime(long clientTime) => clientTime;
+    // Deliberately does NOT apply StaticDelayMs, unlike FakeClockSynchronizer. Existing users
+    // of this fake schedule playback through it, and folding the static delay in here shifts
+    // every scheduled start — enough to hang tests waiting on audio that now arrives at a
+    // different time. The offset alone is what this fake needed to become useful.
+    public long ServerToClientTime(long serverTime) => serverTime - OffsetMicroseconds;
+
+    public long ClientToServerTime(long clientTime) => clientTime + OffsetMicroseconds;
 
     public void ProcessMeasurement(long t1, long t2, long t3, long t4)
     {
