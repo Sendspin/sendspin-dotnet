@@ -602,6 +602,34 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
+    public void PairingConfigChanged_CarriesStaticPinAndRecordModeDistinctly_SoASwapBetweenThemWouldFail()
+    {
+        // StaticPin and RecordModePskId sit on adjacent lines in CurrentPairingConfig and are
+        // both string?; a copy-paste swap between them would compile clean and pass every
+        // other test in the suite. Both are asserted here against different values a swap
+        // would visibly cross, so a swap fails this test instead of shipping silently.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" } };
+        var (client, connection, _, store) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        var shared = Enumerable.Repeat((byte)8, 32).ToArray();
+        store.Upsert(new PairingRecord(shared, PskCategory.LongTerm)); // no ServerId => shared-PSK record
+        string sharedId = NoiseConstants.DerivePskId(shared);
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true,"pin":"13579246"},"record_mode":{"psk_id":"PSKID"}}}"""
+                .Replace("PSKID", sharedId));
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        var change = Assert.Single(events);
+        Assert.True(change.StaticPinEnabled);
+        Assert.Equal("13579246", change.StaticPin);
+        Assert.Equal(sharedId, change.RecordModePskId);
+    }
+
+    [Fact]
     public void RotatingThePairingPsk_ToItsOwnCurrentValue_Succeeds()
     {
         // The naive "does any record already have this psk_id?" check would find the
