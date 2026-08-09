@@ -2074,7 +2074,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         // check — that is a no-op re-rotation, not a conflict, so only the Sentinel PSK
                         // and stored records in a category other than Pairing count as collisions.
                         string newPskId = NoiseConstants.DerivePskId(newPairingPsk);
-                        bool collides = newPskId == NoiseConstants.DerivePskId(NoiseConstants.SentinelPsk);
+                        bool collides = newPskId == NoiseConstants.SentinelPskId;
                         if (!collides)
                         {
                             lock (_pairingStoreLock)
