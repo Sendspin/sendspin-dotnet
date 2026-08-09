@@ -15,6 +15,14 @@ public class SendspinClientServiceSourceTests
 {
     private const string ServerId = FakeNoiseSession.FakeServerId;
 
+    /// <summary>
+    /// Deliberately non-zero, and deliberately not a round number. The source spec requires
+    /// chunk timestamps in the SERVER time domain; a clock that maps client to server
+    /// identically cannot distinguish a pipeline that converts from one that ships the raw
+    /// capture time, so the fixture injects a real offset.
+    /// </summary>
+    private const long ClockOffsetUs = 1_234_567;
+
     private static (SendspinClientService, FakeSendspinConnection, FakeCaptureDevice) CreateSourceClient(
         bool lineSense = false, PskCategory trust = PskCategory.LongTerm, bool unpairedAccess = false)
     {
@@ -35,8 +43,12 @@ public class SendspinClientServiceSourceTests
 
                 // Clock already converged: source@v1 requires sync, so the initial client/state
                 // (and with it the line-sense reporting gate) would otherwise stay deferred —
-                // InitialClientStateGatingTests owns the deferred path.
-                options.ClockSynchronizer = new ConvergedClockSynchronizer();
+                // InitialClientStateGatingTests owns the deferred path. The offset is what
+                // makes the server-domain conversion observable; see ClockOffsetUs.
+                options.ClockSynchronizer = new ConvergedClockSynchronizer
+                {
+                    OffsetMicroseconds = ClockOffsetUs,
+                };
             });
 
         // The source trust gate reads the matched PSK, which is bound to the server id.
@@ -98,8 +110,15 @@ public class SendspinClientServiceSourceTests
         await WaitUntilAsync(() => connection.SnapshotSentBinary().Count == 1, "the captured buffer to be framed and sent");
         byte[] chunk = connection.SnapshotSentBinary().Last();
         Assert.Equal(12, chunk[0]);
+        // The chunk timestamp is the capture instant mapped into the SERVER domain. The old
+        // assertion here compared serverTs against itself through a ternary whose branches
+        // were identical, so it passed unconditionally and this spec MUST was untested. With
+        // a non-zero clock offset, a pipeline that shipped the raw capture time now fails.
+        // (The offset+drift arithmetic itself belongs to KalmanClockSynchronizer and is
+        // pinned by ClientToServerTime_AppliesOffsetAndDrift.)
         long serverTs = BinaryPrimitives.ReadInt64BigEndian(chunk.AsSpan(1, 8));
-        Assert.Equal(client.CurrentGroup is null ? serverTs : serverTs, serverTs); // present
+        Assert.Equal(5000 + ClockOffsetUs, serverTs);
+
         Assert.Equal(pcm, chunk[9..]);
     }
 
