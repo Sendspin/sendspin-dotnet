@@ -608,9 +608,20 @@ public sealed class SendspinConnection : ISendspinConnection
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        _disposed = true;
 
-        await DisconnectAsync("disposing");
+        // Say goodbye BEFORE marking disposed. SendMessageAsync refuses to send on a disposed
+        // connection, so setting the flag first made the goodbye throw ObjectDisposedException
+        // straight into DisconnectAsync's catch, where it was swallowed at Debug level — the
+        // connection closed silently every time. A server that sees a client vanish without a
+        // goodbye is told to assume 'restart' and auto-reconnect (messaging.md:442), so an app
+        // that had exited kept being reconnected to.
+        //
+        // 'shutdown' is the spec's reason for a client that is not coming back
+        // (messaging.md:436). An app that IS coming back — restarting to self-update, say —
+        // should call DisconnectAsync(GoodbyeReasons.Restart) itself before disposing.
+        await DisconnectAsync(GoodbyeReasons.Shutdown);
+
+        _disposed = true;
         _sendLock.Dispose();
     }
 }
