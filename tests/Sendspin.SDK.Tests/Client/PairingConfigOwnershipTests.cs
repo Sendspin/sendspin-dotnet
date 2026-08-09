@@ -484,4 +484,74 @@ public class PairingConfigOwnershipTests
             "a disabled method is still implemented and must still be reported");
         Assert.False(dynamicPin.GetProperty("enabled").GetBoolean());
     }
+
+    [Fact]
+    public void DisablingPairingPsk_StopsOfferingTheMethod()
+    {
+        // pairing.md:67 — the client keeps its Pairing PSK among handshake candidates
+        // "whenever the method is enabled", so disabling it must withdraw both the
+        // advertisement and the client's willingness to run the flow.
+        var (client, connection, _, _) = CreateManagementClient(new ClientCapabilities());
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"enabled":false}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
+        Assert.False(LastResult(connection).Data!.Value
+            .GetProperty("pairing_psk").GetProperty("enabled").GetBoolean());
+
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        Assert.DoesNotContain(
+            connection.SentMessages.OfType<ClientHelloMessage>().Last().Payload.SupportedPairMethods!,
+            m => m.Method == "pairing_psk");
+
+        // Positive control: re-enabling brings it back, so the test is not passing on a
+        // client that simply never advertises the method.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"enabled":true}}}""");
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        Assert.Contains(
+            connection.SentMessages.OfType<ClientHelloMessage>().Last().Payload.SupportedPairMethods!,
+            m => m.Method == "pairing_psk");
+    }
+
+    [Fact]
+    public void SetPairingPskEnabled_RaisesEventExactlyOnce_AndNotOnANoOpSet()
+    {
+        // A prior review flagged a specific hazard in this handler: each config section
+        // needs its changed-flag folded into the final event condition by hand, and it is
+        // easy to add a new section and forget that third touch point, silently
+        // suppressing PairingConfigChanged with nothing failing. This pins pairing_psk's
+        // enabled flag against exactly that mistake.
+        var capabilities = new ClientCapabilities();
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        // No-op: pairing_psk.enabled already defaults to true, so re-asserting true
+        // changes nothing and must not raise.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"enabled":true}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Empty(events);
+
+        // A real change raises exactly once.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"enabled":false}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Single(events);
+
+        // Positive control: re-enabling raises again, proving the single event above
+        // reflects the flip and is not dead event-wiring that fires once regardless of
+        // what changed.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"enabled":true}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Equal(2, events.Count);
+    }
 }

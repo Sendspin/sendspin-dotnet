@@ -1441,9 +1441,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private bool CanOffer(string? method) => method switch
     {
-        // pairing_psk is admissible only on a session already keyed by the Pairing PSK,
-        // and only when the resulting long-term record can actually be persisted.
-        "pairing_psk" => _session.MatchedPsk?.Category == PskCategory.Pairing
+        // pairing_psk is admissible only when the method is enabled, on a session already
+        // keyed by the Pairing PSK, and only when the resulting long-term record can
+        // actually be persisted.
+        "pairing_psk" => _pairingPskEnabled
+                         && _session.MatchedPsk?.Category == PskCategory.Pairing
                          && _pairingStore is not null,
         // A PIN method without a lockout store cannot enforce the spec's terminal lockout at
         // 10 failures — IsPinMethodLockedOut would always report false — so offering it would
@@ -2053,16 +2055,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
 
                 byte[]? newPairingPsk = null;
-                if (payload.TryGetProperty("pairing_psk", out var pp)
-                    && pp.TryGetProperty("psk", out var pskEl))
+                bool? requestedPairingPskEnabled = null;
+                if (payload.TryGetProperty("pairing_psk", out var pp))
                 {
-                    if (_pairingStore is null)
+                    if (pp.TryGetProperty("psk", out var pskEl))
                     {
-                        result.Result = "storage_exhausted";
-                        break;
+                        if (_pairingStore is null)
+                        {
+                            result.Result = "storage_exhausted";
+                            break;
+                        }
+
+                        newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
                     }
 
-                    newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
+                    if (pp.TryGetProperty("enabled", out var ppEnabled))
+                    {
+                        requestedPairingPskEnabled = ppEnabled.GetBoolean();
+                    }
                 }
 
                 // The spec permits the server to make these changes, so the SDK honours
@@ -2114,7 +2124,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     }
                 }
 
-                if (unpairedAccessChanged || dynamicPinChanged || staticPinChanged || newPairingPsk is not null)
+                bool pairingPskEnabledChanged = false;
+                if (requestedPairingPskEnabled is { } ppe)
+                {
+                    pairingPskEnabledChanged = ppe != _pairingPskEnabled;
+                    _pairingPskEnabled = ppe;
+                }
+
+                if (unpairedAccessChanged || dynamicPinChanged || staticPinChanged || newPairingPsk is not null
+                    || pairingPskEnabledChanged)
                 {
                     // One event per request, after every change is applied, and outside
                     // _pairingStoreLock: subscribers run arbitrary app code, and raising
