@@ -197,7 +197,87 @@ git commit -m "fix: clear the accepted activate when a new handshake starts (#10
 
 ---
 
-### Task 3: Full verification
+### Task 3: an accepted activate must not outlive an in-band re-key either
+
+*Added mid-execution: the Task 2 review found the in-band twin of #100. Same defect, one line away.*
+
+**Files:**
+- Modify: `src/Sendspin.SDK/Client/SendSpinClient.cs` (`DetectSessionRekey:1001-1012`)
+- Test: `tests/Sendspin.SDK.Tests/Client/SendspinClientServiceManagementTests.cs`
+
+**The defect.** Task 2 closed the *cross-connection* case by clearing `LastServerActivate` in `SendHandshakeAsync`. The **in-band** case is still open. `DetectSessionRekey` notices a Noise re-handshake on an established connection and restarts the state scoped to that session — `_pairingCounter` and `_markedPskUsed` — but not `LastServerActivate`. Its own summary says it "restarts the state that is scoped to one Noise session", which `LastServerActivate` is, for permission purposes.
+
+**Why it is exploitable, not theoretical.** `pairing.md:63`:
+
+> If a connection is already open under any other PSK — Sentinel or a long-term Sendspin PSK — when the operator picks `pairing_psk`, the server first re-handshakes to the Pairing PSK before sending the `server/activate` shown above.
+
+So a `LongTerm`-keyed session holding a legitimate `management` grant can be re-handshaked **down** to the Pairing PSK. `DetectSessionRekey` fires, but the management grant survives, and `HandleManagement` (`:1846`) permits `management/*` on a Pairing-keyed session until the next activate arrives. A Pairing-keyed session is admissible only for `['pairing']` (`IsAdmissible`), so this hands management to a session that could never have been granted it.
+
+- [ ] **Step 1: Write the failing test**
+
+Cross-*session*, within one connection. Drive a management grant, then change `session.HandshakeHash` so `DetectSessionRekey` observes a re-key, then send a management request with no new activate.
+
+```csharp
+[Fact]
+public void ManagementGrantedBeforeAnInBandRekey_IsNotHonouredAfterIt()
+{
+    // pairing.md:63 lets a server re-handshake an established LongTerm session DOWN to
+    // the Pairing PSK. The grant belonged to the session that was replaced; honouring it
+    // afterwards gives management to a session that is admissible only for ['pairing'].
+    var (client, connection, session, _) = Create();
+    using var _c = client;
+
+    // Positive control: management is genuinely permitted on the pre-rekey session.
+    connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
+    Assert.Equal("ok", LastResult(connection).Result);
+
+    // An in-band re-key installs a fresh handshake hash. Nothing else about the
+    // connection changes — this is the same WebSocket.
+    session.HandshakeHash = Enumerable.Repeat((byte)0xAB, 32).ToArray();
+
+    connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
+
+    Assert.Equal("permission_denied", LastResult(connection).Result);
+}
+```
+
+Check `FakeNoiseSession`'s `HandshakeHash` is settable before writing this; if it is not, make it settable in the fake rather than reshaping the test. `DetectSessionRekey` runs per decrypted message, so the second request itself triggers the detection.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `dotnet test tests/Sendspin.SDK.Tests/Sendspin.SDK.Tests.csproj --filter "FullyQualifiedName~ManagementGrantedBeforeAnInBandRekey" --nologo`
+Expected: FAIL — the post-rekey request answers `ok`, because `DetectSessionRekey` leaves `LastServerActivate` standing.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `DetectSessionRekey`, beside the existing resets:
+
+```csharp
+// An activate authorises the Noise session it arrived on. A re-key replaces that
+// session — including downward, since the spec has the server re-handshake to the
+// Pairing PSK before a pairing_psk flow — so the grant does not carry over. Without
+// this, a management grant from the retired session was honoured on the new one until
+// its first activate, on a PSK that could never have been granted management.
+LastServerActivate = null;
+```
+
+Update the method's summary to name `LastServerActivate` alongside the other two, so the comment and the code agree.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run the full suite: `dotnet test tests/Sendspin.SDK.Tests/Sendspin.SDK.Tests.csproj -v q --nologo`
+Expected: PASS. `DetectSessionRekey` runs on every decrypted message, so this has a wider blast radius than Task 2's — in particular the post-pairing promote flow, where a re-key is followed by a playback activate. If a pairing test fails, report it rather than adjusting it: it may mean a legitimate flow depends on the grant surviving, which would be a finding.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/Sendspin.SDK/Client/SendSpinClient.cs tests/
+git commit -m "fix: clear the accepted activate on an in-band re-key (#100)"
+```
+
+---
+
+### Task 4: Full verification
 
 - [ ] **Step 1:** `dotnet test tests/Sendspin.SDK.Tests/Sendspin.SDK.Tests.csproj -v q --nologo` → 0 failed.
 - [ ] **Step 2:** `dotnet build src/Sendspin.SDK/Sendspin.SDK.csproj -c Release --nologo` → `0 Error(s)`.
