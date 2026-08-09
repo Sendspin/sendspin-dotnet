@@ -1405,6 +1405,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     };
 
     /// <summary>
+    /// A shared-PSK record: a long-term record with no bound server_id, so the same PSK may
+    /// authenticate any server holding it. record_mode's fallback target must be one of
+    /// these (management.md:111).
+    /// </summary>
+    private static bool IsSharedPskRecord(PairingRecord record)
+        => record.Category == PskCategory.LongTerm && record.ServerId is null;
+
+    /// <summary>
     /// Builds the supported_pair_methods list for the encrypted client/hello: every
     /// implemented method that is currently enabled, with its descriptor.
     /// </summary>
@@ -1907,6 +1915,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 string pskId = payload.GetProperty("psk_id").GetString()
                     ?? throw new FormatException("psk_id missing");
+
+                // A record referenced by record_mode.psk_id cannot be removed while the
+                // reference exists (management.md:111); both halves of that constraint are
+                // rejected as invalid.
+                if (pskId == _recordModePskId)
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
                 bool removed = false;
                 bool removedPairing = false;
                 if (_pairingStore is not null)
@@ -2097,6 +2115,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     }
                 }
 
+                // record_mode.psk_id names the shared-PSK record the client falls back to
+                // when its stored-pubkey record space is exhausted. The spec constrains it
+                // in both directions (management.md:111): it must reference a shared-PSK
+                // record here, and that record is protected from removal for as long as the
+                // reference exists (see ManagementRemoveRecord below).
+                string? requestedRecordModePskId = null;
+                if (payload.TryGetProperty("record_mode", out var rm)
+                    && rm.TryGetProperty("psk_id", out var rmPskId))
+                {
+                    string target = rmPskId.GetString() ?? string.Empty;
+                    bool valid;
+                    lock (_pairingStoreLock)
+                    {
+                        valid = _pairingStore?.List().Any(r => r.PskId == target && IsSharedPskRecord(r)) == true;
+                    }
+
+                    if (!valid)
+                    {
+                        result.Result = "invalid";
+                        break;
+                    }
+
+                    requestedRecordModePskId = target;
+                }
+
                 // The spec permits the server to make these changes, so the SDK honours
                 // them — against its own effective state, never the app's capabilities.
                 bool unpairedAccessChanged = false;
@@ -2153,8 +2196,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _pairingPskEnabled = ppe;
                 }
 
+                bool recordModeChanged = false;
+                if (requestedRecordModePskId is not null)
+                {
+                    recordModeChanged = requestedRecordModePskId != _recordModePskId;
+                    _recordModePskId = requestedRecordModePskId;
+                }
+
                 if (unpairedAccessChanged || dynamicPinChanged || staticPinChanged || newPairingPsk is not null
-                    || pairingPskEnabledChanged)
+                    || pairingPskEnabledChanged || recordModeChanged)
                 {
                     // One event per request, after every change is applied, and outside
                     // _pairingStoreLock: subscribers run arbitrary app code, and raising

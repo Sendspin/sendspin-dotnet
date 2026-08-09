@@ -179,6 +179,105 @@ public class SendspinClientServiceManagementTests
     }
 
     [Fact]
+    public void RecordMode_MustReferenceASharedPskRecord_AndProtectsItFromRemoval()
+    {
+        // management.md:111 — psk_id MUST reference a shared-PSK record, enforced at
+        // configuration time, and the referenced record cannot be removed while referenced.
+        var (client, connection, store) = Create();
+        using var _c = client;
+
+        var shared = Enumerable.Repeat((byte)3, 32).ToArray();
+        store.Upsert(new PairingRecord(shared, PskCategory.LongTerm)); // no ServerId => shared
+        string sharedId = NoiseConstants.DerivePskId(shared);
+
+        // A stored-pubkey record is not a legal target: SessionPsk is bound to a server_id.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"record_mode":{"psk_id":"PSKID"}}}"""
+                .Replace("PSKID", NoiseConstants.DerivePskId(SessionPsk)));
+        Assert.Equal("invalid", LastResult(connection).Result);
+
+        // Nor is one that does not exist.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"record_mode":{"psk_id":"nope"}}}""");
+        Assert.Equal("invalid", LastResult(connection).Result);
+
+        // The shared record is accepted and reported back.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"record_mode":{"psk_id":"PSKID"}}}"""
+                .Replace("PSKID", sharedId));
+        Assert.Equal("ok", LastResult(connection).Result);
+        connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
+        Assert.Equal(sharedId, LastResult(connection).Data!.Value
+            .GetProperty("record_mode").GetProperty("psk_id").GetString());
+
+        // And it is now protected from removal.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/remove-record","payload":{"psk_id":"PSKID"}}"""
+                .Replace("PSKID", sharedId));
+        Assert.Equal("invalid", LastResult(connection).Result);
+        Assert.Contains(store.List(), r => r.PskId == sharedId);
+    }
+
+    [Fact]
+    public void RecordMode_SuccessfulSet_RaisesPairingConfigChangedOnce_AndNotOnANoOpSet()
+    {
+        // Same hazard PairingConfigOwnershipTests.SetPairingPskEnabled_RaisesEventExactlyOnce_...
+        // guards for pairing_psk: a section's changed-flag must be folded into the final
+        // event condition by hand, and it is easy to add a new section and forget that
+        // third touch point, silently suppressing PairingConfigChanged with nothing failing.
+        var (client, connection, store) = Create();
+        using var _c = client;
+
+        var shared = Enumerable.Repeat((byte)4, 32).ToArray();
+        store.Upsert(new PairingRecord(shared, PskCategory.LongTerm));
+        string sharedId = NoiseConstants.DerivePskId(shared);
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"record_mode":{"psk_id":"PSKID"}}}"""
+                .Replace("PSKID", sharedId));
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Single(events);
+
+        // Re-asserting the value it already holds is a no-op: applied, but changes nothing,
+        // so it must not raise again.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"record_mode":{"psk_id":"PSKID"}}}"""
+                .Replace("PSKID", sharedId));
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Single(events);
+    }
+
+    [Fact]
+    public void RemoveRecord_SharedPskRecord_NotTheRecordModeTarget_IsStillRemovable()
+    {
+        // The removal constraint has an obvious hole to prove closed: a shared-PSK record
+        // that record_mode does NOT reference must still be removable. Without this
+        // positive control, a remove-record that rejected everything would also pass
+        // RecordMode_MustReferenceASharedPskRecord_AndProtectsItFromRemoval above.
+        var (client, connection, store) = Create();
+        using var _c = client;
+
+        var referenced = Enumerable.Repeat((byte)5, 32).ToArray();
+        var other = Enumerable.Repeat((byte)6, 32).ToArray();
+        store.Upsert(new PairingRecord(referenced, PskCategory.LongTerm));
+        store.Upsert(new PairingRecord(other, PskCategory.LongTerm));
+        string otherId = NoiseConstants.DerivePskId(other);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"record_mode":{"psk_id":"PSKID"}}}"""
+                .Replace("PSKID", NoiseConstants.DerivePskId(referenced)));
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/remove-record","payload":{"psk_id":"PSKID"}}"""
+                .Replace("PSKID", otherId));
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.DoesNotContain(store.List(), r => r.PskId == otherId);
+    }
+
+    [Fact]
     public void ServerUnpair_RemovesRecord_AndSaysGoodbyeUnpaired()
     {
         var (client, connection, store) = Create();
