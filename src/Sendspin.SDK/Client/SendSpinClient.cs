@@ -1984,16 +1984,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             case MessageTypes.ManagementGetPairingConfig:
             {
+                PairingMethodState? staticPinState = IsMethodImplemented("static_pin")
+                    ? new PairingMethodState(IsMethodEnabled("static_pin"))
+                    : null;
+                DynamicPinConfigState? dynamicPinState = IsMethodImplemented("dynamic_pin")
+                    ? new DynamicPinConfigState(
+                        IsMethodEnabled("dynamic_pin"),
+                        _effectiveMinPinLength,
+                        IsPinMethodLockedOut("dynamic_pin"))
+                    : null;
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new PairingConfigData(
-                        new PairingMethodState(_pairingPskEnabled),
-                        IsMethodImplemented("static_pin") ? new PairingMethodState(_staticPinEnabled) : null,
-                        IsMethodImplemented("dynamic_pin")
-                            ? new DynamicPinConfigState(
-                                _dynamicPinEnabled,
-                                _effectiveMinPinLength,
-                                IsPinMethodLockedOut("dynamic_pin"))
-                            : null,
+                        new PairingMethodState(IsMethodEnabled("pairing_psk")),
+                        staticPinState,
+                        dynamicPinState,
                         new RecordModeState(_recordModePskId),
                         new PairingMethodState(_unpairedAccessEnabled)),
                     MessageSerializerContext.Default.PairingConfigData);
