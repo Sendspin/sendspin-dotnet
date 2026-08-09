@@ -1405,6 +1405,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     };
 
     /// <summary>
+    /// Snapshots every effective pairing-config value into a <see cref="PairingConfigChangedEventArgs"/>.
+    /// Every PairingConfigChanged raise site goes through this one builder, so a field added
+    /// to the effective state later cannot reach one raise site and be missed by another.
+    /// </summary>
+    private PairingConfigChangedEventArgs CurrentPairingConfig(bool pairingPskReplaced) => new()
+    {
+        UnpairedAccessEnabled = _unpairedAccessEnabled,
+        PairingPskReplaced = pairingPskReplaced,
+        PairingPskEnabled = _pairingPskEnabled,
+        DynamicPinEnabled = _dynamicPinEnabled,
+        StaticPinEnabled = _staticPinEnabled,
+        MinPinLength = _effectiveMinPinLength,
+        StaticPin = _effectiveStaticPin,
+        RecordModePskId = _recordModePskId,
+    };
+
+    /// <summary>
     /// A shared-PSK record: a long-term record with no bound server_id, so the same PSK may
     /// authenticate any server holding it. record_mode's fallback target must be one of
     /// these (management.md:111).
@@ -1959,11 +1976,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     // set-pairing-config's psk replacement causes — report it the same way.
                     // Raised outside _pairingStoreLock for the same reason as there:
                     // subscribers run arbitrary app code and must not run under the lock.
-                    PairingConfigChanged?.Invoke(this, new PairingConfigChangedEventArgs
-                    {
-                        UnpairedAccessEnabled = _unpairedAccessEnabled,
-                        PairingPskReplaced = true,
-                    });
+                    PairingConfigChanged?.Invoke(this, CurrentPairingConfig(pairingPskReplaced: true));
                 }
 
                 break;
@@ -2211,11 +2224,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     // under the lock would let that code block against other threads
                     // contending for it (same-thread re-entry is safe; cross-thread
                     // waits under the lock are the deadlock hazard).
-                    PairingConfigChanged?.Invoke(this, new PairingConfigChangedEventArgs
-                    {
-                        UnpairedAccessEnabled = _unpairedAccessEnabled,
-                        PairingPskReplaced = newPairingPsk is not null,
-                    });
+                    PairingConfigChanged?.Invoke(this, CurrentPairingConfig(pairingPskReplaced: newPairingPsk is not null));
                 }
 
                 break;

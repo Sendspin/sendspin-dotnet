@@ -17,4 +17,28 @@ public sealed class PairingConfigChangedEventArgs : EventArgs
     /// token previously obtained from <see cref="ISendspinClient.EnsurePairingPsk"/> is stale.
     /// </summary>
     public bool PairingPskReplaced { get; init; }
+
+    /// <summary>The effective <c>pairing_psk</c> enabled setting after the change.</summary>
+    public bool PairingPskEnabled { get; init; }
+
+    /// <summary>The effective <c>dynamic_pin</c> enabled setting after the change.</summary>
+    public bool DynamicPinEnabled { get; init; }
+
+    /// <summary>The effective <c>static_pin</c> enabled setting after the change.</summary>
+    public bool StaticPinEnabled { get; init; }
+
+    /// <summary>The effective minimum PIN length after the change.</summary>
+    public int MinPinLength { get; init; }
+
+    /// <summary>
+    /// The effective static PIN after the change, or null if none is configured. This is a
+    /// secret: the app is expected to store it securely (the same expectation as the Pairing
+    /// PSK), and it must never be logged. It is carried here — unlike
+    /// <c>management/get-pairing-config</c>, which never returns a configured secret — because
+    /// without it the app cannot persist a PIN the server just rotated.
+    /// </summary>
+    public string? StaticPin { get; init; }
+
+    /// <summary>The effective <c>record_mode.psk_id</c> after the change, or null if unset.</summary>
+    public string? RecordModePskId { get; init; }
 }

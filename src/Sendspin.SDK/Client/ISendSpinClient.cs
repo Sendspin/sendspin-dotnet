@@ -296,11 +296,15 @@ public interface ISendspinClient : IAsyncDisposable
 
     /// <summary>
     /// Raised when a server changes this client's pairing configuration via
-    /// <c>management/set-pairing-config</c> — the effective unpaired-access setting changed,
-    /// the stored Pairing PSK was replaced, or both — or removes the stored Pairing record
-    /// via <c>management/remove-record</c>. The SDK applies the change to its own
-    /// effective state — never to the <see cref="ClientCapabilities"/> instance the app
-    /// owns — so subscribe to this to persist the new configuration. When
+    /// <c>management/set-pairing-config</c> — any pairing method enabled, disabled, or
+    /// reconfigured (min PIN length, static PIN, record-mode fallback), unpaired access
+    /// changed, the stored Pairing PSK replaced, or any combination of these — or removes
+    /// the stored Pairing record via <c>management/remove-record</c>. The SDK applies the
+    /// change to its own effective state — never to the <see cref="ClientCapabilities"/>
+    /// instance the app owns — so this state lives in memory only. Subscribe to this and
+    /// persist every value the event args report; without that, a restart silently reverts
+    /// the client to whatever <see cref="ClientCapabilities"/> says, discarding the
+    /// server's changes with no error. When
     /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is true, any token
     /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
     /// </summary>

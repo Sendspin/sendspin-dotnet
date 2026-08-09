@@ -582,6 +582,26 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
+    public void PairingConfigChanged_CarriesEveryEffectiveValue_SoTheAppCanPersistThem()
+    {
+        // The SDK holds effective config in memory only; without the values on the event the
+        // app cannot persist them and every restart silently reverts a server's changes.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":false,"min_pin_length":10}}}""");
+
+        var change = Assert.Single(events);
+        Assert.False(change.DynamicPinEnabled);
+        Assert.Equal(10, change.MinPinLength);
+        Assert.True(change.PairingPskEnabled); // untouched fields still report their current value
+    }
+
+    [Fact]
     public void RotatingThePairingPsk_ToItsOwnCurrentValue_Succeeds()
     {
         // The naive "does any record already have this psk_id?" check would find the
