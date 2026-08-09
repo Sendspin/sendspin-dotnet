@@ -554,4 +554,54 @@ public class PairingConfigOwnershipTests
         Assert.Equal("ok", LastResult(connection).Result);
         Assert.Equal(2, events.Count);
     }
+
+    [Fact]
+    public void RotatingThePairingPsk_ToAPskIdInAnotherCategory_IsAlreadyExists()
+    {
+        // management.md:98 — a rotation that collides with the Sentinel PSK or a stored
+        // record would make one psk_id resolve to two different trust levels.
+        var (client, connection, _, store) = CreateManagementClient(new ClientCapabilities());
+        using var _c = client;
+
+        // SessionPsk is already stored as this connection's LongTerm record.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"psk":"PSK"}}}"""
+                .Replace("PSK", ToBase64Url(SessionPsk)));
+        Assert.Equal("already_exists", LastResult(connection).Result);
+
+        // And nothing was written: the Pairing record is still absent.
+        Assert.DoesNotContain(store.List(), r => r.Category == PskCategory.Pairing);
+
+        // Positive control: an unused PSK rotates successfully.
+        var fresh = Enumerable.Repeat((byte)9, 32).ToArray();
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"psk":"PSK"}}}"""
+                .Replace("PSK", ToBase64Url(fresh)));
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Contains(store.List(), r => r.Category == PskCategory.Pairing);
+    }
+
+    [Fact]
+    public void RotatingThePairingPsk_ToItsOwnCurrentValue_Succeeds()
+    {
+        // The naive "does any record already have this psk_id?" check would find the
+        // Pairing record itself and reject a same-value re-rotation as a collision. The
+        // category exclusion (a stored record only collides when it is NOT the Pairing
+        // record) exists precisely so this is a no-op, not a conflict.
+        var (client, connection, _, store) = CreateManagementClient(new ClientCapabilities());
+        using var _c = client;
+
+        var pairingPsk = Enumerable.Repeat((byte)3, 32).ToArray();
+        string request = """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"psk":"PSK"}}}"""
+            .Replace("PSK", ToBase64Url(pairingPsk));
+        connection.RaiseTextMessageReceived(request);
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        // Re-rotate to the exact same value already held by the Pairing record.
+        connection.RaiseTextMessageReceived(request);
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Contains(
+            store.List(),
+            r => r.Category == PskCategory.Pairing && r.Psk.ToArray().SequenceEqual(pairingPsk));
+    }
 }

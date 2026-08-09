@@ -2067,6 +2067,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         }
 
                         newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
+
+                        // A psk_id that already identifies a candidate in another category would make
+                        // one id resolve to two trust levels at handshake time (management.md:98).
+                        // Rotating to the value the Pairing record already holds is excluded from this
+                        // check — that is a no-op re-rotation, not a conflict, so only the Sentinel PSK
+                        // and stored records in a category other than Pairing count as collisions.
+                        string newPskId = NoiseConstants.DerivePskId(newPairingPsk);
+                        bool collides = newPskId == NoiseConstants.DerivePskId(NoiseConstants.SentinelPsk);
+                        if (!collides)
+                        {
+                            lock (_pairingStoreLock)
+                            {
+                                collides = _pairingStore.List()
+                                    .Any(r => r.Category != PskCategory.Pairing && r.PskId == newPskId);
+                            }
+                        }
+
+                        if (collides)
+                        {
+                            result.Result = "already_exists";
+                            break;
+                        }
                     }
 
                     if (pp.TryGetProperty("enabled", out var ppEnabled))
