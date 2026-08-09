@@ -113,7 +113,7 @@ public class InboundMessageHardeningTests
         // JsonElement.GetString(), which escapes them. The dispatch filter must name it
         // as peer-triggerable and close — not let it escape the receive callback
         // unhandled (the condition carried from the previous change's review).
-        var (client, connection, _) = SendspinClientServiceManagementTests.Create();
+        var (client, connection, _, _) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived(

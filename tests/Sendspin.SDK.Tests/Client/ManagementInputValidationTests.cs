@@ -18,7 +18,7 @@ public class ManagementInputValidationTests
     [Fact]
     public void AddRecord_ServerIdWithInjectedJsonStructure_IsRejectedBeforeTheStore()
     {
-        var (client, connection, store) = SendspinClientServiceManagementTests.Create();
+        var (client, connection, _, store) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
         // Create() seeds the requester's own record, so "unchanged" is a snapshot
         // comparison rather than emptiness.
@@ -37,7 +37,7 @@ public class ManagementInputValidationTests
     [Fact]
     public void ListRecords_ServerIdRoundTripsExactly()
     {
-        var (client, connection, store) = SendspinClientServiceManagementTests.Create();
+        var (client, connection, _, store) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
         string serverId = EncodeKey(5);
         Assert.Equal(43, serverId.Length);
@@ -58,7 +58,7 @@ public class ManagementInputValidationTests
     [Fact]
     public void AddRecord_ServerIdOfWrongLength_IsRejected()
     {
-        var (client, connection, store) = SendspinClientServiceManagementTests.Create();
+        var (client, connection, _, store) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
         var before = store.List().Select(r => r.PskId).ToList();
 
@@ -78,7 +78,7 @@ public class ManagementInputValidationTests
     [Fact]
     public void AddRecord_ServerIdOfCorrectLengthButNotBase64Url_IsRejected()
     {
-        var (client, connection, store) = SendspinClientServiceManagementTests.Create();
+        var (client, connection, _, store) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
         var before = store.List().Select(r => r.PskId).ToList();
         string psk = EncodeKey(24);
@@ -98,7 +98,7 @@ public class ManagementInputValidationTests
     [Fact]
     public void AddRecord_MalformedPsk_IsRejected_AndTheErrorNamesThePsk()
     {
-        var (client, connection, store) = SendspinClientServiceManagementTests.Create();
+        var (client, connection, _, store) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
         var before = store.List().Select(r => r.PskId).ToList();
         string serverId = EncodeKey(23);
@@ -120,7 +120,7 @@ public class ManagementInputValidationTests
     [Fact]
     public void SetPairingConfig_UnpairedAccess_RoundTripsThroughGetPairingConfig()
     {
-        var (client, connection, _) = SendspinClientServiceManagementTests.Create();
+        var (client, connection, _, _) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived(

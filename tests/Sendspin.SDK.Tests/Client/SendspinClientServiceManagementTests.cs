@@ -16,7 +16,7 @@ public class SendspinClientServiceManagementTests
     private static readonly byte[] SessionPsk = Enumerable.Repeat((byte)7, 32).ToArray();
 
     // Internal so ManagementInputValidationTests can reuse the same management-activated client.
-    internal static (SendspinClientService, FakeSendspinConnection, InMemoryPairingRecordStore) Create(
+    internal static (SendspinClientService, FakeSendspinConnection, FakeNoiseSession, InMemoryPairingRecordStore) Create(
         bool managementActive = true)
     {
         var store = new InMemoryPairingRecordStore();
@@ -32,16 +32,19 @@ public class SendspinClientServiceManagementTests
         string activities = managementActive ? """["playback","management"]""" : """["playback"]""";
         connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/activate","payload":{"activities":{{{activities}}},"active_roles":[]}}""");
-        return (client, connection, store);
+        return (client, connection, session, store);
     }
 
     internal static ManagementResultPayload LastResult(FakeSendspinConnection connection) =>
         connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
 
+    private static string ToBase64Url(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
     [Fact]
     public void Management_WithoutManagementActivity_IsPermissionDenied()
     {
-        var (client, connection, _) = Create(managementActive: false);
+        var (client, connection, _, _) = Create(managementActive: false);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
@@ -52,7 +55,7 @@ public class SendspinClientServiceManagementTests
     [Fact]
     public void ListRecords_ReturnsStoredRecords()
     {
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
@@ -68,7 +71,7 @@ public class SendspinClientServiceManagementTests
     [Fact]
     public void AddRecord_PersistsAndRejectsDuplicates()
     {
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
         string psk = Convert.ToBase64String(Enumerable.Repeat((byte)9, 32).ToArray())
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -88,9 +91,45 @@ public class SendspinClientServiceManagementTests
     }
 
     [Fact]
+    public void AddRecord_CarryingTheSentinelPsk_IsRejected_AndDoesNotShadowSentinelResolution()
+    {
+        // management.md:37 — a psk_id already known as the Sentinel PSK is already_exists.
+        // Without this, a LongTerm record holding the published Sentinel constant shadows
+        // Sentinel resolution (RecordPskResolver searches records before falling back), so
+        // every anonymous peer that knows the constant authenticates at trust 'user'.
+        var (client, connection, _, store) = Create();
+        using var _c = client;
+
+        string sentinel = ToBase64Url(NoiseConstants.SentinelPsk.ToArray());
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/add-record","payload":{"psk":"PSK"}}""".Replace("PSK", sentinel));
+
+        Assert.Equal("already_exists", LastResult(connection).Result);
+
+        // Nothing was written: the Sentinel psk_id must not appear in the store at all,
+        // which is the property that keeps resolution unambiguous.
+        Assert.DoesNotContain(store.List(), r => r.PskId == NoiseConstants.SentinelPskId);
+    }
+
+    [Fact]
+    public void AddRecord_CarryingAnUnrelatedPsk_StillSucceeds()
+    {
+        // Positive control: a guard that rejected every add would pass the test above.
+        var (client, connection, _, store) = Create();
+        using var _c = client;
+
+        var fresh = Enumerable.Repeat((byte)0x5A, 32).ToArray();
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/add-record","payload":{"psk":"PSK"}}""".Replace("PSK", ToBase64Url(fresh)));
+
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Contains(store.List(), r => r.PskId == NoiseConstants.DerivePskId(fresh));
+    }
+
+    [Fact]
     public void RemoveRecord_NotFound_And_SelfRemovalClosesSession()
     {
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -113,7 +152,7 @@ public class SendspinClientServiceManagementTests
         // list-records hands every management server the Pairing record's psk_id, and
         // remove-record removes any record by psk_id — so a server can kill the token
         // behind a QR code an app is currently displaying. The app must hear about it.
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
         string before = client.EnsurePairingPsk();
         string pairingPskId = store.List().Single(r => r.Category == PskCategory.Pairing).PskId;
@@ -134,7 +173,7 @@ public class SendspinClientServiceManagementTests
     public void RemoveRecord_TargetingALongTermRecord_DoesNotRaisePairingConfigChanged()
     {
         // Guards the positive test against an implementation that fires on every removal.
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
         byte[] otherPsk = Enumerable.Repeat((byte)8, 32).ToArray();
         store.Upsert(new PairingRecord(otherPsk, PskCategory.LongTerm, ServerId));
@@ -151,7 +190,7 @@ public class SendspinClientServiceManagementTests
     [Fact]
     public void PairingConfig_GetAndPatch()
     {
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
@@ -183,7 +222,7 @@ public class SendspinClientServiceManagementTests
     {
         // management.md:111 — psk_id MUST reference a shared-PSK record, enforced at
         // configuration time, and the referenced record cannot be removed while referenced.
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         var shared = Enumerable.Repeat((byte)3, 32).ToArray();
@@ -225,7 +264,7 @@ public class SendspinClientServiceManagementTests
         // guards for pairing_psk: a section's changed-flag must be folded into the final
         // event condition by hand, and it is easy to add a new section and forget that
         // third touch point, silently suppressing PairingConfigChanged with nothing failing.
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         var shared = Enumerable.Repeat((byte)4, 32).ToArray();
@@ -256,7 +295,7 @@ public class SendspinClientServiceManagementTests
         // that record_mode does NOT reference must still be removable. Without this
         // positive control, a remove-record that rejected everything would also pass
         // RecordMode_MustReferenceASharedPskRecord_AndProtectsItFromRemoval above.
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         var referenced = Enumerable.Repeat((byte)5, 32).ToArray();
@@ -280,7 +319,7 @@ public class SendspinClientServiceManagementTests
     [Fact]
     public void ServerUnpair_RemovesRecord_AndSaysGoodbyeUnpaired()
     {
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"server/unpair","payload":{}}""");
@@ -325,12 +364,70 @@ public class SendspinClientServiceManagementTests
     }
 
     [Fact]
+    public void ManagementPermittedOnOneConnection_IsNotPermittedOnTheNextBeforeItsOwnActivate()
+    {
+        // A permission decision must be read from the session it was made for. Nothing
+        // cleared LastServerActivate on reconnect, so the window between a new handshake
+        // completing and that session's first server/activate honoured the PREVIOUS
+        // session's grant — even when the new session is keyed differently.
+        var (client, connection, _, _) = Create();
+        using var _c = client;
+
+        // Positive control first: management is genuinely permitted on this connection.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/list-records","payload":{}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        // Reconnect. No server/activate arrives on the new connection.
+        connection.SimulateConnectionLoss();
+        connection.SimulateReconnected();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/list-records","payload":{}}""");
+
+        Assert.Equal("permission_denied", LastResult(connection).Result);
+    }
+
+    [Fact]
+    public void ManagementGrantedBeforeAnInBandRekey_IsNotHonouredAfterIt()
+    {
+        // pairing.md:63 lets a server re-handshake an established LongTerm session DOWN to
+        // the Pairing PSK. The grant belonged to the session that was replaced; honouring it
+        // afterwards gives management to a session that is admissible only for ['pairing'].
+        var (client, connection, session, _) = Create();
+        using var _c = client;
+
+        // Positive control: management is genuinely permitted on the pre-rekey session.
+        connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+
+        // An in-band re-key installs a fresh handshake hash. Nothing else about the
+        // connection changes — this is the same WebSocket.
+        session.HandshakeHash = Enumerable.Repeat((byte)0xAB, 32).ToArray();
+
+        connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
+
+        Assert.Equal("permission_denied", LastResult(connection).Result);
+
+        // Positive control (closes the loop the rest of this test only proves half of): a
+        // fresh server/activate on the new session re-grants management. Without this, an
+        // implementation that nulled LastServerActivate permanently — and never re-honoured
+        // a later activate at all — would also pass the denial assertion above.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback","management"],"active_roles":[]}}""");
+        connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
+
+        Assert.Equal("ok", LastResult(connection).Result);
+    }
+
+    [Fact]
     public void MessageArrivingAfterTheClientClosed_IsDropped_WithNoReply()
     {
         // Defence in depth for the same window: neither receive path stops when the client
         // decides to close, and every close is fire-and-forget, so frames keep arriving
         // during the teardown. They must not be handled at all — not even answered.
-        var (client, connection, store) = Create();
+        var (client, connection, _, store) = Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"server/unpair","payload":{}}""");
