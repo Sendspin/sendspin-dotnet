@@ -190,8 +190,11 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void LockedOutMethod_AbortsImmediately_AndIsAdvertised()
+    public void LockedOutMethod_AbortsImmediately()
     {
+        // Lockout state is not part of the client/hello descriptor (no spec field for it);
+        // it only shows up as the pair/abort reason once the server actually selects the
+        // locked-out method.
         var caps = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
         var lockout = new InMemoryPinLockoutStore();
         lockout.SetFailures("static_pin", 10);
@@ -206,11 +209,6 @@ public class SendspinClientServicePinPairingTests
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
-
-        // client/hello advertises the method as locked out.
-        var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
-        var descriptor = hello.Payload.SupportedPairMethods!.Single(m => m.Method == "static_pin");
-        Assert.True(descriptor.LockedOut);
 
         connection.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");

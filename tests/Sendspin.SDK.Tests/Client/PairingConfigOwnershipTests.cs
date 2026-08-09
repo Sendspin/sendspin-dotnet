@@ -2,6 +2,7 @@ using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Connection.Noise.Pairing;
+using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -235,5 +236,26 @@ public class PairingConfigOwnershipTests
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Last();
         Assert.True(hello.Payload.UnpairedAccess!.Enabled);
         Assert.False(capabilities.UnpairedAccessEnabled);
+    }
+
+    [Fact]
+    public void HelloPairMethodDescriptors_CarryOnlySpecDefinedFields()
+    {
+        // `locked_out` appears in no spec file (README/connection/management/messaging/pairing).
+        // The descriptor is method, out_channels?, min_pin_length?, locations? (pairing.md:279-283).
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 7 };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        var hello = connection.SentMessages.OfType<ClientHelloMessage>().Last();
+        string json = MessageSerializer.Serialize(hello);
+
+        Assert.DoesNotContain("locked_out", json);
+
+        // Positive control: the descriptor is genuinely present and populated, so the
+        // assertion above is not passing on an empty supported_pair_methods list.
+        var dynamicPin = Assert.Single(
+            hello.Payload.SupportedPairMethods!, m => m.Method == "dynamic_pin");
+        Assert.Equal(7, dynamicPin.MinPinLength);
     }
 }

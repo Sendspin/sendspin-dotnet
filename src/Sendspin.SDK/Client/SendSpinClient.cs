@@ -82,6 +82,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // PairingConfigChanged tells the app to persist the new value.
     private bool _unpairedAccessEnabled;
 
+    // Effective pairing-method configuration: seeded from capabilities at construction and
+    // updated only by management/set-pairing-config. Held here rather than in the app-owned
+    // capabilities object, which the SDK does not mutate; PairingConfigChanged tells the app
+    // to persist the new values. client/hello, CanOffer, and get-pairing-config all read
+    // these, so the advertisement and the management answer cannot drift apart.
+    private bool _pairingPskEnabled;
+    private bool _dynamicPinEnabled;
+    private bool _staticPinEnabled;
+    private int _effectiveMinPinLength;
+    private string? _effectiveStaticPin;
+
     // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
     private const double MinStaticDelayMs = -5000.0;
@@ -230,6 +241,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _requiredLeadTimeMs = Math.Max(0, _capabilities.RequiredLeadTimeMs);
         _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
         _unpairedAccessEnabled = _capabilities.UnpairedAccessEnabled;
+
+        // Implemented methods start enabled: before this setting existed, "listed in
+        // PinPairingMethods" was what made a method live, and that must stay the default.
+        _pairingPskEnabled = true;
+        _dynamicPinEnabled = _capabilities.PinPairingMethods.Contains("dynamic_pin");
+        _staticPinEnabled = _capabilities.PinPairingMethods.Contains("static_pin");
+        _effectiveMinPinLength = _capabilities.MinPinLength;
+        _effectiveStaticPin = _capabilities.StaticPin;
 
         _playerState = new PlayerState
         {
@@ -1360,31 +1379,51 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Builds the supported_pair_methods list for the encrypted client/hello: the
-    /// mandatory Pairing PSK plus any configured PIN methods with their descriptors,
-    /// including current lockout state.
+    /// Whether the app built this client with the method's implementation. Distinct from
+    /// <see cref="IsMethodEnabled"/>: the spec omits a method object from
+    /// get-pairing-config only when it is not implemented, while a merely disabled method
+    /// still reports itself with enabled: false.
+    /// </summary>
+    private bool IsMethodImplemented(string method) => method switch
+    {
+        "pairing_psk" => true, // every client implements it (pairing.md:65)
+        _ => _capabilities.PinPairingMethods.Contains(method),
+    };
+
+    /// <summary>The method's effective enablement, as set by management/set-pairing-config.</summary>
+    private bool IsMethodEnabled(string method) => method switch
+    {
+        "pairing_psk" => _pairingPskEnabled,
+        "dynamic_pin" => _dynamicPinEnabled,
+        "static_pin" => _staticPinEnabled,
+        _ => false,
+    };
+
+    /// <summary>
+    /// Builds the supported_pair_methods list for the encrypted client/hello: every
+    /// implemented method that is currently enabled, with its descriptor.
     /// </summary>
     private List<PairMethodDescriptor> BuildPairMethods()
     {
-        var methods = new List<PairMethodDescriptor> { new() { Method = "pairing_psk" } };
-        if (_capabilities.PinPairingMethods.Contains("dynamic_pin"))
+        var methods = new List<PairMethodDescriptor>();
+        if (IsMethodEnabled("pairing_psk"))
+        {
+            methods.Add(new PairMethodDescriptor { Method = "pairing_psk" });
+        }
+
+        if (IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin"))
         {
             methods.Add(new PairMethodDescriptor
             {
                 Method = "dynamic_pin",
                 OutChannels = _capabilities.PinOutChannels,
-                MinPinLength = _capabilities.MinPinLength,
-                LockedOut = IsPinMethodLockedOut("dynamic_pin"),
+                MinPinLength = _effectiveMinPinLength,
             });
         }
 
-        if (_capabilities.PinPairingMethods.Contains("static_pin"))
+        if (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin"))
         {
-            methods.Add(new PairMethodDescriptor
-            {
-                Method = "static_pin",
-                LockedOut = IsPinMethodLockedOut("static_pin"),
-            });
+            methods.Add(new PairMethodDescriptor { Method = "static_pin" });
         }
 
         return methods;
@@ -1406,10 +1445,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // grant unlimited attempts. Refuse rather than fail open. Dynamic PIN additionally
         // requires a presenter: without PresentPinAsync the derived PIN would reach nobody,
         // so an attempt could only proceed with a PIN the operator never saw.
-        "dynamic_pin" => _capabilities.PinPairingMethods.Contains("dynamic_pin")
+        "dynamic_pin" => IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin")
                          && _pinLockoutStore is not null
                          && _presentPinAsync is not null,
-        "static_pin" => _capabilities.PinPairingMethods.Contains("static_pin")
+        "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
                         && _pinLockoutStore is not null,
         _ => false,
     };
@@ -1515,7 +1554,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
 
         int pinLength = msg.Payload.PinLength;
-        if (pinLength < _capabilities.MinPinLength || pinLength > 12)
+        if (pinLength < _effectiveMinPinLength || pinLength > 12)
         {
             AbortPin("pin_length_unacceptable");
             return;
@@ -1556,7 +1595,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
 
         // Static PIN: the PIN is device-printed and known from the start.
-        string pin = state.Dynamic ? state.Pin! : (_capabilities.StaticPin ?? string.Empty);
+        string pin = state.Dynamic ? state.Pin! : (_effectiveStaticPin ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
         byte[] sid = PinPairing.BuildSid(h, (uint)_pairingCounter);
 

@@ -88,11 +88,6 @@ public sealed class PairMethodDescriptor
     [JsonPropertyName("min_pin_length")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? MinPinLength { get; set; }
-
-    /// <summary>Whether the method is in terminal lockout (PIN methods only).</summary>
-    [JsonPropertyName("locked_out")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public bool? LockedOut { get; set; }
 }
 
 /// <summary>Starts a PIN-pairing attempt (client → server).</summary>
