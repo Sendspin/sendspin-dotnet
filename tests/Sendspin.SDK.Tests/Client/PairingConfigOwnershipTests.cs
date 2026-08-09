@@ -1,3 +1,4 @@
+using System.Text;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
@@ -27,10 +28,11 @@ public class PairingConfigOwnershipTests
     /// <summary>
     /// A client on a paired, management-activated session, built around the caller's
     /// <see cref="ClientCapabilities"/> instance so tests can observe whether the SDK
-    /// writes to it.
+    /// writes to it. <paramref name="pinLockoutStore"/> is optional and only needed by
+    /// tests that go on to drive a real PIN pairing attempt on this same client.
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session, InMemoryPairingRecordStore Store)
-        CreateManagementClient(ClientCapabilities capabilities)
+        CreateManagementClient(ClientCapabilities capabilities, IPinLockoutStore? pinLockoutStore = null)
     {
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId));
@@ -39,6 +41,7 @@ public class PairingConfigOwnershipTests
             {
                 options.PairingRecordStore = store;
                 options.Capabilities = capabilities;
+                options.PinLockoutStore = pinLockoutStore;
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -316,6 +319,103 @@ public class PairingConfigOwnershipTests
         connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
         Assert.Equal(9, LastResult(connection).Data!.Value
             .GetProperty("dynamic_pin").GetProperty("min_pin_length").GetInt32());
+    }
+
+    [Theory]
+    [InlineData(4, "ok")]
+    [InlineData(12, "ok")]
+    [InlineData(3, "invalid")]
+    [InlineData(13, "invalid")]
+    public void SetDynamicPinMinLength_AcceptsTheFullSpecRange_AndRejectsJustOutsideIt(int value, string expected)
+    {
+        // SetDynamicPinMinLength_TakesEffect_AndIsRangeChecked only ever exercised 9 (valid)
+        // and 13 (invalid), so an off-by-one in `value < 4 || value > 12` at either edge of
+        // the spec's 4-12 range would pass unnoticed. Each boundary pair sits next to its
+        // own positive control: 4 and 12 accepted right where 3 and 13 are rejected.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            $$$$"""{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"min_pin_length":{{{{value}}}}}}}""");
+        Assert.Equal(expected, LastResult(connection).Result);
+    }
+
+    [Fact]
+    public void EnablingStaticPin_WithNoPinConfiguredAndNoneSupplied_IsInvalid()
+    {
+        // management.md:98 names this case explicitly. Enabling a PIN method with no secret
+        // behind it would advertise a method that can never authenticate anyone.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" } };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
+        Assert.Equal("invalid", LastResult(connection).Result);
+
+        // Positive control: the same enable succeeds when a PIN comes with it.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true,"pin":"01234567"}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Null(capabilities.StaticPin); // rotation did not touch the app's object
+    }
+
+    [Fact]
+    public void RotatingStaticPin_RejectsAnythingButEightDigits()
+    {
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "11111111" };
+        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        using var _c = client;
+
+        foreach (string bad in new[] { "1234567", "123456789", "1234567a", "" })
+        {
+            connection.RaiseTextMessageReceived(
+                $$$$"""{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"{{{{bad}}}}"}}}""");
+            Assert.Equal("invalid", LastResult(connection).Result);
+        }
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"87654321"}}}""");
+        Assert.Equal("ok", LastResult(connection).Result);
+    }
+
+    [Fact]
+    public void RejectedStaticPinRotation_LeavesThePreviouslyConfiguredPinInForce()
+    {
+        // get-pairing-config never returns a configured secret (management.md:77), so unlike
+        // the min_pin_length boundary test above, a get-pairing-config re-query cannot prove
+        // this. The only observable effect of the stored PIN is whether it authenticates a
+        // real pairing attempt, so that is what this drives: a rejected rotation must not
+        // have replaced (or cleared) the PIN configured before it.
+        var lockout = new InMemoryPinLockoutStore();
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "11111111" };
+        var (client, connection, session, _) = CreateManagementClient(capabilities, lockout);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"1234567"}}}""");
+        Assert.Equal("invalid", LastResult(connection).Result);
+
+        // Re-pair on a fresh connection, still keyed by the client's existing long-term PSK
+        // (admissible for a standalone 'pairing' activity), and run a real CPace exchange
+        // against the ORIGINAL PIN. It must still verify.
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
+
+        byte[] sid = PinPairing.BuildSid(session.HandshakeHash!.Value.Span, 1);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("11111111"), sid, ad: PinPairing.AdServer);
+        connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{ToBase64Url(server.PublicShare)}}}"}}""");
+        var auth = connection.SentMessages.OfType<ClientPairAuthMessage>().Last();
+        server.Derive(PinPairing.DecodeB64Url(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{ToBase64Url(server.Tag())}}}"}}""");
+
+        var confirm = connection.SentMessages.OfType<ClientPairConfirmMessage>().Last();
+        Assert.True(server.Verify(PinPairing.DecodeB64Url(confirm.Payload.ClientKc)));
     }
 
     [Fact]

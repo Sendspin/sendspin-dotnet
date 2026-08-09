@@ -2014,13 +2014,42 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     }
                 }
 
-                // static_pin's own patch semantics land in a later task, but the
-                // unimplemented-method rule applies to it the same as dynamic_pin: a field
-                // set on a method this client cannot run must not silently no-op to "ok".
-                if (payload.TryGetProperty("static_pin", out _) && !IsMethodImplemented("static_pin"))
+                // static_pin. The spec fixes the static PIN at 8 decimal digits (pairing.md:186) and
+                // rejects enabling the method with no secret behind it (management.md:98).
+                bool? requestedStaticPinEnabled = null;
+                string? requestedStaticPin = null;
+                if (payload.TryGetProperty("static_pin", out var sp))
                 {
-                    result.Result = "invalid";
-                    break;
+                    if (!IsMethodImplemented("static_pin"))
+                    {
+                        result.Result = "invalid";
+                        break;
+                    }
+
+                    if (sp.TryGetProperty("pin", out var pinEl))
+                    {
+                        string pin = pinEl.GetString() ?? string.Empty;
+                        if (pin.Length != 8 || !pin.All(char.IsAsciiDigit))
+                        {
+                            result.Result = "invalid";
+                            break;
+                        }
+
+                        requestedStaticPin = pin;
+                    }
+
+                    if (sp.TryGetProperty("enabled", out var spEnabled))
+                    {
+                        requestedStaticPinEnabled = spEnabled.GetBoolean();
+                    }
+
+                    if (requestedStaticPinEnabled == true
+                        && requestedStaticPin is null
+                        && string.IsNullOrEmpty(_effectiveStaticPin))
+                    {
+                        result.Result = "invalid";
+                        break;
+                    }
                 }
 
                 byte[]? newPairingPsk = null;
@@ -2058,6 +2087,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _effectiveMinPinLength = minPin;
                 }
 
+                bool staticPinChanged = false;
+                if (requestedStaticPin is not null)
+                {
+                    staticPinChanged |= requestedStaticPin != _effectiveStaticPin;
+                    _effectiveStaticPin = requestedStaticPin;
+                }
+
+                if (requestedStaticPinEnabled is { } spe)
+                {
+                    staticPinChanged |= spe != _staticPinEnabled;
+                    _staticPinEnabled = spe;
+                }
+
                 if (newPairingPsk is not null)
                 {
                     lock (_pairingStoreLock)
@@ -2072,7 +2114,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     }
                 }
 
-                if (unpairedAccessChanged || dynamicPinChanged || newPairingPsk is not null)
+                if (unpairedAccessChanged || dynamicPinChanged || staticPinChanged || newPairingPsk is not null)
                 {
                     // One event per request, after every change is applied, and outside
                     // _pairingStoreLock: subscribers run arbitrary app code, and raising
