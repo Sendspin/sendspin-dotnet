@@ -344,7 +344,7 @@ git commit -m "fix: report implemented PIN methods from get-pairing-config (#122
 
 **Interfaces:**
 - Consumes: `IsMethodImplemented`, `_dynamicPinEnabled`, `_effectiveMinPinLength`
-- Produces: the parse-then-apply structure later tasks extend; helper `bool TryReadMethodPatch(JsonElement payload, string method, out JsonElement obj)` returning false when the object is absent and setting `result.Result = "invalid"` when the method is not implemented.
+- Produces: the parse-then-apply structure later tasks extend, as explicit per-section parsing inline — a shared helper could not `break` out of the enclosing `switch` case, which every refusal path here needs.
 
 - [ ] **Step 1: Write the failing test**
 
