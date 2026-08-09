@@ -301,10 +301,14 @@ public interface ISendspinClient : IAsyncDisposable
     /// changed, the stored Pairing PSK replaced, or any combination of these — or removes
     /// the stored Pairing record via <c>management/remove-record</c>. The SDK applies the
     /// change to its own effective state — never to the <see cref="ClientCapabilities"/>
-    /// instance the app owns — so this state lives in memory only. Subscribe to this and
-    /// persist every value the event args report; without that, a restart silently reverts
-    /// the client to whatever <see cref="ClientCapabilities"/> says, discarding the
-    /// server's changes with no error. When
+    /// instance the app owns — so this state lives in memory only. Only
+    /// <see cref="PairingConfigChangedEventArgs.UnpairedAccessEnabled"/>,
+    /// <see cref="PairingConfigChangedEventArgs.MinPinLength"/>, and
+    /// <see cref="PairingConfigChangedEventArgs.StaticPin"/> have a matching
+    /// <see cref="ClientCapabilities"/> property to reapply on the next startup; the SDK
+    /// tracks the rest (which pairing methods are enabled, and the record-mode
+    /// <c>psk_id</c>) with no way to seed it back in today, so a server-side change to
+    /// those is always lost on restart regardless of what the app persists. When
     /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is true, any token
     /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
     /// </summary>
