@@ -987,10 +987,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Notices an in-band re-handshake and restarts the state that is scoped to one Noise
-    /// session: which record has been marked used, and the CPace pairing counter (which the
-    /// spec defines as the pairing activates since the last handshake). Re-handshakes happen
-    /// inside the framing layer, but they install a fresh handshake hash, so a change in it
-    /// is our signal that the session was re-keyed.
+    /// session: which record has been marked used, the CPace pairing counter (which the
+    /// spec defines as the pairing activates since the last handshake), and the accepted
+    /// server/activate grant. Re-handshakes happen inside the framing layer, but they
+    /// install a fresh handshake hash, so a change in it is our signal that the session was
+    /// re-keyed.
     /// </summary>
     /// <remarks>
     /// Called for every decrypted message rather than from the pairing path, because the
@@ -1009,6 +1010,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _lastHandshakeHash = currentHash;
         _pairingCounter = 0;
         _markedPskUsed = false;
+
+        // An activate authorises the Noise session it arrived on. A re-key replaces that
+        // session — including downward, since the spec has the server re-handshake to the
+        // Pairing PSK before a pairing_psk flow — so the grant does not carry over. Without
+        // this, a management grant from the retired session was honoured on the new one until
+        // its first activate, on a PSK that could never have been granted management.
+        LastServerActivate = null;
     }
 
     /// <summary>
