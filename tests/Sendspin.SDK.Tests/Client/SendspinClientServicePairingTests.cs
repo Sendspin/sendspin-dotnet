@@ -150,6 +150,56 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
+    public void PendingPairingPsk_AbandonedAcrossAnInBandRekey_DoesNotFinalizeOnTheNewSession()
+    {
+        // The in-band twin of the reconnect test above, isolating DetectSessionRekey's
+        // clear the same way that test isolates SendHandshakeAsync's: no reconnect here —
+        // just a fresh handshake hash on the same connection, with no server/hello or any
+        // other bounding message in between. pairing.md:63's down-re-handshake to the
+        // Pairing PSK (the scenario ManagementGrantedBeforeAnInBandRekey_IsNotHonouredAfterIt
+        // in SendspinClientServiceManagementTests.cs names explicitly) is exactly this
+        // shape. Unlike the reconnect test, there is no SendHandshakeAsync call at all here,
+        // so there is no 30s handshake-timeout wait to avoid; and HandleServerPairFinalize's
+        // store write is fully synchronous (no SafeFireAndForget in its path), so the
+        // assertions below need no WaitUntilAsync/Task.Delay — a plain synchronous read of
+        // store.List() right after RaiseTextMessageReceived is not a vacuous pass here the
+        // way it was for the source pipeline's fire-and-forget command chain.
+        var store = new InMemoryPairingRecordStore();
+        var (client, connection, session) = TestClient.Create(
+            PskCategory.Pairing,
+            configure: options => options.PairingRecordStore = store);
+        using var _c = client;
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        // Positive control first: within the attempt's own session, a finalize genuinely
+        // persists the record. Without this, an implementation that broke pairing
+        // entirely would also pass the assertion below for the wrong reason.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+        Assert.Single(store.List());
+
+        // A second, abandoned attempt: the server activates pairing again — a fresh
+        // client/pair-finalize goes out, setting _pendingPairingPsk again.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+
+        // An in-band re-key installs a fresh handshake hash before the server's own
+        // finalize ever arrives. Nothing else about the connection changes — this is the
+        // same WebSocket, no reconnect.
+        session.HandshakeHash = Enumerable.Repeat((byte)0xAB, 32).ToArray();
+
+        // The retired session's peer sends a bare finalize, with no pairing_psk activate
+        // of its own on the new (re-keyed) session.
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+
+        // Still just the one record from the positive control above: the abandoned
+        // attempt's PSK must not be persisted on a session it was never generated for.
+        Assert.Single(store.List());
+    }
+
+    [Fact]
     public void EncryptedHello_AdvertisesPairingPskMethod()
     {
         var (client, connection, _) = Create();
