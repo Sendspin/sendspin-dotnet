@@ -38,6 +38,9 @@ public class SendspinClientServiceManagementTests
     internal static ManagementResultPayload LastResult(FakeSendspinConnection connection) =>
         connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
 
+    private static string ToBase64Url(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
     [Fact]
     public void Management_WithoutManagementActivity_IsPermissionDenied()
     {
@@ -85,6 +88,42 @@ public class SendspinClientServiceManagementTests
         connection.RaiseTextMessageReceived(
             """{"type":"management/add-record","payload":{"psk":"tooshort"}}""");
         Assert.Equal("invalid", LastResult(connection).Result);
+    }
+
+    [Fact]
+    public void AddRecord_CarryingTheSentinelPsk_IsRejected_AndDoesNotShadowSentinelResolution()
+    {
+        // management.md:37 — a psk_id already known as the Sentinel PSK is already_exists.
+        // Without this, a LongTerm record holding the published Sentinel constant shadows
+        // Sentinel resolution (RecordPskResolver searches records before falling back), so
+        // every anonymous peer that knows the constant authenticates at trust 'user'.
+        var (client, connection, store) = Create();
+        using var _c = client;
+
+        string sentinel = ToBase64Url(NoiseConstants.SentinelPsk.ToArray());
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/add-record","payload":{"psk":"PSK"}}""".Replace("PSK", sentinel));
+
+        Assert.Equal("already_exists", LastResult(connection).Result);
+
+        // Nothing was written: the Sentinel psk_id must not appear in the store at all,
+        // which is the property that keeps resolution unambiguous.
+        Assert.DoesNotContain(store.List(), r => r.PskId == NoiseConstants.SentinelPskId);
+    }
+
+    [Fact]
+    public void AddRecord_CarryingAnUnrelatedPsk_StillSucceeds()
+    {
+        // Positive control: a guard that rejected every add would pass the test above.
+        var (client, connection, store) = Create();
+        using var _c = client;
+
+        var fresh = Enumerable.Repeat((byte)0x5A, 32).ToArray();
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/add-record","payload":{"psk":"PSK"}}""".Replace("PSK", ToBase64Url(fresh)));
+
+        Assert.Equal("ok", LastResult(connection).Result);
+        Assert.Contains(store.List(), r => r.PskId == NoiseConstants.DerivePskId(fresh));
     }
 
     [Fact]

@@ -1913,6 +1913,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
                 }
 
+                // The Sentinel PSK is a published constant, and RecordPskResolver searches records
+                // before falling back to it — so a record holding it would shadow Sentinel resolution
+                // and admit every anonymous peer at trust 'user'. The store query below covers records
+                // (including the Pairing record); this covers the candidate that is not in the store.
+                if (NoiseConstants.DerivePskId(psk) == NoiseConstants.SentinelPskId)
+                {
+                    result.Result = "already_exists";
+                    break;
+                }
+
                 lock (_pairingStoreLock)
                 {
                     if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
