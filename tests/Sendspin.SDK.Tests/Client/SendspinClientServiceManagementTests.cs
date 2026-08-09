@@ -409,6 +409,16 @@ public class SendspinClientServiceManagementTests
         connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
 
         Assert.Equal("permission_denied", LastResult(connection).Result);
+
+        // Positive control (closes the loop the rest of this test only proves half of): a
+        // fresh server/activate on the new session re-grants management. Without this, an
+        // implementation that nulled LastServerActivate permanently — and never re-honoured
+        // a later activate at all — would also pass the denial assertion above.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback","management"],"active_roles":[]}}""");
+        connection.RaiseTextMessageReceived("""{"type":"management/list-records","payload":{}}""");
+
+        Assert.Equal("ok", LastResult(connection).Result);
     }
 
     [Fact]
