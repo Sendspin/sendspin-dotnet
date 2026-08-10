@@ -594,13 +594,13 @@ internal sealed class PairingHarness : IAsyncDisposable
             $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64Url(server.PublicShare)}}}"}}""");
 
         var auth = await NextMessageAsync<ClientPairAuthMessage>();
-        server.Derive(PinPairing.DecodeB64Url(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
 
         _connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{B64Url(server.Tag())}}}"}}""");
 
         var confirm = await NextMessageAsync<ClientPairConfirmMessage>();
-        Assert.True(server.Verify(PinPairing.DecodeB64Url(confirm.Payload.ClientKc)));
+        Assert.True(server.Verify(Base64UrlText.Decode(confirm.Payload.ClientKc)));
         await NextMessageAsync<ClientPairFinalizeMessage>();
 
         _connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
@@ -628,7 +628,7 @@ internal sealed class PairingHarness : IAsyncDisposable
             $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64Url(server.PublicShare)}}}"}}""");
 
         var auth = await NextMessageAsync<ClientPairAuthMessage>();
-        server.Derive(PinPairing.DecodeB64Url(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
 
         _connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{B64Url(server.Tag())}}}"}}""");

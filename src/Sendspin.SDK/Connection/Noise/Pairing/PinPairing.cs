@@ -11,13 +11,6 @@ namespace Sendspin.SDK.Connection.Noise.Pairing;
 /// </summary>
 internal static class PinPairing
 {
-    /// <summary>Decodes an unpadded base64url string to bytes.</summary>
-    internal static byte[] DecodeB64Url(string s)
-    {
-        string b64 = s.Replace('-', '+').Replace('_', '/');
-        return Convert.FromBase64String(b64.PadRight(b64.Length + (4 - b64.Length % 4) % 4, '='));
-    }
-
     /// <summary>CPace associated data for the server (role A).</summary>
     internal static readonly byte[] AdServer = "server"u8.ToArray();
 

@@ -17,7 +17,7 @@ public class SendspinClientServicePinPairingTests
     private const string ServerId = FakeNoiseSession.FakeServerId;
     private static readonly byte[] HandshakeHash = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
 
-    private static byte[] B64(string s) => PinPairing.DecodeB64Url(s);
+    private static byte[] B64(string s) => Base64UrlText.Decode(s);
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPinLockoutStore, InMemoryPairingRecordStore)
