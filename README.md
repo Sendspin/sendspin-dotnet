@@ -21,6 +21,49 @@ Cross-platform .NET SDK implementing the [Sendspin Protocol](https://www.sendspi
 dotnet add package Sendspin.SDK
 ```
 
+## Compatibility
+
+The transport is encrypted end to end from 10.0.0 onward, and there is **no downgrade
+negotiation** — a 10.x client cannot talk to a server that predates the encrypted protocol.
+Pick the line that matches your server.
+
+| SDK | Transport | Requires | Status |
+|---|---|---|---|
+| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin >= 7.0.0` | Current |
+| **9.x** | Plaintext | Any `aiosendspin` | Maintained for pre-encryption servers |
+
+The 9.x line stays maintained for now; it is not end-of-life. If you are on 9.x and your
+server supports the encrypted protocol, see
+[MIGRATION-10.0.0.md](src/Sendspin.SDK/MIGRATION-10.0.0.md) — note especially that the client
+identity must be persisted, which is the one breaking change that fails silently rather than
+at compile time.
+
+## Security
+
+The encrypted transport protects a session's confidentiality and integrity, but what it
+*authenticates* depends on how the client is paired and configured.
+
+- **Pair before trusting.** An unpaired connection runs under the published Sentinel PSK,
+  which authenticates nothing — its trust level is `none`. Pairing establishes a per-server
+  pre-shared key and raises the session to trust `user`.
+- **Unpaired access is off by default; leave it off unless you need it.**
+  `ClientCapabilities.UnpairedAccessEnabled = true` lets a server play to the client with no
+  pairing record. Because the Sentinel PSK is a published constant and neither peer's static
+  key is bound to its identity by any out-of-band exchange, such a session is vulnerable to
+  an **active man-in-the-middle** on the local network. It still protects against passive
+  observers, and it says nothing about which peer you are actually talking to.
+- **Store keys where the platform protects them.** The client identity and the pairing
+  records are long-lived secrets. The shipped file-backed stores write atomically and
+  restrict access where the platform supports it, but on Windows a file inherits its parent
+  directory's ACL — put it somewhere already user-scoped such as `%LOCALAPPDATA%`. For
+  hardware-backed protection, implement `ISendspinIdentityStore` and `IPairingRecordStore`
+  over DPAPI, Keychain, or the Android keystore; the identity blob is opaque, so the raw
+  private key never leaves the SDK.
+- **A static PIN is a long-lived, low-entropy secret.** The X25519 implementation used by the
+  PAKE is not constant-time, so a local attacker able to measure the client precisely enough
+  may learn something from timing. This matters most for `static_pin`, where the same short
+  secret is reused indefinitely; dynamic PIN derives a fresh per-session value.
+
 ## Example
 
 A client's `client_id` **is** its Curve25519 public key, so its identity must persist across
