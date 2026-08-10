@@ -104,7 +104,10 @@ internal sealed class OptionalJsonConverter<T> : JsonConverter<Optional<T>>
         }
         else
         {
-            JsonSerializer.Serialize(writer, value.Value, options);
+            // Same JsonTypeInfo route the Read path above already used. The reflection
+            // overload here was the last IL2026/IL3050 pair in the SDK (#89).
+            var typeInfo = (JsonTypeInfo<T>)options.GetTypeInfo(typeof(T));
+            JsonSerializer.Serialize(writer, value.Value, typeInfo);
         }
     }
 }
@@ -153,7 +156,10 @@ internal sealed class OptionalRgbColorJsonConverter : JsonConverter<Optional<Rgb
         }
         else
         {
-            JsonSerializer.Serialize(writer, value.Value.Value, options);
+            // Concrete type here, so the resolver lookup is for RgbColor rather than a
+            // generic parameter — but the reason is the same as the generic converter's.
+            var typeInfo = (JsonTypeInfo<RgbColor>)options.GetTypeInfo(typeof(RgbColor));
+            JsonSerializer.Serialize(writer, value.Value.Value, typeInfo);
         }
     }
 }

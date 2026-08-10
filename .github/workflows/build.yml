@@ -64,6 +64,34 @@ jobs:
             artifacts/*.nupkg
             artifacts/*.snupkg
 
+  aot:
+    # Proves the NativeAOT claim instead of inferring it from analyzer warnings. The trim/AOT
+    # analyzers only see this repo's IL and cannot speak for a dependency; Noise.NET sits on
+    # the mandatory transport, so the only real check is publishing and running (#89).
+    # The smoke test project sets WarningsAsErrors for the IL* diagnostics, so a new
+    # reflection path fails this job rather than accumulating silently.
+    name: NativeAOT publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install native toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Publish NativeAOT
+        run: dotnet publish tools/AotSmokeTest/AotSmokeTest.csproj -c Release -r linux-x64
+
+      - name: Run the native binary
+        run: ./tools/AotSmokeTest/bin/Release/net10.0/linux-x64/publish/AotSmokeTest
+
   publish:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
