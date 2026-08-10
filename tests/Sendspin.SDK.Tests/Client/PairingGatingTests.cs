@@ -216,6 +216,27 @@ public class PairingGatingTests
         Assert.Equal("static_pin", raised[0].Method);
         Assert.Equal(1, raised[0].PairingIndex);
     }
+
+    [Fact]
+    public async Task DynamicPinAttempt_SucceedingAfterEscalation_ResetsTheFailureCounter()
+    {
+        // Closes the other half of #127: it is not enough for escalation to gate an attempt
+        // instead of refusing it -- a success once the gate opens must also de-escalate the
+        // method, or it stays gesture-gated forever even after nothing is failing anymore.
+        var lockouts = new InMemoryPinLockoutStore();
+        lockouts.SetFailures("dynamic_pin", 10);
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(
+            minPinLength: 6, window: window, lockouts: lockouts);
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: 8);
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+
+        window.Open();
+        await h.CompleteDynamicPinPairingAsync();
+
+        Assert.Equal(0, lockouts.GetFailures("dynamic_pin"));
+    }
 }
 
 /// <summary>
@@ -416,25 +437,44 @@ internal sealed class PairingHarness : IAsyncDisposable
         _connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{B64Url(RandomNumberGenerator.GetBytes(32))}}}"}}""");
 
-        var deadline = DateTime.UtcNow + DefaultTimeout;
-        while (true)
-        {
-            lock (_presentations)
-            {
-                if (_presentations.Count > _consumedPresentations)
-                {
-                    _consumedPresentations++;
-                    return;
-                }
-            }
+        await WaitForNextPresentedPinAsync();
+    }
 
-            if (DateTime.UtcNow >= deadline)
-            {
-                Assert.Fail("Timed out waiting for the dynamic-PIN presenter to be invoked.");
-            }
+    /// <summary>
+    /// Drives a dynamic-PIN attempt through a full CPace exchange to a successful
+    /// server/pair-finalize, using the actual derived PIN captured from the presenter
+    /// (unlike <see cref="CompleteStaticPinPairingAsync"/>'s fixed static PIN, the dynamic PIN
+    /// is only known once the presenter fires). Verifies the client's confirmation tag the
+    /// same way a real server would, so a broken PAKE would fail this method's own CPace
+    /// verification before ever reaching a caller's assertions.
+    /// </summary>
+    public async Task CompleteDynamicPinPairingAsync()
+    {
+        var init = await NextMessageAsync<ClientPairInitMessage>();
 
-            await Task.Delay(10);
-        }
+        _connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{B64Url(RandomNumberGenerator.GetBytes(32))}}}"}}""");
+
+        string pin = await WaitForNextPresentedPinAsync();
+
+        byte[] handshakeHash = _session.HandshakeHash!.Value.ToArray();
+        byte[] sid = PinPairing.BuildSid(handshakeHash, (uint)init.Payload.PairingIndex);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(pin), sid, ad: PinPairing.AdServer);
+
+        _connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64Url(server.PublicShare)}}}"}}""");
+
+        var auth = await NextMessageAsync<ClientPairAuthMessage>();
+        server.Derive(PinPairing.DecodeB64Url(auth.Payload.PakeMsg2), PinPairing.AdClient);
+
+        _connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{B64Url(server.Tag())}}}"}}""");
+
+        var confirm = await NextMessageAsync<ClientPairConfirmMessage>();
+        Assert.True(server.Verify(PinPairing.DecodeB64Url(confirm.Payload.ClientKc)));
+        await NextMessageAsync<ClientPairFinalizeMessage>();
+
+        _connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
     }
 
     /// <summary>Drives a static-PIN attempt through to server/pair-finalize.</summary>
@@ -475,6 +515,29 @@ internal sealed class PairingHarness : IAsyncDisposable
         lock (_presentations)
         {
             _presentations.Add(presentation);
+        }
+    }
+
+    /// <summary>Waits for the next dynamic-PIN presentation and returns its derived PIN.</summary>
+    private async Task<string> WaitForNextPresentedPinAsync()
+    {
+        var deadline = DateTime.UtcNow + DefaultTimeout;
+        while (true)
+        {
+            lock (_presentations)
+            {
+                if (_presentations.Count > _consumedPresentations)
+                {
+                    return _presentations[_consumedPresentations++].Pin;
+                }
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                Assert.Fail("Timed out waiting for the dynamic-PIN presenter to be invoked.");
+            }
+
+            await Task.Delay(10);
         }
     }
 

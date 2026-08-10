@@ -228,9 +228,11 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":8}}}""");
 
-        // Gated, not refused: a pending signal and no abort of any kind.
+        // Gated, not refused: a pending signal, no abort of any kind, and no init -- gating
+        // that signalled pending and then proceeded ungated anyway must fail this too.
         Assert.NotEmpty(connection.SentMessages.OfType<ClientPairPendingMessage>());
         Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);
+        Assert.Empty(connection.SentMessages.OfType<ClientPairInitMessage>());
     }
 
     [Fact]
