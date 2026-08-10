@@ -115,6 +115,28 @@ public class PairingGatingTests
     }
 
     [Fact]
+    public async Task PendingGatedAttempt_WhenTheConnectionLeavesPairing_IsDiscardedWithoutConsumingTheWindow()
+    {
+        // A pending attempt belongs to the activation that deferred it. Left standing, the next
+        // opening makes this connection send client/pair-init outside any pairing activation
+        // AND consume the shared window -- so the operator's gesture silently does nothing for
+        // whichever connection is still legitimately pending.
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(staticPin: "12345678", window: window);
+        h.SendPairingActivate(method: "static_pin");
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+
+        h.SendNonPairingActivate();
+        window.Open();
+
+        // Nothing is expected to be sent, so there is no message to wait for: give the send
+        // path (SafeFireAndForget) time to produce the init this test says must not exist.
+        await Task.Delay(200);
+        Assert.Empty(h.SentOfType<ClientPairInitMessage>());
+        Assert.True(window.IsOpen);
+    }
+
+    [Fact]
     public async Task DynamicPinActivation_WithLongPinAndNoEscalation_IsNotGated()
     {
         var window = new PairingWindow();
@@ -353,7 +375,9 @@ internal sealed class PairingHarness : IAsyncDisposable
     /// omitted so <c>CanOffer</c> can still admit it; static_pin whenever
     /// <paramref name="staticPin"/> is non-null; pairing_psk only when
     /// <paramref name="pairingPsk"/> is true, which also keys the session on the Pairing PSK
-    /// (instead of Sentinel) and supplies a pairing record store. <paramref name="lockouts"/>
+    /// (instead of Sentinel) and supplies a pairing record store — <paramref name="pairingStore"/>
+    /// when given, so a test can assert on what pairing did or did not persist.
+    /// <paramref name="lockouts"/>
     /// defaults to a fresh <see cref="InMemoryPinLockoutStore"/>. <paramref name="window"/> is
     /// passed straight to <c>SendspinClientOptions.PairingWindow</c>; omitted, gated attempts
     /// stay pending forever (the fail-closed default). <paramref name="management"/>, when true,
@@ -366,6 +390,7 @@ internal sealed class PairingHarness : IAsyncDisposable
         bool dynamicPin = true,
         string? staticPin = null,
         bool pairingPsk = false,
+        IPairingRecordStore? pairingStore = null,
         PairingWindow? window = null,
         IPinLockoutStore? lockouts = null,
         TimeSpan? attemptTimeout = null,
@@ -431,7 +456,7 @@ internal sealed class PairingHarness : IAsyncDisposable
 
                 if (pairingPsk)
                 {
-                    options.PairingRecordStore = new InMemoryPairingRecordStore();
+                    options.PairingRecordStore = pairingStore ?? new InMemoryPairingRecordStore();
                 }
             });
 
@@ -475,6 +500,19 @@ internal sealed class PairingHarness : IAsyncDisposable
         };
         _connection.RaiseTextMessageReceived(MessageSerializer.Serialize(activate));
     }
+
+    /// <summary>
+    /// Feeds a server/activate that does not declare the pairing activity — the connection
+    /// leaving pairing. Empty activities are admissible on every PSK category the harness
+    /// builds, so this needs no cooperation from the caller's session setup.
+    /// </summary>
+    public void SendNonPairingActivate() =>
+        _connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":[],"active_roles":[]}}""");
+
+    /// <summary>Feeds a bare server/pair-finalize, the message that persists the record.</summary>
+    public void SendServerPairFinalize() =>
+        _connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
 
     /// <summary>Feeds a bare management request of the given type.</summary>
     public void SendManagement(string type) =>

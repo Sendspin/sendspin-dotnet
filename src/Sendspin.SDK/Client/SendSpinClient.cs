@@ -53,12 +53,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private readonly TimeSpan _attemptTimeout;
 
+    // Covers _attemptTimeoutCts and _pendingGatedMethod. Both are touched from the receive
+    // loop AND from whatever thread raises PairingWindow.StateChanged — an operator gesture,
+    // or another connection's management/open-pairing-window — so neither is safe to
+    // read-modify-write unsynchronized: an unsynchronized arm leaks a CancellationTokenSource
+    // that fires attempt_timeout minutes later on a connection with no attempt in flight, and
+    // an unsynchronized clear can Cancel() a source another thread has already disposed, whose
+    // ObjectDisposedException propagates into the receive loop's message dispatch.
+    // Lock ordering: PairingWindow raises StateChanged outside its own lock, so this lock is
+    // only ever taken before PairingWindow's, never after. Never held across a send.
+    private readonly object _attemptLock = new object();
+
     // Bounds the in-flight pairing attempt. Armed by the attempt's first message, disposed by
-    // ClearPinState when the attempt ends for any reason.
+    // ClearPinState when the attempt ends for any reason. Guarded by _attemptLock.
     private CancellationTokenSource? _attemptTimeoutCts;
 
     // Set when a gated activation is waiting on a window; cleared when the attempt starts or
-    // the activation is superseded.
+    // the activation is superseded. Guarded by _attemptLock.
     private string? _pendingGatedMethod;
     private PinPairingState? _pinState;
     private int _pairingCounter;
@@ -1392,6 +1403,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             HandlePairingActivate(payload);
         }
+        else
+        {
+            DiscardPendingGatedAttempt();
+        }
 
         bool first = !_activateReceived;
         _activateReceived = true;
@@ -1723,7 +1738,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (gated && _pairingWindow?.TryConsume() != true)
         {
             // Signals the wait without starting the attempt, so no attempt timeout is armed.
-            _pendingGatedMethod = method;
+            lock (_attemptLock)
+            {
+                _pendingGatedMethod = method;
+            }
+
             _connection.SendMessageAsync(new ClientPairPendingMessage
             {
                 Payload = new ClientPairPendingPayload { PairingIndex = _pairingCounter },
@@ -1749,18 +1768,58 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void OnPairingWindowStateChanged(object? sender, EventArgs e)
     {
-        if (_pendingGatedMethod is not { } method)
+        string method;
+
+        // The claim — "is this connection still pending, and can it take the opening?" — has to
+        // be atomic, or two raises on different threads both consume for the same connection.
+        // TryConsume takes the window's own lock, which is safe here: the window raises this
+        // event after releasing that lock, so the two are never taken in the other order.
+        lock (_attemptLock)
         {
-            return;
+            if (_pendingGatedMethod is not { } pending)
+            {
+                return;
+            }
+
+            if (_pairingWindow?.TryConsume() != true)
+            {
+                return;
+            }
+
+            _pendingGatedMethod = null;
+            method = pending;
         }
 
-        if (_pairingWindow?.TryConsume() != true)
-        {
-            return;
-        }
-
-        _pendingGatedMethod = null;
         StartPinAttempt(dynamic: method == "dynamic_pin");
+    }
+
+    /// <summary>
+    /// Drops a gated attempt still waiting on a gesture, without consuming the window.
+    /// </summary>
+    /// <remarks>
+    /// A pending attempt belongs to the activation that deferred it. An activation that does
+    /// not declare the pairing activity ends that one, so the wait ends with it: left standing,
+    /// the next opening would make this connection send client/pair-init outside any pairing
+    /// activation — and consume the shared window while doing it, so the gesture the operator
+    /// made for whichever connection is still legitimately pending would silently do nothing
+    /// for them. Not consuming the window is the other half: the opening stays available.
+    /// The superseded-by-a-newer-pairing-activation case is <see cref="HandlePairingActivate"/>'s
+    /// own ClearPinState.
+    /// </remarks>
+    private void DiscardPendingGatedAttempt()
+    {
+        lock (_attemptLock)
+        {
+            if (_pendingGatedMethod is null)
+            {
+                return;
+            }
+
+            _pendingGatedMethod = null;
+        }
+
+        _logger.LogInformation(
+            "Activation no longer declares the pairing activity; discarding the pending gated attempt");
     }
 
     /// <summary>
@@ -1794,10 +1853,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void ArmAttemptTimeout()
     {
-        _attemptTimeoutCts?.Cancel();
-        _attemptTimeoutCts?.Dispose();
-        var cts = new CancellationTokenSource();
-        _attemptTimeoutCts = cts;
+        CancellationTokenSource cts;
+        lock (_attemptLock)
+        {
+            _attemptTimeoutCts?.Cancel();
+            _attemptTimeoutCts?.Dispose();
+            cts = new CancellationTokenSource();
+            _attemptTimeoutCts = cts;
+        }
 
         _ = Task.Delay(_attemptTimeout, cts.Token).ContinueWith(
             t =>
@@ -1805,6 +1868,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (t.IsCanceled)
                 {
                     return;
+                }
+
+                // The delay can complete just as the attempt ends on another thread, which
+                // cancels and replaces this source. Identity, not cancellation, is what says
+                // whether the attempt this timer bounds is still the current one.
+                lock (_attemptLock)
+                {
+                    if (!ReferenceEquals(_attemptTimeoutCts, cts))
+                    {
+                        return;
+                    }
                 }
 
                 _logger.LogWarning("Pairing attempt timed out; aborting");
@@ -2011,24 +2085,42 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Drops the in-flight PIN attempt, if any, and cancels its pending PIN presentation,
+    /// Drops the in-flight pairing attempt, if any, and cancels its pending PIN presentation,
     /// so a presenter still holding the PIN (dialog, speaker) is released when the attempt
     /// is aborted, superseded, or the connection or client goes away.
     /// </summary>
+    /// <remarks>
+    /// This clears the whole attempt, not just its PIN half. <see cref="_pendingPairingPsk"/>
+    /// belongs here because <see cref="HandleServerPairFinalize"/>'s only gate is "that field
+    /// is not null" — no activity, trust or session check — so an attempt this method ends
+    /// (an abort, an attempt_timeout, a re-key) that left the PSK armed would still persist a
+    /// permanent record on a later bare server/pair-finalize. That is the same reasoning
+    /// <see cref="HandlePairAbort"/> already applied to the abort path alone.
+    /// </remarks>
     private void ClearPinState()
     {
         var state = _pinState;
         _pinState = null;
-        _pendingGatedMethod = null;
+        _pendingPairingPsk = null;
+
+        // Read only inside an attempt, and every attempt re-reads them from its activation —
+        // but they are cleared with the rest of the attempt state so no read can ever see a
+        // value from an attempt that has already ended.
+        _activationPinLength = 0;
+        _activationLanguages = null;
         if (state?.PresentPinCts is { } cts)
         {
             cts.Cancel();
             cts.Dispose();
         }
 
-        _attemptTimeoutCts?.Cancel();
-        _attemptTimeoutCts?.Dispose();
-        _attemptTimeoutCts = null;
+        lock (_attemptLock)
+        {
+            _pendingGatedMethod = null;
+            _attemptTimeoutCts?.Cancel();
+            _attemptTimeoutCts?.Dispose();
+            _attemptTimeoutCts = null;
+        }
     }
 
     /// <summary>
@@ -2037,7 +2129,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void HandleServerPairFinalize()
     {
-        if (_pendingPairingPsk is null)
+        // Captured before the clear below, which ends the attempt and with it the field.
+        if (_pendingPairingPsk is not { } psk)
         {
             _logger.LogWarning("server/pair-finalize with no pairing attempt in flight; ignoring");
             return;
@@ -2051,8 +2144,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             lock (_pairingStoreLock)
             {
-                _pairingStore.Upsert(new PairingRecord(
-                    _pendingPairingPsk, PskCategory.LongTerm, ServerId));
+                _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
             }
 
             _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
@@ -2062,7 +2154,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogWarning("Pairing completed but no record store configured; record NOT persisted");
         }
 
-        _pendingPairingPsk = null;
         PairingCompleted?.Invoke(this, ServerId ?? string.Empty);
     }
 
