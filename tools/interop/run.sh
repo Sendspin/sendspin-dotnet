@@ -1,23 +1,30 @@
 #!/usr/bin/env bash
-# Live interop harness: runs the .NET SDK host against the aiosendspin 7.0.0 reference
+# Live interop harness: runs the .NET SDK host against the aiosendspin 9.0.0 reference
 # server for one scenario. Starts the .NET host (it prints its listening port), then
 # dials it from the Python server, and checks both sides report success.
 #
-# Usage: run.sh <scenario>              scenario: unpaired | pairing
-# Env:   PYTHON  - python interpreter with aiosendspin[server]==7.0.0 (default: python3)
+# Usage: run.sh <scenario>              scenario: unpaired | pairing | static-pin
+# Env:   PYTHON  - python interpreter with aiosendspin[server]==9.0.0 (default: python3)
 set -euo pipefail
 
 SCENARIO="${1:-unpaired}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${PYTHON:-python3}"
 PORT=8931
-PSK_HEX="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+
+# The shared secret both sides need, per scenario: a random Pairing PSK, or a static PIN
+# (the spec fixes static PINs at 8 digits).
+case "$SCENARIO" in
+  pairing|source) SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" ;;
+  static-pin)     SECRET="31415926" ;;
+  *)              SECRET="" ;;
+esac
 
 pass() { echo "INTEROP PASS: $SCENARIO"; exit 0; }
 fail() { echo "INTEROP FAIL: $SCENARIO — $1" >&2; exit 1; }
 
 client_args=("$SCENARIO" "$PORT")
-[ "$SCENARIO" = "pairing" ] && client_args+=("$PSK_HEX")
+[ -n "$SECRET" ] && client_args+=("$SECRET")
 
 # Start the .NET host in the background; capture its output.
 CLIENT_OUT="$(mktemp)"
@@ -34,7 +41,7 @@ done
 grep -q '"event":"host_ready"' "$CLIENT_OUT" || { cat "$CLIENT_OUT"; fail "host never became ready"; }
 
 server_args=("$SCENARIO" "ws://127.0.0.1:${PORT}/sendspin")
-[ "$SCENARIO" = "pairing" ] && server_args+=("$PSK_HEX")
+[ -n "$SECRET" ] && server_args+=("$SECRET")
 
 # Dial from the reference server.
 if ! "$PYTHON" "$HERE/server.py" "${server_args[@]}"; then

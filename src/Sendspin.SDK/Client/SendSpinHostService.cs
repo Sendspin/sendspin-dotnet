@@ -152,6 +152,16 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 
     /// <summary>
+    /// Raised when a pairing attempt on any connection is gesture-gated and no pairing
+    /// window is open. Forwarded from the per-connection client — see
+    /// <see cref="ISendspinClient.PairingGestureRequested"/>. Prompt the operator, then call
+    /// <see cref="PairingWindow.Open"/> on the window supplied in
+    /// <see cref="SendspinClientOptions.PairingWindow"/>. Without a subscriber, a
+    /// <c>static_pin</c> attempt — which is gated every time — never proceeds.
+    /// </summary>
+    public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
+
+    /// <summary>
     /// Gets the server ID of the server that most recently had playback_state "playing".
     /// Used to break an arbitration tie between two connections that declare no activities.
     /// </summary>
@@ -485,6 +495,7 @@ public sealed class SendspinHostService : IAsyncDisposable
 
             client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
             client.PairingConfigChanged += (s, e) => PairingConfigChanged?.Invoke(this, e);
+            client.PairingGestureRequested += (s, e) => PairingGestureRequested?.Invoke(this, e);
 
             client.GroupStateChanged += (s, g) =>
             {

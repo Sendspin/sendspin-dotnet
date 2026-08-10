@@ -186,6 +186,20 @@ public class MessageSerializerTests
     }
 
     [Fact]
+    public void Serialize_ThroughTheIMessageInterface_ResolvesTheRuntimeType()
+    {
+        // The source role's send delegate is Func<IMessage, Task>, so T binds to the
+        // interface. Resolving metadata from typeof(T) asked the source-generated context
+        // for IMessage, which has no entry, and serialization died on null metadata — so
+        // client_stream/start could never be sent and the source role never streamed.
+        IMessage message = new ClientStreamStartMessage();
+
+        string json = MessageSerializer.Serialize(message);
+
+        Assert.Contains("\"type\":\"client_stream/start\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ClientPairPending_SerializesWithPairingIndex()
     {
         var json = MessageSerializer.Serialize(new ClientPairPendingMessage

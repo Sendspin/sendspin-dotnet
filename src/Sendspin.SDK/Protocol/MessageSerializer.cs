@@ -16,11 +16,30 @@ public static class MessageSerializer
         (JsonTypeInfo<T>)s_context.GetTypeInfo(typeof(T))!;
 
     /// <summary>
+    /// Resolves source-generated metadata for a message by its <b>runtime</b> type.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <c>typeof(T)</c>. A caller that holds a message through
+    /// <see cref="IMessage"/> — the source role's send delegate is
+    /// <c>Func&lt;IMessage, Task&gt;</c> — would otherwise ask the context for the interface,
+    /// which has no entry, and serialization would fail on null metadata. That made
+    /// <c>client_stream/start</c> unsendable, so the source role never streamed at all, and
+    /// the only symptom was a swallowed ArgumentNullException naming 'jsonTypeInfo'.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">The message type has no context entry.</exception>
+    private static JsonTypeInfo GetTypeInfo(IMessage message) =>
+        s_context.GetTypeInfo(message.GetType())
+        ?? throw new InvalidOperationException(
+            $"No source-generated metadata for {message.GetType()}. Add a [JsonSerializable] "
+            + "entry to MessageSerializerContext — this is the mandatory transport path, and "
+            + "reflection-based serialization breaks under PublishAot.");
+
+    /// <summary>
     /// Serializes a message to JSON string.
     /// </summary>
     public static string Serialize<T>(T message) where T : IMessage
     {
-        return JsonSerializer.Serialize(message, GetTypeInfo<T>());
+        return JsonSerializer.Serialize(message, GetTypeInfo(message));
     }
 
     /// <summary>
@@ -28,7 +47,7 @@ public static class MessageSerializer
     /// </summary>
     public static byte[] SerializeToBytes<T>(T message) where T : IMessage
     {
-        return JsonSerializer.SerializeToUtf8Bytes(message, GetTypeInfo<T>());
+        return JsonSerializer.SerializeToUtf8Bytes(message, GetTypeInfo(message));
     }
 
     /// <summary>
