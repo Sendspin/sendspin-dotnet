@@ -81,4 +81,12 @@ public sealed class SendspinClientOptions
     /// fail-closed direction. Open it from the application's operator gesture.
     /// </summary>
     public PairingWindow? PairingWindow { get; init; }
+
+    /// <summary>
+    /// How long a pairing attempt may run before the client aborts it with
+    /// <c>attempt_timeout</c>, measured from the attempt's first message. The spec recommends
+    /// 2 minutes. Does not apply while a gesture-gated attempt waits on a pairing window:
+    /// <c>client/pair-pending</c> precedes an attempt without starting one.
+    /// </summary>
+    public TimeSpan PairingAttemptTimeout { get; init; } = TimeSpan.FromMinutes(2);
 }

@@ -248,9 +248,8 @@ public class PairingGatingTests
 /// <remarks>
 /// This surface is binding across the whole pairing-window plan, not just the tests in this
 /// file: later tasks call every member here, including ones exercised by no test in this file
-/// yet. <c>attemptTimeout</c> is accepted for forward signature-compatibility but not wired to
-/// anything yet — <c>SendspinClientOptions</c> has no attempt-timeout option. A later task in
-/// the plan adds it and should wire it through here at that point.
+/// yet. <c>attemptTimeout</c> flows into <c>SendspinClientOptions.PairingAttemptTimeout</c> when
+/// given; omitted, the option's own default (2 minutes) applies.
 /// </remarks>
 internal sealed class PairingHarness : IAsyncDisposable
 {
@@ -347,6 +346,11 @@ internal sealed class PairingHarness : IAsyncDisposable
                 options.PinLockoutStore = lockouts ?? new InMemoryPinLockoutStore();
                 options.PresentPinAsync = adaptedPresenter;
                 options.PairingWindow = window;
+                if (attemptTimeout is not null)
+                {
+                    options.PairingAttemptTimeout = attemptTimeout.Value;
+                }
+
                 if (pairingPsk)
                 {
                     options.PairingRecordStore = new InMemoryPairingRecordStore();

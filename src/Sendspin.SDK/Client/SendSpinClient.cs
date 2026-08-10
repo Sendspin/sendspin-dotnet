@@ -51,6 +51,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly Func<PinPresentation, CancellationToken, ValueTask>? _presentPinAsync;
     private readonly PairingWindow? _pairingWindow;
 
+    private readonly TimeSpan _attemptTimeout;
+
+    // Bounds the in-flight pairing attempt. Armed by the attempt's first message, disposed by
+    // ClearPinState when the attempt ends for any reason.
+    private CancellationTokenSource? _attemptTimeoutCts;
+
     // Set when a gated activation is waiting on a window; cleared when the attempt starts or
     // the activation is superseded.
     private string? _pendingGatedMethod;
@@ -241,6 +247,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pinLockoutStore = options.PinLockoutStore;
         _presentPinAsync = options.PresentPinAsync;
         _pairingWindow = options.PairingWindow;
+        _attemptTimeout = options.PairingAttemptTimeout;
         _captureDevice = options.CaptureDevice;
         _sourceEncoderFactory = options.SourceEncoderFactory;
         _clockSynchronizer = options.ClockSynchronizer ?? new KalmanClockSynchronizer();
@@ -1681,6 +1688,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     Payload = new ClientPairFinalizePayload { LongTermPsk = B64Url(_pendingPairingPsk) },
                 }).SafeFireAndForget(_logger);
+                ArmAttemptTimeout();
                 break;
 
             case "dynamic_pin":
@@ -1776,6 +1784,35 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pinState = state;
         _logger.LogInformation("PIN pairing ({Method}): starting attempt", method);
         _connection.SendMessageAsync(init).SafeFireAndForget(_logger);
+        ArmAttemptTimeout();
+    }
+
+    /// <summary>
+    /// Starts the attempt timeout. Called from the attempt's first message — client/pair-init
+    /// for the PIN flows, client/pair-finalize for Pairing PSK.
+    /// </summary>
+    private void ArmAttemptTimeout()
+    {
+        _attemptTimeoutCts?.Cancel();
+        _attemptTimeoutCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _attemptTimeoutCts = cts;
+
+        _ = Task.Delay(_attemptTimeout, cts.Token).ContinueWith(
+            t =>
+            {
+                if (t.IsCanceled)
+                {
+                    return;
+                }
+
+                _logger.LogWarning("Pairing attempt timed out; aborting");
+                AbortPin("attempt_timeout");
+                _pairingWindow?.Close();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private void HandleServerPairInit(string json)
@@ -1987,6 +2024,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             cts.Cancel();
             cts.Dispose();
         }
+
+        _attemptTimeoutCts?.Cancel();
+        _attemptTimeoutCts?.Dispose();
+        _attemptTimeoutCts = null;
     }
 
     /// <summary>
@@ -2000,6 +2041,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogWarning("server/pair-finalize with no pairing attempt in flight; ignoring");
             return;
         }
+
+        // The attempt succeeded: disarm its timeout so a completed attempt cannot abort itself
+        // afterwards, and release any PIN presentation still held for it.
+        ClearPinState();
 
         if (_pairingStore is not null && ServerId is not null)
         {
