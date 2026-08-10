@@ -44,3 +44,9 @@ jobs:
 
       - name: Pairing PSK round-trip (pair, persist, re-handshake to user trust)
         run: bash tools/interop/run.sh pairing
+
+      # The only live cover for the CPace round, PSK wrapping, and the pairing window. The
+      # server side fails the run if the client did not gesture-gate the attempt first, so
+      # this also pins the gating policy rather than just "pairing worked".
+      - name: Static PIN round-trip (gesture-gated attempt, CPace, wrapped PSK)
+        run: bash tools/interop/run.sh static-pin

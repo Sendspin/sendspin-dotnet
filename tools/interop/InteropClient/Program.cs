@@ -1,20 +1,24 @@
 // Live interop client: runs the .NET SDK as an encrypted Sendspin host that the
-// aiosendspin reference server dials into. Drives one scenario (unpaired connect, or a
-// full Pairing PSK round-trip), prints JSON result lines, and exits non-zero on failure.
+// aiosendspin reference server dials into. Drives one scenario, prints JSON result lines,
+// and exits non-zero on failure.
 //
-// Usage: InteropClient <scenario> <port> [pairingPskHex]
-//   scenario: "unpaired" | "pairing"
+// Usage: InteropClient <scenario> <port> [secret]
+//   unpaired    connect for playback over unpaired access
+//   pairing     full Pairing PSK round-trip; secret = pairing PSK as hex
+//   static-pin  full static-PIN round-trip; secret = the 8-digit PIN
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
+using Sendspin.SDK.Connection.Noise.Pairing;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Discovery;
 
 string scenario = args.Length > 0 ? args[0] : "unpaired";
 int port = args.Length > 1 ? int.Parse(args[1]) : 8930;
-byte[]? pairingPsk = args.Length > 2 ? Convert.FromHexString(args[2]) : null;
+string? secret = args.Length > 2 ? args[2] : null;
+bool pairs = scenario is "pairing" or "static-pin";
 
 ILoggerFactory loggerFactory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Warning).AddSimpleConsole(o => o.SingleLine = true));
 
@@ -24,7 +28,7 @@ if (scenario == "pairing")
 {
     // Stage the shared bootstrap secret so our host resolves the server's dial to the
     // Pairing PSK (category Pairing) during the Noise handshake.
-    records.Upsert(new PairingRecord(pairingPsk!, PskCategory.Pairing));
+    records.Upsert(new PairingRecord(Convert.FromHexString(secret!), PskCategory.Pairing));
 }
 
 var caps = new ClientCapabilities
@@ -33,6 +37,15 @@ var caps = new ClientCapabilities
     UnpairedAccessEnabled = scenario == "unpaired",
 };
 
+if (scenario == "static-pin")
+{
+    caps.PinPairingMethods.Add("static_pin");
+    caps.StaticPin = secret;
+}
+
+// Every static_pin attempt is gesture-gated, so the window is what lets it proceed at all.
+var window = new PairingWindow();
+
 await using var host = new SendspinHostService(
     loggerFactory,
     new SendspinClientOptions
@@ -40,6 +53,11 @@ await using var host = new SendspinHostService(
         Identity = identity,
         Capabilities = caps,
         PairingRecordStore = records,
+        PairingWindow = window,
+        // The failure counter has to persist for the method to be offered at all.
+        PinLockoutStore = scenario == "static-pin"
+            ? new FilePinLockoutStore(Path.Combine(Path.GetTempPath(), $"interop-lockout-{Guid.NewGuid():N}.json"))
+            : null,
     },
     listenerOptions: new ListenerOptions { Port = port },
     advertiserOptions: new AdvertiserOptions { Enabled = false });
@@ -49,6 +67,15 @@ var paired = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuatio
 host.ServerConnected += (_, info) => connected.TrySetResult(info);
 host.PairingCompleted += (_, serverId) => paired.TrySetResult(serverId);
 
+// Stand in for the physical operator gesture: the SDK reports it is withholding
+// client/pair-init until a window opens, and we open one. Emitting the event first makes
+// the gating observable — if it stopped happening, this line would stop appearing.
+host.PairingGestureRequested += (_, e) =>
+{
+    Emit(new { @event = "gesture_requested", method = e.Method, pairing_index = e.PairingIndex });
+    window.Open();
+};
+
 await host.StartAsync();
 Emit(new { @event = "host_ready", port = host.ListeningPort, client_id = identity.PeerId });
 
@@ -57,7 +84,7 @@ try
 {
     var timeout = TimeSpan.FromSeconds(30);
 
-    if (scenario == "pairing")
+    if (pairs)
     {
         string serverId = await paired.Task.WaitAsync(timeout);
         // After pairing the server re-handshakes to the new long-term PSK; the record
