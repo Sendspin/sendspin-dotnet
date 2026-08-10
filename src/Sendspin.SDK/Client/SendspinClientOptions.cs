@@ -30,8 +30,14 @@ public sealed class SendspinClientOptions
     /// <summary>Roles, features and names advertised in <c>client/hello</c>.</summary>
     public ClientCapabilities Capabilities { get; init; } = new();
 
-    /// <summary>Noise cipher suite announced in <c>client/init</c>.</summary>
-    public NoiseCipherSuite Suite { get; init; } = NoiseCipherSuite.ChaChaPoly;
+    /// <summary>
+    /// Noise cipher suite announced in <c>client/init</c>. Defaults to whichever suite this
+    /// platform can actually perform — ChaCha20-Poly1305 where available, otherwise AES-GCM.
+    /// Both are spec-defined and servers support both, so overriding is a preference, not a
+    /// compatibility requirement; an override the platform cannot perform fails at connect
+    /// with <see cref="PlatformNotSupportedException"/> rather than inside the handshake.
+    /// </summary>
+    public NoiseCipherSuite Suite { get; init; } = NoiseCipherSuiteExtensions.SelectDefault();
 
     /// <summary>Clock synchronizer. A <see cref="KalmanClockSynchronizer"/> is created when null.</summary>
     public IClockSynchronizer? ClockSynchronizer { get; init; }

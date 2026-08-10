@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Noise;
 using Sendspin.SDK.Connection.Framing;
+using Sendspin.SDK.Protocol;
 using NoiseProtocol = Noise.Protocol;
 
 namespace Sendspin.SDK.Connection.Noise;
@@ -93,16 +94,23 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     /// <inheritdoc/>
     public IReadOnlyList<WireFrame> Start()
     {
-        string clientInitText = JsonSerializer.Serialize(new Dictionary<string, object>
-        {
-            ["type"] = "client/init",
-            ["payload"] = new Dictionary<string, object>
-            {
-                ["client_id"] = _identity.PeerId,
-                ["version"] = NoiseConstants.ProtocolVersion,
-                ["suite"] = _suite.ToWireName(),
-            },
-        });
+        // Fail here, naming the suite and the alternative, rather than several messages later
+        // from inside the Noise state machine as an opaque crypto fatal (#89).
+        _suite.EnsureSupported();
+
+        // Source-generated rather than reflection: this is the mandatory transport path and
+        // reflection-based System.Text.Json breaks it under PublishAot (#89). ClientInitJson's
+        // member order reproduces exactly what the dictionary emitted — the prologue binds
+        // these literal bytes, so the order is not free to change. Pinned by
+        // HandshakeByteFidelityTests.
+        string clientInitText = JsonSerializer.Serialize(
+            new ClientInitJson(
+                "client/init",
+                new ClientInitPayloadJson(
+                    _identity.PeerId,
+                    NoiseConstants.ProtocolVersion,
+                    _suite.ToWireName())),
+            MessageSerializerContext.Default.ClientInitJson);
         var frame = WireFrame.FromText(clientInitText);
         // Prologue binds the exact wire bytes of both init messages.
         _clientInitBytes = frame.Payload.ToArray();
@@ -293,11 +301,11 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (transport is null)
             return Fail("handshake did not complete after message 2");
 
-        string replyJson = JsonSerializer.Serialize(new Dictionary<string, object>
-        {
-            ["type"] = "noise/handshake",
-            ["payload"] = new Dictionary<string, object> { ["data"] = Base64UrlText.Encode(buf.AsSpan(0, msg2Len)) },
-        });
+        string replyJson = JsonSerializer.Serialize(
+            new NoiseHandshakeJson(
+                "noise/handshake",
+                new NoiseHandshakePayloadJson(Base64UrlText.Encode(buf.AsSpan(0, msg2Len)))),
+            MessageSerializerContext.Default.NoiseHandshakeJson);
 
         if (_transport is null)
         {

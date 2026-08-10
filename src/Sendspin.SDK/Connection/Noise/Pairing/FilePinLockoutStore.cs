@@ -31,7 +31,7 @@ public sealed class FilePinLockoutStore : IPinLockoutStore
     public void SetFailures(string method, int failures)
     {
         _failures[method] = failures;
-        SecureFile.WriteAllTextAtomic(_path, JsonSerializer.Serialize(_failures));
+        SecureFile.WriteAllTextAtomic(_path, JsonSerializer.Serialize(_failures, PinLockoutStoreJsonContext.Default.DictionaryStringInt32));
     }
 
     private static Dictionary<string, int> Read(string path)
@@ -47,7 +47,7 @@ public sealed class FilePinLockoutStore : IPinLockoutStore
 
         try
         {
-            return JsonSerializer.Deserialize<Dictionary<string, int>>(text) ?? new Dictionary<string, int>();
+            return JsonSerializer.Deserialize(text, PinLockoutStoreJsonContext.Default.DictionaryStringInt32) ?? new Dictionary<string, int>();
         }
         catch (JsonException)
         {

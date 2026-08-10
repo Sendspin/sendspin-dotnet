@@ -84,7 +84,7 @@ public sealed class InMemoryPairingRecordStore : IPairingRecordStore
 /// </summary>
 public sealed class FilePairingRecordStore : IPairingRecordStore
 {
-    private sealed record Entry(string Psk, string Category, string? ServerId, bool Used);
+    internal sealed record Entry(string Psk, string Category, string? ServerId, bool Used);
 
     private readonly string _path;
     private readonly ILogger _logger;
@@ -121,7 +121,7 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
         List<Entry>? entries;
         try
         {
-            entries = JsonSerializer.Deserialize<List<Entry>>(text);
+            entries = JsonSerializer.Deserialize(text, PairingRecordStoreJsonContext.Default.ListEntry);
         }
         catch (JsonException ex)
         {
@@ -212,7 +212,9 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
         var entries = _records.Values
             .Select(r => new Entry(Base64UrlText.Encode(r.Psk.Span), r.Category.ToString(), r.ServerId, r.Used))
             .ToList();
-        SecureFile.WriteAllTextAtomic(_path, JsonSerializer.Serialize(entries));
+        SecureFile.WriteAllTextAtomic(
+            _path,
+            JsonSerializer.Serialize(entries, PairingRecordStoreJsonContext.Default.ListEntry));
     }
 }
 
