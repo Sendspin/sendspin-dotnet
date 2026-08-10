@@ -8,16 +8,19 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 **Server requirement**: a 10.x client requires a server speaking the encrypted protocol — `aiosendspin >= 7.0.0`. There is no negotiation and no fallback: against an older server the handshake fails. **The 9.x line remains maintained** for deployments that need to talk to those servers.
 
+**Pairing requires `aiosendspin >= 9.0.0`**, a higher floor than connecting. 9.0.0 is the first release carrying the current pairing wire shape: `server/activate` names the chosen method inside a `pairing` object, with `pin_length` alongside it, rather than in a flat `selected_pair_method` field. 7.0.0 and 8.0.0 still send the old shape, so a 10.x client reads the offered method as absent and refuses every pairing attempt with `pair/abort` reason `method_not_supported`. Connecting and playback — including unpaired access — are unaffected and still work against `>= 7.0.0`.
+
 ---
 
 ## Breaking Changes Summary
 
 | Area | Change | Impact |
 |------|--------|--------|
-| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin >= 7.0.0` |
+| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin >= 7.0.0`, and `>= 9.0.0` to pair |
 | Client identity | New required persistent Curve25519 identity | **High** — silent data loss if unpersisted |
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
 | Pairing | New: Pairing PSK, dynamic PIN, static PIN | Medium — new UX surface |
+| Pairing gestures | PIN pairing can require an open `PairingWindow` | **High** if a PIN method is offered — silently never pairs without one |
 | `client/state` | `available` is a boolean, not a state string | Medium |
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
 
@@ -98,9 +101,42 @@ Three methods, all optional to offer except the first:
 
 - **Pairing PSK** — every client implements it. The client surfaces a *pairing token* (an `SP:`-prefixed string) that the operator transfers to the server. Get it from `EnsurePairingPsk()`.
 - **Dynamic PIN** — the client derives a per-session PIN and displays it; the operator types it into the server. Requires both `PinLockoutStore` and `PresentPinAsync`; without either, the SDK refuses to offer the method rather than fail open.
-- **Static PIN** — a fixed 8-digit device PIN. Requires `PinLockoutStore`.
+- **Static PIN** — a fixed 8-digit device PIN. Requires `PinLockoutStore` **and a `PairingWindow`** (below).
 
 Enable the PIN methods through `ClientCapabilities.PinPairingMethods`.
+
+`PresentPinAsync` is `Func<PinPresentation, CancellationToken, ValueTask>`: the argument carries the derived `Pin` **and** the server's `Languages` hint, rather than being a bare PIN string. Read `presentation.Pin` for the digits; match `presentation.Languages` (BCP 47, most-preferred first, possibly null) against the languages your app can actually speak when you announce the PIN aloud. The hint is informational — emitting in another language is never a protocol error.
+
+### A `PairingWindow` is required for the gesture-gated methods
+
+The spec gates some PIN attempts on a deliberate operator gesture, and the SDK will not complete those attempts without one. Gated attempts are:
+
+- **every `static_pin` attempt**;
+- a `dynamic_pin` attempt once the method has **escalated** (10 recorded failures) — escalation replaces the terminal lockout earlier 10.0.0 pre-releases applied, so a method that used to become permanently unusable now becomes gesture-gated instead, and a success resets it;
+- a `dynamic_pin` attempt whose session PIN is **shorter than 6 digits** — short PINs are bought with a gesture.
+
+The window is a property of the **device**, not of a connection: one instance is shared by every connection, and it admits exactly one attempt per opening no matter how many servers are connected.
+
+```csharp
+var window = new PairingWindow();   // one per device — share it across every connection
+
+var options = new SendspinClientOptions
+{
+    Identity = identity,
+    PinLockoutStore = lockouts,
+    PairingWindow = window,         // omitted, every gated attempt waits forever
+    // ...
+};
+
+// Wire it to a deliberate operator gesture: a button, a reset pinhole, a power-cycle pattern.
+pairingButton.Pressed += (_, _) => window.Open();
+```
+
+**Leaving `PairingWindow` null does not fail loudly.** It defaults to null and a null window reads as permanently closed, which is the fail-closed direction: the client answers a gated activation with `client/pair-pending` and then waits. Nothing throws and nothing times out — pairing simply never completes. Subscribe to `ISendspinClient.PairingGestureRequested` to prompt the operator, and pass the same window to `SendspinHostService` (which forwards it to every connection it accepts).
+
+An already-paired server can also open the window remotely with `management/open-pairing-window`.
+
+Once an attempt has started it is bounded by `SendspinClientOptions.PairingAttemptTimeout` (2 minutes by default, the spec's recommendation), after which the client sends `pair/abort` with `attempt_timeout`. The wait for a gesture is not bounded by it.
 
 ### Unpaired access
 
@@ -133,10 +169,12 @@ The spec requires a source to run only on a paired connection, and the SDK enfor
 ## 6. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
+- [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
 - [ ] `Identity` comes from a **store**, not `Generate()` — verify by restarting the app twice and confirming the pairing survives
 - [ ] The same identity and pairing store are shared across dial and listen modes
 - [ ] `PairingRecordStore` is configured and writes somewhere durable
 - [ ] A pairing UX exists — at minimum, surfacing the token from `EnsurePairingPsk()`
+- [ ] If any PIN method is offered: a `PairingWindow` is supplied and opened by a real operator gesture — verify by pairing with a static PIN and confirming it only succeeds after the gesture
 - [ ] `UnpairedAccessEnabled` is a deliberate decision, not a default you inherited
 - [ ] `PairingConfigChanged` is persisted and reapplied at startup
 - [ ] Identity and PSK files are in a user-scoped location

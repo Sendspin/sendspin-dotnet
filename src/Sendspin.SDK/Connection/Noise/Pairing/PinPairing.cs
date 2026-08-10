@@ -93,7 +93,7 @@ internal static class PinPairing
 }
 
 /// <summary>
-/// Persists per-method PIN-pairing failure counters (spec: terminal lockout at 10,
+/// Persists per-method PIN-pairing failure counters (spec: escalates to gesture-gating at 10,
 /// counters survive reboots, not partitioned by server).
 /// </summary>
 public interface IPinLockoutStore

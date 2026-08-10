@@ -33,7 +33,7 @@ public class SendspinClientServicePairingTests
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
 
         var finalize = Assert.Single(connection.SentMessages.OfType<ClientPairFinalizeMessage>());
         Assert.NotNull(finalize.Payload.LongTermPsk);
@@ -50,7 +50,7 @@ public class SendspinClientServicePairingTests
         client.PairingCompleted += (_, id) => pairedWith = id;
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
 
         var record = Assert.Single(store.List());
@@ -75,7 +75,7 @@ public class SendspinClientServicePairingTests
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
 
         var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
         Assert.Equal("method_not_supported", abort.Payload.Reason);
@@ -90,7 +90,7 @@ public class SendspinClientServicePairingTests
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
         connection.RaiseTextMessageReceived("""{"type":"pair/abort","payload":{"reason":"user_cancelled"}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
 
@@ -116,7 +116,7 @@ public class SendspinClientServicePairingTests
         // entirely (e.g. never sets _pendingPairingPsk) would also pass the assertion
         // below for the wrong reason.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
         Assert.Single(store.List());
 
@@ -124,7 +124,7 @@ public class SendspinClientServicePairingTests
         // client/pair-finalize goes out, setting _pendingPairingPsk again — but the
         // connection drops before server/pair-finalize arrives.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
         connection.SimulateConnectionLoss();
         connection.SimulateReconnected();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -138,7 +138,7 @@ public class SendspinClientServicePairingTests
         // from. See UnsupportedPairMethod_AbortsWithoutClosingTheConnection for the same
         // "unknown method aborts, connection stays open" shape.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"telepathy"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"telepathy"}}}""");
 
         // The new session's peer sends a bare finalize, with no pairing_psk activate of
         // its own.
@@ -176,14 +176,14 @@ public class SendspinClientServicePairingTests
         // persists the record. Without this, an implementation that broke pairing
         // entirely would also pass the assertion below for the wrong reason.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
         Assert.Single(store.List());
 
         // A second, abandoned attempt: the server activates pairing again — a fresh
         // client/pair-finalize goes out, setting _pendingPairingPsk again.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
 
         // An in-band re-key installs a fresh handshake hash before the server's own
         // finalize ever arrives. Nothing else about the connection changes — this is the
@@ -234,8 +234,8 @@ public class SendspinClientServicePairingTests
 
     private static void SendPairingActivate(FakeSendspinConnection connection, string method) =>
         connection.RaiseTextMessageReceived(
-            $$$"""
-            {"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"{{{method}}}"}}
+            $$$$"""
+            {"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"{{{{method}}}}"}}}
             """);
 
     [Fact]
@@ -344,7 +344,7 @@ public class SendspinClientServicePairingTests
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"pairing_psk"}}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
 
         var promoted = Assert.Single(store.List());

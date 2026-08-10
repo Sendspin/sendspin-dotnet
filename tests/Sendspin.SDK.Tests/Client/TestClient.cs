@@ -45,11 +45,15 @@ internal sealed class TestClientOptions
 
     public IPinLockoutStore? PinLockoutStore { get; set; }
 
-    public Func<string, CancellationToken, ValueTask>? PresentPinAsync { get; set; }
+    public Func<PinPresentation, CancellationToken, ValueTask>? PresentPinAsync { get; set; }
 
     public IAudioCaptureDevice? CaptureDevice { get; set; }
 
     public ISourceAudioEncoderFactory? SourceEncoderFactory { get; set; }
+
+    public PairingWindow? PairingWindow { get; set; }
+
+    public TimeSpan PairingAttemptTimeout { get; set; } = TimeSpan.FromMinutes(2);
 }
 
 /// <summary>
@@ -111,6 +115,8 @@ internal static class TestClient
             PresentPinAsync = draft.PresentPinAsync,
             CaptureDevice = draft.CaptureDevice,
             SourceEncoderFactory = draft.SourceEncoderFactory,
+            PairingWindow = draft.PairingWindow,
+            PairingAttemptTimeout = draft.PairingAttemptTimeout,
         };
 
         // Connected before the client subscribes, so no state-changed event is delivered and

@@ -36,11 +36,40 @@ public sealed class ServerActivatePayload
     public List<string>? ActiveRoles { get; set; }
 
     /// <summary>
-    /// Pairing method the server picked. Present exactly when 'pairing' is in
-    /// activities.
+    /// Parameters of the pairing attempt this activation admits. Present exactly when
+    /// 'pairing' is in activities; ignored otherwise.
     /// </summary>
-    [JsonPropertyName("selected_pair_method")]
-    public string? SelectedPairMethod { get; set; }
+    [JsonPropertyName("pairing")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public PairingActivation? Pairing { get; set; }
+}
+
+/// <summary>
+/// The <c>pairing</c> object on <c>server/activate</c>: which method the server picked and
+/// the parameters that method needs.
+/// </summary>
+public sealed class PairingActivation
+{
+    /// <summary>Pairing method the server picked: dynamic_pin, pairing_psk, or static_pin.</summary>
+    [JsonPropertyName("method")]
+    public string Method { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The dynamic PIN length for this session. Required when <see cref="Method"/> is
+    /// 'dynamic_pin'; absent otherwise. Validated on receipt of the activation, because the
+    /// gesture-gating policy turns on it before client/pair-init is sent.
+    /// </summary>
+    [JsonPropertyName("pin_length")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? PinLength { get; set; }
+
+    /// <summary>
+    /// BCP 47 language tags in descending operator preference, for spoken PIN emission.
+    /// Informational: never grounds for pair/abort.
+    /// </summary>
+    [JsonPropertyName("languages")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Languages { get; set; }
 }
 
 /// <summary>

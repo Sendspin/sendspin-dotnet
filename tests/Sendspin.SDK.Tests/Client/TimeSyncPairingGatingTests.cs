@@ -20,7 +20,7 @@ public class TimeSyncPairingGatingTests
         """{"type":"server/hello","payload":{"name":"srv"}}""";
 
     private const string PairingActivate =
-        """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"dynamic_pin"}}""";
+        """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""";
 
     private const string PlaybackActivate =
         """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""";

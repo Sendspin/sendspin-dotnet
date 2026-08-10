@@ -21,10 +21,15 @@ public class SendspinClientServicePinPairingTests
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPinLockoutStore, InMemoryPairingRecordStore)
-        CreateClient(ClientCapabilities caps, Func<string, CancellationToken, ValueTask>? presentPin = null)
+        CreateClient(ClientCapabilities caps, Func<PinPresentation, CancellationToken, ValueTask>? presentPin = null)
     {
         var lockout = new InMemoryPinLockoutStore();
         var records = new InMemoryPairingRecordStore();
+
+        // Pre-opened so a static_pin attempt (always gesture-gated now) proceeds immediately,
+        // exactly as it did before gating existed -- these tests are not about gating.
+        var window = new PairingWindow();
+        window.Open();
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options =>
@@ -33,6 +38,7 @@ public class SendspinClientServicePinPairingTests
                 options.PairingRecordStore = records;
                 options.PinLockoutStore = lockout;
                 options.PresentPinAsync = presentPin;
+                options.PairingWindow = window;
             });
 
         // The CPace exchange is bound to the Noise handshake hash, which the test's server
@@ -65,23 +71,23 @@ public class SendspinClientServicePinPairingTests
         };
         var (client, conn, _, _) = CreateClient(caps, (p, _) =>
         {
-            emittedPin = p;
+            emittedPin = p.Pin;
             return ValueTask.CompletedTask;
         });
         using var _c = client;
 
-        // Pairing activate selects dynamic_pin.
+        // Pairing activate selects dynamic_pin and carries the session's pin_length.
+        const int length = 6;
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
 
         // Client sends pair-init with commit_B.
         var init = Last<ClientPairInitMessage>(conn);
         Assert.NotNull(init.Payload.CommitB);
         byte[] commitB = B64(init.Payload.CommitB!);
 
-        // Server picks nonce_A and pin_length, derives the same PIN.
+        // Server picks nonce_A, derives the same PIN using the activation's pin_length.
         byte[] nonceA = Enumerable.Repeat((byte)0x42, 32).ToArray();
-        const int length = 6;
         conn.RaiseTextMessageReceived(
             ServerPairInit(B64(nonceA), length));
 
@@ -124,14 +130,15 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void DynamicPin_PinLengthBelowMinimum_Aborts()
     {
+        // pin_length now arrives on the activation, not server/pair-init (that field no
+        // longer exists), so a too-short session length is caught there, before any
+        // attempt starts.
         var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8 };
         var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"dynamic_pin"}}""");
-        conn.RaiseTextMessageReceived(
-            ServerPairInit(B64(new byte[32]), 6));
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
 
         Assert.Equal("pin_length_unacceptable", Last<PairAbortMessage>(conn).Payload.Reason);
     }
@@ -144,7 +151,7 @@ public class SendspinClientServicePinPairingTests
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
 
         // Static PIN: no commit_B in pair-init.
         var init = Last<ClientPairInitMessage>(conn);
@@ -173,7 +180,7 @@ public class SendspinClientServicePinPairingTests
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
         // Server runs CPace with the WRONG pin, so its confirmation tag won't verify.
         byte[] sid = PinPairing.BuildSid(HandshakeHash, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("00000000"), sid, ad: PinPairing.AdServer);
@@ -190,33 +197,42 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void LockedOutMethod_AbortsImmediately_ButStaysAdvertised()
+    public void EscalatedMethod_IsGatedNotAborted_AndStaysAdvertised()
     {
-        // Lockout state is not part of the client/hello descriptor (no spec field for it);
-        // it only shows up as the pair/abort reason once the server actually selects the
-        // locked-out method. Lockout is signalled that way, not by hiding the method: an
-        // escalated method stays advertised, so the descriptor must still be there.
-        var caps = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
+        // Escalation state is not part of the client/hello descriptor (no spec field for it);
+        // it only shows up as a gesture gate once the server actually selects the escalated
+        // method. Escalation is signalled that way, not by hiding the method: an escalated
+        // method stays advertised, so the descriptor must still be there. Dynamic PIN with a
+        // session pin_length >= 6 isolates escalation as the gating cause -- static_pin is
+        // gated regardless of its failure count, so it cannot tell escalation apart from the
+        // method's own baseline policy.
+        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
         var lockout = new InMemoryPinLockoutStore();
-        lockout.SetFailures("static_pin", 10);
+        lockout.SetFailures("dynamic_pin", 10);
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options =>
             {
                 options.Capabilities = caps;
-                options.PairingRecordStore = new InMemoryPairingRecordStore();
                 options.PinLockoutStore = lockout;
+                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
+                options.PairingWindow = new PairingWindow();
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
-        Assert.Contains(hello.Payload.SupportedPairMethods!, m => m.Method == "static_pin");
+        Assert.Contains(hello.Payload.SupportedPairMethods!, m => m.Method == "dynamic_pin");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
-        Assert.Equal("locked_out", Last<PairAbortMessage>(connection).Payload.Reason);
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":8}}}""");
+
+        // Gated, not refused: a pending signal, no abort of any kind, and no init -- gating
+        // that signalled pending and then proceeded ungated anyway must fail this too.
+        Assert.NotEmpty(connection.SentMessages.OfType<ClientPairPendingMessage>());
+        Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);
+        Assert.Empty(connection.SentMessages.OfType<ClientPairInitMessage>());
     }
 
     [Fact]
@@ -238,7 +254,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
@@ -248,7 +264,7 @@ public class SendspinClientServicePinPairingTests
                                                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(1, second.Payload.PairingIndex);
@@ -276,13 +292,13 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
         // No mutation of session.HandshakeHash here — that is the point of this test.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(2, second.Payload.PairingIndex);
@@ -291,9 +307,9 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void DynamicPin_WithNoLockoutStore_IsRefused()
     {
-        // With no store, IsPinMethodLockedOut evaluates (null?.GetFailures() ?? 0) >= 10 —
+        // With no store, IsMethodEscalated evaluates (null?.GetFailures() ?? 0) >= 10 —
         // always false — and RecordPinFailure returns early. So PIN attempts are unlimited
-        // and the spec's terminal lockout is silently inert. Refuse the method instead.
+        // and could never escalate to gesture-gating. Refuse the method instead.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options =>
@@ -309,7 +325,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
 
         Assert.DoesNotContain(connection.SentMessages, m => m is ClientPairInitMessage);
         var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
@@ -335,7 +351,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
 
         Assert.Single(connection.SentMessages.OfType<ClientPairInitMessage>());
         Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);

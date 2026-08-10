@@ -165,4 +165,35 @@ public class MessageSerializerTests
         Assert.DoesNotContain("client_id", json);
         Assert.DoesNotContain("\"version\"", json);
     }
+
+    [Fact]
+    public void ServerActivate_DeserializesNestedPairingObject()
+    {
+        // Spec 5b0e6469 replaced the flat selected_pair_method with a pairing object
+        // carrying method, pin_length and (spec #131) languages.
+        const string json = """
+            {"type":"server/activate","payload":{"activities":["pairing"],
+            "active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":8,
+            "languages":["ca","es"]}}}
+            """;
+
+        var msg = MessageSerializer.Deserialize<ServerActivateMessage>(json);
+
+        Assert.NotNull(msg);
+        Assert.Equal("dynamic_pin", msg!.Payload.Pairing!.Method);
+        Assert.Equal(8, msg.Payload.Pairing.PinLength);
+        Assert.Equal(new[] { "ca", "es" }, msg.Payload.Pairing.Languages);
+    }
+
+    [Fact]
+    public void ClientPairPending_SerializesWithPairingIndex()
+    {
+        var json = MessageSerializer.Serialize(new ClientPairPendingMessage
+        {
+            Payload = new ClientPairPendingPayload { PairingIndex = 3 },
+        });
+
+        Assert.Contains("\"type\":\"client/pair-pending\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"pairing_index\":3", json, StringComparison.Ordinal);
+    }
 }

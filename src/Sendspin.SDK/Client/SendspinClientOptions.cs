@@ -49,12 +49,12 @@ public sealed class SendspinClientOptions
     public IStaticDelayStore? StaticDelayStore { get; init; }
 
     /// <summary>
-    /// Lockout counter persistence for the PIN pairing methods. <b>Required</b> if
+    /// Failure counter persistence for the PIN pairing methods. <b>Required</b> if
     /// <see cref="ClientCapabilities.PinPairingMethods"/> is non-empty: without a store the
-    /// spec's terminal lockout after 10 failed attempts cannot survive a restart, so the SDK
-    /// declines to offer the PIN methods at all (it sends <c>pair/abort</c> and logs a warning)
-    /// rather than granting unlimited attempts. <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/>
-    /// is provided.
+    /// counter cannot survive a restart, so a method could never escalate to gesture-gating —
+    /// the SDK declines to offer the PIN methods at all (it sends <c>pair/abort</c> and logs a
+    /// warning) rather than granting unlimited, ungated attempts.
+    /// <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/> is provided.
     /// </summary>
     public IPinLockoutStore? PinLockoutStore { get; init; }
 
@@ -65,11 +65,28 @@ public sealed class SendspinClientOptions
     /// without it. Awaited before the client proceeds, so a slow presenter delays pairing
     /// rather than racing it.
     /// </summary>
-    public Func<string, CancellationToken, ValueTask>? PresentPinAsync { get; init; }
+    public Func<PinPresentation, CancellationToken, ValueTask>? PresentPinAsync { get; init; }
 
     /// <summary>Capture device for the <c>source@v1</c> role.</summary>
     public IAudioCaptureDevice? CaptureDevice { get; init; }
 
     /// <summary>Encoder factory for the <c>source@v1</c> role.</summary>
     public ISourceAudioEncoderFactory? SourceEncoderFactory { get; init; }
+
+    /// <summary>
+    /// The device's pairing window, shared by every connection this application runs.
+    /// <b>Required</b> to complete any gesture-gated pairing attempt: static PIN always, and
+    /// dynamic PIN once the method is escalated or the session's PIN is shorter than 6 digits.
+    /// A null window is treated as permanently closed, so gated attempts stay pending — the
+    /// fail-closed direction. Open it from the application's operator gesture.
+    /// </summary>
+    public PairingWindow? PairingWindow { get; init; }
+
+    /// <summary>
+    /// How long a pairing attempt may run before the client aborts it with
+    /// <c>attempt_timeout</c>, measured from the attempt's first message. The spec recommends
+    /// 2 minutes. Does not apply while a gesture-gated attempt waits on a pairing window:
+    /// <c>client/pair-pending</c> precedes an attempt without starting one.
+    /// </summary>
+    public TimeSpan PairingAttemptTimeout { get; init; } = TimeSpan.FromMinutes(2);
 }

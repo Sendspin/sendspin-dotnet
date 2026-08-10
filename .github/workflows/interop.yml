@@ -25,8 +25,16 @@ jobs:
         with:
           python-version: '3.13'
 
+      # 9.0.0 is the first release implementing spec 5b0e6469 (spec PR #130): the
+      # server/activate 'pairing' object, pin_length validated at the activation, the
+      # pairing window, client/pair-pending and management/open-pairing-window. 7.0.0 and
+      # 8.0.0 both still send the flat selected_pair_method, so a client conforming to the
+      # current spec cannot pair with them at all — the pairing scenario fails with
+      # "Cannot offer pair method (null)". Unpaired connect still works against 7.0.0;
+      # the split floor (playback >= 7.0.0, pairing >= 9.0.0) is documented in the README
+      # compatibility matrix.
       - name: Install aiosendspin reference server
-        run: pip install "aiosendspin[server]==7.0.0"
+        run: pip install "aiosendspin[server]==9.0.0"
 
       - name: Build interop client
         run: dotnet build tools/interop/InteropClient -c Release

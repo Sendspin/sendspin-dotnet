@@ -16,6 +16,7 @@ public static class MessageTypes
     public const string ClientPairFinalize = "client/pair-finalize";
     public const string ServerPairFinalize = "server/pair-finalize";
     public const string PairAbort = "pair/abort";
+    public const string ClientPairPending = "client/pair-pending";
     public const string ClientPairInit = "client/pair-init";
     public const string ServerPairInit = "server/pair-init";
     public const string ServerPairAuth = "server/pair-auth";
@@ -29,6 +30,7 @@ public static class MessageTypes
     public const string ManagementRemoveRecord = "management/remove-record";
     public const string ManagementGetPairingConfig = "management/get-pairing-config";
     public const string ManagementSetPairingConfig = "management/set-pairing-config";
+    public const string ManagementOpenPairingWindow = "management/open-pairing-window";
     public const string ManagementResult = "management/result";
     public const string ServerUnpair = "server/unpair";
 
