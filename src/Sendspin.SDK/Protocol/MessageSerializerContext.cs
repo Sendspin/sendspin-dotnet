@@ -17,6 +17,8 @@ namespace Sendspin.SDK.Protocol;
     PropertyNamingPolicy = JsonKnownNamingPolicy.SnakeCaseLower,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     Converters = [typeof(OptionalJsonConverterFactory)])]
+[JsonSerializable(typeof(Sendspin.SDK.Connection.Noise.ClientInitJson))]
+[JsonSerializable(typeof(Sendspin.SDK.Connection.Noise.NoiseHandshakeJson))]
 [JsonSerializable(typeof(ClientHelloMessage))]
 [JsonSerializable(typeof(ClientGoodbyeMessage))]
 [JsonSerializable(typeof(ClientTimeMessage))]
