@@ -403,7 +403,7 @@ public class PairingConfigOwnershipTests
         connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
 
         byte[] sid = PinPairing.BuildSid(session.HandshakeHash!.Value.Span, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("11111111"), sid, ad: PinPairing.AdServer);

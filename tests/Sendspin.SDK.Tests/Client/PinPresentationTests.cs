@@ -41,7 +41,7 @@ public class PinPresentationTests
 
     private static void ActivateDynamicPin(FakeSendspinConnection conn) =>
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
 
     private static void SendServerPairInit(FakeSendspinConnection conn, byte[] nonceA, int pinLength) =>
         conn.RaiseTextMessageReceived(

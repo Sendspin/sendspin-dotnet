@@ -72,7 +72,7 @@ public class SendspinClientServicePinPairingTests
 
         // Pairing activate selects dynamic_pin.
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
 
         // Client sends pair-init with commit_B.
         var init = Last<ClientPairInitMessage>(conn);
@@ -129,7 +129,7 @@ public class SendspinClientServicePinPairingTests
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
         conn.RaiseTextMessageReceived(
             ServerPairInit(B64(new byte[32]), 6));
 
@@ -144,7 +144,7 @@ public class SendspinClientServicePinPairingTests
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
 
         // Static PIN: no commit_B in pair-init.
         var init = Last<ClientPairInitMessage>(conn);
@@ -173,7 +173,7 @@ public class SendspinClientServicePinPairingTests
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
         // Server runs CPace with the WRONG pin, so its confirmation tag won't verify.
         byte[] sid = PinPairing.BuildSid(HandshakeHash, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("00000000"), sid, ad: PinPairing.AdServer);
@@ -215,7 +215,7 @@ public class SendspinClientServicePinPairingTests
         Assert.Contains(hello.Payload.SupportedPairMethods!, m => m.Method == "static_pin");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"static_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
         Assert.Equal("locked_out", Last<PairAbortMessage>(connection).Payload.Reason);
     }
 
@@ -238,7 +238,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
@@ -248,7 +248,7 @@ public class SendspinClientServicePinPairingTests
                                                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(1, second.Payload.PairingIndex);
@@ -276,13 +276,13 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
         // No mutation of session.HandshakeHash here — that is the point of this test.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(2, second.Payload.PairingIndex);
@@ -309,7 +309,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
 
         Assert.DoesNotContain(connection.SentMessages, m => m is ClientPairInitMessage);
         var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
@@ -335,7 +335,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"selected_pair_method":"dynamic_pin"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
 
         Assert.Single(connection.SentMessages.OfType<ClientPairInitMessage>());
         Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);

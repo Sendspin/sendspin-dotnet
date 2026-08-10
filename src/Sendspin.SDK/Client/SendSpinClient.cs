@@ -1612,14 +1612,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // DetectSessionRekey, which has already run for this message.
         _pairingCounter++;
 
-        if (!CanOffer(payload.SelectedPairMethod))
+        if (!CanOffer(payload.Pairing?.Method))
         {
             // Spec: reply method_not_supported and LEAVE THE CONNECTION OPEN. The server
             // may re-activate with another method, or re-handshake for a fresh
             // supported_pair_methods advertisement.
             _logger.LogWarning(
                 "Cannot offer pair method {Method} on this session; aborting the attempt",
-                payload.SelectedPairMethod);
+                payload.Pairing?.Method);
             _connection.SendMessageAsync(new PairAbortMessage
             {
                 Payload = new PairAbortPayload { Reason = "method_not_supported" },
@@ -1627,7 +1627,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        switch (payload.SelectedPairMethod)
+        switch (payload.Pairing?.Method)
         {
             case "pairing_psk":
                 _pendingPairingPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
@@ -1651,7 +1651,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 // added to one and not the other would otherwise fall through in silence,
                 // leaving the server waiting for a reply that never comes.
                 throw new System.Diagnostics.UnreachableException(
-                    $"CanOffer admitted pair method '{payload.SelectedPairMethod}' with no dispatch arm");
+                    $"CanOffer admitted pair method '{payload.Pairing?.Method}' with no dispatch arm");
         }
     }
 

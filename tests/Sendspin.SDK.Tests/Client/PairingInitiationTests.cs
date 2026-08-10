@@ -83,7 +83,7 @@ public class PairingInitiationTests
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"selected_pair_method":"pairing_psk"}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
 
         // Positive control: without this, deleting the pairing flow entirely would leave
