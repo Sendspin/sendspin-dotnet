@@ -96,6 +96,22 @@ public class Base64UrlTextTests
         Assert.Equal(32, Base64UrlText.Decode(mutated).Length);
     }
 
+    [Theory]
+    [InlineData('\v')]
+    [InlineData('\u00A0')]
+    public void Decode_RejectsNonAsciiWhitespace(char character)
+    {
+        // '\v' and U+00A0 satisfy char.IsWhiteSpace but are not among the four characters
+        // (' ', '\t', '\r', '\n') that Convert.FromBase64String and net10.0's
+        // Base64Url.DecodeFromChars actually skip. This passes on net10.0 today; it exists so
+        // the net8.0 fallback's strip can never widen back to char.IsWhiteSpace, which would
+        // silently reintroduce the #108 divergence.
+        string encoded = Base64UrlText.Encode(new byte[32]);
+        string mutated = encoded[..1] + character + encoded[1..];
+
+        Assert.Throws<FormatException>(() => Base64UrlText.Decode(mutated));
+    }
+
     [Fact]
     public void Decode_NullThrowsArgumentNullException()
     {
