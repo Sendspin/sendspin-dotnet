@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Proves the SDK is genuinely NativeAOT-publishable, which analyzer warnings alone cannot.
+    The trim/AOT analyzers only see this repo's IL; they say nothing about whether a
+    dependency survives AOT. Noise.NET sits on the mandatory transport, so until something
+    actually published and ran a handshake, "PublishAot compatible" was an untested claim
+    (#89).
+
+    Deliberately outside the solution and not referenced by tests: its job is to be published,
+    not built.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- The point of the exercise: any trim/AOT complaint fails the build. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <WarningsAsErrors>IL2026;IL2027;IL2046;IL2072;IL2075;IL3050;IL3051;IL3053</WarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Sendspin.SDK/Sendspin.SDK.csproj" />
+  </ItemGroup>
+
+</Project>
