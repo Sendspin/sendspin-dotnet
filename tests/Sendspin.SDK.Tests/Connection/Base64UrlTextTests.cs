@@ -6,7 +6,9 @@ namespace Sendspin.SDK.Tests.Connection;
 /// Base64UrlText.Decode must give the same answer on net8.0 and net10.0. The two frameworks
 /// run different bodies — Convert.FromBase64String after an alphabet translation versus
 /// System.Buffers.Text.Base64Url — and the net8.0 fallback accepts the standard-base64
-/// characters '+' and '/' that base64url does not have (#108).
+/// characters '+' and '/' that base64url does not have (#108). The net8.0 fallback also used
+/// to miscount padding when the input contained whitespace, because it computed padding from
+/// the raw length instead of the length with whitespace stripped.
 /// </summary>
 /// <remarks>
 /// This project targets net10.0 only, so these tests can never execute the net8.0 body.
@@ -59,5 +61,46 @@ public class Base64UrlTextTests
         string encoded = Base64UrlText.Encode(new byte[32]);
 
         Assert.Equal(32, Base64UrlText.Decode(encoded + "=").Length);
+    }
+
+    [Fact]
+    public void Decode_AcceptsTrailingWhitespace()
+    {
+        // On net10.0 this already passes: Base64Url.DecodeFromChars tolerates whitespace
+        // anywhere. It exists so the net8.0 fallback's padding arithmetic — which must strip
+        // whitespace before computing padding, not just leave it for Convert to skip — cannot
+        // silently regress (#108).
+        string encoded = Base64UrlText.Encode(new byte[32]);
+
+        Assert.Equal(32, Base64UrlText.Decode(encoded + " ").Length);
+    }
+
+    [Fact]
+    public void Decode_AcceptsLeadingWhitespace()
+    {
+        // On net10.0 this already passes. It exists so the net8.0 fallback's padding
+        // arithmetic cannot silently regress (#108).
+        string encoded = Base64UrlText.Encode(new byte[32]);
+
+        Assert.Equal(32, Base64UrlText.Decode(" " + encoded).Length);
+    }
+
+    [Fact]
+    public void Decode_AcceptsEmbeddedWhitespace()
+    {
+        // On net10.0 this already passes. It exists so the net8.0 fallback's padding
+        // arithmetic cannot silently regress (#108).
+        string encoded = Base64UrlText.Encode(new byte[32]);
+        string mutated = encoded[..1] + " " + encoded[1..];
+
+        Assert.Equal(32, Base64UrlText.Decode(mutated).Length);
+    }
+
+    [Fact]
+    public void Decode_NullThrowsArgumentNullException()
+    {
+        // The parameter is declared non-nullable; this pins that Decode enforces it instead
+        // of relying on callers, and that both frameworks agree (#108).
+        Assert.Throws<ArgumentNullException>(() => Base64UrlText.Decode(null!));
     }
 }
