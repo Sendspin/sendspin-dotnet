@@ -50,3 +50,9 @@ jobs:
       # this also pins the gating policy rather than just "pairing worked".
       - name: Static PIN round-trip (gesture-gated attempt, CPace, wrapped PSK)
         run: bash tools/interop/run.sh static-pin
+
+      # Slower than the others by design: the client withholds its initial client/state
+      # until clock sync converges, which takes ~30s of burst sampling, and the server
+      # discards source chunks until that state arrives.
+      - name: Source streaming (server start command, client_stream/start, decoded audio)
+        run: bash tools/interop/run.sh source

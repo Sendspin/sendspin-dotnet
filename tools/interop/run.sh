@@ -15,9 +15,9 @@ PORT=8931
 # The shared secret both sides need, per scenario: a random Pairing PSK, or a static PIN
 # (the spec fixes static PINs at 8 digits).
 case "$SCENARIO" in
-  pairing)    SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" ;;
-  static-pin) SECRET="31415926" ;;
-  *)          SECRET="" ;;
+  pairing|source) SECRET="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" ;;
+  static-pin)     SECRET="31415926" ;;
+  *)              SECRET="" ;;
 esac
 
 pass() { echo "INTEROP PASS: $SCENARIO"; exit 0; }
