@@ -46,7 +46,7 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
 
         // Client sends, server receives
         var received = new TaskCompletionSource<string>();
-        serverConn.OnMessage = msg => received.TrySetResult(msg);
+        serverConn.OnText = data => received.TrySetResult(System.Text.Encoding.UTF8.GetString(data));
 
         var msgBytes = System.Text.Encoding.UTF8.GetBytes("hello from client");
         await client.SendAsync(msgBytes, WebSocketMessageType.Text, true, CancellationToken.None);

@@ -165,8 +165,8 @@ public class RehandshakeConcurrencyTests
 
         await incoming.StartAsync();
         var (serverInit, msg1) = server.Respond(gatedSocket.TextFrames()[0]);
-        socket.OnMessage!(serverInit);
-        socket.OnMessage!(msg1);
+        socket.OnText!(Encoding.UTF8.GetBytes(serverInit));
+        socket.OnText!(Encoding.UTF8.GetBytes(msg1));
         await WaitUntilAsync(
             () => gatedSocket.TextFrames().Length == 2,
             "the initial noise handshake reply");
