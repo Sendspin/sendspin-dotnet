@@ -30,7 +30,7 @@ public class SendspinClientServiceSourceTests
         var caps = new ClientCapabilities
         {
             Roles = { "source@v1" },
-            SourceSupport = new SourceRoleSupport { LineSense = lineSense },
+            SourceRoleSupport = new SourceRoleSupport { LineSense = lineSense },
             UnpairedAccessEnabled = unpairedAccess,
         };
         var (client, connection, session) = TestClient.Create(

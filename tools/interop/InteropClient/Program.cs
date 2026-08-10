@@ -55,7 +55,7 @@ if (scenario == "static-pin")
 if (scenario == "source")
 {
     caps.Roles.Add("source@v1");
-    caps.SourceSupport = new SourceRoleSupport();
+    caps.SourceRoleSupport = new SourceRoleSupport();
 }
 
 // Every static_pin attempt is gesture-gated, so the window is what lets it proceed at all.

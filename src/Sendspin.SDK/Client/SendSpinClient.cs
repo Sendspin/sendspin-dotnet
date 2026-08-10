@@ -270,7 +270,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger,
                 IsSourceStreamingPermitted,
                 _sourceEncoderFactory,
-                _capabilities.SourceSupport?.Codec);
+                _capabilities.SourceRoleSupport?.Codec);
         }
         _audioPipeline = options.AudioPipeline;
         _staticDelayStore = options.StaticDelayStore;
@@ -447,7 +447,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public async Task SetSourceSignalAsync(bool present)
     {
-        if (!HasSourceRole() || _capabilities.SourceSupport?.LineSense != true)
+        if (!HasSourceRole() || _capabilities.SourceRoleSupport?.LineSense != true)
             return;
 
         if (!_initialClientStateSent)
@@ -516,7 +516,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             sourceSupport: HasSourceRole()
                 ? new SourceSupport
                 {
-                    Features = _capabilities.SourceSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
+                    Features = _capabilities.SourceRoleSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
             trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",

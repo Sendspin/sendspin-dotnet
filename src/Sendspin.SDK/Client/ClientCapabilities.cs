@@ -135,7 +135,13 @@ public sealed class ClientCapabilities
     /// source support configured. Only meaningful when the 'source@v1' role and a capture
     /// device are configured.
     /// </summary>
-    public SourceRoleSupport? SourceSupport { get; set; }
+    /// <remarks>
+    /// Named for its type, not for the wire field: <see cref="Protocol.Messages.SourceSupport"/>
+    /// is the <c>source@v1_support</c> payload, and a property called <c>SourceSupport</c>
+    /// here made the obvious assignment bind that type instead when both namespaces were
+    /// imported.
+    /// </remarks>
+    public SourceRoleSupport? SourceRoleSupport { get; set; }
 
     /// <summary>
     /// PIN pairing methods this client offers in addition to the mandatory Pairing PSK
