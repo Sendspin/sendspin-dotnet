@@ -21,7 +21,7 @@ public class SendspinClientServicePinPairingTests
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPinLockoutStore, InMemoryPairingRecordStore)
-        CreateClient(ClientCapabilities caps, Func<string, CancellationToken, ValueTask>? presentPin = null)
+        CreateClient(ClientCapabilities caps, Func<PinPresentation, CancellationToken, ValueTask>? presentPin = null)
     {
         var lockout = new InMemoryPinLockoutStore();
         var records = new InMemoryPairingRecordStore();
@@ -65,7 +65,7 @@ public class SendspinClientServicePinPairingTests
         };
         var (client, conn, _, _) = CreateClient(caps, (p, _) =>
         {
-            emittedPin = p;
+            emittedPin = p.Pin;
             return ValueTask.CompletedTask;
         });
         using var _c = client;

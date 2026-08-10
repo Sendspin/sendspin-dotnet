@@ -20,7 +20,7 @@ public class PinPresentationTests
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static (SendspinClientService Client, FakeSendspinConnection Connection)
-        CreateDynamicPinClient(Func<string, CancellationToken, ValueTask>? presentPin)
+        CreateDynamicPinClient(Func<PinPresentation, CancellationToken, ValueTask>? presentPin)
     {
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
@@ -79,9 +79,9 @@ public class PinPresentationTests
         string? presentedPin = null;
         bool presentationCompleted = false;
         var release = new TaskCompletionSource();
-        var (client, conn) = CreateDynamicPinClient(async (pin, _) =>
+        var (client, conn) = CreateDynamicPinClient(async (presentation, _) =>
         {
-            presentedPin = pin;
+            presentedPin = presentation.Pin;
             await release.Task;
             await Task.Yield();
             presentationCompleted = true;

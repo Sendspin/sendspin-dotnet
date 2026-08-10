@@ -45,7 +45,7 @@ internal sealed class TestClientOptions
 
     public IPinLockoutStore? PinLockoutStore { get; set; }
 
-    public Func<string, CancellationToken, ValueTask>? PresentPinAsync { get; set; }
+    public Func<PinPresentation, CancellationToken, ValueTask>? PresentPinAsync { get; set; }
 
     public IAudioCaptureDevice? CaptureDevice { get; set; }
 

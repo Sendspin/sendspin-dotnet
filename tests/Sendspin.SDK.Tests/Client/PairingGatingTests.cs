@@ -52,6 +52,26 @@ public class PairingGatingTests
         var abort = await h.NextMessageAsync<PairAbortMessage>();
         Assert.Equal("method_not_supported", abort.Payload.Reason);
     }
+
+    [Fact]
+    public async Task DynamicPinPresenter_ReceivesTheActivationLanguages()
+    {
+        // The hint is informational and never grounds for abort, but the spec asks the client
+        // to emit in the best-matching language it supports. It cannot do that if the SDK
+        // never hands the hint over. Matching itself stays with the app, which alone knows
+        // which languages it can speak.
+        PinPresentation? seen = null;
+        await using var h = await PairingHarness.StartAsync(
+            minPinLength: 6,
+            presentPin: (p, _) => { seen = p; return ValueTask.CompletedTask; });
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: 8, languages: ["ca", "es"]);
+        await h.CompleteDynamicPinToPresentationAsync();
+
+        Assert.NotNull(seen);
+        Assert.Equal(new[] { "ca", "es" }, seen!.Languages);
+        Assert.Equal(8, seen.Pin.Length);
+    }
 }
 
 /// <summary>
@@ -141,14 +161,11 @@ internal sealed class PairingHarness : IAsyncDisposable
 
         PairingHarness? harness = null;
 
-        // The SDK's own PresentPinAsync is still string-only until a later task changes it to
-        // take PinPresentation directly; this bridges the two shapes so the harness's own
-        // surface can already be PinPresentation-based. It also records every invocation
-        // (see _presentations) independent of whether the wrapped delegate ever completes.
-        Func<string, CancellationToken, ValueTask>? adaptedPresenter = dynamicPin
-            ? async (pin, ct) =>
+        // Wraps the app-supplied presenter so every invocation is recorded (see
+        // _presentations), independent of whether the wrapped delegate ever completes.
+        Func<PinPresentation, CancellationToken, ValueTask>? adaptedPresenter = dynamicPin
+            ? async (presentation, ct) =>
               {
-                  var presentation = new PinPresentation(pin, null);
                   harness!.RecordPresentation(presentation);
                   if (presentPin is not null)
                   {

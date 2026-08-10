@@ -65,7 +65,7 @@ public sealed class SendspinClientOptions
     /// without it. Awaited before the client proceeds, so a slow presenter delays pairing
     /// rather than racing it.
     /// </summary>
-    public Func<string, CancellationToken, ValueTask>? PresentPinAsync { get; init; }
+    public Func<PinPresentation, CancellationToken, ValueTask>? PresentPinAsync { get; init; }
 
     /// <summary>Capture device for the <c>source@v1</c> role.</summary>
     public IAudioCaptureDevice? CaptureDevice { get; init; }

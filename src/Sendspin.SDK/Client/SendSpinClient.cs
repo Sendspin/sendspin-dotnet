@@ -48,7 +48,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool _markedPskUsed;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
-    private readonly Func<string, CancellationToken, ValueTask>? _presentPinAsync;
+    private readonly Func<PinPresentation, CancellationToken, ValueTask>? _presentPinAsync;
     private PinPairingState? _pinState;
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
@@ -56,6 +56,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // pin_length from the current pairing activation, validated on receipt. 0 when the
     // activation is not dynamic_pin. The gating policy reads it before client/pair-init.
     private int _activationPinLength;
+
+    // languages from the current pairing activation, handed to the PIN presenter. Null when
+    // the server sent none.
+    private List<string>? _activationLanguages;
 
     // _handshakeTcs is published by the handshake waiter and completed by the connection's
     // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
@@ -1632,6 +1636,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         _activationPinLength = 0;
+        _activationLanguages = payload.Pairing?.Languages;
         if (payload.Pairing?.Method == "dynamic_pin")
         {
             // Validated here, not at server/pair-init: the spec moved pin_length into the
@@ -1747,7 +1752,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Non-null on every path that reaches a dynamic pair-init: CanOffer refuses
         // dynamic_pin without a presenter, and without StartPinAttempt(dynamic: true)
         // there is no { Dynamic: true } state for HandleServerPairInit to act on.
-        await _presentPinAsync!(pin, cancellationToken);
+        await _presentPinAsync!(new PinPresentation(pin, _activationLanguages), cancellationToken);
     }
 
     private void HandleServerPairAuth(string json)
