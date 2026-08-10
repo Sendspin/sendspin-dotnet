@@ -156,3 +156,7 @@ secrets.json
 # Windows temp/short filenames
 *~*
 *.mp4
+
+# NativeAOT smoke-test build output
+tools/AotSmokeTest/bin/
+tools/AotSmokeTest/obj/
