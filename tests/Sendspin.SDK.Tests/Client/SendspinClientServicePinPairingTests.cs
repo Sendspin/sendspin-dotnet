@@ -70,18 +70,18 @@ public class SendspinClientServicePinPairingTests
         });
         using var _c = client;
 
-        // Pairing activate selects dynamic_pin.
+        // Pairing activate selects dynamic_pin and carries the session's pin_length.
+        const int length = 6;
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
 
         // Client sends pair-init with commit_B.
         var init = Last<ClientPairInitMessage>(conn);
         Assert.NotNull(init.Payload.CommitB);
         byte[] commitB = B64(init.Payload.CommitB!);
 
-        // Server picks nonce_A and pin_length, derives the same PIN.
+        // Server picks nonce_A, derives the same PIN using the activation's pin_length.
         byte[] nonceA = Enumerable.Repeat((byte)0x42, 32).ToArray();
-        const int length = 6;
         conn.RaiseTextMessageReceived(
             ServerPairInit(B64(nonceA), length));
 
@@ -124,14 +124,15 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void DynamicPin_PinLengthBelowMinimum_Aborts()
     {
+        // pin_length now arrives on the activation, not server/pair-init (that field no
+        // longer exists), so a too-short session length is caught there, before any
+        // attempt starts.
         var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8 };
         var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
-        conn.RaiseTextMessageReceived(
-            ServerPairInit(B64(new byte[32]), 6));
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
 
         Assert.Equal("pin_length_unacceptable", Last<PairAbortMessage>(conn).Payload.Reason);
     }
@@ -238,7 +239,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
@@ -248,7 +249,7 @@ public class SendspinClientServicePinPairingTests
                                                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(1, second.Payload.PairingIndex);
@@ -276,13 +277,13 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
         // No mutation of session.HandshakeHash here — that is the point of this test.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(2, second.Payload.PairingIndex);
@@ -335,7 +336,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
 
         Assert.Single(connection.SentMessages.OfType<ClientPairInitMessage>());
         Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);

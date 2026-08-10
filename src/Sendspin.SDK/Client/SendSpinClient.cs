@@ -53,6 +53,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
 
+    // pin_length from the current pairing activation, validated on receipt. 0 when the
+    // activation is not dynamic_pin. The gating policy reads it before client/pair-init.
+    private int _activationPinLength;
+
     // _handshakeTcs is published by the handshake waiter and completed by the connection's
     // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
     // both so a permanent failure that lands before the waiter publishes its TCS is still
@@ -1627,6 +1631,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        _activationPinLength = 0;
+        if (payload.Pairing?.Method == "dynamic_pin")
+        {
+            // Validated here, not at server/pair-init: the spec moved pin_length into the
+            // activation (pairing.md:149) precisely because the gating decision needs it
+            // before client/pair-init is sent.
+            int? length = payload.Pairing.PinLength;
+            if (length is null || length < _effectiveMinPinLength || length > 12)
+            {
+                _logger.LogWarning(
+                    "Activation pin_length {Length} is outside [{Min}, 12]; aborting the attempt",
+                    length,
+                    _effectiveMinPinLength);
+                _connection.SendMessageAsync(new PairAbortMessage
+                {
+                    Payload = new PairAbortPayload { Reason = "pin_length_unacceptable" },
+                }).SafeFireAndForget(_logger);
+                return;
+            }
+
+            _activationPinLength = length.Value;
+        }
+
         switch (payload.Pairing?.Method)
         {
             case "pairing_psk":
@@ -1695,16 +1722,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (msg is null || _pinState is not { Dynamic: true } state)
             return;
 
-        int pinLength = msg.Payload.PinLength;
-        if (pinLength < _effectiveMinPinLength || pinLength > 12)
-        {
-            AbortPin("pin_length_unacceptable");
-            return;
-        }
-
         state.NonceA = PinPairing.DecodeB64Url(msg.Payload.NonceA);
         var h = _session.HandshakeHash!.Value.ToArray();
-        string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, pinLength);
+        string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, _activationPinLength);
         state.Pin = pin;
 
         // Present the PIN through the app's out-channel. Started here (this method runs on

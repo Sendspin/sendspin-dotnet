@@ -129,10 +129,6 @@ public sealed class ServerPairInitPayload
     /// <summary>32 bytes from a CSPRNG, base64url (43 chars).</summary>
     [JsonPropertyName("nonce_A")]
     public string NonceA { get; set; } = string.Empty;
-
-    /// <summary>The PIN length in digits: max(client_min, server_min) clamped to 4-12.</summary>
-    [JsonPropertyName("pin_length")]
-    public int PinLength { get; set; }
 }
 
 /// <summary>Server's CPace public share.</summary>
