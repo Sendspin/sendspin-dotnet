@@ -827,19 +827,17 @@ public class PairingWindowOptionsTests
 
         await using (host)
         {
-            Assert.Same(window, host.BuildClientOptionsForTest().PairingWindow);
+            Assert.Same(window, host.BuildClientOptions().PairingWindow);
         }
     }
 }
 ```
 
-`BuildClientOptionsForTest()` does not exist. Rather than adding a test-only method to
-production code, extract the existing inline options construction in `SendSpinHostService.cs`
-into a private method and expose it via the existing `InternalsVisibleTo`:
-
-```csharp
-    internal SendspinClientOptions BuildClientOptionsForTest() => BuildClientOptions();
-```
+`BuildClientOptions()` does not exist yet. Extract the existing inline per-connection options
+construction in `SendSpinHostService.cs` into a method declared `internal` — the project
+already has `InternalsVisibleTo("Sendspin.SDK.Tests")`, so the test can call it directly. Do
+**not** add a separate test-only shim method; the extraction is worth doing on its own merits
+and `internal` is sufficient.
 
 If the existing construction is conditional (it branches on `_options.ClockSynchronizer`), keep
 that branching inside `BuildClientOptions()` unchanged — this is a pure extraction.
