@@ -72,4 +72,13 @@ public sealed class SendspinClientOptions
 
     /// <summary>Encoder factory for the <c>source@v1</c> role.</summary>
     public ISourceAudioEncoderFactory? SourceEncoderFactory { get; init; }
+
+    /// <summary>
+    /// The device's pairing window, shared by every connection this application runs.
+    /// <b>Required</b> to complete any gesture-gated pairing attempt: static PIN always, and
+    /// dynamic PIN once the method is escalated or the session's PIN is shorter than 6 digits.
+    /// A null window is treated as permanently closed, so gated attempts stay pending — the
+    /// fail-closed direction. Open it from the application's operator gesture.
+    /// </summary>
+    public PairingWindow? PairingWindow { get; init; }
 }
