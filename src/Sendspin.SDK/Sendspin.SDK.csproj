@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Sendspin.SDK</PackageId>
-    <Version>9.2.0</Version>
+    <Version>10.0.0</Version>
     <Authors>Sendspin Contributors</Authors>
     <Company>Sendspin</Company>
     <Product>Sendspin SDK</Product>
@@ -20,6 +20,24 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
+v10.0.0 - Encrypted Transport (BREAKING):
+- The transport is now encrypted end to end (Noise KKpsk2). Plaintext is gone, and there
+  is no downgrade negotiation: a 10.x client requires a server speaking the encrypted
+  protocol (aiosendspin >= 7.0.0). Use the 9.x line for older servers.
+- Clients now have a persistent Curve25519 identity. SendspinClientOptions.Identity is
+  required; build it with SendspinIdentity.FromStore(store), NOT Generate(), or the client
+  gets a new client_id every launch and silently loses every pairing on restart.
+- Construction moved to SendspinClientService.CreateForDial(loggerFactory, options) with a
+  SendspinClientOptions object.
+- Pairing: Pairing PSK plus optional dynamic/static PIN (CPace). A paired server can read
+  and change pairing config via management/*; persist what PairingConfigChanged reports or
+  those changes revert on restart.
+- client/state reports 'available' as a boolean rather than the legacy state string.
+- New source@v1 role for line-in/microphone capture.
+- See MIGRATION-10.0.0.md. The 9.x line remains maintained for now.
+
+----
+
 v9.2.0 - Clock Drift Tracking:
 - Sync error now tracks post-anchor movement of the Kalman clock offset, holding
   absolute alignment over long gapless streams (windowsSpin issue #63 drift fix)
