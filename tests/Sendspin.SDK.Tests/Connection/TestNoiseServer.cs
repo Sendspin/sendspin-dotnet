@@ -13,17 +13,24 @@ internal sealed class TestNoiseServer
     private readonly KeyPair _keys;
     private readonly ReadOnlyMemory<byte> _clientPublicKey;
     private readonly byte[] _psk;
+    private readonly string _protocolName;
     private HandshakeState? _state;
     private Transport? _transport;
 
     /// <param name="clientPublicKey">The client's raw static public key (its client_id, decoded).</param>
     /// <param name="psk">The PSK this session authenticates with.</param>
     /// <param name="keys">Static key pair; pass an existing pair to reuse one server_id across instances.</param>
-    internal TestNoiseServer(ReadOnlyMemory<byte> clientPublicKey, byte[] psk, KeyPair? keys = null)
+    /// <param name="suite">Cipher suite to run; must match what the client announced in client/init.</param>
+    internal TestNoiseServer(
+        ReadOnlyMemory<byte> clientPublicKey,
+        byte[] psk,
+        KeyPair? keys = null,
+        NoiseCipherSuite suite = NoiseCipherSuite.ChaChaPoly)
     {
         _keys = keys ?? KeyPair.Generate();
         _clientPublicKey = clientPublicKey;
         _psk = psk;
+        _protocolName = suite.ToProtocolName();
         ServerId = Base64Url.EncodeToString(_keys.PublicKey);
     }
 
@@ -40,7 +47,7 @@ internal sealed class TestNoiseServer
         });
 
         byte[] prologue = Encoding.UTF8.GetBytes(clientInitText + serverInitText);
-        var protocol = NoiseProtocol.Parse("Noise_KKpsk2_25519_ChaChaPoly_SHA256".AsSpan());
+        var protocol = NoiseProtocol.Parse(_protocolName.AsSpan());
         _state = protocol.Create(
             initiator: true, prologue: prologue,
             s: (byte[])_keys.PrivateKey.Clone(),
@@ -83,7 +90,7 @@ internal sealed class TestNoiseServer
     /// </summary>
     internal string RespondWithPrologue(byte[] prologue)
     {
-        var protocol = NoiseProtocol.Parse("Noise_KKpsk2_25519_ChaChaPoly_SHA256".AsSpan());
+        var protocol = NoiseProtocol.Parse(_protocolName.AsSpan());
         _state = protocol.Create(
             initiator: true, prologue: prologue,
             s: (byte[])_keys.PrivateKey.Clone(),
@@ -107,7 +114,7 @@ internal sealed class TestNoiseServer
     /// <summary>Initiates an in-band re-handshake to a new PSK; returns the encrypted msg1 frame.</summary>
     internal byte[] StartRehandshake(byte[] newPsk)
     {
-        var protocol = NoiseProtocol.Parse("Noise_KKpsk2_25519_ChaChaPoly_SHA256".AsSpan());
+        var protocol = NoiseProtocol.Parse(_protocolName.AsSpan());
         _state = protocol.Create(
             initiator: true, prologue: HandshakeHash!,
             s: (byte[])_keys.PrivateKey.Clone(),
