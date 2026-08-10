@@ -374,7 +374,11 @@ public class SendspinClientServiceSourceTests
         using var _c = client;
         Activate(connection);
 
-        await client.SetSourceSignalAsync(present: true);
+        // Through the interface: #112 — an app coded against ISendspinClient could already
+        // advertise SourceRoleSupport.LineSense in hello, but had no way to report the
+        // signal itself.
+        ISendspinClient asInterface = client;
+        await asInterface.SetSourceSignalAsync(present: true);
 
         var state = connection.SentMessages.OfType<ClientStateMessage>()
             .Last(m => m.Payload.Source is not null);
