@@ -62,11 +62,33 @@ public sealed class PairAbortMessage : IMessageWithPayload<PairAbortPayload>
 public sealed class PairAbortPayload
 {
     /// <summary>
-    /// Abort reason: attempt_timeout, concurrent_attempt, locked_out,
-    /// method_not_supported, pin_length_unacceptable, pin_mismatch, or user_cancelled.
+    /// Abort reason: attempt_timeout, concurrent_attempt, method_not_supported,
+    /// pin_length_unacceptable, pin_mismatch, or user_cancelled.
     /// </summary>
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Reports that the selected attempt is gesture-gated and no pairing window is open. Sent
+/// immediately on receiving such a pairing <c>server/activate</c>; <c>client/pair-init</c>
+/// follows once a window opens. Does not start the attempt or its timeout.
+/// </summary>
+public sealed class ClientPairPendingMessage : IMessageWithPayload<ClientPairPendingPayload>
+{
+    [JsonPropertyName("type")]
+    public string Type => MessageTypes.ClientPairPending;
+
+    [JsonPropertyName("payload")]
+    public ClientPairPendingPayload Payload { get; set; } = new();
+}
+
+/// <summary>Payload of <c>client/pair-pending</c>.</summary>
+public sealed class ClientPairPendingPayload
+{
+    /// <summary>Number of pairing server/activate messages received since the last Noise handshake.</summary>
+    [JsonPropertyName("pairing_index")]
+    public int PairingIndex { get; set; }
 }
 
 /// <summary>

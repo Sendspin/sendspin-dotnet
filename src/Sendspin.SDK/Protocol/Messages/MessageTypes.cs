@@ -16,6 +16,7 @@ public static class MessageTypes
     public const string ClientPairFinalize = "client/pair-finalize";
     public const string ServerPairFinalize = "server/pair-finalize";
     public const string PairAbort = "pair/abort";
+    public const string ClientPairPending = "client/pair-pending";
     public const string ClientPairInit = "client/pair-init";
     public const string ServerPairInit = "server/pair-init";
     public const string ServerPairAuth = "server/pair-auth";

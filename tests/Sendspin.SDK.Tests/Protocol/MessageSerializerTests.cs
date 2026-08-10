@@ -184,4 +184,16 @@ public class MessageSerializerTests
         Assert.Equal(8, msg.Payload.Pairing.PinLength);
         Assert.Equal(new[] { "ca", "es" }, msg.Payload.Pairing.Languages);
     }
+
+    [Fact]
+    public void ClientPairPending_SerializesWithPairingIndex()
+    {
+        var json = MessageSerializer.Serialize(new ClientPairPendingMessage
+        {
+            Payload = new ClientPairPendingPayload { PairingIndex = 3 },
+        });
+
+        Assert.Contains("\"type\":\"client/pair-pending\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"pairing_index\":3", json, StringComparison.Ordinal);
+    }
 }
