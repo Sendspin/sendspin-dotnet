@@ -73,6 +73,21 @@ public class PairingWindowTests
     }
 
     [Fact]
+    public void Window_AtExactlyItsLifetime_IsStillOpen()
+    {
+        // The comparison is strictly greater-than, so a window at exactly its lifetime has
+        // not yet expired. Pins the boundary the 4:59/5:01 tests leave open.
+        var clock = new FakeClock();
+        var window = new PairingWindow(TimeSpan.FromMinutes(5), clock);
+        window.Open();
+
+        clock.Advance(TimeSpan.FromMinutes(5));
+
+        Assert.True(window.IsOpen);
+        Assert.True(window.TryConsume());
+    }
+
+    [Fact]
     public void Reopening_RestartsTheLifetime()
     {
         var clock = new FakeClock();
@@ -97,7 +112,9 @@ public class PairingWindowTests
         Parallel.For(0, 64, _ =>
         {
             if (window.TryConsume())
+            {
                 Interlocked.Increment(ref winners);
+            }
         });
 
         Assert.Equal(1, winners);
