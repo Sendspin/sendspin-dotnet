@@ -70,10 +70,10 @@ public class SendspinHostServicePairingTests
         Assert.Equal(token, host.EnsurePairingPsk());
 
         // A dial-mode client over the same store and identity hands out the same token.
-        var (client, _, _) = TestClient.Create(configure: options =>
+        var (client, _, _) = TestClient.Create(configure: options => options with
         {
-            options.Identity = identity;
-            options.PairingRecordStore = store;
+            Identity = identity,
+            PairingRecordStore = store,
         });
         using var _c = client;
         Assert.Equal(token, client.EnsurePairingPsk());

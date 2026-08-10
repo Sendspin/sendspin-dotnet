@@ -20,7 +20,7 @@ public class ClientIdentityAccessorTests
     public void ClientId_IsTheBase64UrlEncodedPublicKey()
     {
         var identity = SendspinIdentity.FromKeys(FixedPrivateKey, FixedPublicKey);
-        var (client, _, _) = TestClient.Create(configure: o => o.Identity = identity);
+        var (client, _, _) = TestClient.Create(configure: o => o with { Identity = identity });
         using var _c = client;
 
         Assert.Equal(ExpectedClientId, client.ClientId);

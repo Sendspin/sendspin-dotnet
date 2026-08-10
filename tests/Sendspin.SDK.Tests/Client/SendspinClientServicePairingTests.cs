@@ -20,7 +20,7 @@ public class SendspinClientServicePairingTests
         var store = new InMemoryPairingRecordStore();
         var (client, connection, _) = TestClient.Create(
             PskCategory.Pairing,
-            configure: options => options.PairingRecordStore = store);
+            configure: options => options with { PairingRecordStore = store });
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         return (client, connection, store);
@@ -167,7 +167,7 @@ public class SendspinClientServicePairingTests
         var store = new InMemoryPairingRecordStore();
         var (client, connection, session) = TestClient.Create(
             PskCategory.Pairing,
-            configure: options => options.PairingRecordStore = store);
+            configure: options => options with { PairingRecordStore = store });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -222,11 +222,9 @@ public class SendspinClientServicePairingTests
     {
         var (client, connection, _) = TestClient.Create(
             category,
-            configure: options =>
-            {
-                if (withStore)
-                    options.PairingRecordStore = new InMemoryPairingRecordStore();
-            });
+            configure: options => withStore
+                ? options with { PairingRecordStore = new InMemoryPairingRecordStore() }
+                : options);
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         return (client, connection);
@@ -339,7 +337,7 @@ public class SendspinClientServicePairingTests
         var store = new InMemoryPairingRecordStore();
         var (client, connection, session) = TestClient.Create(
             PskCategory.Pairing,
-            configure: options => options.PairingRecordStore = store);
+            configure: options => options with { PairingRecordStore = store });
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -373,7 +371,7 @@ public class SendspinClientServicePairingTests
 
         var (client, connection, _) = TestClient.Create(
             PskCategory.LongTerm,
-            configure: options => options.PairingRecordStore = store);
+            configure: options => options with { PairingRecordStore = store });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
 

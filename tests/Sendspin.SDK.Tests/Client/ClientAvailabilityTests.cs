@@ -22,10 +22,10 @@ public class ClientAvailabilityTests
         SyncedClient()
     {
         var pipe = new FakeAudioPipeline();
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.AudioPipeline = pipe;
-            options.ClockSynchronizer = new FakeClockSynchronizer { IsConverged = true };
+            AudioPipeline = pipe,
+            ClockSynchronizer = new FakeClockSynchronizer { IsConverged = true },
         });
         return (client, connection, pipe);
     }

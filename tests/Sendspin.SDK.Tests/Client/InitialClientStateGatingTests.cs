@@ -23,7 +23,7 @@ public class InitialClientStateGatingTests
         CreatePlayerClient()
     {
         var clock = new ScriptedClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(configure: options => options.ClockSynchronizer = clock);
+        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = clock });
         return (client, connection, clock);
     }
 
@@ -32,10 +32,10 @@ public class InitialClientStateGatingTests
     {
         var clock = new ScriptedClockSynchronizer();
         var pipe = new FakeAudioPipeline();
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = clock;
-            options.AudioPipeline = pipe;
+            ClockSynchronizer = clock,
+            AudioPipeline = pipe,
         });
         return (client, connection, clock, pipe);
     }
@@ -105,7 +105,7 @@ public class InitialClientStateGatingTests
         // No player/source role => no clock-sync requirement. The default (unconverged) Kalman
         // synchronizer is kept deliberately: the send must not wait for it.
         var (client, connection, _) = TestClient.Create(configure: options =>
-            options.Capabilities = new ClientCapabilities { Roles = ["artwork@v1"] });
+            options with { Capabilities = new ClientCapabilities { Roles = ["artwork@v1"] } });
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "artwork@v1");
@@ -440,14 +440,14 @@ public class InitialClientStateGatingTests
     public async Task SourceSignalWhileConverging_SendsNothing_AndResumesAfterTheInitialState()
     {
         var clock = new ScriptedClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = clock;
-            options.Capabilities = new ClientCapabilities
+            ClockSynchronizer = clock,
+            Capabilities = new ClientCapabilities
             {
                 Roles = ["source@v1"],
                 SourceSupport = new SourceRoleSupport { LineSense = true }
-            };
+            },
         });
         using var _c = client;
 

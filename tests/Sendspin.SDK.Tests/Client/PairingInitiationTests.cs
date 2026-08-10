@@ -175,11 +175,13 @@ public class PairingInitiationTests
             category,
             configure: options =>
             {
-                options.PairingRecordStore = store;
+                options = options with { PairingRecordStore = store };
                 if (identity is not null)
                 {
-                    options.Identity = identity;
+                    options = options with { Identity = identity };
                 }
+
+                return options;
             });
     }
 }

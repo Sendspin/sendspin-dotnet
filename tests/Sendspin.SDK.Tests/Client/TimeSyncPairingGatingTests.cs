@@ -53,10 +53,13 @@ public class TimeSyncPairingGatingTests
                     caps.Roles = [.. roles];
                 }
 
-                options.Capabilities = caps;
-                options.ClockSynchronizer = clock;
-                options.PinLockoutStore = new InMemoryPinLockoutStore();
-                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
+                return options with
+                {
+                    Capabilities = caps,
+                    ClockSynchronizer = clock,
+                    PinLockoutStore = new InMemoryPinLockoutStore(),
+                    PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                };
             });
         return (client, connection, clock);
     }

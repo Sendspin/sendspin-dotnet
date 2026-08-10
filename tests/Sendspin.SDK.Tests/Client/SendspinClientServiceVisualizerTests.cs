@@ -31,15 +31,18 @@ public class SendspinClientServiceVisualizerTests
     private static (SendspinClientService Client, FakeSendspinConnection Connection) VisualizerClient()
     {
         var (client, connection, _) = TestClient.Create(configure: options =>
-            options.Capabilities = new ClientCapabilities
+            options with
             {
-                Roles = new List<string> { "visualizer@v1" },
-                VisualizerSupport = new VisualizerSupport
+                Capabilities = new ClientCapabilities
                 {
-                    BufferCapacity = 65536,
-                    RateMax = 30,
-                    Types = new List<string> { VisualizerTypes.Loudness, VisualizerTypes.Spectrum },
-                    Spectrum = new VisualizerSpectrum { NDispBins = 4, Scale = "log", FMin = 20, FMax = 16000 },
+                    Roles = new List<string> { "visualizer@v1" },
+                    VisualizerSupport = new VisualizerSupport
+                    {
+                        BufferCapacity = 65536,
+                        RateMax = 30,
+                        Types = new List<string> { VisualizerTypes.Loudness, VisualizerTypes.Spectrum },
+                        Spectrum = new VisualizerSpectrum { NDispBins = 4, Scale = "log", FMin = 20, FMax = 16000 },
+                    },
                 },
             });
         return (client, connection);

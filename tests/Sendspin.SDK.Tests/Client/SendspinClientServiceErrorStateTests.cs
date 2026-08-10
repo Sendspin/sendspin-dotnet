@@ -22,7 +22,7 @@ public class SendspinClientServiceErrorStateTests
     private static async Task<(FakeSendspinConnection conn, FakeAudioPipeline pipe, SendspinClientService client)> ConnectedClientAsync()
     {
         var pipe = new FakeAudioPipeline();
-        var (client, conn, _) = TestClient.Create(configure: options => options.AudioPipeline = pipe);
+        var (client, conn, _) = TestClient.Create(configure: options => options with { AudioPipeline = pipe });
         await conn.ConnectAsync(new Uri("ws://test"));
         return (conn, pipe, client);
     }

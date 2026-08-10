@@ -445,19 +445,25 @@ internal sealed class PairingHarness : IAsyncDisposable
             category,
             configure: options =>
             {
-                options.Capabilities = caps;
-                options.PinLockoutStore = lockouts ?? new InMemoryPinLockoutStore();
-                options.PresentPinAsync = adaptedPresenter;
-                options.PairingWindow = window;
+                options = options with
+                {
+                    Capabilities = caps,
+                    PinLockoutStore = lockouts ?? new InMemoryPinLockoutStore(),
+                    PresentPinAsync = adaptedPresenter,
+                    PairingWindow = window,
+                };
+
                 if (attemptTimeout is not null)
                 {
-                    options.PairingAttemptTimeout = attemptTimeout.Value;
+                    options = options with { PairingAttemptTimeout = attemptTimeout.Value };
                 }
 
                 if (pairingPsk)
                 {
-                    options.PairingRecordStore = pairingStore ?? new InMemoryPairingRecordStore();
+                    options = options with { PairingRecordStore = pairingStore ?? new InMemoryPairingRecordStore() };
                 }
+
+                return options;
             });
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");

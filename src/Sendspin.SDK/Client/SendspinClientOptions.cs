@@ -15,8 +15,13 @@ namespace Sendspin.SDK.Client;
 /// This type is the single construction seam for both the dial path
 /// (<see cref="SendspinClientService.CreateForDial"/>) and the listen path
 /// (<see cref="SendspinHostService"/>).
+/// <para>
+/// A record, not a class, so per-connection variants are taken with <c>with</c>. Two
+/// hand-copied property mirrors previously existed for want of it, and each silently
+/// dropped any property added and forgotten (#95).
+/// </para>
 /// </remarks>
-public sealed class SendspinClientOptions
+public sealed record SendspinClientOptions
 {
     /// <summary>
     /// Persistent Curve25519 identity. <c>client_id</c> is derived from it, and the spec

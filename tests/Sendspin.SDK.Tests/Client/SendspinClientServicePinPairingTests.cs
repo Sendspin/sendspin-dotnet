@@ -32,13 +32,13 @@ public class SendspinClientServicePinPairingTests
         window.Open();
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = caps;
-                options.PairingRecordStore = records;
-                options.PinLockoutStore = lockout;
-                options.PresentPinAsync = presentPin;
-                options.PairingWindow = window;
+                Capabilities = caps,
+                PairingRecordStore = records,
+                PinLockoutStore = lockout,
+                PresentPinAsync = presentPin,
+                PairingWindow = window,
             });
 
         // The CPace exchange is bound to the Noise handshake hash, which the test's server
@@ -211,12 +211,12 @@ public class SendspinClientServicePinPairingTests
         lockout.SetFailures("dynamic_pin", 10);
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = caps;
-                options.PinLockoutStore = lockout;
-                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
-                options.PairingWindow = new PairingWindow();
+                Capabilities = caps,
+                PinLockoutStore = lockout,
+                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PairingWindow = new PairingWindow(),
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -243,11 +243,11 @@ public class SendspinClientServicePinPairingTests
         // server's after any key rotation, and CPace then fails.
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
-                options.PinLockoutStore = new InMemoryPinLockoutStore();
-                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
+                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                PinLockoutStore = new InMemoryPinLockoutStore(),
+                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -281,11 +281,11 @@ public class SendspinClientServicePinPairingTests
         // PairingIndex == 1, so an "always reset" implementation would pass it too.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
-                options.PinLockoutStore = new InMemoryPinLockoutStore();
-                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
+                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                PinLockoutStore = new InMemoryPinLockoutStore(),
+                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -312,13 +312,13 @@ public class SendspinClientServicePinPairingTests
         // and could never escalate to gesture-gating. Refuse the method instead.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
+                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
 
                 // A presenter IS configured, so the refusal below is attributable to the
                 // missing lockout store alone.
-                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
+                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -340,11 +340,11 @@ public class SendspinClientServicePinPairingTests
         // would still pass.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
-                options.PinLockoutStore = new InMemoryPinLockoutStore();
-                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
+                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                PinLockoutStore = new InMemoryPinLockoutStore(),
+                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();

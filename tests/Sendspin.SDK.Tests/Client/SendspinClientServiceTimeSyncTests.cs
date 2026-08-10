@@ -39,7 +39,7 @@ public class SendspinClientServiceTimeSyncTests
         // fallback that called ProcessMeasurement directly on unmatched responses,
         // bypassing the burst-best selection. The new code discards them.
         var clockSync = new RecordingClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(configure: options => options.ClockSynchronizer = clockSync);
+        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = clockSync });
         using var _c = client;
         await connection.ConnectAsync(new Uri("ws://test"));
 

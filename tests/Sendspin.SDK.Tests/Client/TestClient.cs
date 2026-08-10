@@ -19,44 +19,6 @@ internal sealed class FakeNoiseSession : INoiseSessionInfo
 }
 
 /// <summary>
-/// Mutable mirror of <see cref="SendspinClientOptions"/> for the
-/// <see cref="TestClient.Create"/> configure callback.
-/// </summary>
-/// <remarks>
-/// <see cref="SendspinClientOptions"/> uses <c>init</c> accessors, which a callback cannot
-/// assign (CS8852), so tests mutate this draft and <see cref="TestClient.Create"/> copies it
-/// into the real options in an object initializer. Property names match one-for-one.
-/// </remarks>
-internal sealed class TestClientOptions
-{
-    public SendspinIdentity Identity { get; set; } = SendspinIdentity.Generate();
-
-    public IPairingRecordStore? PairingRecordStore { get; set; }
-
-    public ClientCapabilities Capabilities { get; set; } = new();
-
-    public NoiseCipherSuite Suite { get; set; } = NoiseCipherSuite.ChaChaPoly;
-
-    public IClockSynchronizer? ClockSynchronizer { get; set; }
-
-    public IAudioPipeline? AudioPipeline { get; set; }
-
-    public IStaticDelayStore? StaticDelayStore { get; set; }
-
-    public IPinLockoutStore? PinLockoutStore { get; set; }
-
-    public Func<PinPresentation, CancellationToken, ValueTask>? PresentPinAsync { get; set; }
-
-    public IAudioCaptureDevice? CaptureDevice { get; set; }
-
-    public ISourceAudioEncoderFactory? SourceEncoderFactory { get; set; }
-
-    public PairingWindow? PairingWindow { get; set; }
-
-    public TimeSpan PairingAttemptTimeout { get; set; } = TimeSpan.FromMinutes(2);
-}
-
-/// <summary>
 /// Builds a client over the encrypted protocol with a fake Noise session.
 /// </summary>
 /// <remarks>
@@ -70,9 +32,12 @@ internal static class TestClient
     /// <param name="category">Category of the PSK the fake session reports as matched.</param>
     /// <param name="unpairedAccess">
     /// Advertised unpaired-access flag. Applied after <paramref name="configure"/> runs, so a
-    /// callback that replaces <see cref="TestClientOptions.Capabilities"/> cannot drop it.
+    /// callback that replaces <see cref="SendspinClientOptions.Capabilities"/> cannot drop it.
     /// </param>
-    /// <param name="configure">Mutates the options draft before the client is constructed.</param>
+    /// <param name="configure">
+    /// Returns the options to build the client from, given the defaults. Take a variant with
+    /// <c>with</c>: <c>o => o with { PairingWindow = window }</c>.
+    /// </param>
     /// <param name="connected">
     /// Whether the fake connection is dialled before the client is built (the default). Pass
     /// false only for tests whose subject is behavior while disconnected — the client drops
@@ -82,7 +47,7 @@ internal static class TestClient
         Create(
             PskCategory category = PskCategory.LongTerm,
             bool unpairedAccess = false,
-            Action<TestClientOptions>? configure = null,
+            Func<SendspinClientOptions, SendspinClientOptions>? configure = null,
             bool connected = true)
     {
         var connection = new FakeSendspinConnection();
@@ -91,33 +56,20 @@ internal static class TestClient
             MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), category),
         };
 
-        var draft = new TestClientOptions
+        var options = new SendspinClientOptions
         {
+            Identity = SendspinIdentity.Generate(),
+            // Pinned rather than platform-selected: these tests assert on wire bytes.
+            Suite = NoiseCipherSuite.ChaChaPoly,
             Capabilities = new ClientCapabilities { UnpairedAccessEnabled = unpairedAccess },
         };
-        configure?.Invoke(draft);
+
+        options = configure?.Invoke(options) ?? options;
 
         if (unpairedAccess)
         {
-            draft.Capabilities.UnpairedAccessEnabled = true;
+            options.Capabilities.UnpairedAccessEnabled = true;
         }
-
-        var options = new SendspinClientOptions
-        {
-            Identity = draft.Identity,
-            PairingRecordStore = draft.PairingRecordStore,
-            Capabilities = draft.Capabilities,
-            Suite = draft.Suite,
-            ClockSynchronizer = draft.ClockSynchronizer,
-            AudioPipeline = draft.AudioPipeline,
-            StaticDelayStore = draft.StaticDelayStore,
-            PinLockoutStore = draft.PinLockoutStore,
-            PresentPinAsync = draft.PresentPinAsync,
-            CaptureDevice = draft.CaptureDevice,
-            SourceEncoderFactory = draft.SourceEncoderFactory,
-            PairingWindow = draft.PairingWindow,
-            PairingAttemptTimeout = draft.PairingAttemptTimeout,
-        };
 
         // Connected before the client subscribes, so no state-changed event is delivered and
         // tests that dial explicitly are unaffected. The client drops frames received while

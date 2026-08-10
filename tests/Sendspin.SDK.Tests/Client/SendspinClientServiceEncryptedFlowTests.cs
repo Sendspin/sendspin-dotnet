@@ -55,7 +55,7 @@ public class SendspinClientServiceEncryptedFlowTests
         // InitialClientStateGatingTests owns that gate.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options => options.ClockSynchronizer = new ConvergedClockSynchronizer());
+            configure: options => options with { ClockSynchronizer = new ConvergedClockSynchronizer() });
         using var _c = client;
         connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
 
@@ -94,7 +94,7 @@ public class SendspinClientServiceEncryptedFlowTests
         // deferred behind sync convergence.
         var (client, connection, _) = TestClient.Create(
             PskCategory.LongTerm,
-            configure: options => options.ClockSynchronizer = new ConvergedClockSynchronizer());
+            configure: options => options with { ClockSynchronizer = new ConvergedClockSynchronizer() });
         using var _c = client;
 
         var connectTask = client.ConnectAsync(ServerUri);
