@@ -50,6 +50,8 @@ internal sealed class TestClientOptions
     public IAudioCaptureDevice? CaptureDevice { get; set; }
 
     public ISourceAudioEncoderFactory? SourceEncoderFactory { get; set; }
+
+    public PairingWindow? PairingWindow { get; set; }
 }
 
 /// <summary>
@@ -111,6 +113,7 @@ internal static class TestClient
             PresentPinAsync = draft.PresentPinAsync,
             CaptureDevice = draft.CaptureDevice,
             SourceEncoderFactory = draft.SourceEncoderFactory,
+            PairingWindow = draft.PairingWindow,
         };
 
         // Connected before the client subscribes, so no state-changed event is delivered and

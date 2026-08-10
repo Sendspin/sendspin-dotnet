@@ -72,6 +72,150 @@ public class PairingGatingTests
         Assert.Equal(new[] { "ca", "es" }, seen!.Languages);
         Assert.Equal(8, seen.Pin.Length);
     }
+
+    [Fact]
+    public async Task StaticPinActivation_WithNoWindowOpen_SendsPairPendingAndWithholdsInit()
+    {
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(staticPin: "12345678", window: window);
+
+        h.SendPairingActivate(method: "static_pin");
+
+        var pending = await h.NextMessageAsync<ClientPairPendingMessage>();
+        Assert.Equal(1, pending.Payload.PairingIndex);
+        Assert.Empty(h.SentOfType<ClientPairInitMessage>());
+    }
+
+    [Fact]
+    public async Task StaticPinActivation_WhenTheWindowOpens_SendsPairInit()
+    {
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(staticPin: "12345678", window: window);
+        h.SendPairingActivate(method: "static_pin");
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+
+        window.Open();
+
+        var init = await h.NextMessageAsync<ClientPairInitMessage>();
+        Assert.Equal(1, init.Payload.PairingIndex);
+        Assert.False(window.IsOpen); // consumed by the attempt
+    }
+
+    [Fact]
+    public async Task StaticPinActivation_WithAWindowAlreadyOpen_SendsPairInitImmediately()
+    {
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(staticPin: "12345678", window: window);
+
+        h.SendPairingActivate(method: "static_pin");
+
+        await h.NextMessageAsync<ClientPairInitMessage>();
+        Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
+    }
+
+    [Fact]
+    public async Task DynamicPinActivation_WithLongPinAndNoEscalation_IsNotGated()
+    {
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(minPinLength: 6, window: window);
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: 8);
+
+        await h.NextMessageAsync<ClientPairInitMessage>();
+        Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public async Task DynamicPinActivation_WithShortPin_IsGated(int pinLength)
+    {
+        // "short PINs are bought with a gesture" -- the boundary is below 6.
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(minPinLength: 4, window: window);
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: pinLength);
+
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+        Assert.Empty(h.SentOfType<ClientPairInitMessage>());
+    }
+
+    [Fact]
+    public async Task DynamicPinActivation_AtSixDigits_IsNotGated()
+    {
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(minPinLength: 4, window: window);
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: 6);
+
+        await h.NextMessageAsync<ClientPairInitMessage>();
+        Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
+    }
+
+    [Fact]
+    public async Task DynamicPinActivation_WhenEscalated_IsGatedButStillRuns()
+    {
+        // The #127 deadlock. At 10 failures the old code refused the attempt outright with a
+        // non-spec pair/abort reason, and the counter could only reset inside an attempt -- so
+        // it never could. Escalation gates the attempt instead of refusing it.
+        var lockouts = new InMemoryPinLockoutStore();
+        lockouts.SetFailures("dynamic_pin", 10);
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(
+            minPinLength: 6, window: window, lockouts: lockouts);
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: 8);
+
+        // Gated, not refused: a pending signal and no abort.
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+        Assert.Empty(h.SentOfType<PairAbortMessage>());
+
+        window.Open();
+        await h.NextMessageAsync<ClientPairInitMessage>();
+    }
+
+    [Fact]
+    public async Task EscalatedMethod_IsStillOffered_AndNeverAbortsWithLockedOut()
+    {
+        // "Escalation is not an error state - the method stays offered."
+        var lockouts = new InMemoryPinLockoutStore();
+        lockouts.SetFailures("dynamic_pin", 10);
+        await using var h = await PairingHarness.StartAsync(
+            minPinLength: 6, window: new PairingWindow(), lockouts: lockouts);
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: 8);
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+
+        Assert.DoesNotContain(h.AllSentJson(), j => j.Contains("locked_out", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task PairingPskActivation_IsNeverGated()
+    {
+        await using var h = await PairingHarness.StartAsync(pairingPsk: true, window: new PairingWindow());
+
+        h.SendPairingActivate(method: "pairing_psk");
+
+        await h.NextMessageAsync<ClientPairFinalizeMessage>();
+        Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
+    }
+
+    [Fact]
+    public async Task GatedActivation_RaisesPairingGestureRequestedOnce()
+    {
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(staticPin: "12345678", window: window);
+        var raised = new List<PairingGestureRequestedEventArgs>();
+        h.Client.PairingGestureRequested += (_, e) => raised.Add(e);
+
+        h.SendPairingActivate(method: "static_pin");
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+
+        Assert.Single(raised);
+        Assert.Equal("static_pin", raised[0].Method);
+        Assert.Equal(1, raised[0].PairingIndex);
+    }
 }
 
 /// <summary>
@@ -81,14 +225,11 @@ public class PairingGatingTests
 /// that file before changing this one.
 /// </summary>
 /// <remarks>
-/// This surface is binding across the whole pairing-window plan, not just the three tests
-/// above: later tasks call every member here, including ones exercised by no test in this
-/// file yet. Two constructor parameters are accepted for forward signature-compatibility but
-/// are not wired to anything yet, because there is nowhere for them to go: <c>window</c>
-/// (nothing reads <see cref="PairingWindow"/> — it is itself a placeholder type — and
-/// <c>SendspinClientOptions</c> has no <c>PairingWindow</c> property) and <c>attemptTimeout</c>
-/// (<c>SendspinClientOptions</c> has no attempt-timeout option). A later task in the plan adds
-/// both and should wire them through here at that point.
+/// This surface is binding across the whole pairing-window plan, not just the tests in this
+/// file: later tasks call every member here, including ones exercised by no test in this file
+/// yet. <c>attemptTimeout</c> is accepted for forward signature-compatibility but not wired to
+/// anything yet — <c>SendspinClientOptions</c> has no attempt-timeout option. A later task in
+/// the plan adds it and should wire it through here at that point.
 /// </remarks>
 internal sealed class PairingHarness : IAsyncDisposable
 {
@@ -133,7 +274,9 @@ internal sealed class PairingHarness : IAsyncDisposable
     /// <paramref name="staticPin"/> is non-null; pairing_psk only when
     /// <paramref name="pairingPsk"/> is true, which also keys the session on the Pairing PSK
     /// (instead of Sentinel) and supplies a pairing record store. <paramref name="lockouts"/>
-    /// defaults to a fresh <see cref="InMemoryPinLockoutStore"/>. <paramref name="management"/>
+    /// defaults to a fresh <see cref="InMemoryPinLockoutStore"/>. <paramref name="window"/> is
+    /// passed straight to <c>SendspinClientOptions.PairingWindow</c>; omitted, gated attempts
+    /// stay pending forever (the fail-closed default). <paramref name="management"/>
     /// controls whether <see cref="SendPairingActivate"/> includes the 'management' activity.
     /// </summary>
     public static Task<PairingHarness> StartAsync(
@@ -182,6 +325,7 @@ internal sealed class PairingHarness : IAsyncDisposable
                 options.Capabilities = caps;
                 options.PinLockoutStore = lockouts ?? new InMemoryPinLockoutStore();
                 options.PresentPinAsync = adaptedPresenter;
+                options.PairingWindow = window;
                 if (pairingPsk)
                 {
                     options.PairingRecordStore = new InMemoryPairingRecordStore();

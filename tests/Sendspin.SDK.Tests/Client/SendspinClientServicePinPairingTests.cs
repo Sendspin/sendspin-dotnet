@@ -25,6 +25,11 @@ public class SendspinClientServicePinPairingTests
     {
         var lockout = new InMemoryPinLockoutStore();
         var records = new InMemoryPairingRecordStore();
+
+        // Pre-opened so a static_pin attempt (always gesture-gated now) proceeds immediately,
+        // exactly as it did before gating existed -- these tests are not about gating.
+        var window = new PairingWindow();
+        window.Open();
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options =>
@@ -33,6 +38,7 @@ public class SendspinClientServicePinPairingTests
                 options.PairingRecordStore = records;
                 options.PinLockoutStore = lockout;
                 options.PresentPinAsync = presentPin;
+                options.PairingWindow = window;
             });
 
         // The CPace exchange is bound to the Noise handshake hash, which the test's server
@@ -191,33 +197,40 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void LockedOutMethod_AbortsImmediately_ButStaysAdvertised()
+    public void EscalatedMethod_IsGatedNotAborted_AndStaysAdvertised()
     {
-        // Lockout state is not part of the client/hello descriptor (no spec field for it);
-        // it only shows up as the pair/abort reason once the server actually selects the
-        // locked-out method. Lockout is signalled that way, not by hiding the method: an
-        // escalated method stays advertised, so the descriptor must still be there.
-        var caps = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
+        // Escalation state is not part of the client/hello descriptor (no spec field for it);
+        // it only shows up as a gesture gate once the server actually selects the escalated
+        // method. Escalation is signalled that way, not by hiding the method: an escalated
+        // method stays advertised, so the descriptor must still be there. Dynamic PIN with a
+        // session pin_length >= 6 isolates escalation as the gating cause -- static_pin is
+        // gated regardless of its failure count, so it cannot tell escalation apart from the
+        // method's own baseline policy.
+        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
         var lockout = new InMemoryPinLockoutStore();
-        lockout.SetFailures("static_pin", 10);
+        lockout.SetFailures("dynamic_pin", 10);
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options =>
             {
                 options.Capabilities = caps;
-                options.PairingRecordStore = new InMemoryPairingRecordStore();
                 options.PinLockoutStore = lockout;
+                options.PresentPinAsync = (_, _) => ValueTask.CompletedTask;
+                options.PairingWindow = new PairingWindow();
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
-        Assert.Contains(hello.Payload.SupportedPairMethods!, m => m.Method == "static_pin");
+        Assert.Contains(hello.Payload.SupportedPairMethods!, m => m.Method == "dynamic_pin");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
-        Assert.Equal("locked_out", Last<PairAbortMessage>(connection).Payload.Reason);
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":8}}}""");
+
+        // Gated, not refused: a pending signal and no abort of any kind.
+        Assert.NotEmpty(connection.SentMessages.OfType<ClientPairPendingMessage>());
+        Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);
     }
 
     [Fact]
@@ -292,9 +305,9 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void DynamicPin_WithNoLockoutStore_IsRefused()
     {
-        // With no store, IsPinMethodLockedOut evaluates (null?.GetFailures() ?? 0) >= 10 —
+        // With no store, IsMethodEscalated evaluates (null?.GetFailures() ?? 0) >= 10 —
         // always false — and RecordPinFailure returns early. So PIN attempts are unlimited
-        // and the spec's terminal lockout is silently inert. Refuse the method instead.
+        // and could never escalate to gesture-gating. Refuse the method instead.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options =>

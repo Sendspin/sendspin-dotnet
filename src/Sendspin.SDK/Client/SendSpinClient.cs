@@ -49,6 +49,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
     private readonly Func<PinPresentation, CancellationToken, ValueTask>? _presentPinAsync;
+    private readonly PairingWindow? _pairingWindow;
+
+    // Set when a gated activation is waiting on a window; cleared when the attempt starts or
+    // the activation is superseded.
+    private string? _pendingGatedMethod;
     private PinPairingState? _pinState;
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
@@ -211,6 +216,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc />
     public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 
+    /// <inheritdoc />
+    public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
+
     /// <summary>
     /// Constructs a client for the encrypted Sendspin protocol.
     /// </summary>
@@ -232,6 +240,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _identity = options.Identity;
         _pinLockoutStore = options.PinLockoutStore;
         _presentPinAsync = options.PresentPinAsync;
+        _pairingWindow = options.PairingWindow;
         _captureDevice = options.CaptureDevice;
         _sourceEncoderFactory = options.SourceEncoderFactory;
         _clockSynchronizer = options.ClockSynchronizer ?? new KalmanClockSynchronizer();
@@ -277,6 +286,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _audioPipeline.ErrorOccurred += OnPipelineError;
             _audioPipeline.StateChanged += OnPipelineStateChanged;
+        }
+
+        if (_pairingWindow is not null)
+        {
+            _pairingWindow.StateChanged += OnPairingWindowStateChanged;
         }
     }
 
@@ -1590,11 +1604,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         "pairing_psk" => _pairingPskEnabled
                          && _session.MatchedPsk?.Category == PskCategory.Pairing
                          && _pairingStore is not null,
-        // A PIN method without a lockout store cannot enforce the spec's terminal lockout at
-        // 10 failures — IsPinMethodLockedOut would always report false — so offering it would
-        // grant unlimited attempts. Refuse rather than fail open. Dynamic PIN additionally
-        // requires a presenter: without PresentPinAsync the derived PIN would reach nobody,
-        // so an attempt could only proceed with a PIN the operator never saw.
+        // A PIN method without a lockout store cannot persist the failure counter, so the
+        // method could never escalate to gesture-gating and every attempt would stay ungated.
+        // Refuse rather than fail open. Dynamic PIN additionally requires a presenter: without
+        // PresentPinAsync the derived PIN would reach nobody.
         "dynamic_pin" => IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin")
                          && _pinLockoutStore is not null
                          && _presentPinAsync is not null,
@@ -1671,11 +1684,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 break;
 
             case "dynamic_pin":
-                StartPinAttempt(dynamic: true);
-                break;
-
             case "static_pin":
-                StartPinAttempt(dynamic: false);
+                BeginOrDeferPinAttempt(payload.Pairing!.Method);
                 break;
 
             default:
@@ -1688,23 +1698,70 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Begins a PIN-pairing attempt by sending client/pair-init. For dynamic PIN it
-    /// includes commit_B over a fresh nonce_B; for static PIN the operator gesture that
-    /// opens the pairing window is assumed to have occurred (the SDK sends init
-    /// immediately — hosts gate this via their own gesture handling if required).
+    /// Starts a PIN attempt, or defers it until an operator gesture opens the pairing window.
+    /// </summary>
+    /// <remarks>
+    /// Gating policy (pairing.md:227-230): static_pin gates every attempt; dynamic_pin gates
+    /// only when the method is escalated or the session's PIN is shorter than 6 digits — short
+    /// PINs are bought with a gesture. pairing_psk is never gated and does not reach here.
+    /// </remarks>
+    private void BeginOrDeferPinAttempt(string method)
+    {
+        bool gated = method == "static_pin"
+                     || IsMethodEscalated(method)
+                     || _activationPinLength < 6;
+
+        if (gated && _pairingWindow?.TryConsume() != true)
+        {
+            // Signals the wait without starting the attempt, so no attempt timeout is armed.
+            _pendingGatedMethod = method;
+            _connection.SendMessageAsync(new ClientPairPendingMessage
+            {
+                Payload = new ClientPairPendingPayload { PairingIndex = _pairingCounter },
+            }).SafeFireAndForget(_logger);
+
+            _logger.LogInformation(
+                "PIN pairing ({Method}): awaiting an operator gesture to open the pairing window",
+                method);
+            PairingGestureRequested?.Invoke(this, new PairingGestureRequestedEventArgs
+            {
+                Method = method,
+                PairingIndex = _pairingCounter,
+            });
+            return;
+        }
+
+        StartPinAttempt(dynamic: method == "dynamic_pin");
+    }
+
+    /// <summary>
+    /// A window opened while this connection was waiting on a gesture. Exactly one waiting
+    /// connection can claim any opening; the losers stay pending and send nothing.
+    /// </summary>
+    private void OnPairingWindowStateChanged(object? sender, EventArgs e)
+    {
+        if (_pendingGatedMethod is not { } method)
+        {
+            return;
+        }
+
+        if (_pairingWindow?.TryConsume() != true)
+        {
+            return;
+        }
+
+        _pendingGatedMethod = null;
+        StartPinAttempt(dynamic: method == "dynamic_pin");
+    }
+
+    /// <summary>
+    /// Begins a PIN-pairing attempt by sending client/pair-init. For dynamic PIN it includes
+    /// commit_B over a fresh nonce_B. Any gesture gating has already been satisfied by
+    /// <see cref="BeginOrDeferPinAttempt"/>, which consumed the pairing window.
     /// </summary>
     private void StartPinAttempt(bool dynamic)
     {
         var method = dynamic ? "dynamic_pin" : "static_pin";
-        if (IsPinMethodLockedOut(method))
-        {
-            _connection.SendMessageAsync(new PairAbortMessage
-            {
-                Payload = new PairAbortPayload { Reason = "locked_out" },
-            }).SafeFireAndForget(_logger);
-            return;
-        }
-
         var state = new PinPairingState { Dynamic = dynamic, Method = method };
         var init = new ClientPairInitMessage
         {
@@ -1880,7 +1937,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }).SafeFireAndForget(_logger);
     }
 
-    private bool IsPinMethodLockedOut(string method)
+    /// <summary>
+    /// Whether the method's failure counter has reached the spec's escalation threshold. An
+    /// escalated method stays offered and still runs; every attempt is gesture-gated until a
+    /// successful server_kc verification resets the counter.
+    /// </summary>
+    private bool IsMethodEscalated(string method)
         => (_pinLockoutStore?.GetFailures(method) ?? 0) >= 10;
 
     private void RecordPinFailure(string method)
@@ -1919,6 +1981,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         var state = _pinState;
         _pinState = null;
+        _pendingGatedMethod = null;
         if (state?.PresentPinCts is { } cts)
         {
             cts.Cancel();
@@ -2136,7 +2199,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     ? new DynamicPinConfigState(
                         IsMethodEnabled("dynamic_pin"),
                         _effectiveMinPinLength,
-                        IsPinMethodLockedOut("dynamic_pin"))
+                        IsMethodEscalated("dynamic_pin"))
                     : null;
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new PairingConfigData(
@@ -3464,6 +3527,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _audioPipeline.ErrorOccurred -= OnPipelineError;
             _audioPipeline.StateChanged -= OnPipelineStateChanged;
+        }
+
+        if (_pairingWindow is not null)
+        {
+            _pairingWindow.StateChanged -= OnPairingWindowStateChanged;
         }
     }
 

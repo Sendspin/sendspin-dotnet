@@ -36,12 +36,19 @@ public class PairingConfigOwnershipTests
     {
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId));
+
+        // Pre-opened so a static_pin attempt (always gesture-gated now) proceeds immediately,
+        // exactly as it did before gating existed -- the one test that drives a real static_pin
+        // attempt through this helper is not about gating.
+        var window = new PairingWindow();
+        window.Open();
         var (client, connection, session) = TestClient.Create(
             configure: options =>
             {
                 options.PairingRecordStore = store;
                 options.Capabilities = capabilities;
                 options.PinLockoutStore = pinLockoutStore;
+                options.PairingWindow = window;
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");

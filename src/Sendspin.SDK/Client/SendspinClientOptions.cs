@@ -49,12 +49,12 @@ public sealed class SendspinClientOptions
     public IStaticDelayStore? StaticDelayStore { get; init; }
 
     /// <summary>
-    /// Lockout counter persistence for the PIN pairing methods. <b>Required</b> if
+    /// Failure counter persistence for the PIN pairing methods. <b>Required</b> if
     /// <see cref="ClientCapabilities.PinPairingMethods"/> is non-empty: without a store the
-    /// spec's terminal lockout after 10 failed attempts cannot survive a restart, so the SDK
-    /// declines to offer the PIN methods at all (it sends <c>pair/abort</c> and logs a warning)
-    /// rather than granting unlimited attempts. <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/>
-    /// is provided.
+    /// counter cannot survive a restart, so a method could never escalate to gesture-gating —
+    /// the SDK declines to offer the PIN methods at all (it sends <c>pair/abort</c> and logs a
+    /// warning) rather than granting unlimited, ungated attempts.
+    /// <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/> is provided.
     /// </summary>
     public IPinLockoutStore? PinLockoutStore { get; init; }
 

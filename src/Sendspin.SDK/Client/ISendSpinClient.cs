@@ -313,4 +313,11 @@ public interface ISendspinClient : IAsyncDisposable
     /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
     /// </summary>
     event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
+
+    /// <summary>
+    /// Raised when a pairing attempt is gesture-gated and no pairing window is open. Prompt
+    /// the operator, then call <see cref="PairingWindow.Open"/> on the window supplied in
+    /// <see cref="SendspinClientOptions.PairingWindow"/>.
+    /// </summary>
+    event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 }
