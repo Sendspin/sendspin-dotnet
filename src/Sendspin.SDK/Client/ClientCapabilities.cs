@@ -172,6 +172,12 @@ public sealed class ClientCapabilities
     /// disabled this method expects it to stay disabled across a restart, and leaving the
     /// default would silently re-offer Pairing-PSK pairing.
     /// </summary>
+    /// <remarks>
+    /// <see cref="ISendspinClient.EnsurePairingPsk"/> and
+    /// <see cref="ISendspinClient.RotatePairingPsk"/> do not check this flag: an app that
+    /// sets it false and still calls either to render a pairing token (a QR code, say) hands
+    /// the operator a token whose method the client will refuse, with no error raised.
+    /// </remarks>
     public bool PairingPskEnabled { get; set; } = true;
 
     /// <summary>
@@ -201,6 +207,12 @@ public sealed class ClientCapabilities
     /// default. Ignored unless it names a shared-PSK record still present in the pairing
     /// record store — a server may have removed that record while the app was down.
     /// </summary>
+    /// <remarks>
+    /// When an id you persisted here is ignored, the client logs a warning rather than
+    /// raising — a store the app doesn't control is not the client's error to throw. Treat
+    /// that warning as a signal to clear the persisted value: left in place, it is relogged
+    /// and re-ignored on every subsequent start.
+    /// </remarks>
     public string? RecordModePskId { get; set; }
 
     /// <summary>

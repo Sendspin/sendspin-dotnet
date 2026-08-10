@@ -53,10 +53,9 @@ public class PairingConfigSeedingTests
             """{"type":"server/activate","payload":{"activities":["management"],"active_roles":[]}}""");
 
     /// <summary>
-    /// Drives a management-activated session and returns the record_mode object from
-    /// get-pairing-config.
+    /// Drives a management-activated session and returns the full get-pairing-config data.
     /// </summary>
-    private static JsonElement RecordModeFromGetPairingConfig(FakeSendspinConnection connection)
+    private static JsonElement GetPairingConfigData(FakeSendspinConnection connection)
     {
         ActivateManagement(connection);
         connection.RaiseTextMessageReceived(
@@ -64,8 +63,11 @@ public class PairingConfigSeedingTests
 
         var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
         Assert.Equal("ok", result.Result);
-        return result.Data!.Value.GetProperty("record_mode");
+        return result.Data!.Value;
     }
+
+    private static JsonElement RecordModeFromGetPairingConfig(FakeSendspinConnection connection) =>
+        GetPairingConfigData(connection).GetProperty("record_mode");
 
     [Fact]
     public void PairingPskEnabledFalse_IsNotAdvertised()
@@ -96,7 +98,10 @@ public class PairingConfigSeedingTests
     public void PinMethodDisabled_IsImplementedButNotAdvertised(string method)
     {
         // Disabled is not unimplemented: the method stays in PinPairingMethods so a server
-        // can turn it back on, but client/hello must not offer it.
+        // can turn it back on, but client/hello must not offer it — while get-pairing-config
+        // must still report the method's object, with enabled: false, so a management server
+        // sees "implemented but disabled" rather than "not implemented" (the two the AND in
+        // the seeding block exists to keep distinct).
         var capabilities = new ClientCapabilities
         {
             PinPairingMethods = { method },
@@ -108,6 +113,11 @@ public class PairingConfigSeedingTests
         using var _c = client;
 
         Assert.DoesNotContain(method, HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.TryGetProperty(method, out var methodState),
+            "a disabled method is still implemented and must still be reported");
+        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     [Theory]

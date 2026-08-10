@@ -311,17 +311,21 @@ public interface ISendspinClient : IAsyncDisposable
     /// changed, the stored Pairing PSK replaced, or any combination of these — or removes
     /// the stored Pairing record via <c>management/remove-record</c>. The SDK applies the
     /// change to its own effective state — never to the <see cref="ClientCapabilities"/>
-    /// instance the app owns — so this state lives in memory only. Every value it reports
-    /// has a <see cref="ClientCapabilities"/> property to reapply on the next startup:
+    /// instance the app owns — so this state lives in memory only. Every setting the event
+    /// reports has a <see cref="ClientCapabilities"/> property to reapply on the next startup:
     /// <see cref="ClientCapabilities.UnpairedAccessEnabled"/>,
     /// <see cref="ClientCapabilities.MinPinLength"/>, <see cref="ClientCapabilities.StaticPin"/>,
     /// <see cref="ClientCapabilities.PairingPskEnabled"/>,
     /// <see cref="ClientCapabilities.DynamicPinEnabled"/>,
     /// <see cref="ClientCapabilities.StaticPinEnabled"/> and
     /// <see cref="ClientCapabilities.RecordModePskId"/>. Persist them and reapply them at
-    /// construction, and the server's change survives a restart. When
-    /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is true, any token
-    /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
+    /// construction, and the server's change survives a restart.
+    /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is not one of those
+    /// settings — it is a staleness signal, not a value to reapply. When it is true, any
+    /// token previously returned by <see cref="EnsurePairingPsk"/> has stopped being
+    /// current; the replaced Pairing PSK itself round-trips through
+    /// <see cref="Sendspin.SDK.Connection.Noise.IPairingRecordStore"/>, not through
+    /// <see cref="ClientCapabilities"/>.
     /// </summary>
     event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 
