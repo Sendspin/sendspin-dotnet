@@ -115,8 +115,20 @@ the failure counter cannot survive a restart, so a method could never escalate t
 gesture-gating; the SDK refuses to offer the PIN methods rather than granting unlimited,
 ungated attempts. Offering `dynamic_pin`
 additionally requires `SendspinClientOptions.PresentPinAsync` (the callback that shows the
-derived PIN to the operator); without it the SDK refuses that method with
-`method_not_supported` rather than pairing with a PIN nobody can see.
+derived PIN to the operator, taking a `PinPresentation` — the derived PIN plus the server's
+language hint); without it the SDK refuses that method with `method_not_supported` rather than
+pairing with a PIN nobody can see.
+
+**A `PairingWindow` is required to complete a gesture-gated attempt** — every `static_pin`
+attempt, and a `dynamic_pin` attempt once the method has escalated or its PIN is shorter than
+6 digits. The window is device-level: construct one, share it across every connection (pass it
+to `SendspinClientOptions.PairingWindow`, which `SendspinHostService` forwards to each
+connection it accepts), and `Open()` it from a deliberate operator gesture. Leaving it null is
+the fail-closed default and does not fail loudly: the client answers with `client/pair-pending`
+and waits forever, so pairing simply never completes. Subscribe to
+`ISendspinClient.PairingGestureRequested` to prompt the operator. See
+[MIGRATION-10.0.0.md](MIGRATION-10.0.0.md#a-pairingwindow-is-required-for-the-gesture-gated-methods)
+for the full migration note.
 
 **Runtime reconfiguration.** `ClientCapabilities` only seeds the client's *initial* pairing
 config. Once paired, a management-activated server can enable, disable, and reconfigure each
