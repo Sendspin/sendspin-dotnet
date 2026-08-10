@@ -44,14 +44,21 @@ public class PairingConfigSeedingTests
             .Payload.SupportedPairMethods?.Select(m => m.Method).ToList() ?? [];
 
     /// <summary>
+    /// Activates the connection for management. Management requests are scoped to
+    /// connections whose activities include 'management', so any test driving
+    /// management/* messages needs this first.
+    /// </summary>
+    private static void ActivateManagement(FakeSendspinConnection connection) =>
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["management"],"active_roles":[]}}""");
+
+    /// <summary>
     /// Drives a management-activated session and returns the record_mode object from
-    /// get-pairing-config. Management is scoped to connections whose activities include
-    /// 'management', so the activate is required.
+    /// get-pairing-config.
     /// </summary>
     private static JsonElement RecordModeFromGetPairingConfig(FakeSendspinConnection connection)
     {
-        connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["management"],"active_roles":[]}}""");
+        ActivateManagement(connection);
         connection.RaiseTextMessageReceived(
             """{"type":"management/get-pairing-config","payload":{}}""");
 
@@ -124,14 +131,30 @@ public class PairingConfigSeedingTests
     [Fact]
     public void PinMethodEnabledFlag_WithoutTheMethodImplemented_StaysDisabled()
     {
-        // The flags default true, so they must be ANDed with PinPairingMethods. Without the
-        // AND a client that never implemented dynamic_pin would start reporting it enabled
-        // on PairingConfigChanged — the very event apps are told to persist.
+        // The flags default true, so they must be ANDed with PinPairingMethods. client/hello
+        // omitting the method is not proof of that AND by itself: BuildPairMethods gates on
+        // IsMethodImplemented independently, so it omits an unlisted method whether or not
+        // the AND exists. The AND is only observable on PairingConfigChanged, where
+        // CurrentPairingConfig reports _dynamicPinEnabled/_staticPinEnabled raw with no
+        // implemented-gate — the very event apps are told to persist — so that path is
+        // asserted here too.
         var (client, connection) = CreateAndGreet(new ClientCapabilities());
         using var _c = client;
 
         Assert.DoesNotContain("dynamic_pin", HelloPairMethods(connection));
         Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
+
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+        ActivateManagement(connection);
+        // unpaired_access is unrelated to the PIN flags; it exists only to make the event
+        // fire so the raw effective state can be observed.
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"unpaired_access":{"enabled":true}}}""");
+
+        var change = Assert.Single(events);
+        Assert.False(change.DynamicPinEnabled);
+        Assert.False(change.StaticPinEnabled);
     }
 
     [Fact]

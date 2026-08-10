@@ -319,7 +319,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// <see cref="ClientCapabilities.DynamicPinEnabled"/>,
     /// <see cref="ClientCapabilities.StaticPinEnabled"/> and
     /// <see cref="ClientCapabilities.RecordModePskId"/>. Persist them and reapply them at
-    /// construction and the server's change survives a restart. When
+    /// construction, and the server's change survives a restart. When
     /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is true, any token
     /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
     /// </summary>
