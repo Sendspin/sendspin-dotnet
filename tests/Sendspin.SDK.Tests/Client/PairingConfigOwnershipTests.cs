@@ -417,12 +417,12 @@ public class PairingConfigOwnershipTests
         connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{ToBase64Url(server.PublicShare)}}}"}}""");
         var auth = connection.SentMessages.OfType<ClientPairAuthMessage>().Last();
-        server.Derive(PinPairing.DecodeB64Url(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
         connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{ToBase64Url(server.Tag())}}}"}}""");
 
         var confirm = connection.SentMessages.OfType<ClientPairConfirmMessage>().Last();
-        Assert.True(server.Verify(PinPairing.DecodeB64Url(confirm.Payload.ClientKc)));
+        Assert.True(server.Verify(Base64UrlText.Decode(confirm.Payload.ClientKc)));
     }
 
     [Fact]

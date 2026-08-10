@@ -74,7 +74,7 @@ public class PairingWindowEndToEndTests
         });
 
         var auth = await link.NextMessageAsync<ClientPairAuthMessage>();
-        serverPake.Derive(PinPairing.DecodeB64Url(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        serverPake.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
 
         link.SendServerMessage(new ServerPairConfirmMessage
         {
@@ -83,7 +83,7 @@ public class PairingWindowEndToEndTests
 
         var confirm = await link.NextMessageAsync<ClientPairConfirmMessage>();
         Assert.True(
-            serverPake.Verify(PinPairing.DecodeB64Url(confirm.Payload.ClientKc)),
+            serverPake.Verify(Base64UrlText.Decode(confirm.Payload.ClientKc)),
             "the client's confirmation tag must verify against an independently-run server CPace");
 
         await link.NextMessageAsync<ClientPairFinalizeMessage>();
