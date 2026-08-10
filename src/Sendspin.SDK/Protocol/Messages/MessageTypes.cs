@@ -30,6 +30,7 @@ public static class MessageTypes
     public const string ManagementRemoveRecord = "management/remove-record";
     public const string ManagementGetPairingConfig = "management/get-pairing-config";
     public const string ManagementSetPairingConfig = "management/set-pairing-config";
+    public const string ManagementOpenPairingWindow = "management/open-pairing-window";
     public const string ManagementResult = "management/result";
     public const string ServerUnpair = "server/unpair";
 

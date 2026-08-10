@@ -1229,6 +1229,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 case MessageTypes.ManagementRemoveRecord:
                 case MessageTypes.ManagementGetPairingConfig:
                 case MessageTypes.ManagementSetPairingConfig:
+                case MessageTypes.ManagementOpenPairingWindow:
                     HandleManagement(messageType!, json);
                     break;
 
@@ -2484,6 +2485,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     PairingConfigChanged?.Invoke(this, CurrentPairingConfig(pairingPskReplaced: newPairingPsk is not null));
                 }
 
+                break;
+            }
+
+            case MessageTypes.ManagementOpenPairingWindow:
+            {
+                // Opens the window in place of the operator gesture. Rejected when no PIN
+                // method is enabled, since there would be nothing for the window to admit.
+                bool anyPinMethod = (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin"))
+                                    || (IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin"));
+                if (!anyPinMethod || _pairingWindow is null)
+                {
+                    result.Result = "invalid";
+                    break;
+                }
+
+                // A no-op ok when a window is already open.
+                _pairingWindow.Open();
                 break;
             }
         }

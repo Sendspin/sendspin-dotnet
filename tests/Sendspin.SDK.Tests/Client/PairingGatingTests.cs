@@ -237,6 +237,66 @@ public class PairingGatingTests
 
         Assert.Equal(0, lockouts.GetFailures("dynamic_pin"));
     }
+
+    [Fact]
+    public async Task OpenPairingWindow_OnAManagementSession_OpensTheWindow()
+    {
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(
+            staticPin: "12345678", window: window, management: true);
+
+        h.SendManagement("management/open-pairing-window");
+
+        var result = await h.NextMessageAsync<ManagementResultMessage>();
+        Assert.Equal("ok", result.Payload.Result);
+        Assert.True(window.IsOpen);
+    }
+
+    [Fact]
+    public async Task OpenPairingWindow_WhenAlreadyOpen_IsANoOpOk()
+    {
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(
+            staticPin: "12345678", window: window, management: true);
+
+        h.SendManagement("management/open-pairing-window");
+
+        var result = await h.NextMessageAsync<ManagementResultMessage>();
+        Assert.Equal("ok", result.Payload.Result);
+        Assert.True(window.IsOpen);
+    }
+
+    [Fact]
+    public async Task OpenPairingWindow_WithNoPinMethodEnabled_IsInvalid()
+    {
+        var window = new PairingWindow();
+
+        // dynamicPin defaults to true in the harness, so it must be turned off explicitly to
+        // get an implemented-methods set of zero.
+        await using var h = await PairingHarness.StartAsync(
+            dynamicPin: false, window: window, management: true); // no PIN methods configured
+
+        h.SendManagement("management/open-pairing-window");
+
+        var result = await h.NextMessageAsync<ManagementResultMessage>();
+        Assert.Equal("invalid", result.Payload.Result);
+        Assert.False(window.IsOpen);
+    }
+
+    [Fact]
+    public async Task OpenPairingWindow_OutsideAManagementSession_IsPermissionDenied()
+    {
+        var window = new PairingWindow();
+        await using var h = await PairingHarness.StartAsync(
+            staticPin: "12345678", window: window, management: false);
+
+        h.SendManagement("management/open-pairing-window");
+
+        var result = await h.NextMessageAsync<ManagementResultMessage>();
+        Assert.Equal("permission_denied", result.Payload.Result);
+        Assert.False(window.IsOpen);
+    }
 }
 
 /// <summary>
@@ -296,8 +356,10 @@ internal sealed class PairingHarness : IAsyncDisposable
     /// (instead of Sentinel) and supplies a pairing record store. <paramref name="lockouts"/>
     /// defaults to a fresh <see cref="InMemoryPinLockoutStore"/>. <paramref name="window"/> is
     /// passed straight to <c>SendspinClientOptions.PairingWindow</c>; omitted, gated attempts
-    /// stay pending forever (the fail-closed default). <paramref name="management"/>
-    /// controls whether <see cref="SendPairingActivate"/> includes the 'management' activity.
+    /// stay pending forever (the fail-closed default). <paramref name="management"/>, when true,
+    /// both raises a server/activate granting the 'management' activity up front (so bare
+    /// <see cref="SendManagement"/> requests need no pairing activation to ride in on) and makes
+    /// <see cref="SendPairingActivate"/> include that activity on any activation it sends later.
     /// </summary>
     public static Task<PairingHarness> StartAsync(
         int minPinLength = 6,
@@ -337,7 +399,23 @@ internal sealed class PairingHarness : IAsyncDisposable
               }
             : null;
 
-        var category = pairingPsk ? PskCategory.Pairing : PskCategory.Sentinel;
+        // The activation admissibility table (SendSpinClient.IsAdmissible) never allows the
+        // 'management' activity on a Sentinel-trust session — only a paired (LongTerm) one —
+        // matching the spec: only an already-paired server may drive management/*.
+        PskCategory category;
+        if (pairingPsk)
+        {
+            category = PskCategory.Pairing;
+        }
+        else if (management)
+        {
+            category = PskCategory.LongTerm;
+        }
+        else
+        {
+            category = PskCategory.Sentinel;
+        }
+
         var (client, connection, session) = TestClient.Create(
             category,
             configure: options =>
@@ -358,6 +436,15 @@ internal sealed class PairingHarness : IAsyncDisposable
             });
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        // Bare management requests (SendManagement) have no pairing activation to ride in on,
+        // so a management session is established directly here rather than through
+        // SendPairingActivate's nested pairing object.
+        if (management)
+        {
+            connection.RaiseTextMessageReceived(
+                """{"type":"server/activate","payload":{"activities":["management"],"active_roles":[]}}""");
+        }
 
         harness = new PairingHarness(client, connection, session, staticPin, management);
         return Task.FromResult(harness);
