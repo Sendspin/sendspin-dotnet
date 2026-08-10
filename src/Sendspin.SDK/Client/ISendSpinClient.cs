@@ -315,6 +315,12 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 
     /// <summary>
+    /// Raised when a Pairing PSK or PIN pairing exchange completes, with the paired
+    /// server id. Fires once per completed attempt.
+    /// </summary>
+    event EventHandler<string>? PairingCompleted;
+
+    /// <summary>
     /// Raised when a pairing attempt is gesture-gated and no pairing window is open. Prompt
     /// the operator, then call <see cref="PairingWindow.Open"/> on the window supplied in
     /// <see cref="SendspinClientOptions.PairingWindow"/>.

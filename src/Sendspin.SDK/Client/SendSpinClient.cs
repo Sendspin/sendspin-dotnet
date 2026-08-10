@@ -222,10 +222,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public event EventHandler<ServerActivatePayload>? ServerActivateReceived;
 
-    /// <summary>
-    /// Raised when a Pairing PSK exchange completes and the long-term record has been
-    /// persisted (argument: the paired server id).
-    /// </summary>
+    /// <inheritdoc />
     public event EventHandler<string>? PairingCompleted;
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
