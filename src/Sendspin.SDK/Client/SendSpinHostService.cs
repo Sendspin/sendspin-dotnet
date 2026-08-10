@@ -413,6 +413,9 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// when no shared synchronizer was configured) means building a fresh options instance
     /// rather than mutating the stored one. Every field on the stored options must be
     /// hand-copied here — one left out silently never reaches any connection.
+    /// <c>PairingWindowOptionsTests</c> compares the two objects property by property, so an
+    /// option added to <see cref="SendspinClientOptions"/> and forgotten here fails a test
+    /// rather than vanishing.
     /// </remarks>
     internal SendspinClientOptions BuildClientOptions()
     {
@@ -427,9 +430,11 @@ public sealed class SendspinHostService : IAsyncDisposable
                 AudioPipeline = _options.AudioPipeline,
                 StaticDelayStore = _options.StaticDelayStore,
                 PinLockoutStore = _options.PinLockoutStore,
+                PresentPinAsync = _options.PresentPinAsync,
                 CaptureDevice = _options.CaptureDevice,
                 SourceEncoderFactory = _options.SourceEncoderFactory,
                 PairingWindow = _options.PairingWindow,
+                PairingAttemptTimeout = _options.PairingAttemptTimeout,
             }
             : _options;
     }
