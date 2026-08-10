@@ -675,9 +675,21 @@ For older release notes (v5.0.0 and earlier), see https://github.com/chrisuthe/w
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Core dependencies - all cross-platform -->
+    <!-- Core dependencies -->
     <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="Noise.NET" Version="1.0.0" />
+    <!--
+      Noise.NET is a managed wrapper over libsodium: every primitive on the mandatory
+      transport (X25519, ChaCha20-Poly1305, AES-GCM, SHA-256) is a P/Invoke. It declares
+      'libsodium >= 1.0.16', and NuGet resolves the lowest match, so without this line we
+      restore the 2018 build - whose native binaries cover only linux-x64, osx-x64, win-x64
+      and win-x86. Every ARM consumer then hits DllNotFoundException from inside the
+      handshake. Referencing libsodium directly floats that floor: 1.0.22 adds linux-arm,
+      linux-arm64, linux-musl-*, osx-arm64 and win-arm64 (plus eight years of upstream
+      fixes). This is a deliberate pin, not an incidental one - dropping it silently
+      reintroduces the gap, so it is covered by the linux-arm64 leg of the CI aot job. (#89)
+    -->
+    <PackageReference Include="libsodium" Version="1.0.22" />
     <PackageReference Include="Zeroconf" Version="3.7.16" />
     <PackageReference Include="Makaretu.Dns.Multicast" Version="0.27.0" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />

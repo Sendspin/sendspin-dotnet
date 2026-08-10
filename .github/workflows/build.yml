@@ -70,8 +70,25 @@ jobs:
     # the mandatory transport, so the only real check is publishing and running (#89).
     # The smoke test project sets WarningsAsErrors for the IL* diagnostics, so a new
     # reflection path fails this job rather than accumulating silently.
-    name: NativeAOT publish
-    runs-on: ubuntu-latest
+    #
+    # arm64 is not redundant with x64. Noise.NET P/Invokes libsodium, and the libsodium build
+    # it declares a floor on (1.0.16) ships no ARM binaries at all, so before the direct pin to
+    # 1.0.22 every ARM consumer hit DllNotFoundException inside the handshake — invisible to an
+    # x64-only job. This leg is what keeps that from silently reopening if the pin is dropped
+    # or floated back down (#89, #144). The smoke test's cipher-suite check now runs a real
+    # Curve25519 + AEAD operation through libsodium rather than querying the BCL, so simply
+    # running the binary here exercises the native path end to end.
+    name: NativeAOT publish (${{ matrix.rid }})
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-latest
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
@@ -87,10 +104,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
 
       - name: Publish NativeAOT
-        run: dotnet publish tools/AotSmokeTest/AotSmokeTest.csproj -c Release -r linux-x64
+        run: dotnet publish tools/AotSmokeTest/AotSmokeTest.csproj -c Release -r ${{ matrix.rid }}
 
       - name: Run the native binary
-        run: ./tools/AotSmokeTest/bin/Release/net10.0/linux-x64/publish/AotSmokeTest
+        run: ./tools/AotSmokeTest/bin/Release/net10.0/${{ matrix.rid }}/publish/AotSmokeTest
 
   publish:
     needs: build

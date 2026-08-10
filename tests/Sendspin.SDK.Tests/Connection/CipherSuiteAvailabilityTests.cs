@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Connection;
@@ -8,16 +8,26 @@ namespace Sendspin.SDK.Tests.Connection;
 /// spec-defined and every server supports both, so the choice is the client's to make at
 /// runtime — but hardcoding one meant a platform without it threw from inside the Noise
 /// handshake and surfaced as a generic crypto fatal with nothing naming the cause (#89).
+///
+/// "What the platform can actually do" means libsodium, not the BCL: Noise.NET P/Invokes
+/// libsodium for every primitive and never touches <c>System.Security.Cryptography</c>'s
+/// AEADs. These tests therefore compare the probe against a real handshake rather than
+/// against the BCL's capability flags, which is what they used to do (#144).
 /// </summary>
 public class CipherSuiteAvailabilityTests
 {
     [Fact]
-    public void IsSupported_TracksTheBcl()
+    public void IsSupported_TracksTheRealBackend_NotTheBcl()
     {
-        // Not a tautology against a hardcoded answer: each arm is compared to the BCL's own
-        // capability flag, which is what actually decides whether the AEAD can be built.
-        Assert.Equal(ChaCha20Poly1305.IsSupported, NoiseCipherSuite.ChaChaPoly.IsSupported());
-        Assert.Equal(AesGcm.IsSupported, NoiseCipherSuite.AesGcm.IsSupported());
+        // Previously this asserted IsSupported() == ChaCha20Poly1305.IsSupported /
+        // AesGcm.IsSupported. That pinned the wrong contract: the BCL flags describe a
+        // library the handshake never calls, so they answered "supported" on every ARM
+        // target, where libsodium had no native binary and the handshake died on
+        // DllNotFoundException. The real question is whether the handshake runs.
+        foreach (var suite in Enum.GetValues<NoiseCipherSuite>())
+        {
+            Assert.Equal(suite.IsSupported(), CompletesRealHandshake(suite));
+        }
     }
 
     [Fact]
@@ -28,10 +38,19 @@ public class CipherSuiteAvailabilityTests
     }
 
     [Fact]
+    public void SelectDefault_ReturnsASuiteWhoseHandshakeActuallyCompletes()
+    {
+        // SelectDefault's promise, checked against the thing it is a promise about. This is
+        // the end-to-end version of the test above: a probe that reported on the wrong
+        // backend would satisfy IsSupported() and fail here.
+        Assert.True(CompletesRealHandshake(NoiseCipherSuiteExtensions.SelectDefault()));
+    }
+
+    [Fact]
     public void SelectDefault_PrefersChaChaPolyWhenAvailable()
     {
         // Preference, not just availability — AES-GCM is the fallback, not a coin flip.
-        if (!ChaCha20Poly1305.IsSupported)
+        if (!NoiseCipherSuite.ChaChaPoly.IsSupported())
             return; // nothing to assert on a platform without it
 
         Assert.Equal(NoiseCipherSuite.ChaChaPoly, NoiseCipherSuiteExtensions.SelectDefault());
@@ -69,5 +88,30 @@ public class CipherSuiteAvailabilityTests
 
         Assert.Equal(NoiseCipherSuiteExtensions.SelectDefault(), options.Suite);
         Assert.True(options.Suite.IsSupported());
+    }
+
+    /// <summary>
+    /// Drives a genuine KKpsk2 handshake for <paramref name="suite"/> through the production
+    /// framing against <see cref="TestNoiseServer"/>, returning whether it reached transport
+    /// mode. Goes through the real path on purpose — the point is to check the probe against
+    /// reality, not against a second copy of the probe, which would pass on both sides of a
+    /// systematic error.
+    /// </summary>
+    private static bool CompletesRealHandshake(NoiseCipherSuite suite)
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity, pskResolver: null, suite);
+        var server = new TestNoiseServer(
+            identity.PublicKey, NoiseConstants.SentinelPsk.ToArray(), suite: suite);
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+
+        Assert.Null(framing.ProcessInbound(WireFrame.FromText(serverInit)).FatalReason);
+        var result = framing.ProcessInbound(WireFrame.FromText(msg1));
+        Assert.Null(result.FatalReason);
+
+        server.CompleteHandshake(Assert.Single(result.Replies!).PayloadAsText());
+        return framing.IsTransportReady;
     }
 }
