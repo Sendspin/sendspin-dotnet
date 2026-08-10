@@ -42,33 +42,3 @@ public static class ClientRoles
     /// </summary>
     public const string Source = "source@v1";
 }
-
-/// <summary>
-/// Commands that can be sent to control playback.
-/// </summary>
-public enum PlayerCommand
-{
-    Play,
-    Pause,
-    Stop,
-    Next,
-    Previous,
-    Shuffle,
-    Repeat
-}
-
-/// <summary>
-/// Volume adjustment modes.
-/// </summary>
-public enum VolumeMode
-{
-    /// <summary>
-    /// Set absolute volume level.
-    /// </summary>
-    Absolute,
-
-    /// <summary>
-    /// Adjust volume by delta.
-    /// </summary>
-    Relative
-}

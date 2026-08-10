@@ -37,7 +37,7 @@ public class SourceCodecSelectionTests
         var (client, connection, session) = TestClient.Create(
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { Roles = { "source@v1" }, SourceSupport = sourceSupport },
+                Capabilities = new ClientCapabilities { Roles = { "source@v1" }, SourceRoleSupport = sourceSupport },
                 CaptureDevice = capture,
                 SourceEncoderFactory = new StubEncoderFactory(),
             });

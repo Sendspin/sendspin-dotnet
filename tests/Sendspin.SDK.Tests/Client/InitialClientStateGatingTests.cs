@@ -446,7 +446,7 @@ public class InitialClientStateGatingTests
             Capabilities = new ClientCapabilities
             {
                 Roles = ["source@v1"],
-                SourceSupport = new SourceRoleSupport { LineSense = true }
+                SourceRoleSupport = new SourceRoleSupport { LineSense = true }
             },
         });
         using var _c = client;

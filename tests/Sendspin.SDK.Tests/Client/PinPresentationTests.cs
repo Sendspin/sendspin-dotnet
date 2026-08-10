@@ -117,11 +117,11 @@ public class PinPresentationTests
 
         // And the PAKE completes against the presented PIN, proving the presenter received
         // the PIN the server can verify.
-        server.Derive(PinPairing.DecodeB64Url(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
         conn.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{B64(server.Tag())}}}"}}""");
         var confirm = await WaitForSentAsync<ClientPairConfirmMessage>(conn);
-        Assert.True(server.Verify(PinPairing.DecodeB64Url(confirm.Payload.ClientKc)));
+        Assert.True(server.Verify(Base64UrlText.Decode(confirm.Payload.ClientKc)));
     }
 
     [Fact]

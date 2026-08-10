@@ -222,10 +222,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public event EventHandler<ServerActivatePayload>? ServerActivateReceived;
 
-    /// <summary>
-    /// Raised when a Pairing PSK exchange completes and the long-term record has been
-    /// persisted (argument: the paired server id).
-    /// </summary>
+    /// <inheritdoc />
     public event EventHandler<string>? PairingCompleted;
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
@@ -273,7 +270,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger,
                 IsSourceStreamingPermitted,
                 _sourceEncoderFactory,
-                _capabilities.SourceSupport?.Codec);
+                _capabilities.SourceRoleSupport?.Codec);
         }
         _audioPipeline = options.AudioPipeline;
         _staticDelayStore = options.StaticDelayStore;
@@ -440,17 +437,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool RequiresClockSync()
         => _capabilities.Roles.Any(r => r.StartsWith("player@", StringComparison.Ordinal)) || HasSourceRole();
 
-    /// <summary>
-    /// Reports line-sense signal presence to the server via client/state (source role).
-    /// No-op unless the source role is configured with line sensing, and skipped while the
-    /// connection's initial client/state is still deferred pending clock sync — a source-only
-    /// delta must not become the first client/state the server sees. The initial message does
-    /// not carry the signal, so a change made inside that window is reported by the app's next
-    /// call after sync converges.
-    /// </summary>
+    /// <inheritdoc />
     public async Task SetSourceSignalAsync(bool present)
     {
-        if (!HasSourceRole() || _capabilities.SourceSupport?.LineSense != true)
+        if (!HasSourceRole() || _capabilities.SourceRoleSupport?.LineSense != true)
             return;
 
         if (!_initialClientStateSent)
@@ -519,7 +509,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             sourceSupport: HasSourceRole()
                 ? new SourceSupport
                 {
-                    Features = _capabilities.SourceSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
+                    Features = _capabilities.SourceRoleSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
             trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
@@ -1702,7 +1692,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
                 _connection.SendMessageAsync(new ClientPairFinalizeMessage
                 {
-                    Payload = new ClientPairFinalizePayload { LongTermPsk = B64Url(_pendingPairingPsk) },
+                    Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(_pendingPairingPsk) },
                 }).SafeFireAndForget(_logger);
                 ArmAttemptTimeout();
                 break;
@@ -1838,7 +1828,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (dynamic)
         {
             state.NonceB = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-            init.Payload.CommitB = B64Url(PinPairing.CommitB(state.NonceB));
+            init.Payload.CommitB = Base64UrlText.Encode(PinPairing.CommitB(state.NonceB));
         }
 
         _pinState = state;
@@ -1896,7 +1886,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (msg is null || _pinState is not { Dynamic: true } state)
             return;
 
-        state.NonceA = PinPairing.DecodeB64Url(msg.Payload.NonceA);
+        state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
         var h = _session.HandshakeHash!.Value.ToArray();
         string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, _activationPinLength);
         state.Pin = pin;
@@ -1945,7 +1935,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Derive stays on the synchronous path: a hostile pake_msg_1 raises CPaceException
         // into the dispatch catch, which closes the connection as with any malformed input.
-        cpace.Derive(PinPairing.DecodeB64Url(msg.Payload.PakeMsg1), PinPairing.AdServer);
+        cpace.Derive(Base64UrlText.Decode(msg.Payload.PakeMsg1), PinPairing.AdServer);
 
         SendPairAuthAfterPinPresentedAsync(state, cpace.PublicShare).SafeFireAndForget(_logger);
     }
@@ -1998,7 +1988,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         await _connection.SendMessageAsync(new ClientPairAuthMessage
         {
-            Payload = new ClientPairAuthPayload { PakeMsg2 = B64Url(publicShare) },
+            Payload = new ClientPairAuthPayload { PakeMsg2 = Base64UrlText.Encode(publicShare) },
         });
     }
 
@@ -2008,7 +1998,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (msg is null || _pinState is not { CPace: { } cpace } state)
             return;
 
-        if (!cpace.Verify(PinPairing.DecodeB64Url(msg.Payload.ServerKc)))
+        if (!cpace.Verify(Base64UrlText.Decode(msg.Payload.ServerKc)))
         {
             RecordPinFailure(state.Method);
             AbortPin("pin_mismatch");
@@ -2018,11 +2008,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Send client/pair-confirm then client/pair-finalize (wrapped PSK) back-to-back.
         var confirm = new ClientPairConfirmMessage
         {
-            Payload = new ClientPairConfirmPayload { ClientKc = B64Url(cpace.Tag()) },
+            Payload = new ClientPairConfirmPayload { ClientKc = Base64UrlText.Encode(cpace.Tag()) },
         };
         if (state.Dynamic)
         {
-            confirm.Payload.NonceB = B64Url(state.NonceB!);
+            confirm.Payload.NonceB = Base64UrlText.Encode(state.NonceB!);
         }
 
         _connection.SendMessageAsync(confirm).SafeFireAndForget(_logger);
@@ -2033,7 +2023,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         byte[] wrapped = PinPairing.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
         _connection.SendMessageAsync(new ClientPairFinalizeMessage
         {
-            Payload = new ClientPairFinalizePayload { WrappedPsk = B64Url(wrapped) },
+            Payload = new ClientPairFinalizePayload { WrappedPsk = Base64UrlText.Encode(wrapped) },
         }).SafeFireAndForget(_logger);
 
         // Success resets the method's failure counter.
@@ -2063,9 +2053,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         _pinLockoutStore.SetFailures(method, _pinLockoutStore.GetFailures(method) + 1);
     }
-
-    private static string B64Url(byte[] data)
-        => Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private sealed class PinPairingState
     {
