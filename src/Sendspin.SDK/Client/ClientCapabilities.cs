@@ -167,6 +167,55 @@ public sealed class ClientCapabilities
     public string? StaticPin { get; set; }
 
     /// <summary>
+    /// Whether the mandatory Pairing PSK method starts enabled. Default true. Set false only
+    /// to restore a server's <c>management/set-pairing-config</c> change: a server that
+    /// disabled this method expects it to stay disabled across a restart, and leaving the
+    /// default would silently re-offer Pairing-PSK pairing.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ISendspinClient.EnsurePairingPsk"/> and
+    /// <see cref="ISendspinClient.RotatePairingPsk"/> do not check this flag: an app that
+    /// sets it false and still calls either to render a pairing token (a QR code, say) hands
+    /// the operator a token whose method the client will refuse, with no error raised.
+    /// </remarks>
+    public bool PairingPskEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether <c>"dynamic_pin"</c> starts enabled, when it is listed in
+    /// <see cref="PinPairingMethods"/>. Default true, so listing the method is enough to
+    /// offer it. Ignored when the method is not listed.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from removing the method from <see cref="PinPairingMethods"/>, which means
+    /// <em>not implemented</em>. A disabled-but-implemented method still reports itself to a
+    /// managing server with <c>enabled: false</c> and can be turned back on with
+    /// <c>set-pairing-config</c>; an unimplemented one is omitted entirely and can never be
+    /// re-enabled.
+    /// </remarks>
+    public bool DynamicPinEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether <c>"static_pin"</c> starts enabled, when it is listed in
+    /// <see cref="PinPairingMethods"/>. Default true. See
+    /// <see cref="DynamicPinEnabled"/> for why this is not the same as omitting the method.
+    /// </summary>
+    public bool StaticPinEnabled { get; set; } = true;
+
+    /// <summary>
+    /// The shared-PSK record this client falls back to when its stored-pubkey record space
+    /// is exhausted, as last set by a server's <c>management/set-pairing-config</c>. Null by
+    /// default. Ignored unless it names a shared-PSK record still present in the pairing
+    /// record store — a server may have removed that record while the app was down.
+    /// </summary>
+    /// <remarks>
+    /// When an id you persisted here is ignored, the client logs a warning rather than
+    /// raising — a store the app doesn't control is not the client's error to throw. Treat
+    /// that warning as a signal to clear the persisted value: left in place, it is relogged
+    /// and re-ignored on every subsequent start.
+    /// </remarks>
+    public string? RecordModePskId { get; set; }
+
+    /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.
     /// This is sent in the initial client/state message after handshake.
     /// Default is 100 for backwards compatibility.

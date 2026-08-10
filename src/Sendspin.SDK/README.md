@@ -138,12 +138,21 @@ record-mode fallback record. The SDK tracks this effective state itself and neve
 back to your `ClientCapabilities` instance, so it lives in memory only: subscribe to
 `ISendspinClient.PairingConfigChanged` to observe every change.
 
-Only three of the six values the event reports have a `ClientCapabilities` property to seed
-them back on the next startup — `UnpairedAccessEnabled`, `MinPinLength`, and `StaticPin`.
-Reapply those three and that part of the server's change survives a restart. The other
-three — whether Pairing PSK, dynamic PIN, or static PIN is *enabled*, and the record-mode
-`psk_id` — have no `ClientCapabilities` counterpart today, so a server-side change to any of
-them is always lost on restart no matter what your app persists.
+Every setting the event reports has a `ClientCapabilities` property to seed it back on the next
+startup — `UnpairedAccessEnabled`, `MinPinLength`, `StaticPin`, `PairingPskEnabled`,
+`DynamicPinEnabled`, `StaticPinEnabled` and `RecordModePskId`. Persist them when the event
+fires, reapply them to the `ClientCapabilities` you construct the client with, and the
+server's change survives a restart. `PairingPskReplaced` is not one of those settings — it's a
+staleness signal, not a value to persist: when it's true, any pairing token you already handed
+out has stopped being valid, and the replaced PSK itself round-trips through your
+`IPairingRecordStore`, not through `ClientCapabilities`.
+
+Note that `DynamicPinEnabled`/`StaticPinEnabled` are not the same as listing the method in
+`PinPairingMethods`. That list means *implemented*: a method omitted from it is reported to
+the server as absent and can never be re-enabled, whereas a listed-but-disabled method
+reports `enabled: false` and the server can turn it back on. `RecordModePskId` is ignored
+unless it still names a shared-PSK record in your store, since a server may have removed that
+record while your app was down.
 
 ## Architecture
 

@@ -279,13 +279,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
         _unpairedAccessEnabled = _capabilities.UnpairedAccessEnabled;
 
-        // Implemented methods start enabled: before this setting existed, "listed in
-        // PinPairingMethods" was what made a method live, and that must stay the default.
-        _pairingPskEnabled = true;
-        _dynamicPinEnabled = _capabilities.PinPairingMethods.Contains("dynamic_pin");
-        _staticPinEnabled = _capabilities.PinPairingMethods.Contains("static_pin");
+        // Implemented methods start enabled unless the app says otherwise. The three flags
+        // exist so an app can reapply a server's set-pairing-config change on the next start
+        // (#131); ANDing each with PinPairingMethods keeps "not implemented" and "implemented
+        // but disabled" distinct, which is what the spec keys different behaviour off, and
+        // keeps a default-constructed ClientCapabilities reporting exactly what it did before
+        // these members existed.
+        _pairingPskEnabled = _capabilities.PairingPskEnabled;
+        _dynamicPinEnabled = _capabilities.DynamicPinEnabled && _capabilities.PinPairingMethods.Contains("dynamic_pin");
+        _staticPinEnabled = _capabilities.StaticPinEnabled && _capabilities.PinPairingMethods.Contains("static_pin");
         _effectiveMinPinLength = _capabilities.MinPinLength;
         _effectiveStaticPin = _capabilities.StaticPin;
+        _recordModePskId = SeedRecordModePskId();
 
         _playerState = new PlayerState
         {
@@ -1573,6 +1578,40 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private static bool IsSharedPskRecord(PairingRecord record)
         => record.Category == PskCategory.LongTerm && record.ServerId is null;
+
+    /// <summary>
+    /// Restores the record-mode fallback target the app persisted from
+    /// <see cref="PairingConfigChangedEventArgs.RecordModePskId"/>, but only while it still
+    /// names a shared-PSK record — the same constraint <c>set-pairing-config</c> validates
+    /// against (management.md:111). A server can remove that record with
+    /// <c>management/remove-record</c> while the app is down, and reporting a
+    /// <c>psk_id</c> no record backs would tell the next server a fallback exists that
+    /// cannot be used.
+    /// </summary>
+    private string? SeedRecordModePskId()
+    {
+        string? seeded = _capabilities.RecordModePskId;
+        if (seeded is null)
+        {
+            return null;
+        }
+
+        bool valid;
+        lock (_pairingStoreLock)
+        {
+            valid = _pairingStore?.List().Any(r => r.PskId == seeded && IsSharedPskRecord(r)) == true;
+        }
+
+        if (valid)
+        {
+            return seeded;
+        }
+
+        _logger.LogWarning(
+            "ClientCapabilities.RecordModePskId '{PskId}' names no shared-PSK record; record-mode fallback starts unset",
+            seeded);
+        return null;
+    }
 
     /// <summary>
     /// Builds the supported_pair_methods list for the encrypted client/hello: every

@@ -146,7 +146,7 @@ Once an attempt has started it is bounded by `SendspinClientOptions.PairingAttem
 
 A paired server can read and change the client's pairing configuration through `management/*`. The SDK applies those changes to its own state and raises `PairingConfigChanged` — it deliberately does **not** write to the `ClientCapabilities` instance your app owns.
 
-If you do not persist what that event reports and reapply it at startup, a server's configuration changes silently revert on the next launch. Note that only some of the reported values currently have a `ClientCapabilities` counterpart to reapply them to; see the event's documentation for which.
+If you do not persist what that event reports and reapply it at startup, a server's configuration changes silently revert on the next launch. Every setting the event reports has a `ClientCapabilities` property to reapply it to; see `ISendspinClient.PairingConfigChanged`'s documentation for the full list.
 
 ---
 
