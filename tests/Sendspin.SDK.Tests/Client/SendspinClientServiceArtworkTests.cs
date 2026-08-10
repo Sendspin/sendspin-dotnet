@@ -23,12 +23,15 @@ public class SendspinClientServiceArtworkTests
     public void ClientHello_AdvertisesAllConfiguredArtworkChannels()
     {
         var (client, connection, _) = TestClient.Create(configure: options =>
-            options.Capabilities = new ClientCapabilities
+            options with
             {
-                ArtworkChannels = new List<ArtworkChannelSpec>
+                Capabilities = new ClientCapabilities
                 {
-                    new() { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = 512, MediaHeight = 512 },
-                    new() { Source = ArtworkSources.Artist, Format = "png", MediaWidth = 256, MediaHeight = 256 },
+                    ArtworkChannels = new List<ArtworkChannelSpec>
+                    {
+                        new() { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = 512, MediaHeight = 512 },
+                        new() { Source = ArtworkSources.Artist, Format = "png", MediaWidth = 256, MediaHeight = 256 },
+                    },
                 },
             });
         using var _c = client;
@@ -65,11 +68,14 @@ public class SendspinClientServiceArtworkTests
     public void ClientHello_CapsAdvertisedChannelsAtFour()
     {
         var (client, connection, _) = TestClient.Create(configure: options =>
-            options.Capabilities = new ClientCapabilities
+            options with
             {
-                ArtworkChannels = Enumerable.Range(0, 6)
-                    .Select(i => new ArtworkChannelSpec { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = i, MediaHeight = i })
-                    .ToList(),
+                Capabilities = new ClientCapabilities
+                {
+                    ArtworkChannels = Enumerable.Range(0, 6)
+                        .Select(i => new ArtworkChannelSpec { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = i, MediaHeight = i })
+                        .ToList(),
+                },
             });
         using var _c = client;
 

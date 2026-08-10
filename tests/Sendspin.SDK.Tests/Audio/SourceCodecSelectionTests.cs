@@ -35,11 +35,11 @@ public class SourceCodecSelectionTests
     {
         var capture = new FakeCaptureDevice();
         var (client, connection, session) = TestClient.Create(
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = new ClientCapabilities { Roles = { "source@v1" }, SourceRoleSupport = sourceSupport };
-                options.CaptureDevice = capture;
-                options.SourceEncoderFactory = new StubEncoderFactory();
+                Capabilities = new ClientCapabilities { Roles = { "source@v1" }, SourceRoleSupport = sourceSupport },
+                CaptureDevice = capture,
+                SourceEncoderFactory = new StubEncoderFactory(),
             });
 
         // Bound to ServerId so the source trust gate (user trust) is satisfied, same as

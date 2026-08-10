@@ -24,12 +24,12 @@ public class PinPresentationTests
     {
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] };
-                options.PairingRecordStore = new InMemoryPairingRecordStore();
-                options.PinLockoutStore = new InMemoryPinLockoutStore();
-                options.PresentPinAsync = presentPin;
+                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                PairingRecordStore = new InMemoryPairingRecordStore(),
+                PinLockoutStore = new InMemoryPinLockoutStore(),
+                PresentPinAsync = presentPin,
             });
 
         // The CPace exchange is bound to the Noise handshake hash, which the test's server

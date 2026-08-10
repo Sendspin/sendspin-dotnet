@@ -43,12 +43,12 @@ public class PairingConfigOwnershipTests
         var window = new PairingWindow();
         window.Open();
         var (client, connection, session) = TestClient.Create(
-            configure: options =>
+            configure: options => options with
             {
-                options.PairingRecordStore = store;
-                options.Capabilities = capabilities;
-                options.PinLockoutStore = pinLockoutStore;
-                options.PairingWindow = window;
+                PairingRecordStore = store,
+                Capabilities = capabilities,
+                PinLockoutStore = pinLockoutStore,
+                PairingWindow = window,
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -98,7 +98,7 @@ public class PairingConfigOwnershipTests
         var capabilities = new ClientCapabilities { UnpairedAccessEnabled = true };
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options => options.Capabilities = capabilities);
+            configure: options => options with { Capabilities = capabilities });
         using var _c = client;
         var events = new List<PairingConfigChangedEventArgs>();
         client.PairingConfigChanged += (_, e) => events.Add(e);

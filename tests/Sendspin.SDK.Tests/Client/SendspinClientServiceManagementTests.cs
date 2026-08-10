@@ -22,7 +22,7 @@ public class SendspinClientServiceManagementTests
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, ServerId));
         var (client, connection, session) = TestClient.Create(
-            configure: options => options.PairingRecordStore = store);
+            configure: options => options with { PairingRecordStore = store });
 
         // The management tests remove their own record by psk_id, so the session must be
         // keyed with the same PSK the store holds.
@@ -341,7 +341,7 @@ public class SendspinClientServiceManagementTests
         var store = new InMemoryPairingRecordStore();
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options => options.PairingRecordStore = store);
+            configure: options => options with { PairingRecordStore = store });
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -450,7 +450,7 @@ public class SendspinClientServiceManagementTests
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, ServerId));
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options => options.PairingRecordStore = store);
+            configure: options => options with { PairingRecordStore = store });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
 

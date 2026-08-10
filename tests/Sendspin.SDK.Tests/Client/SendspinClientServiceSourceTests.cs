@@ -36,19 +36,19 @@ public class SendspinClientServiceSourceTests
         var (client, connection, session) = TestClient.Create(
             trust,
             unpairedAccess,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = caps;
-                options.CaptureDevice = capture;
+                Capabilities = caps,
+                CaptureDevice = capture,
 
                 // Clock already converged: source@v1 requires sync, so the initial client/state
                 // (and with it the line-sense reporting gate) would otherwise stay deferred —
                 // InitialClientStateGatingTests owns the deferred path. The offset is what
                 // makes the server-domain conversion observable; see ClockOffsetUs.
-                options.ClockSynchronizer = new ConvergedClockSynchronizer
+                ClockSynchronizer = new ConvergedClockSynchronizer
                 {
                     OffsetMicroseconds = ClockOffsetUs,
-                };
+                },
             });
 
         // The source trust gate reads the matched PSK, which is bound to the server id.
@@ -315,11 +315,11 @@ public class SendspinClientServiceSourceTests
         var capture = new FakeCaptureDevice();
         var (client, connection, session) = TestClient.Create(
             PskCategory.LongTerm,
-            configure: options =>
+            configure: options => options with
             {
-                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
-                options.CaptureDevice = capture;
-                options.ClockSynchronizer = new ConvergedClockSynchronizer();
+                Capabilities = new ClientCapabilities { Roles = ["source@v1"] },
+                CaptureDevice = capture,
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -396,10 +396,10 @@ public class SendspinClientServiceSourceTests
         var capture = new FakeCaptureDevice();
         var (client, connection, _) = TestClient.Create(
             category,
-            configure: options =>
+            configure: options => options with
             {
-                options.CaptureDevice = capture;
-                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
+                CaptureDevice = capture,
+                Capabilities = new ClientCapabilities { Roles = ["source@v1"] },
             });
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -478,10 +478,10 @@ public class SendspinClientServiceSourceTests
         var capture = new FakeCaptureDevice();
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
-            configure: options =>
+            configure: options => options with
             {
-                options.CaptureDevice = capture;
-                options.Capabilities = new ClientCapabilities { Roles = ["source@v1"] };
+                CaptureDevice = capture,
+                Capabilities = new ClientCapabilities { Roles = ["source@v1"] },
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();

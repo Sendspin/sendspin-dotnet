@@ -17,7 +17,7 @@ public class SendspinClientServiceExternalSourceTests
     {
         var (client, connection, _) = TestClient.Create(
             connected: connected,
-            configure: options => options.ClockSynchronizer = new FakeClockSynchronizer { IsConverged = true });
+            configure: options => options with { ClockSynchronizer = new FakeClockSynchronizer { IsConverged = true } });
         return (client, connection);
     }
 

@@ -21,10 +21,10 @@ public class SendspinClientServiceStaticDelayTests
     {
         var sync = new KalmanClockSynchronizer();
         var store = new FakeStaticDelayStore();
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = sync;
-            options.StaticDelayStore = store;
+            ClockSynchronizer = sync,
+            StaticDelayStore = store,
         });
         using var _c = client;
 
@@ -40,7 +40,7 @@ public class SendspinClientServiceStaticDelayTests
     public void SetStaticDelay_ClampsToSpecRange(int requested, double expected)
     {
         var sync = new KalmanClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(configure: options => options.ClockSynchronizer = sync);
+        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = sync });
         using var _c = client;
 
         connection.RaiseTextMessageReceived(SetStaticDelayCommand(requested));
@@ -53,11 +53,11 @@ public class SendspinClientServiceStaticDelayTests
     {
         var sync = new KalmanClockSynchronizer();
         var store = new FakeStaticDelayStore();
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = sync;
-            options.Capabilities = new ClientCapabilities { SupportsSetStaticDelay = false };
-            options.StaticDelayStore = store;
+            ClockSynchronizer = sync,
+            Capabilities = new ClientCapabilities { SupportsSetStaticDelay = false },
+            StaticDelayStore = store,
         });
         using var _c = client;
 
@@ -72,10 +72,10 @@ public class SendspinClientServiceStaticDelayTests
     {
         var sync = new KalmanClockSynchronizer();
         var store = new FakeStaticDelayStore { Stored = 300.0 };
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = sync;
-            options.StaticDelayStore = store;
+            ClockSynchronizer = sync,
+            StaticDelayStore = store,
         });
         using var _c = client;
 
@@ -88,7 +88,7 @@ public class SendspinClientServiceStaticDelayTests
     public void NoStore_HandshakeLeavesDelayUntouched()
     {
         var sync = new KalmanClockSynchronizer { StaticDelayMs = 42.0 };
-        var (client, connection, _) = TestClient.Create(configure: options => options.ClockSynchronizer = sync);
+        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = sync });
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "player@v1");
@@ -102,15 +102,15 @@ public class SendspinClientServiceStaticDelayTests
     {
         // Clock already converged: the initial client/state these tests inspect is otherwise
         // deferred until sync convergence (see InitialClientStateGatingTests).
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = new ConvergedClockSynchronizer();
-            options.Capabilities = new ClientCapabilities
+            ClockSynchronizer = new ConvergedClockSynchronizer(),
+            Capabilities = new ClientCapabilities
             {
                 RequiredLeadTimeMs = 200,
                 MinBufferMs = 150,
                 SupportsSetStaticDelay = true,
-            };
+            },
         });
         using var _c = client;
 
@@ -126,10 +126,10 @@ public class SendspinClientServiceStaticDelayTests
     [Fact]
     public async Task InitialClientState_OmitsSupportedCommandsWhenCapabilityDisabled()
     {
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = new ConvergedClockSynchronizer();
-            options.Capabilities = new ClientCapabilities { SupportsSetStaticDelay = false };
+            ClockSynchronizer = new ConvergedClockSynchronizer(),
+            Capabilities = new ClientCapabilities { SupportsSetStaticDelay = false },
         });
         using var _c = client;
 
@@ -142,10 +142,10 @@ public class SendspinClientServiceStaticDelayTests
     [Fact]
     public async Task UpdateTimingAsync_WhenConnected_ResendsStateWithNewValues()
     {
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = new ConvergedClockSynchronizer();
-            options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 };
+            ClockSynchronizer = new ConvergedClockSynchronizer(),
+            Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 },
         });
         using var _c = client;
 
@@ -165,10 +165,10 @@ public class SendspinClientServiceStaticDelayTests
     public async Task UpdateTimingAsync_WhenDisconnected_AppliesValuesWithoutSending()
     {
         var (client, connection, _) = TestClient.Create(
-            configure: options =>
+            configure: options => options with
             {
-                options.ClockSynchronizer = new ConvergedClockSynchronizer();
-                options.Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 };
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
+                Capabilities = new ClientCapabilities { RequiredLeadTimeMs = 200, MinBufferMs = 150 },
             },
             connected: false);
         using var _c = client;
@@ -192,10 +192,10 @@ public class SendspinClientServiceStaticDelayTests
         // needs the initial client/state actually sent, which a player defers until sync.
         var sync = new ConvergedClockSynchronizer { StaticDelayMs = 12.0 };
         var store = new FakeStaticDelayStore { ThrowOnLoad = true };
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = sync;
-            options.StaticDelayStore = store;
+            ClockSynchronizer = sync,
+            StaticDelayStore = store,
         });
         using var _c = client;
 
@@ -212,10 +212,10 @@ public class SendspinClientServiceStaticDelayTests
     {
         var sync = new KalmanClockSynchronizer();
         var store = new FakeStaticDelayStore { ThrowOnSave = true };
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(configure: options => options with
         {
-            options.ClockSynchronizer = sync;
-            options.StaticDelayStore = store;
+            ClockSynchronizer = sync,
+            StaticDelayStore = store,
         });
         using var _c = client;
 
