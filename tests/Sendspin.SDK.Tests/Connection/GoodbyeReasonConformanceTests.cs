@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Protocol.Messages;
@@ -47,8 +48,9 @@ public class GoodbyeReasonConformanceTests : IAsyncDisposable
         var goodbye = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var allReceived = new List<string>();
         _server.ClientConnected += (_, c) =>
-            c.OnMessage = text =>
+            c.OnText = data =>
             {
+                string text = Encoding.UTF8.GetString(data);
                 lock (allReceived)
                 {
                     allReceived.Add(text);

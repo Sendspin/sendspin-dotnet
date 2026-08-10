@@ -9,7 +9,7 @@ namespace Sendspin.SDK.Connection;
 
 /// <summary>
 /// Wraps a System.Net.WebSockets.WebSocket accepted by SimpleWebSocketServer.
-/// Provides event-based message dispatch (OnMessage, OnBinary, OnClose, OnError)
+/// Provides event-based message dispatch (OnText, OnBinary, OnClose, OnError)
 /// and send methods, replacing Fleck's IWebSocketConnection.
 /// </summary>
 public sealed class WebSocketClientConnection : IAsyncDisposable
@@ -30,8 +30,14 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
     /// <summary>The HTTP request path used during the WebSocket upgrade.</summary>
     public string Path { get; }
 
-    /// <summary>Raised when a text message is received.</summary>
-    public Action<string>? OnMessage { get; set; }
+    /// <summary>
+    /// Raised when a text message is received, carrying the frame's raw payload bytes.
+    /// Bytes rather than a decoded string because the Noise prologue binds the exact bytes
+    /// of the two init messages: decoding here and re-encoding downstream is lossy for
+    /// input that is not valid UTF-8, and the loss is unrecoverable by the time the framing
+    /// sees the frame (#124).
+    /// </summary>
+    public Action<byte[]>? OnText { get; set; }
 
     /// <summary>Raised when a binary message is received.</summary>
     public Action<byte[]>? OnBinary { get; set; }
@@ -173,8 +179,7 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
 
                 if (result.MessageType == WebSocketMessageType.Text)
                 {
-                    var text = Encoding.UTF8.GetString(data);
-                    OnMessage?.Invoke(text);
+                    OnText?.Invoke(data);
                 }
                 else if (result.MessageType == WebSocketMessageType.Binary)
                 {

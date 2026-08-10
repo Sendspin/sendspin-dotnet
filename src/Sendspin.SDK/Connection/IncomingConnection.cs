@@ -43,7 +43,7 @@ public sealed class IncomingConnection : ISendspinConnection
         ServerUri = new Uri($"ws://{clientIp}:{clientPort}");
 
         // Wire up events
-        _socket.OnMessage = OnTextMessage;
+        _socket.OnText = OnTextMessage;
         _socket.OnBinary = OnBinaryMessage;
         _socket.OnClose = OnClose;
         _socket.OnError = OnError;
@@ -181,7 +181,10 @@ public sealed class IncomingConnection : ISendspinConnection
         }
     }
 
-    private void OnTextMessage(string message) => DispatchInbound(WireFrame.FromText(message));
+    // Built from the received bytes, not from a decoded string: the Noise prologue binds the
+    // exact wire bytes of both init messages, and WireFrame.FromText would re-encode them
+    // (#124). This mirrors what SendspinConnection already does on the dial path.
+    private void OnTextMessage(byte[] data) => DispatchInbound(new WireFrame(WireFrameKind.Text, data));
 
     private void OnBinaryMessage(byte[] data) => DispatchInbound(new WireFrame(WireFrameKind.Binary, data));
 

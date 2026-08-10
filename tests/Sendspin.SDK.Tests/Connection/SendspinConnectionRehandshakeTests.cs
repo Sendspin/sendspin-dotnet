@@ -30,7 +30,7 @@ public class SendspinConnectionRehandshakeTests
         var binary = Channel.CreateUnbounded<byte[]>();
         server.ClientConnected += (_, c) =>
         {
-            c.OnMessage = t => text.Writer.TryWrite(t);
+            c.OnText = data => text.Writer.TryWrite(Encoding.UTF8.GetString(data));
             c.OnBinary = b => binary.Writer.TryWrite(b);
             accepted.TrySetResult(c);
         };
