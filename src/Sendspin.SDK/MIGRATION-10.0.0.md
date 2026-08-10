@@ -8,13 +8,15 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 **Server requirement**: a 10.x client requires a server speaking the encrypted protocol — `aiosendspin >= 7.0.0`. There is no negotiation and no fallback: against an older server the handshake fails. **The 9.x line remains maintained** for deployments that need to talk to those servers.
 
+**Pairing requires `aiosendspin >= 9.0.0`**, a higher floor than connecting. 9.0.0 is the first release carrying the current pairing wire shape: `server/activate` names the chosen method inside a `pairing` object, with `pin_length` alongside it, rather than in a flat `selected_pair_method` field. 7.0.0 and 8.0.0 still send the old shape, so a 10.x client reads the offered method as absent and refuses every pairing attempt with `pair/abort` reason `method_not_supported`. Connecting and playback — including unpaired access — are unaffected and still work against `>= 7.0.0`.
+
 ---
 
 ## Breaking Changes Summary
 
 | Area | Change | Impact |
 |------|--------|--------|
-| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin >= 7.0.0` |
+| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin >= 7.0.0`, and `>= 9.0.0` to pair |
 | Client identity | New required persistent Curve25519 identity | **High** — silent data loss if unpersisted |
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
 | Pairing | New: Pairing PSK, dynamic PIN, static PIN | Medium — new UX surface |
@@ -167,6 +169,7 @@ The spec requires a source to run only on a paired connection, and the SDK enfor
 ## 6. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
+- [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
 - [ ] `Identity` comes from a **store**, not `Generate()` — verify by restarting the app twice and confirming the pairing survives
 - [ ] The same identity and pairing store are shared across dial and listen modes
 - [ ] `PairingRecordStore` is configured and writes somewhere durable

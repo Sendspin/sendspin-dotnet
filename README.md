@@ -29,8 +29,16 @@ Pick the line that matches your server.
 
 | SDK | Transport | Requires | Status |
 |---|---|---|---|
-| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin >= 7.0.0` | Current |
+| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin >= 7.0.0`, and `>= 9.0.0` to pair | Current |
 | **9.x** | Plaintext | Any `aiosendspin` | Maintained for pre-encryption servers |
+
+The floor differs by capability. Connecting and playing back, including over unpaired
+access, works against `aiosendspin >= 7.0.0`. **Pairing needs `>= 9.0.0`**: that is the
+first release carrying the current pairing wire shape, where `server/activate` names the
+method in a `pairing` object rather than a flat `selected_pair_method` field. Against 7.0.0
+or 8.0.0 a 10.x client refuses every pairing attempt with `method_not_supported`, because
+the method it is offered reads as absent. The interop workflow runs against 9.0.0, so the
+pairing floor is exercised; the 7.0.0 playback floor is not currently covered by CI.
 
 The 9.x line stays maintained for now; it is not end-of-life. If you are on 9.x and your
 server supports the encrypted protocol, see
