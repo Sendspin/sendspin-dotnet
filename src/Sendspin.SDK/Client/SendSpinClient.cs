@@ -222,10 +222,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public event EventHandler<ServerActivatePayload>? ServerActivateReceived;
 
-    /// <summary>
-    /// Raised when a Pairing PSK exchange completes and the long-term record has been
-    /// persisted (argument: the paired server id).
-    /// </summary>
+    /// <inheritdoc />
     public event EventHandler<string>? PairingCompleted;
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
@@ -273,7 +270,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger,
                 IsSourceStreamingPermitted,
                 _sourceEncoderFactory,
-                _capabilities.SourceSupport?.Codec);
+                _capabilities.SourceRoleSupport?.Codec);
         }
         _audioPipeline = options.AudioPipeline;
         _staticDelayStore = options.StaticDelayStore;
@@ -440,17 +437,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool RequiresClockSync()
         => _capabilities.Roles.Any(r => r.StartsWith("player@", StringComparison.Ordinal)) || HasSourceRole();
 
-    /// <summary>
-    /// Reports line-sense signal presence to the server via client/state (source role).
-    /// No-op unless the source role is configured with line sensing, and skipped while the
-    /// connection's initial client/state is still deferred pending clock sync — a source-only
-    /// delta must not become the first client/state the server sees. The initial message does
-    /// not carry the signal, so a change made inside that window is reported by the app's next
-    /// call after sync converges.
-    /// </summary>
+    /// <inheritdoc />
     public async Task SetSourceSignalAsync(bool present)
     {
-        if (!HasSourceRole() || _capabilities.SourceSupport?.LineSense != true)
+        if (!HasSourceRole() || _capabilities.SourceRoleSupport?.LineSense != true)
             return;
 
         if (!_initialClientStateSent)
@@ -519,7 +509,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             sourceSupport: HasSourceRole()
                 ? new SourceSupport
                 {
-                    Features = _capabilities.SourceSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
+                    Features = _capabilities.SourceRoleSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
             trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",

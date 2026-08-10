@@ -47,7 +47,11 @@ public class SendspinClientServicePairingTests
         var (client, connection, store) = Create();
         using var _c = client;
         string? pairedWith = null;
-        client.PairingCompleted += (_, id) => pairedWith = id;
+        // Through the interface: #112 — an app coded against ISendspinClient could already
+        // start pairing and be told its PSK went stale, so it must be able to observe
+        // pairing finish too.
+        ISendspinClient asInterface = client;
+        asInterface.PairingCompleted += (_, id) => pairedWith = id;
 
         connection.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");

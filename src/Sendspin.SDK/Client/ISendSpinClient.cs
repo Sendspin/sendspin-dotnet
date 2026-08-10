@@ -188,6 +188,16 @@ public interface ISendspinClient : IAsyncDisposable
     Task ExitExternalSourceAsync();
 
     /// <summary>
+    /// Reports line-sense signal presence to the server via client/state (source role).
+    /// No-op unless the source role is configured with line sensing, and skipped while the
+    /// connection's initial client/state is still deferred pending clock sync — a source-only
+    /// delta must not become the first client/state the server sees. The initial message does
+    /// not carry the signal, so a change made inside that window is reported by the app's next
+    /// call after sync converges.
+    /// </summary>
+    Task SetSourceSignalAsync(bool present);
+
+    /// <summary>
     /// Clears the audio buffer, causing the pipeline to restart buffering.
     /// Use this when audio sync parameters change and you want immediate effect.
     /// </summary>
@@ -313,6 +323,12 @@ public interface ISendspinClient : IAsyncDisposable
     /// previously returned by <see cref="EnsurePairingPsk"/> has stopped being current.
     /// </summary>
     event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
+
+    /// <summary>
+    /// Raised when a Pairing PSK or PIN pairing exchange completes, with the paired
+    /// server id. Fires once per completed attempt.
+    /// </summary>
+    event EventHandler<string>? PairingCompleted;
 
     /// <summary>
     /// Raised when a pairing attempt is gesture-gated and no pairing window is open. Prompt
