@@ -1,9 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
-using Sendspin.SDK.Audio;
-using Sendspin.SDK.Audio.Source;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
-using Sendspin.SDK.Connection.Noise.Pairing;
 using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Tests.Client;
