@@ -133,6 +133,24 @@ public class PairingWindowTests
         Assert.Equal(2, fired);
     }
 
+    [Fact]
+    public void StateChanged_ContainsAThrowingSubscriber()
+    {
+        // Every connection sharing the window subscribes, and the raise is synchronous on the
+        // caller's thread -- for management/open-pairing-window, one connection's receive loop,
+        // whose catch does not cover an arbitrary handler fault. A throwing handler must not
+        // reach the caller or stop the other subscribers from seeing the opening.
+        var window = new PairingWindow();
+        int reached = 0;
+        window.StateChanged += (_, _) => throw new InvalidOperationException("subscriber fault");
+        window.StateChanged += (_, _) => Interlocked.Increment(ref reached);
+
+        window.Open();
+        window.Close();
+
+        Assert.Equal(2, reached);
+    }
+
     /// <summary>Clock stub: only GetUtcNow matters, since the window expires lazily.</summary>
     private sealed class FakeClock : TimeProvider
     {

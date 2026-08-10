@@ -42,7 +42,11 @@ public sealed class PairingWindow
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    /// <summary>Raised when the window opens or closes. Not raised on silent expiry.</summary>
+    /// <summary>
+    /// Raised when the window opens or closes. Not raised on silent expiry. Subscribers are
+    /// invoked independently: an exception from one neither reaches the other subscribers nor
+    /// the caller of <see cref="Open"/>/<see cref="Close"/>.
+    /// </summary>
     public event EventHandler? StateChanged;
 
     /// <summary>Whether an unexpired opening is available.</summary>
@@ -67,7 +71,7 @@ public sealed class PairingWindow
             _openedAt = _timeProvider.GetUtcNow();
         }
 
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     /// <summary>
@@ -82,7 +86,7 @@ public sealed class PairingWindow
             _openedAt = null;
         }
 
-        StateChanged?.Invoke(this, EventArgs.Empty);
+        RaiseStateChanged();
     }
 
     /// <summary>
@@ -101,6 +105,43 @@ public sealed class PairingWindow
 
             _openedAt = null;
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Raises <see cref="StateChanged"/> so that one subscriber cannot affect another.
+    /// </summary>
+    /// <remarks>
+    /// Every connection sharing this window subscribes, and the raise is synchronous on the
+    /// caller's thread — which for <c>management/open-pairing-window</c> is one connection's
+    /// receive loop. A subscriber that throws would otherwise propagate out of
+    /// <see cref="Open"/> into that connection's message dispatch and tear it down over
+    /// another connection's fault, and would stop the remaining subscribers from ever seeing
+    /// the opening. The window itself is already updated before this runs, so a swallowed
+    /// handler fault costs that handler's reaction and nothing else.
+    /// </remarks>
+    private void RaiseStateChanged()
+    {
+        var handlers = StateChanged;
+        if (handlers is null)
+        {
+            return;
+        }
+
+        foreach (var handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler)handler)(this, EventArgs.Empty);
+            }
+#pragma warning disable RCS1075 // Empty catch of Exception: deliberate, see the comment inside.
+            catch (Exception)
+            {
+                // Deliberately swallowed and deliberately not rethrown anywhere: this type is
+                // constructed by the application (new PairingWindow()) and has no logger, and
+                // containing the fault is the entire purpose of this loop.
+            }
+#pragma warning restore RCS1075
         }
     }
 
