@@ -1236,7 +1236,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 case MessageTypes.ManagementGetPairingConfig:
                 case MessageTypes.ManagementSetPairingConfig:
                 case MessageTypes.ManagementOpenPairingWindow:
-                    HandleManagement(messageType!, json);
+                    HandleManagement(messageType, json);
                     break;
 
                 case MessageTypes.ServerUnpair:

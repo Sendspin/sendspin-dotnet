@@ -56,7 +56,7 @@ public static class MessageSerializer
     /// <exception cref="JsonException">
     /// The document is not a JSON object, or has no string <c>type</c> member. Both are
     /// malformed input rather than an unrecognised message: an unknown-but-well-formed
-    /// type is returned as-is (null) for the caller to ignore.
+    /// type returns <see langword="null"/> for the caller to ignore.
     /// </exception>
     public static IMessage? Deserialize(string json)
     {
@@ -97,7 +97,7 @@ public static class MessageSerializer
     /// unrecognised message: an unknown-but-well-formed type is returned as-is for the
     /// caller to ignore.
     /// </exception>
-    public static string? GetMessageType(string json)
+    public static string GetMessageType(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -117,7 +117,9 @@ public static class MessageSerializer
             throw new JsonException($"Message \"type\" member is {typeProp.ValueKind}, not a string.");
         }
 
-        return typeProp.GetString();
+        // ValueKind == String guarantees a non-null result; JsonElement.GetString() is
+        // annotated nullable only because it also covers JsonValueKind.Null.
+        return typeProp.GetString()!;
     }
 
     /// <summary>
@@ -129,40 +131,60 @@ public static class MessageSerializer
     /// unrecognised message: an unknown-but-well-formed type is returned as-is for the
     /// caller to ignore.
     /// </exception>
-    public static string? GetMessageType(ReadOnlySpan<byte> utf8Json)
+    public static string GetMessageType(ReadOnlySpan<byte> utf8Json)
     {
         var reader = new Utf8JsonReader(utf8Json);
 
+        // The !reader.Read() branch is defensive rather than reachable: with a
+        // single-segment, final-block reader (this constructor), Read() throws on empty
+        // or whitespace-only input instead of returning false -- there is no "need more
+        // data" case for a reader that already has the whole, final buffer.
         if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
         {
-            throw new JsonException("Message root is not a JSON object.");
+            throw new JsonException($"Message root is {reader.TokenType}, not a JSON object.");
         }
 
+        // Root-only, matching the string overload: members of the root object sit at depth
+        // 1, so a "type" nested inside another member (such as a payload) must not classify
+        // the document.
+        //
+        // Record the latest match rather than stopping at the first: duplicate root-level
+        // "type" members are legal JSON (RFC 8259 leaves duplicate-key semantics to the
+        // implementation), and JsonDocument.TryGetProperty -- what the string overload
+        // uses, and what JsonSerializer.Deserialize's typed routing agrees with -- is
+        // last-wins. Deferring the non-string throw until the scan finishes is what makes
+        // that possible: a `{"type":42,"type":"a"}` document must resolve to "a", not throw
+        // on the first, superseded value.
+        //
+        // Draining the reader to the end of the document (rather than returning as soon as
+        // the loop's target is settled) is what surfaces trailing content after the closing
+        // brace as a JsonException on a subsequent Read().
+        bool found = false;
+        JsonTokenType valueToken = default;
         string? messageType = null;
         while (reader.Read())
         {
-            // Root-only, matching the string overload: members of the root object sit at
-            // depth 1, so a "type" nested inside another member (such as a payload) must
-            // not classify the document. Once found, keep draining the reader instead of
-            // returning immediately -- a subsequent Read() surfaces trailing content after
-            // the closing brace (e.g. `{"type":"a"}x`) as a JsonException, which is what
-            // catches malformed input the first match would otherwise let through.
-            if (messageType is null &&
-                reader.CurrentDepth == 1 &&
+            if (reader.CurrentDepth == 1 &&
                 reader.TokenType == JsonTokenType.PropertyName &&
                 reader.ValueTextEquals("type"u8))
             {
                 reader.Read();
-                if (reader.TokenType != JsonTokenType.String)
-                {
-                    throw new JsonException(
-                        $"Message \"type\" member is {reader.TokenType}, not a string.");
-                }
-
-                messageType = reader.GetString();
+                found = true;
+                valueToken = reader.TokenType;
+                messageType = valueToken == JsonTokenType.String ? reader.GetString() : null;
             }
         }
 
-        return messageType ?? throw new JsonException("Message has no \"type\" member.");
+        if (!found)
+        {
+            throw new JsonException("Message has no \"type\" member.");
+        }
+
+        if (valueToken != JsonTokenType.String)
+        {
+            throw new JsonException($"Message \"type\" member is {valueToken}, not a string.");
+        }
+
+        return messageType!;
     }
 }

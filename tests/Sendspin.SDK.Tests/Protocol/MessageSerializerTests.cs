@@ -259,7 +259,41 @@ public class MessageSerializerTests
         Assert.Throws<JsonException>(() => MessageSerializer.Deserialize("""{"type":null}"""));
     }
 
-    private static byte[] Utf8(string json) => System.Text.Encoding.UTF8.GetBytes(json);
+    // #107 review: a duplicate root-level "type" member is legal JSON (RFC 8259 leaves
+    // duplicate-key semantics to the implementation), and the two overloads must resolve
+    // it identically. JsonDocument.TryGetProperty (the string overload) is last-wins, and
+    // so is JsonSerializer.Deserialize's typed routing, so the span overload must agree
+    // rather than keep its first match.
+    [Fact]
+    public void GetMessageType_DuplicateTypeMember_LastString_BothOverloadsAgree()
+    {
+        const string json = """{"type":"a","type":"b"}""";
+        Assert.Equal("b", MessageSerializer.GetMessageType(json));
+        Assert.Equal("b", MessageSerializer.GetMessageType(Utf8(json)));
+    }
+
+    [Fact]
+    public void GetMessageType_DuplicateTypeMember_LastNonString_BothOverloadsThrow()
+    {
+        const string json = """{"type":"a","type":42}""";
+        Assert.Throws<JsonException>(() => MessageSerializer.GetMessageType(json));
+        Assert.Throws<JsonException>(() => MessageSerializer.GetMessageType(Utf8(json)));
+    }
+
+    [Fact]
+    public void GetMessageType_DuplicateTypeMember_FirstNonStringLastString_BothOverloadsAgree()
+    {
+        const string json = """{"type":42,"type":"a"}""";
+        Assert.Equal("a", MessageSerializer.GetMessageType(json));
+        Assert.Equal("a", MessageSerializer.GetMessageType(Utf8(json)));
+    }
+
+    [Fact]
+    public void GetMessageType_Utf8_EmptyInput_Throws()
+    {
+        var ex = Assert.ThrowsAny<JsonException>(() => MessageSerializer.GetMessageType(ReadOnlySpan<byte>.Empty));
+        Assert.IsType<JsonReaderException>(ex);
+    }
 
     [Fact]
     public void ClientHello_NeverSerializesClientIdOrVersion()
@@ -319,4 +353,6 @@ public class MessageSerializerTests
         Assert.Contains("\"type\":\"client/pair-pending\"", json, StringComparison.Ordinal);
         Assert.Contains("\"pairing_index\":3", json, StringComparison.Ordinal);
     }
+
+    private static byte[] Utf8(string json) => System.Text.Encoding.UTF8.GetBytes(json);
 }
