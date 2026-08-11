@@ -2561,6 +2561,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         // handing out a token for a record that no longer exists, with no
                         // PairingConfigChanged to say so. Upserting first means a refusal here
                         // leaves the old record intact.
+                        //
+                        // The cost: a new record has a different psk_id than the one it replaces
+                        // (it is derived from the PSK), so this needs transient capacity for N+1
+                        // records, not N. A legitimate rotation can therefore be refused on a
+                        // store already at capacity, where remove-then-upsert would have
+                        // succeeded. That trade is intentional — a full store genuinely cannot
+                        // hold another record, storage_exhausted is an honest answer to that, and
+                        // it is recoverable: the server can free a slot with management/
+                        // remove-record and retry. See PairingPskOperations.Rotate for the
+                        // opposite ordering and why it differs.
                         if (!_pairingStore!.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing)))
                         {
                             result.Result = "storage_exhausted";
