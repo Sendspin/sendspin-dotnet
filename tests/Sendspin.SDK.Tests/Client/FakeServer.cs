@@ -17,7 +17,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// server/activate that completes the host's handshake and sets its arbitration priority.
 /// Captures any client/goodbye reason the host sends back through the encrypted channel.
 /// </summary>
-internal sealed class FakeServer : IAsyncDisposable
+internal class FakeServer : IAsyncDisposable
 {
     private readonly ClientWebSocket _ws = new();
     private readonly CancellationTokenSource _cts = new();
@@ -79,6 +79,7 @@ internal sealed class FakeServer : IAsyncDisposable
                     result = await _ws.ReceiveAsync(buffer, _cts.Token);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
+                        await OnCloseReceivedAsync();
                         return;
                     }
 
@@ -113,6 +114,12 @@ internal sealed class FakeServer : IAsyncDisposable
             _goodbye.TrySetException(ex);
         }
     }
+
+    /// <summary>
+    /// Answers the host's close handshake. Overridden by <see cref="SilentCloseFakeServer"/> to
+    /// model the non-conformant peer that exposed #143: one that never replies to a Close frame.
+    /// </summary>
+    protected virtual Task OnCloseReceivedAsync() => Task.CompletedTask;
 
     /// <summary>Handles the two cleartext handshake messages the host sends: client/init and noise/handshake.</summary>
     private async Task HandleHandshakeTextAsync(string json)

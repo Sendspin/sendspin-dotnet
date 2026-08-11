@@ -155,4 +155,23 @@ public class SendspinHostServiceArbitrationTests
 
         Assert.Equal("user_request", await first.WaitForGoodbyeAsync(Timeout));
     }
+
+    /// <summary>
+    /// Regression test for #143: disposing the host closes each connected socket via a full
+    /// WebSocket closing handshake, which blocks forever against a peer that never answers.
+    /// SilentCloseFakeServer models exactly that peer. This only asserts that disposal
+    /// terminates within a generous bound, not that it is fast.
+    /// </summary>
+    [Fact]
+    public async Task DisposeAsync_WithPeerThatNeverAnswersClose_TerminatesWithinBound()
+    {
+        var host = await StartHostAsync();
+        await using var server = new SilentCloseFakeServer(TestPsk, []);
+        await server.ConnectAsync(host.ListeningPort);
+        await WaitForServerConnectedAsync(host, server.ServerId);
+
+        var dispose = host.DisposeAsync().AsTask();
+        Assert.Same(dispose, await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(10))));
+        await dispose; // surface any exception
+    }
 }

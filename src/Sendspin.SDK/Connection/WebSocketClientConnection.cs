@@ -113,6 +113,15 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
     /// <summary>
     /// Initiates a graceful WebSocket close.
     /// </summary>
+    /// <remarks>
+    /// Uses <see cref="WebSocket.CloseOutputAsync"/>, not <see cref="WebSocket.CloseAsync"/>:
+    /// the latter performs the full closing handshake and waits for the peer's Close frame,
+    /// which a crashed, hung, or non-conformant peer will never send. This call sits on the
+    /// disposal path (<see cref="IncomingConnection.DisposeAsync"/> via
+    /// <see cref="IncomingConnection.DisconnectAsync"/>) with no cancellation, so waiting here
+    /// would block application shutdown forever (#143). CloseOutputAsync sends our Close frame
+    /// and returns without waiting, which still gives the peer a clean close.
+    /// </remarks>
     public async Task CloseAsync(CancellationToken cancellationToken = default)
     {
         if (_webSocket.State == WebSocketState.Open ||
@@ -120,7 +129,7 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
         {
             try
             {
-                await _webSocket.CloseAsync(
+                await _webSocket.CloseOutputAsync(
                     WebSocketCloseStatus.NormalClosure,
                     "closing",
                     cancellationToken).ConfigureAwait(false);
