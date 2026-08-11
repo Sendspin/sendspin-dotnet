@@ -2168,9 +2168,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (_pairingStore is not null && ServerId is not null)
         {
+            bool stored;
             lock (_pairingStoreLock)
             {
-                _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
+                stored = _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
+            }
+
+            if (!stored)
+            {
+                // The store is full: nothing was persisted, so this client cannot authenticate
+                // the server on a future connection. Do not log "persisted" and do not raise
+                // PairingCompleted — the same discipline the no-store branch below follows.
+                _logger.LogError(
+                    "Pairing complete but the record store is full; record NOT persisted for {ServerId}",
+                    ServerId);
+                return;
             }
 
             _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
@@ -2290,9 +2302,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     {
                         result.Result = "already_exists";
                     }
-                    else
+                    else if (!_pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId)))
                     {
-                        _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                        result.Result = "storage_exhausted";
                     }
                 }
 
@@ -2530,6 +2542,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 // The spec permits the server to make these changes, so the SDK honours
                 // them — against its own effective state, never the app's capabilities.
+                //
+                // The pairing_psk store write runs first, before any other field is applied:
+                // it is the only fallible step in this section (a full store), and parse-before-
+                // apply requires that a refusal changes nothing and raises no event. Applying it
+                // after even one other field would leave that field's mutation stuck on a
+                // request this handler ultimately refused.
+                if (newPairingPsk is not null)
+                {
+                    lock (_pairingStoreLock)
+                    {
+                        // _pairingStore (readonly) was verified non-null when the psk parsed.
+                        foreach (var old in _pairingStore!.List().Where(r => r.Category == PskCategory.Pairing))
+                        {
+                            _pairingStore.Remove(old.PskId);
+                        }
+
+                        if (!_pairingStore.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing)))
+                        {
+                            result.Result = "storage_exhausted";
+                            break;
+                        }
+                    }
+                }
+
                 bool unpairedAccessChanged = false;
                 if (requestedUnpairedAccess is { } enabled)
                 {
@@ -2561,20 +2597,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     staticPinChanged |= spe != _staticPinEnabled;
                     _staticPinEnabled = spe;
-                }
-
-                if (newPairingPsk is not null)
-                {
-                    lock (_pairingStoreLock)
-                    {
-                        // _pairingStore (readonly) was verified non-null when the psk parsed.
-                        foreach (var old in _pairingStore!.List().Where(r => r.Category == PskCategory.Pairing))
-                        {
-                            _pairingStore.Remove(old.PskId);
-                        }
-
-                        _pairingStore.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing));
-                    }
                 }
 
                 bool pairingPskEnabledChanged = false;

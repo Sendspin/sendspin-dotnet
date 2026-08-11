@@ -70,6 +70,32 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
+    public void ServerPairFinalize_StoreFull_DoesNotRaiseEvent_AndDoesNotClaimPersisted()
+    {
+        // #128: a store that cannot hold the fresh long-term record must not leave the client
+        // claiming a pairing it cannot authenticate. See the positive control immediately
+        // above — without it, an implementation that never raised PairingCompleted at all
+        // would also pass this assertion, for the wrong reason.
+        var store = new FullPairingRecordStore();
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Pairing,
+            configure: options => options with { PairingRecordStore = store });
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        using var _c = client;
+
+        bool paired = false;
+        client.PairingCompleted += (_, _) => paired = true;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+
+        Assert.False(paired, "PairingCompleted must not fire when the store is full");
+        Assert.Empty(store.List());
+    }
+
+    [Fact]
     public void KnownButUnconfiguredPairMethod_SendsAbort()
     {
         // dynamic_pin is a method the SDK implements but this client has not enabled, so

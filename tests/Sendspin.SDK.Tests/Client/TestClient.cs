@@ -5,6 +5,22 @@ using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Tests.Client;
 
+/// <summary>
+/// Store double that reports full: <see cref="Upsert"/> always returns <c>false</c> and never
+/// stores anything, exercising the storage-exhausted paths (#128) without needing to fill a
+/// real store to capacity.
+/// </summary>
+internal sealed class FullPairingRecordStore : IPairingRecordStore
+{
+    public IReadOnlyList<PairingRecord> List() => [];
+
+    public bool Upsert(PairingRecord record) => false;
+
+    public void Remove(string pskId)
+    {
+    }
+}
+
 /// <summary>Mutable <see cref="INoiseSessionInfo"/> stand-in for tests.</summary>
 internal sealed class FakeNoiseSession : INoiseSessionInfo
 {

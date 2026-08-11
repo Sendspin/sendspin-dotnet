@@ -40,8 +40,18 @@ public interface IPairingRecordStore
     /// <summary>All stored records.</summary>
     IReadOnlyList<PairingRecord> List();
 
-    /// <summary>Adds or replaces the record with the same psk_id.</summary>
-    void Upsert(PairingRecord record);
+    /// <summary>
+    /// Adds or replaces the record with the same psk_id. Returns <c>false</c> when the record
+    /// could not be stored because the store is full — the spec's <c>record_mode</c> fallback
+    /// branches on exhaustion (<c>management.md:109</c>), and a client that cannot tell the
+    /// difference will claim a pairing it cannot authenticate.
+    /// </summary>
+    /// <remarks>
+    /// Return <c>true</c> if your store has no capacity limit. Reserve <c>false</c> for a full
+    /// store; report an IO or permission failure by throwing, as before — those are faults, not
+    /// a full store, and the SDK does not treat them as exhaustion.
+    /// </remarks>
+    bool Upsert(PairingRecord record);
 
     /// <summary>Removes the record with the given psk_id (no-op if absent).</summary>
     void Remove(string pskId);
@@ -61,10 +71,13 @@ public sealed class InMemoryPairingRecordStore : IPairingRecordStore
     }
 
     /// <inheritdoc/>
-    public void Upsert(PairingRecord record)
+    /// <remarks>Always returns <c>true</c>: a <see cref="Dictionary{TKey,TValue}"/> in memory has
+    /// no capacity limit in the sense the spec means, so this store is never "full".</remarks>
+    public bool Upsert(PairingRecord record)
     {
         lock (_lock)
             _records[record.PskId] = record;
+        return true;
     }
 
     /// <inheritdoc/>
@@ -185,13 +198,18 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
     }
 
     /// <inheritdoc/>
-    public void Upsert(PairingRecord record)
+    /// <remarks>Always returns <c>true</c>: the backing file has no capacity limit in the sense
+    /// the spec means, so this store is never "full". A write that fails outright (disk full,
+    /// permission revoked) still throws, from <see cref="Save"/>.</remarks>
+    public bool Upsert(PairingRecord record)
     {
         lock (_lock)
         {
             _records[record.PskId] = record;
             Save();
         }
+
+        return true;
     }
 
     /// <inheritdoc/>
