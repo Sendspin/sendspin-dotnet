@@ -127,6 +127,28 @@ public class SendspinClientServiceManagementTests
     }
 
     [Fact]
+    public void AddRecord_StoreFull_AnswersStorageExhausted()
+    {
+        // #128: Upsert can now report a full store, and add-record must relay that rather
+        // than claiming ok for a record it never held.
+        var store = new FullPairingRecordStore();
+        var (client, connection, _) = TestClient.Create(
+            configure: options => options with { PairingRecordStore = store });
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback","management"],"active_roles":[]}}""");
+        using var _c = client;
+
+        var fresh = Enumerable.Repeat((byte)0x5A, 32).ToArray();
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/add-record","payload":{"psk":"PSK"}}""".Replace("PSK", ToBase64Url(fresh)));
+
+        Assert.Equal("storage_exhausted", LastResult(connection).Result);
+        Assert.Empty(store.List());
+    }
+
+    [Fact]
     public void RemoveRecord_NotFound_And_SelfRemovalClosesSession()
     {
         var (client, connection, _, store) = Create();
@@ -215,6 +237,78 @@ public class SendspinClientServiceManagementTests
         connection.RaiseTextMessageReceived(
             """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
         Assert.Equal("invalid", LastResult(connection).Result);
+    }
+
+    [Fact]
+    public void SetPairingConfig_PairingPsk_StoreFull_AnswersStorageExhausted_AndDoesNotRaiseEvent()
+    {
+        // #128: same discipline as AddRecord_StoreFull_AnswersStorageExhausted, applied to the
+        // pairing_psk write in set-pairing-config. The request also bundles unpaired_access, to
+        // prove the handler's parse-before-apply discipline still holds: a refusal from the
+        // store write must leave the bundled field unapplied too, not just skip the event.
+        var store = new FullPairingRecordStore();
+        var (client, connection, _) = TestClient.Create(
+            configure: options => options with { PairingRecordStore = store });
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback","management"],"active_roles":[]}}""");
+        using var _c = client;
+
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        string psk = Convert.ToBase64String(Enumerable.Repeat((byte)3, 32).ToArray())
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"unpaired_access":{"enabled":true},"pairing_psk":{"psk":"PSK"}}}"""
+                .Replace("PSK", psk));
+
+        Assert.Equal("storage_exhausted", LastResult(connection).Result);
+        Assert.Empty(events);
+
+        // Nothing else from the bundled request applied either — a failed store write must
+        // not leave a partially-applied config.
+        connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
+        Assert.False(LastResult(connection).Data!.Value
+            .GetProperty("unpaired_access").GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void SetPairingConfig_PairingPsk_StoreFull_LeavesOldPairingRecordIntact()
+    {
+        // #128 review: the store write must Upsert the new Pairing PSK before removing the
+        // old one. Removing first and only then discovering the store refuses the new record
+        // would destroy the client's only Pairing PSK while still answering storage_exhausted
+        // — worse than the answer alone, since EnsurePairingPsk's already-issued token is now
+        // dead with no PairingConfigChanged to say so. The store here starts "full" with one
+        // Pairing record already seeded, so rotating to a genuinely different PSK is refused;
+        // that record must still be there afterward.
+        var oldPsk = Enumerable.Repeat((byte)0x11, 32).ToArray();
+        var store = new FullPairingRecordStore(new PairingRecord(oldPsk, PskCategory.Pairing));
+        var (client, connection, _) = TestClient.Create(
+            configure: options => options with { PairingRecordStore = store });
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback","management"],"active_roles":[]}}""");
+        using var _c = client;
+
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        string newPsk = Convert.ToBase64String(Enumerable.Repeat((byte)0x22, 32).ToArray())
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"psk":"PSK"}}}"""
+                .Replace("PSK", newPsk));
+
+        Assert.Equal("storage_exhausted", LastResult(connection).Result);
+        Assert.Empty(events);
+
+        var record = Assert.Single(store.List());
+        Assert.Equal(PskCategory.Pairing, record.Category);
+        Assert.Equal(NoiseConstants.DerivePskId(oldPsk), record.PskId);
     }
 
     [Fact]
