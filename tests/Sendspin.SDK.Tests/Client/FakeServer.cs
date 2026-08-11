@@ -118,8 +118,25 @@ internal class FakeServer : IAsyncDisposable
     /// <summary>
     /// Answers the host's close handshake. Overridden by <see cref="SilentCloseFakeServer"/> to
     /// model the non-conformant peer that exposed #143: one that never replies to a Close frame.
+    /// Uses CancellationToken.None, not _cts.Token: during disposal _cts is already cancelled,
+    /// so the token would cancel the reply immediately and reintroduce the silence.
     /// </summary>
-    protected virtual Task OnCloseReceivedAsync() => Task.CompletedTask;
+    protected virtual async Task OnCloseReceivedAsync()
+    {
+        if (_ws.State != WebSocketState.CloseReceived)
+        {
+            return;
+        }
+
+        try
+        {
+            await _ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
+        }
+        catch
+        {
+            // best-effort: the socket may already be gone
+        }
+    }
 
     /// <summary>Handles the two cleartext handshake messages the host sends: client/init and noise/handshake.</summary>
     private async Task HandleHandshakeTextAsync(string json)
