@@ -2178,7 +2178,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 // The store is full: nothing was persisted, so this client cannot authenticate
                 // the server on a future connection. Do not log "persisted" and do not raise
-                // PairingCompleted — the same discipline the no-store branch below follows.
+                // PairingCompleted — the same discipline CanOffer already applies when it
+                // refuses pairing_psk outright for a null store (this branch's non-null store
+                // means only a full one reaches here for that method).
                 _logger.LogError(
                     "Pairing complete but the record store is full; record NOT persisted for {ServerId}",
                     ServerId);
@@ -2553,15 +2555,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     lock (_pairingStoreLock)
                     {
                         // _pairingStore (readonly) was verified non-null when the psk parsed.
-                        foreach (var old in _pairingStore!.List().Where(r => r.Category == PskCategory.Pairing))
-                        {
-                            _pairingStore.Remove(old.PskId);
-                        }
-
-                        if (!_pairingStore.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing)))
+                        // Upsert before removing the old record: removing it first and then
+                        // finding the store full would destroy the client's only Pairing PSK
+                        // while answering storage_exhausted, and do so silently — the app keeps
+                        // handing out a token for a record that no longer exists, with no
+                        // PairingConfigChanged to say so. Upserting first means a refusal here
+                        // leaves the old record intact.
+                        if (!_pairingStore!.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing)))
                         {
                             result.Result = "storage_exhausted";
                             break;
+                        }
+
+                        string newPskId = NoiseConstants.DerivePskId(newPairingPsk);
+                        foreach (var old in _pairingStore.List()
+                            .Where(r => r.Category == PskCategory.Pairing && r.PskId != newPskId))
+                        {
+                            _pairingStore.Remove(old.PskId);
                         }
                     }
                 }

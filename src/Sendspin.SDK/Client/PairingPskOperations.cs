@@ -16,7 +16,11 @@ internal static class PairingPskOperations
     /// Returns the pairing token for the stored Pairing PSK, generating and persisting one
     /// if none is stored.
     /// </summary>
-    /// <exception cref="InvalidOperationException">No record store is configured.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// No record store is configured, or the store is full and could not persist a freshly
+    /// generated PSK — this call is from an app thread, so an exception is the channel; a
+    /// token for a PSK that was never stored could never authenticate.
+    /// </exception>
     internal static string Ensure(IPairingRecordStore? store, SendspinIdentity identity)
     {
         var records = RequireStore(store);
@@ -25,7 +29,11 @@ internal static class PairingPskOperations
         {
             byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
             record = new PairingRecord(psk, PskCategory.Pairing);
-            records.Upsert(record);
+            if (!records.Upsert(record))
+            {
+                throw new InvalidOperationException(
+                    "The pairing record store is full; a fresh Pairing PSK could not be persisted.");
+            }
         }
 
         return PairingToken.Encode(identity.PublicKey.Span, record.Psk.Span);
@@ -34,7 +42,10 @@ internal static class PairingPskOperations
     /// <summary>
     /// Replaces the stored Pairing PSK with a freshly generated one and returns the new token.
     /// </summary>
-    /// <exception cref="InvalidOperationException">No record store is configured.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// No record store is configured, or the store is full and could not persist the rotated
+    /// PSK (see <see cref="Ensure"/>).
+    /// </exception>
     internal static string Rotate(IPairingRecordStore? store, SendspinIdentity identity)
     {
         var records = RequireStore(store);
@@ -48,7 +59,12 @@ internal static class PairingPskOperations
         }
 
         byte[] fresh = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-        records.Upsert(new PairingRecord(fresh, PskCategory.Pairing));
+        if (!records.Upsert(new PairingRecord(fresh, PskCategory.Pairing)))
+        {
+            throw new InvalidOperationException(
+                "The pairing record store is full; the rotated Pairing PSK could not be persisted.");
+        }
+
         return PairingToken.Encode(identity.PublicKey.Span, fresh);
     }
 
