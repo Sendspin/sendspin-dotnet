@@ -304,7 +304,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // method usable again without also having to resend enabled: true. This warning is
         // still worth logging once, at construction, so the app sees why the method it asked
         // for is not being offered.
-        if (_capabilities.PinPairingMethods.Contains("static_pin") && !IsValidStaticPin(_capabilities.StaticPin))
+        if (_capabilities.StaticPinEnabled
+            && _capabilities.PinPairingMethods.Contains("static_pin")
+            && !IsValidStaticPin(_capabilities.StaticPin))
         {
             _logger.LogWarning(
                 "ClientCapabilities.StaticPin is not a valid 8-digit PIN; static_pin will not be offered until a valid PIN is configured");
@@ -2491,7 +2493,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     if (requestedStaticPinEnabled == true
                         && requestedStaticPin is null
-                        && string.IsNullOrEmpty(_effectiveStaticPin))
+                        && !IsValidStaticPin(_effectiveStaticPin))
                     {
                         result.Result = "invalid";
                         break;

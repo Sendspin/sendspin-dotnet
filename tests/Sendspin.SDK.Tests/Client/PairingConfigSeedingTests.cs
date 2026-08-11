@@ -24,7 +24,7 @@ public class PairingConfigSeedingTests
     /// (SendSpinClient.cs:1327), so without this the advertisement never exists.
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection)
-        CreateAndGreet(ClientCapabilities capabilities, IPairingRecordStore? store = null)
+        CreateAndGreet(ClientCapabilities capabilities, IPairingRecordStore? store = null, PairingWindow? window = null)
     {
         var (client, connection, session) = TestClient.Create(
             configure: o => o with
@@ -34,6 +34,7 @@ public class PairingConfigSeedingTests
                 // Present so a PIN method is never withheld for want of a lockout store,
                 // which would confound "withheld because disabled".
                 PinLockoutStore = new InMemoryPinLockoutStore(),
+                PairingWindow = window,
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -261,6 +262,26 @@ public class PairingConfigSeedingTests
     }
 
     [Fact]
+    public void StaticPinWithNoUsablePin_OpenPairingWindowIsInvalid()
+    {
+        // The fourth surface: ManagementOpenPairingWindow's anyPinMethod check must also
+        // require HasUsableStaticPin, or a management server could open a window admitting
+        // a method that cannot run.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = null };
+        var window = new PairingWindow();
+        var (client, connection) = CreateAndGreet(capabilities, window: window);
+        using var _c = client;
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/open-pairing-window","payload":{}}""");
+
+        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
+        Assert.Equal("invalid", result.Result);
+        Assert.False(window.IsOpen);
+    }
+
+    [Fact]
     public void SetPairingConfigSuppliesAValidPin_WithoutResendingEnabled_MakesTheMethodUsableAgain()
     {
         // The live-predicate design's payoff: a server repairs a client constructed with no
@@ -277,13 +298,32 @@ public class PairingConfigSeedingTests
             """{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"12345678"}}}""");
         Assert.Equal("ok", connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload.Result);
 
-        // Reconnect so a fresh client/hello is built from the effective state.
-        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        // A fresh server/hello gets a fresh client/hello built from the effective state --
+        // the same reply-to-server/hello mechanism CreateAndGreet used for the first one.
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         Assert.Contains("static_pin", HelloPairMethods(connection));
 
         var data = GetPairingConfigData(connection);
         Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void SetPairingConfigEnablesWithAMalformedStoredPin_IsInvalid()
+    {
+        // The set-pairing-config "enable with no secret" check must agree with
+        // HasUsableStaticPin: a malformed-but-non-empty stored PIN (StaticPin = "abc") is just
+        // as unusable as a null one, so the natural repair {"enabled":true} with no new pin
+        // must be rejected the same way -- not silently accepted as a no-op "ok".
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "abc" };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
+
+        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
+        Assert.Equal("invalid", result.Result);
     }
 
     [Theory]
