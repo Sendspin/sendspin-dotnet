@@ -53,16 +53,14 @@ public static class MessageSerializer
     /// <summary>
     /// Deserializes a JSON message, returning the appropriate message type.
     /// </summary>
+    /// <exception cref="JsonException">
+    /// The document is not a JSON object, or has no string <c>type</c> member. Both are
+    /// malformed input rather than an unrecognised message: an unknown-but-well-formed
+    /// type is returned as-is (null) for the caller to ignore.
+    /// </exception>
     public static IMessage? Deserialize(string json)
     {
-        // First, parse to get the message type
-        using var doc = JsonDocument.Parse(json);
-        if (!doc.RootElement.TryGetProperty("type", out var typeProp))
-        {
-            return null;
-        }
-
-        var messageType = typeProp.GetString();
+        var messageType = GetMessageType(json);
         return messageType switch
         {
             MessageTypes.ServerHello => JsonSerializer.Deserialize(json, s_context.ServerHelloMessage),
@@ -94,16 +92,29 @@ public static class MessageSerializer
     /// Gets the message type from a JSON string without full deserialization.
     /// </summary>
     /// <exception cref="JsonException">
-    /// The document is not valid JSON, or has no <c>type</c> member. Both are malformed
-    /// input rather than an unrecognised message: an unknown-but-well-formed type is
-    /// returned as-is for the caller to ignore.
+    /// The input is not valid JSON, is not a JSON object, has no <c>type</c> member, or
+    /// <c>type</c> is not a string. All of these are malformed input rather than an
+    /// unrecognised message: an unknown-but-well-formed type is returned as-is for the
+    /// caller to ignore.
     /// </exception>
     public static string? GetMessageType(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        if (!doc.RootElement.TryGetProperty("type", out var typeProp))
+        var root = doc.RootElement;
+
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            throw new JsonException($"Message root is {root.ValueKind}, not a JSON object.");
+        }
+
+        if (!root.TryGetProperty("type", out var typeProp))
         {
             throw new JsonException("Message has no \"type\" member.");
+        }
+
+        if (typeProp.ValueKind != JsonValueKind.String)
+        {
+            throw new JsonException($"Message \"type\" member is {typeProp.ValueKind}, not a string.");
         }
 
         return typeProp.GetString();
@@ -113,27 +124,45 @@ public static class MessageSerializer
     /// Gets the message type from a UTF-8 byte span without full deserialization.
     /// </summary>
     /// <exception cref="JsonException">
-    /// The document is not valid JSON, or has no <c>type</c> member. Both are malformed
-    /// input rather than an unrecognised message: an unknown-but-well-formed type is
-    /// returned as-is for the caller to ignore.
+    /// The input is not valid JSON, is not a JSON object, has no <c>type</c> member, or
+    /// <c>type</c> is not a string. All of these are malformed input rather than an
+    /// unrecognised message: an unknown-but-well-formed type is returned as-is for the
+    /// caller to ignore.
     /// </exception>
     public static string? GetMessageType(ReadOnlySpan<byte> utf8Json)
     {
         var reader = new Utf8JsonReader(utf8Json);
+
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject)
+        {
+            throw new JsonException("Message root is not a JSON object.");
+        }
+
+        string? messageType = null;
         while (reader.Read())
         {
             // Root-only, matching the string overload: members of the root object sit at
             // depth 1, so a "type" nested inside another member (such as a payload) must
-            // not classify the document.
-            if (reader.CurrentDepth == 1 &&
+            // not classify the document. Once found, keep draining the reader instead of
+            // returning immediately -- a subsequent Read() surfaces trailing content after
+            // the closing brace (e.g. `{"type":"a"}x`) as a JsonException, which is what
+            // catches malformed input the first match would otherwise let through.
+            if (messageType is null &&
+                reader.CurrentDepth == 1 &&
                 reader.TokenType == JsonTokenType.PropertyName &&
                 reader.ValueTextEquals("type"u8))
             {
                 reader.Read();
-                return reader.GetString();
+                if (reader.TokenType != JsonTokenType.String)
+                {
+                    throw new JsonException(
+                        $"Message \"type\" member is {reader.TokenType}, not a string.");
+                }
+
+                messageType = reader.GetString();
             }
         }
 
-        throw new JsonException("Message has no \"type\" member.");
+        return messageType ?? throw new JsonException("Message has no \"type\" member.");
     }
 }

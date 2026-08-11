@@ -153,6 +153,115 @@ public class MessageSerializerTests
     }
 
     [Fact]
+    public void GetMessageType_String_ReadsOnlyTheRootObject()
+    {
+        // Same root-only rule as the span overload, verified on the string overload too —
+        // the two must classify identically.
+        Assert.Equal("a/b", MessageSerializer.GetMessageType(
+            """{"payload":{"x":1},"type":"a/b"}"""));
+        Assert.Throws<JsonException>(
+            () => MessageSerializer.GetMessageType("""{"payload":{"type":"x"}}"""));
+    }
+
+    // #107: one rule for both overloads — input that is not a JSON object carrying a
+    // string "type" member throws JsonException. Each row below used to be classified
+    // differently (JsonException, InvalidOperationException, or a silently-returned
+    // null/wrong value) depending on which overload and which way the input was wrong.
+    [Theory]
+    [InlineData("""{"type":null}""")]        // failed open on the string overload
+    [InlineData("""{"type":42}""")]
+    [InlineData("""{"type":{}}""")]
+    [InlineData("[1,2]")]                     // non-object root
+    [InlineData("42")]
+    [InlineData("\"str\"")]
+    [InlineData("{}")]                        // missing "type"
+    public void GetMessageType_String_MalformedInput_Throws(string json)
+    {
+        Assert.Throws<JsonException>(() => MessageSerializer.GetMessageType(json));
+    }
+
+    [Theory]
+    [InlineData("""{"type":null}""")]
+    [InlineData("""{"type":42}""")]
+    [InlineData("""{"type":{}}""")]
+    [InlineData("[1,2]")]
+    [InlineData("42")]
+    [InlineData("\"str\"")]
+    [InlineData("{}")]
+    public void GetMessageType_Utf8_MalformedInput_Throws(string json)
+    {
+        Assert.Throws<JsonException>(() => MessageSerializer.GetMessageType(Utf8(json)));
+    }
+
+    [Fact]
+    public void GetMessageType_String_TrailingGarbage_Throws()
+    {
+        // JsonDocument.Parse rejects trailing content by throwing JsonReaderException, a
+        // JsonException subtype -- ThrowsAny (rather than Throws, which requires an exact
+        // type match) is what confirms the thrown type still satisfies callers that catch
+        // JsonException, matching SendSpinClient's dispatch filter.
+        Assert.ThrowsAny<JsonException>(() => MessageSerializer.GetMessageType("""{"type":"a"}x"""));
+    }
+
+    [Fact]
+    public void GetMessageType_Utf8_TrailingGarbage_Throws()
+    {
+        // Confirms the brief's claim: draining the reader past the matched "type" value
+        // surfaces trailing content as a JsonReaderException (a JsonException subtype) on
+        // a subsequent Read() — the span overload used to stop at the first match and
+        // silently accept this.
+        Assert.ThrowsAny<JsonException>(
+            () => MessageSerializer.GetMessageType(Utf8("""{"type":"a"}x""")));
+    }
+
+    [Fact]
+    public void GetMessageType_String_NormalMessage_ReturnsType()
+    {
+        Assert.Equal("server/hello",
+            MessageSerializer.GetMessageType("""{"type":"server/hello","payload":{}}"""));
+    }
+
+    [Fact]
+    public void GetMessageType_Utf8_NormalMessage_ReturnsType()
+    {
+        Assert.Equal("server/hello",
+            MessageSerializer.GetMessageType(Utf8("""{"type":"server/hello","payload":{}}""")));
+    }
+
+    [Fact]
+    public void GetMessageType_String_UnknownButWellFormedType_ReturnsAsIs()
+    {
+        // Positive control: without this, a change that throws on everything would still
+        // pass every malformed-input test above.
+        Assert.Equal("unknown/type", MessageSerializer.GetMessageType("""{"type":"unknown/type"}"""));
+    }
+
+    [Fact]
+    public void GetMessageType_Utf8_UnknownButWellFormedType_ReturnsAsIs()
+    {
+        Assert.Equal("unknown/type",
+            MessageSerializer.GetMessageType(Utf8("""{"type":"unknown/type"}""")));
+    }
+
+    [Fact]
+    public void Deserialize_MissingTypeMember_Throws()
+    {
+        // #107 item 4: Deserialize(string) used to return null for a missing "type",
+        // making "malformed" indistinguishable from "unknown type" (which still returns
+        // null via the switch's default arm — see Deserialize_UnknownType_ReturnsNull).
+        // No test pinned the old null-for-missing-type behaviour.
+        Assert.Throws<JsonException>(() => MessageSerializer.Deserialize("{}"));
+    }
+
+    [Fact]
+    public void Deserialize_NonStringTypeMember_Throws()
+    {
+        Assert.Throws<JsonException>(() => MessageSerializer.Deserialize("""{"type":null}"""));
+    }
+
+    private static byte[] Utf8(string json) => System.Text.Encoding.UTF8.GetBytes(json);
+
+    [Fact]
     public void ClientHello_NeverSerializesClientIdOrVersion()
     {
         var hello = ClientHelloMessage.Create(
