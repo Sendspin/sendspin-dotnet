@@ -288,9 +288,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pairingPskEnabled = _capabilities.PairingPskEnabled;
         _dynamicPinEnabled = _capabilities.DynamicPinEnabled && _capabilities.PinPairingMethods.Contains("dynamic_pin");
         _staticPinEnabled = _capabilities.StaticPinEnabled && _capabilities.PinPairingMethods.Contains("static_pin");
-        _effectiveMinPinLength = _capabilities.MinPinLength;
+        _effectiveMinPinLength = Math.Clamp(_capabilities.MinPinLength, 4, 12);
+        if (_effectiveMinPinLength != _capabilities.MinPinLength)
+        {
+            _logger.LogWarning(
+                "ClientCapabilities.MinPinLength {Value} is outside [4, 12]; clamped to {Clamped}",
+                _capabilities.MinPinLength,
+                _effectiveMinPinLength);
+        }
         _effectiveStaticPin = _capabilities.StaticPin;
         _recordModePskId = SeedRecordModePskId();
+
+        // Usability of static_pin is evaluated live via HasUsableStaticPin, not snapshotted
+        // here, so a server that later supplies a valid PIN via set-pairing-config makes the
+        // method usable again without also having to resend enabled: true. This warning is
+        // still worth logging once, at construction, so the app sees why the method it asked
+        // for is not being offered.
+        if (_capabilities.StaticPinEnabled
+            && _capabilities.PinPairingMethods.Contains("static_pin")
+            && !IsValidStaticPin(_capabilities.StaticPin))
+        {
+            _logger.LogWarning(
+                "ClientCapabilities.StaticPin is not a valid 8-digit PIN; static_pin will not be offered until a valid PIN is configured");
+        }
 
         _playerState = new PlayerState
         {
@@ -1555,6 +1575,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     };
 
     /// <summary>
+    /// Whether <paramref name="pin"/> is a well-formed static PIN: exactly 8 decimal digits
+    /// (pairing.md:186).
+    /// </summary>
+    private static bool IsValidStaticPin(string? pin) =>
+        pin is { Length: 8 } && pin.All(char.IsAsciiDigit);
+
+    /// <summary>
+    /// Whether a static PIN good enough to run the method is configured. The spec forbids
+    /// enabling static_pin with no secret behind it (management.md:98) and set-pairing-config
+    /// enforces that, but nothing validated what the app supplied at construction — so a
+    /// client could advertise the method with a null PIN and run CPace with an empty password.
+    /// </summary>
+    /// <remarks>
+    /// Evaluated live rather than snapshotted at construction, so a server that supplies a
+    /// valid PIN through set-pairing-config makes the method usable again without also having
+    /// to resend <c>enabled: true</c>.
+    /// </remarks>
+    private bool HasUsableStaticPin => IsValidStaticPin(_effectiveStaticPin);
+
+    /// <summary>
     /// Snapshots every effective pairing-config value into a <see cref="PairingConfigChangedEventArgs"/>.
     /// Every PairingConfigChanged raise site goes through this one builder, so a field added
     /// to the effective state later cannot reach one raise site and be missed by another.
@@ -1635,7 +1675,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             });
         }
 
-        if (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin"))
+        if (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin") && HasUsableStaticPin)
         {
             methods.Add(new PairMethodDescriptor { Method = "static_pin" });
         }
@@ -1664,7 +1704,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                          && _pinLockoutStore is not null
                          && _presentPinAsync is not null,
         "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
-                        && _pinLockoutStore is not null,
+                        && HasUsableStaticPin && _pinLockoutStore is not null,
         _ => false,
     };
 
@@ -2356,7 +2396,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case MessageTypes.ManagementGetPairingConfig:
             {
                 PairingMethodState? staticPinState = IsMethodImplemented("static_pin")
-                    ? new PairingMethodState(IsMethodEnabled("static_pin"))
+                    ? new PairingMethodState(IsMethodEnabled("static_pin") && HasUsableStaticPin)
                     : null;
                 DynamicPinConfigState? dynamicPinState = IsMethodImplemented("dynamic_pin")
                     ? new DynamicPinConfigState(
@@ -2437,7 +2477,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     if (sp.TryGetProperty("pin", out var pinEl))
                     {
                         string pin = pinEl.GetString() ?? string.Empty;
-                        if (pin.Length != 8 || !pin.All(char.IsAsciiDigit))
+                        if (!IsValidStaticPin(pin))
                         {
                             result.Result = "invalid";
                             break;
@@ -2453,7 +2493,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     if (requestedStaticPinEnabled == true
                         && requestedStaticPin is null
-                        && string.IsNullOrEmpty(_effectiveStaticPin))
+                        && !IsValidStaticPin(_effectiveStaticPin))
                     {
                         result.Result = "invalid";
                         break;
@@ -2609,7 +2649,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 // Opens the window in place of the operator gesture. Rejected when no PIN
                 // method is enabled, since there would be nothing for the window to admit.
-                bool anyPinMethod = (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin"))
+                bool anyPinMethod = (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin") && HasUsableStaticPin)
                                     || (IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin"));
                 if (!anyPinMethod || _pairingWindow is null)
                 {
