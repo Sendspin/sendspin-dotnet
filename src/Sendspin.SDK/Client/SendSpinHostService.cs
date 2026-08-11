@@ -711,7 +711,17 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         try
         {
+            // Disconnect first so the arbitration-specific reason goes out on the wire — the
+            // arbitration tests assert on it. Dispose afterward to actually release the
+            // socket/TcpClient/receive-loop CTS (#143): by then _isOpen is already false, so
+            // DisposeAsync's own DisconnectAsync(GoodbyeReasons.Shutdown) short-circuits without
+            // sending a second goodbye that would overwrite this one. Disposing the connection
+            // rather than the whole client keeps this to the socket only — arbitration eviction
+            // happens on every server reconnect, so widening this to also tear down the audio/
+            // source pipelines (as Client.DisposeAsync would) is a separate change, not asked for
+            // here.
             await existing.Client.DisconnectAsync(reason);
+            await existing.Connection.DisposeAsync();
         }
         catch (Exception ex)
         {
