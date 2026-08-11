@@ -295,9 +295,10 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             try
             {
-                // 'shutdown' is the spec-valid goodbye reason for the host going down
-                // (the device is not coming back on this connection).
-                await conn.Client.DisconnectAsync("shutdown");
+                // Dispose, not just disconnect: DisposeAsync sends the same 'shutdown' goodbye
+                // (GoodbyeReasons.Shutdown) but also reaches IncomingConnection.DisposeAsync,
+                // which releases the socket/TcpClient/CTS after the goodbye goes out (#143).
+                await conn.Client.DisposeAsync();
             }
             catch (Exception ex)
             {
@@ -710,7 +711,17 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         try
         {
+            // Disconnect first so the arbitration-specific reason goes out on the wire — the
+            // arbitration tests assert on it. Dispose afterward to actually release the
+            // socket/TcpClient/receive-loop CTS (#143): by then _isOpen is already false, so
+            // DisposeAsync's own DisconnectAsync(GoodbyeReasons.Shutdown) short-circuits without
+            // sending a second goodbye that would overwrite this one. Disposing the connection
+            // rather than the whole client keeps this to the socket only — arbitration eviction
+            // happens on every server reconnect, so widening this to also tear down the audio/
+            // source pipelines (as Client.DisposeAsync would) is a separate change, not asked for
+            // here.
             await existing.Client.DisconnectAsync(reason);
+            await existing.Connection.DisposeAsync();
         }
         catch (Exception ex)
         {

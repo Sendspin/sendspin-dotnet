@@ -19,10 +19,22 @@ internal sealed class StubFraming : IWireFraming
     /// </summary>
     public string? FatalOnInbound { get; set; }
 
+    /// <summary>
+    /// When set, EncodeText throws instead of producing a frame — models a send that never
+    /// reaches the wire, so a test can observe a connection that reports itself disconnected
+    /// without anything actually having been sent to the peer.
+    /// </summary>
+    public bool ThrowOnEncodeText { get; set; }
+
     public IReadOnlyList<WireFrame> Start() => Array.Empty<WireFrame>();
 
     public IEnumerable<WireFrame> EncodeText(string json)
     {
+        if (ThrowOnEncodeText)
+        {
+            throw new InvalidOperationException("StubFraming.ThrowOnEncodeText is set");
+        }
+
         yield return WireFrame.FromText(json);
     }
 
