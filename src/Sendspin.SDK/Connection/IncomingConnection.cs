@@ -354,6 +354,12 @@ public sealed class IncomingConnection : ISendspinConnection
         // for why an unparseable or absent reason makes a conformant server auto-reconnect.
         await DisconnectAsync(GoodbyeReasons.Shutdown);
 
+        // DisconnectAsync only sends our Close frame (#143) — it never drove the socket to
+        // Closed, so nothing released the WebSocket, TcpClient, or receive-loop CTS. Disposing
+        // here cancels that CTS before awaiting the receive loop, so a cancelled ReceiveAsync
+        // aborts the socket instead of waiting on the peer, even one that never answers close.
+        await _socket.DisposeAsync();
+
         _disposed = true;
         _sendLock.Dispose();
     }

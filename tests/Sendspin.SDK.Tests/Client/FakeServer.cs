@@ -62,6 +62,14 @@ internal class FakeServer : IAsyncDisposable
         return completed == _goodbye.Task ? await _goodbye.Task : null;
     }
 
+    /// <summary>
+    /// Returns once the background receive loop exits. Lets a test prove the peer's own
+    /// ReceiveAsync completed rather than staying parked forever — i.e. that the far end
+    /// actually released the socket instead of merely returning from disposal (#143).
+    /// </summary>
+    internal Task WaitForReceiveLoopExitAsync(TimeSpan timeout) =>
+        (_receiveLoop ?? Task.CompletedTask).WaitAsync(timeout);
+
     private async Task ReceiveLoopAsync()
     {
         // Frames are reassembled to EndOfMessage: a Noise ciphertext only decrypts whole,

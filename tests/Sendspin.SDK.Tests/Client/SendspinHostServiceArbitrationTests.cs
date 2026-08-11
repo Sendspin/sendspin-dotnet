@@ -165,6 +165,9 @@ public class SendspinHostServiceArbitrationTests
     [Fact]
     public async Task DisposeAsync_WithPeerThatNeverAnswersClose_TerminatesWithinBound()
     {
+        // Not 'await using host': SendspinHostService.DisposeAsync has no idempotence guard,
+        // so a second, implicit dispose racing the explicit one below would just add a second
+        // hang on top of whatever this test is trying to prove.
         var host = await StartHostAsync();
         await using var server = new SilentCloseFakeServer(TestPsk, []);
         await server.ConnectAsync(host.ListeningPort);
@@ -173,5 +176,12 @@ public class SendspinHostServiceArbitrationTests
         var dispose = host.DisposeAsync().AsTask();
         Assert.Same(dispose, await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(10))));
         await dispose; // surface any exception
+
+        // Integration-level sanity check that the peer isn't left parked in the full
+        // host+arbitration flow. This doesn't discriminate the resource-release fix by itself
+        // (the Close frame change 1 already sends is enough to satisfy it) — see
+        // SimpleWebSocketServerTests.IncomingConnection_Dispose_ReleasesUnderlyingSocket for the
+        // targeted test that isolates and proves the host actually releases the socket (#143).
+        await server.WaitForReceiveLoopExitAsync(TimeSpan.FromSeconds(5));
     }
 }

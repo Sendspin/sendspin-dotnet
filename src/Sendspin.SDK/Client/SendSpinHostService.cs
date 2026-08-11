@@ -295,9 +295,10 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             try
             {
-                // 'shutdown' is the spec-valid goodbye reason for the host going down
-                // (the device is not coming back on this connection).
-                await conn.Client.DisconnectAsync("shutdown");
+                // Dispose, not just disconnect: DisposeAsync sends the same 'shutdown' goodbye
+                // (GoodbyeReasons.Shutdown) but also reaches IncomingConnection.DisposeAsync,
+                // which releases the socket/TcpClient/CTS after the goodbye goes out (#143).
+                await conn.Client.DisposeAsync();
             }
             catch (Exception ex)
             {
