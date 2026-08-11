@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Connection.Noise.Pairing;
 using Sendspin.SDK.Protocol.Messages;
@@ -204,5 +205,116 @@ public class PairingConfigSeedingTests
 
         Assert.Equal(shared.PskId, RecordModeFromGetPairingConfig(connection)
             .GetProperty("psk_id").GetString());
+    }
+
+    [Fact]
+    public void StaticPinWithNullPin_IsNotAdvertised_ButStillReportedDisabled()
+    {
+        // Construction validated nothing before this fix: an app could list static_pin with
+        // no PIN behind it, and CPace would run with an empty password (management.md:98).
+        // The method object must stay present in get-pairing-config -- it is implemented,
+        // just not currently usable -- so a server can repair it.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = null };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.TryGetProperty("static_pin", out var methodState),
+            "an implemented but unusable method must still be reported, so the server can repair it");
+        Assert.False(methodState.GetProperty("enabled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("1234567")] // 7 digits
+    public void StaticPinWithMalformedPin_IsNotAdvertised_ButStillReportedDisabled(string pin)
+    {
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = pin };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.TryGetProperty("static_pin", out var methodState));
+        Assert.False(methodState.GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void StaticPinWithNoUsablePin_ServerActivateAborts_MethodNotSupported()
+    {
+        // A server that asks for static_pin anyway (e.g. from a stale advertisement) must be
+        // refused rather than let CPace run with an empty password, and the connection must
+        // stay open so the server can retry with another method.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = null };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
+
+        var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+        Assert.Equal(ConnectionState.Connected, connection.State);
+    }
+
+    [Fact]
+    public void SetPairingConfigSuppliesAValidPin_WithoutResendingEnabled_MakesTheMethodUsableAgain()
+    {
+        // The live-predicate design's payoff: a server repairs a client constructed with no
+        // PIN by sending just the pin -- no need to also resend enabled: true, because
+        // usability is evaluated live rather than snapshotted at construction.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = null };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"12345678"}}}""");
+        Assert.Equal("ok", connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload.Result);
+
+        // Reconnect so a fresh client/hello is built from the effective state.
+        connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        Assert.Contains("static_pin", HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(2, 4)]
+    [InlineData(99, 12)]
+    public void MinPinLengthOutOfRange_IsClamped(int configured, int clamped)
+    {
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { "dynamic_pin" },
+            MinPinLength = configured,
+        };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        var data = GetPairingConfigData(connection);
+        Assert.Equal(clamped, data.GetProperty("dynamic_pin").GetProperty("min_pin_length").GetInt32());
+    }
+
+    [Fact]
+    public void StaticPinWithValidPin_IsAdvertised_AndReportedEnabled()
+    {
+        // Positive control: without it, a bug that disables static_pin unconditionally would
+        // pass every test above.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        Assert.Contains("static_pin", HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
     }
 }
