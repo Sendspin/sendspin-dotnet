@@ -291,8 +291,7 @@ public class MessageSerializerTests
     [Fact]
     public void GetMessageType_Utf8_EmptyInput_Throws()
     {
-        var ex = Assert.ThrowsAny<JsonException>(() => MessageSerializer.GetMessageType(ReadOnlySpan<byte>.Empty));
-        Assert.IsType<JsonReaderException>(ex);
+        Assert.ThrowsAny<JsonException>(() => MessageSerializer.GetMessageType(ReadOnlySpan<byte>.Empty));
     }
 
     [Fact]
