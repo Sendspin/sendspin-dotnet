@@ -288,9 +288,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pairingPskEnabled = _capabilities.PairingPskEnabled;
         _dynamicPinEnabled = _capabilities.DynamicPinEnabled && _capabilities.PinPairingMethods.Contains("dynamic_pin");
         _staticPinEnabled = _capabilities.StaticPinEnabled && _capabilities.PinPairingMethods.Contains("static_pin");
-        _effectiveMinPinLength = _capabilities.MinPinLength;
+        _effectiveMinPinLength = Math.Clamp(_capabilities.MinPinLength, 4, 12);
+        if (_effectiveMinPinLength != _capabilities.MinPinLength)
+        {
+            _logger.LogWarning(
+                "ClientCapabilities.MinPinLength {Value} is outside [4, 12]; clamped to {Clamped}",
+                _capabilities.MinPinLength,
+                _effectiveMinPinLength);
+        }
         _effectiveStaticPin = _capabilities.StaticPin;
         _recordModePskId = SeedRecordModePskId();
+
+        // Usability of static_pin is evaluated live via HasUsableStaticPin, not snapshotted
+        // here, so a server that later supplies a valid PIN via set-pairing-config makes the
+        // method usable again without also having to resend enabled: true. This warning is
+        // still worth logging once, at construction, so the app sees why the method it asked
+        // for is not being offered.
+        if (_capabilities.StaticPinEnabled
+            && _capabilities.PinPairingMethods.Contains("static_pin")
+            && !IsValidStaticPin(_capabilities.StaticPin))
+        {
+            _logger.LogWarning(
+                "ClientCapabilities.StaticPin is not a valid 8-digit PIN; static_pin will not be offered until a valid PIN is configured");
+        }
 
         _playerState = new PlayerState
         {
@@ -1555,6 +1575,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     };
 
     /// <summary>
+    /// Whether <paramref name="pin"/> is a well-formed static PIN: exactly 8 decimal digits
+    /// (pairing.md:186).
+    /// </summary>
+    private static bool IsValidStaticPin(string? pin) =>
+        pin is { Length: 8 } && pin.All(char.IsAsciiDigit);
+
+    /// <summary>
+    /// Whether a static PIN good enough to run the method is configured. The spec forbids
+    /// enabling static_pin with no secret behind it (management.md:98) and set-pairing-config
+    /// enforces that, but nothing validated what the app supplied at construction — so a
+    /// client could advertise the method with a null PIN and run CPace with an empty password.
+    /// </summary>
+    /// <remarks>
+    /// Evaluated live rather than snapshotted at construction, so a server that supplies a
+    /// valid PIN through set-pairing-config makes the method usable again without also having
+    /// to resend <c>enabled: true</c>.
+    /// </remarks>
+    private bool HasUsableStaticPin => IsValidStaticPin(_effectiveStaticPin);
+
+    /// <summary>
     /// Snapshots every effective pairing-config value into a <see cref="PairingConfigChangedEventArgs"/>.
     /// Every PairingConfigChanged raise site goes through this one builder, so a field added
     /// to the effective state later cannot reach one raise site and be missed by another.
@@ -1635,7 +1675,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             });
         }
 
-        if (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin"))
+        if (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin") && HasUsableStaticPin)
         {
             methods.Add(new PairMethodDescriptor { Method = "static_pin" });
         }
@@ -1664,7 +1704,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                          && _pinLockoutStore is not null
                          && _presentPinAsync is not null,
         "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
-                        && _pinLockoutStore is not null,
+                        && HasUsableStaticPin && _pinLockoutStore is not null,
         _ => false,
     };
 
@@ -2168,9 +2208,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (_pairingStore is not null && ServerId is not null)
         {
+            bool stored;
             lock (_pairingStoreLock)
             {
-                _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
+                stored = _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
+            }
+
+            if (!stored)
+            {
+                // The store is full: nothing was persisted, so this client cannot authenticate
+                // the server on a future connection. Do not log "persisted" and do not raise
+                // PairingCompleted — the same discipline CanOffer already applies when it
+                // refuses pairing_psk outright for a null store (this branch's non-null store
+                // means only a full one reaches here for that method).
+                _logger.LogError(
+                    "Pairing complete but the record store is full; record NOT persisted for {ServerId}",
+                    ServerId);
+                return;
             }
 
             _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
@@ -2290,9 +2344,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     {
                         result.Result = "already_exists";
                     }
-                    else
+                    else if (!_pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId)))
                     {
-                        _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId));
+                        result.Result = "storage_exhausted";
                     }
                 }
 
@@ -2356,7 +2410,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case MessageTypes.ManagementGetPairingConfig:
             {
                 PairingMethodState? staticPinState = IsMethodImplemented("static_pin")
-                    ? new PairingMethodState(IsMethodEnabled("static_pin"))
+                    ? new PairingMethodState(IsMethodEnabled("static_pin") && HasUsableStaticPin)
                     : null;
                 DynamicPinConfigState? dynamicPinState = IsMethodImplemented("dynamic_pin")
                     ? new DynamicPinConfigState(
@@ -2437,7 +2491,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     if (sp.TryGetProperty("pin", out var pinEl))
                     {
                         string pin = pinEl.GetString() ?? string.Empty;
-                        if (pin.Length != 8 || !pin.All(char.IsAsciiDigit))
+                        if (!IsValidStaticPin(pin))
                         {
                             result.Result = "invalid";
                             break;
@@ -2453,7 +2507,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     if (requestedStaticPinEnabled == true
                         && requestedStaticPin is null
-                        && string.IsNullOrEmpty(_effectiveStaticPin))
+                        && !IsValidStaticPin(_effectiveStaticPin))
                     {
                         result.Result = "invalid";
                         break;
@@ -2530,6 +2584,48 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 // The spec permits the server to make these changes, so the SDK honours
                 // them — against its own effective state, never the app's capabilities.
+                //
+                // The pairing_psk store write runs first, before any other field is applied:
+                // it is the only fallible step in this section (a full store), and parse-before-
+                // apply requires that a refusal changes nothing and raises no event. Applying it
+                // after even one other field would leave that field's mutation stuck on a
+                // request this handler ultimately refused.
+                if (newPairingPsk is not null)
+                {
+                    lock (_pairingStoreLock)
+                    {
+                        // _pairingStore (readonly) was verified non-null when the psk parsed.
+                        // Upsert before removing the old record: removing it first and then
+                        // finding the store full would destroy the client's only Pairing PSK
+                        // while answering storage_exhausted, and do so silently — the app keeps
+                        // handing out a token for a record that no longer exists, with no
+                        // PairingConfigChanged to say so. Upserting first means a refusal here
+                        // leaves the old record intact.
+                        //
+                        // The cost: a new record has a different psk_id than the one it replaces
+                        // (it is derived from the PSK), so this needs transient capacity for N+1
+                        // records, not N. A legitimate rotation can therefore be refused on a
+                        // store already at capacity, where remove-then-upsert would have
+                        // succeeded. That trade is intentional — a full store genuinely cannot
+                        // hold another record, storage_exhausted is an honest answer to that, and
+                        // it is recoverable: the server can free a slot with management/
+                        // remove-record and retry. See PairingPskOperations.Rotate for the
+                        // opposite ordering and why it differs.
+                        if (!_pairingStore!.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing)))
+                        {
+                            result.Result = "storage_exhausted";
+                            break;
+                        }
+
+                        string newPskId = NoiseConstants.DerivePskId(newPairingPsk);
+                        foreach (var old in _pairingStore.List()
+                            .Where(r => r.Category == PskCategory.Pairing && r.PskId != newPskId))
+                        {
+                            _pairingStore.Remove(old.PskId);
+                        }
+                    }
+                }
+
                 bool unpairedAccessChanged = false;
                 if (requestedUnpairedAccess is { } enabled)
                 {
@@ -2561,20 +2657,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     staticPinChanged |= spe != _staticPinEnabled;
                     _staticPinEnabled = spe;
-                }
-
-                if (newPairingPsk is not null)
-                {
-                    lock (_pairingStoreLock)
-                    {
-                        // _pairingStore (readonly) was verified non-null when the psk parsed.
-                        foreach (var old in _pairingStore!.List().Where(r => r.Category == PskCategory.Pairing))
-                        {
-                            _pairingStore.Remove(old.PskId);
-                        }
-
-                        _pairingStore.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing));
-                    }
                 }
 
                 bool pairingPskEnabledChanged = false;
@@ -2609,7 +2691,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 // Opens the window in place of the operator gesture. Rejected when no PIN
                 // method is enabled, since there would be nothing for the window to admit.
-                bool anyPinMethod = (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin"))
+                bool anyPinMethod = (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin") && HasUsableStaticPin)
                                     || (IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin"));
                 if (!anyPinMethod || _pairingWindow is null)
                 {

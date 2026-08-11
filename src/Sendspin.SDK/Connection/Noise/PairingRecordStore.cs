@@ -40,8 +40,21 @@ public interface IPairingRecordStore
     /// <summary>All stored records.</summary>
     IReadOnlyList<PairingRecord> List();
 
-    /// <summary>Adds or replaces the record with the same psk_id.</summary>
-    void Upsert(PairingRecord record);
+    /// <summary>
+    /// Adds or replaces the record with the same psk_id. Returns <c>false</c> when the record
+    /// could not be stored because the store is full — the spec's <c>record_mode</c> fallback
+    /// branches on exhaustion (<c>management.md:109</c>), and a client that cannot tell the
+    /// difference will claim a pairing it cannot authenticate.
+    /// </summary>
+    /// <remarks>
+    /// Return <c>true</c> if your store has no capacity limit. Reserve <c>false</c> for your
+    /// store's own record-capacity policy refusing this record; a failure of the underlying
+    /// medium — including running out of disk — is a fault, not exhaustion, and must be
+    /// reported by throwing instead, as before. Replacing a record that already exists under
+    /// the same psk_id must not return <c>false</c>: the SDK relies on an update to an
+    /// existing record always succeeding, independent of remaining capacity for new ones.
+    /// </remarks>
+    bool Upsert(PairingRecord record);
 
     /// <summary>Removes the record with the given psk_id (no-op if absent).</summary>
     void Remove(string pskId);
@@ -61,10 +74,13 @@ public sealed class InMemoryPairingRecordStore : IPairingRecordStore
     }
 
     /// <inheritdoc/>
-    public void Upsert(PairingRecord record)
+    public bool Upsert(PairingRecord record)
     {
+        // Always true: a Dictionary in memory has no capacity limit in the sense the spec
+        // means, so this store is never "full".
         lock (_lock)
             _records[record.PskId] = record;
+        return true;
     }
 
     /// <inheritdoc/>
@@ -185,13 +201,18 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
     }
 
     /// <inheritdoc/>
-    public void Upsert(PairingRecord record)
+    public bool Upsert(PairingRecord record)
     {
+        // Always true: the backing file has no capacity limit in the sense the spec means, so
+        // this store is never "full". A write that fails outright (disk full, permission
+        // revoked) still throws, from Save() below.
         lock (_lock)
         {
             _records[record.PskId] = record;
             Save();
         }
+
+        return true;
     }
 
     /// <inheritdoc/>

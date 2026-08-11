@@ -23,6 +23,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Pairing gestures | PIN pairing can require an open `PairingWindow` | **High** if a PIN method is offered — silently never pairs without one |
 | `client/state` | `available` is a boolean, not a state string | Medium |
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
+| Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
 
 ---
 
@@ -51,6 +52,10 @@ On Windows the shipped file store inherits its parent directory's ACL, so place 
 ### The identity and the pairing store must be shared across connection modes
 
 If your app both dials servers and listens for server-initiated connections, both paths must be given the **same** identity and the **same** `IPairingRecordStore`. Giving each mode its own means a pairing completed in one mode is invisible to the other, and the user re-pairs every time they switch.
+
+### A custom `IPairingRecordStore` implementation needs a one-line update
+
+`Upsert` now returns `bool` instead of `void`, so a 9.x implementation fails with a compiler error (CS0535). Return `true` unless your store enforces a capacity limit: `false` means "refused because the store is full," which the SDK uses to answer `storage_exhausted` instead of silently claiming a pairing that was never persisted. A failure of the underlying medium (disk full, permission revoked) is a fault, not exhaustion — throw for that, as before.
 
 ---
 

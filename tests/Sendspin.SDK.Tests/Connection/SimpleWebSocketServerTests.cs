@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Connection;
 
 namespace Sendspin.SDK.Tests.Connection;
@@ -147,6 +148,111 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
         {
             // Expected — server tore down the TCP connection without a graceful
             // WebSocket close handshake, proving the TcpClient was disposed.
+        }
+
+        Assert.NotEqual(WebSocketState.Open, client.State);
+    }
+
+    [Fact]
+    public async Task IncomingConnection_Dispose_ReleasesUnderlyingSocket()
+    {
+        // Regression test for #143's review: IncomingConnection.DisconnectAsync sends a Close
+        // frame, but that alone doesn't release the WebSocketClientConnection it wraps — a peer
+        // could already detect that close frame without the underlying socket ever being
+        // disposed. Never calling StartAsync keeps IncomingConnection in its initial
+        // Disconnected/!_isOpen state, so DisposeAsync's internal DisconnectAsync short-circuits
+        // without touching the wire, isolating the one line under test: that DisposeAsync also
+        // disposes the wrapped WebSocketClientConnection.
+        _server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        _server.ClientConnected += (s, c) => connected.TrySetResult(c);
+
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{_server.Port}/test"), CancellationToken.None);
+
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(WebSocketState.Open, client.State);
+
+        var incoming = new IncomingConnection(
+            NullLogger<IncomingConnection>.Instance,
+            serverConn,
+            new StubFraming());
+
+        await incoming.DisposeAsync();
+
+        // Same assertion as Connection_Dispose_ClosesUnderlyingSocket: the client should detect
+        // the socket was torn down, as either a close message or a WebSocketException (abrupt
+        // TCP teardown). No Close frame is sent on this path, so an abrupt teardown is expected.
+        var buffer = new byte[128];
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            var result = await client.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+            Assert.Equal(WebSocketMessageType.Close, result.MessageType);
+        }
+        catch (WebSocketException)
+        {
+            // Expected — no graceful WebSocket close handshake occurred on this path.
+        }
+
+        Assert.NotEqual(WebSocketState.Open, client.State);
+    }
+
+    [Fact]
+    public async Task IncomingConnection_DisposeAfterDisconnect_StillReleasesUnderlyingSocket()
+    {
+        // Regression test for #143's eviction-path review: SendSpinHostService.DisconnectExistingAsync
+        // now calls DisconnectAsync(reason) — to send the arbitration-specific goodbye — and then
+        // DisposeAsync(), to actually release the socket. This reproduces that exact sequence
+        // directly on IncomingConnection.
+        //
+        // A real DisconnectAsync send would leave the peer having already received a Close frame,
+        // and a WebSocket client's SendAsync/ReceiveAsync after that point is governed by its own
+        // local state machine rather than genuinely probing the connection (verified empirically:
+        // a write from the peer after receiving a Close throws WebSocketException regardless of
+        // whether the host disposed its side), so that can't distinguish "released" from "merely
+        // stopped reading". StubFraming.ThrowOnEncodeText makes the goodbye send fail and get
+        // swallowed by DisconnectAsync's own catch, so nothing reaches the wire — DisconnectAsync
+        // still flips the connection to disconnected via its finally block. That isolates exactly
+        // what's under test: does DisposeAsync's unconditional socket-dispose call still run after
+        // a prior DisconnectAsync, the same way IncomingConnection_Dispose_ReleasesUnderlyingSocket
+        // proves it runs from a fresh connection.
+        _server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        _server.ClientConnected += (s, c) => connected.TrySetResult(c);
+
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{_server.Port}/test"), CancellationToken.None);
+
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(WebSocketState.Open, client.State);
+
+        var incoming = new IncomingConnection(
+            NullLogger<IncomingConnection>.Instance,
+            serverConn,
+            new StubFraming { ThrowOnEncodeText = true });
+
+        await incoming.StartAsync();
+        await incoming.DisconnectAsync("evicted"); // send fails and is swallowed; nothing sent
+        await incoming.DisposeAsync();
+
+        // Same assertion as IncomingConnection_Dispose_ReleasesUnderlyingSocket: since nothing
+        // was sent, an abrupt teardown (or, less likely, a synthesized Close) proves the socket
+        // was actually released rather than merely left open with nobody reading it.
+        var buffer = new byte[128];
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            var result = await client.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+            Assert.Equal(WebSocketMessageType.Close, result.MessageType);
+        }
+        catch (WebSocketException)
+        {
+            // Expected — no graceful WebSocket close handshake occurred on this path.
         }
 
         Assert.NotEqual(WebSocketState.Open, client.State);

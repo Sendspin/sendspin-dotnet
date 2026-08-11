@@ -17,7 +17,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// server/activate that completes the host's handshake and sets its arbitration priority.
 /// Captures any client/goodbye reason the host sends back through the encrypted channel.
 /// </summary>
-internal sealed class FakeServer : IAsyncDisposable
+internal class FakeServer : IAsyncDisposable
 {
     private readonly ClientWebSocket _ws = new();
     private readonly CancellationTokenSource _cts = new();
@@ -62,6 +62,14 @@ internal sealed class FakeServer : IAsyncDisposable
         return completed == _goodbye.Task ? await _goodbye.Task : null;
     }
 
+    /// <summary>
+    /// Returns once the background receive loop exits. Lets a test prove the peer's own
+    /// ReceiveAsync completed rather than staying parked forever — i.e. that the far end
+    /// actually released the socket instead of merely returning from disposal (#143).
+    /// </summary>
+    internal Task WaitForReceiveLoopExitAsync(TimeSpan timeout) =>
+        (_receiveLoop ?? Task.CompletedTask).WaitAsync(timeout);
+
     private async Task ReceiveLoopAsync()
     {
         // Frames are reassembled to EndOfMessage: a Noise ciphertext only decrypts whole,
@@ -79,6 +87,7 @@ internal sealed class FakeServer : IAsyncDisposable
                     result = await _ws.ReceiveAsync(buffer, _cts.Token);
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
+                        await OnCloseReceivedAsync();
                         return;
                     }
 
@@ -111,6 +120,29 @@ internal sealed class FakeServer : IAsyncDisposable
             // bare 30s timeout as the sole symptom. Surface it through the channel the tests
             // already await so it lands as an immediate stack trace.
             _goodbye.TrySetException(ex);
+        }
+    }
+
+    /// <summary>
+    /// Answers the host's close handshake. Overridden by <see cref="SilentCloseFakeServer"/> to
+    /// model the non-conformant peer that exposed #143: one that never replies to a Close frame.
+    /// Uses CancellationToken.None, not _cts.Token: during disposal _cts is already cancelled,
+    /// so the token would cancel the reply immediately and reintroduce the silence.
+    /// </summary>
+    protected virtual async Task OnCloseReceivedAsync()
+    {
+        if (_ws.State != WebSocketState.CloseReceived)
+        {
+            return;
+        }
+
+        try
+        {
+            await _ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, string.Empty, CancellationToken.None);
+        }
+        catch
+        {
+            // best-effort: the socket may already be gone
         }
     }
 

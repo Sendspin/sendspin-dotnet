@@ -5,6 +5,35 @@ using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Tests.Client;
 
+/// <summary>
+/// Store double that reports full for any psk_id it does not already hold, exercising the
+/// storage-exhausted paths (#128) without needing to fill a real store to capacity. Backed by
+/// a real dictionary rather than always returning <c>false</c>, so a replace of an existing
+/// record still succeeds — per the interface's contract — and a test can seed a record, then
+/// assert it survives a refused <see cref="Upsert"/> for something new.
+/// </summary>
+internal sealed class FullPairingRecordStore : IPairingRecordStore
+{
+    private readonly Dictionary<string, PairingRecord> _records;
+
+    /// <param name="seed">Records the store starts out holding — "full" from here on.</param>
+    public FullPairingRecordStore(params PairingRecord[] seed) =>
+        _records = seed.ToDictionary(r => r.PskId);
+
+    public IReadOnlyList<PairingRecord> List() => _records.Values.ToList();
+
+    public bool Upsert(PairingRecord record)
+    {
+        if (!_records.ContainsKey(record.PskId))
+            return false;
+
+        _records[record.PskId] = record;
+        return true;
+    }
+
+    public void Remove(string pskId) => _records.Remove(pskId);
+}
+
 /// <summary>Mutable <see cref="INoiseSessionInfo"/> stand-in for tests.</summary>
 internal sealed class FakeNoiseSession : INoiseSessionInfo
 {
