@@ -22,7 +22,7 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
     /// <param name="available">Whether the client is available to participate in Sendspin playback.</param>
     /// <param name="volume">Player volume (0-100).</param>
     /// <param name="muted">Whether the player is muted.</param>
-    /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
+    /// <param name="staticDelayMs">Static delay in milliseconds (0-5000), as it goes on the wire. Project a scheduler-side <see cref="double"/> onto this range before calling.</param>
     /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds (codec init, decode warmup, backend buffering, DAC latency). Always required for players.</param>
     /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds (absorbs network jitter, primarily for live streams). Always required for players.</param>
     /// <param name="supportedCommands">Optional player commands supported via server/command (subset of: 'set_static_delay'). Omitted from the wire when null.</param>
@@ -30,7 +30,7 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
         bool available,
         int volume = 100,
         bool muted = false,
-        double staticDelayMs = 0.0,
+        int staticDelayMs = 0,
         int requiredLeadTimeMs = 0,
         int minBufferMs = 0,
         List<string>? supportedCommands = null)
@@ -72,14 +72,14 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
     /// </summary>
     /// <param name="volume">Player volume (0-100).</param>
     /// <param name="muted">Whether the player is muted.</param>
-    /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
+    /// <param name="staticDelayMs">Static delay in milliseconds (0-5000), as it goes on the wire. Project a scheduler-side <see cref="double"/> onto this range before calling.</param>
     /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds (codec init, decode warmup, backend buffering, DAC latency). Always required for players.</param>
     /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds (absorbs network jitter, primarily for live streams). Always required for players.</param>
     /// <param name="supportedCommands">Optional player commands supported via server/command (subset of: 'set_static_delay'). Omitted from the wire when null.</param>
     public static ClientStateMessage CreatePlayerState(
         int volume,
         bool muted,
-        double staticDelayMs,
+        int staticDelayMs,
         int requiredLeadTimeMs,
         int minBufferMs,
         List<string>? supportedCommands = null)
@@ -185,13 +185,19 @@ public sealed class PlayerStatePayload
     public string? Error { get; init; }
 
     /// <summary>
-    /// Static delay in milliseconds configured for this player.
-    /// Used by the server during GroupSync calibration to compensate for
-    /// device audio output latency across the group.
+    /// Static delay in milliseconds (0-5000) configured for this player: additional delay
+    /// beyond the device's audio port, such as external speakers or an amplifier. Always
+    /// required for players, so it is serialized unconditionally even when zero.
     /// </summary>
+    /// <remarks>
+    /// An integer on the wire, and never negative. The scheduler's own delay is a
+    /// <see cref="double"/> over a wider range — fractional from calibration, negative to
+    /// schedule later — so a caller must project it onto this type rather than passing it
+    /// through. Reporting the raw value emitted a float, omitted the field entirely at its
+    /// default, and could send a negative that a spec-conformant server rejects outright.
+    /// </remarks>
     [JsonPropertyName("static_delay_ms")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public double StaticDelayMs { get; init; }
+    public int StaticDelayMs { get; init; }
 
     /// <summary>
     /// Minimum startup lead time in milliseconds: codec init, decode warmup, audio

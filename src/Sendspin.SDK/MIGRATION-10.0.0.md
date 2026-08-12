@@ -25,6 +25,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
 | Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
+| Static delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
 
 ---
 
@@ -214,7 +215,23 @@ Optional — existing code reading `presentation.Pin` keeps working and simply s
 
 ---
 
-## 8. Checklist
+## 8. `static_delay_ms` is reported as a spec-conformant integer
+
+`client/state` now always carries `static_delay_ms`, projected onto the spec's wire type: an **integer in 0–5000**.
+
+Three things changed, all on what goes out on the wire:
+
+- **It is no longer omitted at zero.** The spec marks `static_delay_ms` REQUIRED for players, exactly like `required_lead_time_ms` and `min_buffer_ms`. Zero is its default, so it used to be missing from almost every player's initial state — and a server reads an absent value as "unchanged", which on the first message means it has no value at all.
+- **It is an integer.** A fractional delay used to serialize as e.g. `12.5`. It is now rounded.
+- **Negatives are clamped to 0.** The spec states negative values are not supported, and `aiosendspin` raises `ValueError` on parse rather than tolerating one — so a negative delay failed the connection.
+
+`IClockSynchronizer.StaticDelayMs` is **unchanged**: still a `double`, still accepting −5000…5000. Negative values still schedule audio *later*, and that is still applied to playback. Only the report is constrained, and the SDK logs a warning naming both values when a configured delay does not survive the projection — because the server's group calibration is then working from a different number than your playback is.
+
+`ClientStateMessage.CreateInitial` / `CreatePlayerState` take `int staticDelayMs` rather than `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
+
+---
+
+## 9. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt

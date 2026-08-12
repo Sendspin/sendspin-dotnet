@@ -389,6 +389,13 @@ cannot choose where to store it, implement `IStaticDelayStore` and pass it to th
 loads on connect (before the first `client/state`) and saves whenever the delay changes (via a
 `set_static_delay` command or a GroupSync offset):
 
+> `IClockSynchronizer.StaticDelayMs` is a `double` over −5000…5000: fractional values come from
+> calibration, and negative values schedule audio *later*. The spec's wire field is an integer
+> 0–5000 and states negatives are unsupported, so what the client **reports** is rounded and
+> clamped into that range while playback keeps using the value you set. The SDK logs a warning
+> naming both numbers when they diverge — at that point the server's group calibration is working
+> from a different delay than your playback is.
+
 ```csharp
 public sealed class FileStaticDelayStore : IStaticDelayStore
 {
