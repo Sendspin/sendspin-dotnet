@@ -113,7 +113,9 @@ If you enable the optional PIN pairing methods via `ClientCapabilities.PinPairin
 you must also supply an `IPinLockoutStore` — `FilePinLockoutStore` is provided. Without one
 the failure counter cannot survive a restart, so a method could never escalate to
 gesture-gating; the SDK refuses to offer the PIN methods rather than granting unlimited,
-ungated attempts. Offering `dynamic_pin`
+ungated attempts. They equally need an `IPairingRecordStore`: without one the PIN exchange
+completes, the server writes a long-term record, and the client stores nothing — so it fails
+to authenticate on the next connection having reported success. Offering `dynamic_pin`
 additionally requires `SendspinClientOptions.PresentPinAsync` (the callback that shows the
 derived PIN to the operator, taking a `PinPresentation` — the derived PIN plus the server's
 language hint); without it the SDK refuses that method with `method_not_supported` rather than

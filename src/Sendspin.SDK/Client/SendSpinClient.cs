@@ -1719,14 +1719,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // method could never escalate to gesture-gating and every attempt would stay ungated.
         // Refuse rather than fail open. Dynamic PIN additionally requires a presenter: without
         // PresentPinAsync the derived PIN would reach nobody.
+        //
+        // A record store is a dependency in exactly the same sense (#158). Without one the PIN
+        // exchange runs to completion, the server writes a long-term record, and this client
+        // stores nothing -- so it fails to authenticate on the very next connection while the
+        // app has been told pairing succeeded. pairing_psk has required a store since the
+        // trust-and-pairing work; the PIN methods were never given the same treatment.
         "dynamic_pin" => IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin")
-                         && _pinLockoutStore is not null && _presentPinAsync is not null,
+                         && _pinLockoutStore is not null && _presentPinAsync is not null
+                         && _pairingStore is not null,
         "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
-                        && HasUsableStaticPin && _pinLockoutStore is not null,
+                        && HasUsableStaticPin && _pinLockoutStore is not null
+                        && _pairingStore is not null,
         // pairing_psk is deliberately not covered here: it stays on BuildPairMethods's
         // own IsMethodEnabled check even though CanOffer requires _pairingStore is not
-        // null too (#158). Folding it in here would make a store-less client advertise
-        // zero pair methods, since pairing_psk is mandatory.
+        // null too. Folding it in here would make a store-less client advertise
+        // zero pair methods, since pairing_psk is mandatory. The PIN methods are optional,
+        // so withholding an unusable one costs nothing and stops the server rendering
+        // pairing UX for a method every attempt would refuse.
         _ => false,
     };
 
@@ -2246,35 +2256,41 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // afterwards, and release any PIN presentation still held for it.
         ClearPinState();
 
-        if (_pairingStore is not null && ServerId is not null)
+        // One success path, and it is the one that actually persisted. Every early return
+        // below leaves PairingCompleted unraised, because a client that stored nothing cannot
+        // authenticate this server on the next connection -- announcing success would tell the
+        // app the opposite of what is true.
+        if (_pairingStore is null || ServerId is null)
         {
-            bool stored;
-            lock (_pairingStoreLock)
-            {
-                stored = _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
-            }
-
-            if (!stored)
-            {
-                // The store is full: nothing was persisted, so this client cannot authenticate
-                // the server on a future connection. Do not log "persisted" and do not raise
-                // PairingCompleted — the same discipline CanOffer already applies when it
-                // refuses pairing_psk outright for a null store (this branch's non-null store
-                // means only a full one reaches here for that method).
-                _logger.LogError(
-                    "Pairing complete but the record store is full; record NOT persisted for {ServerId}",
-                    ServerId);
-                return;
-            }
-
-            _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
-        }
-        else
-        {
-            _logger.LogWarning("Pairing completed but no record store configured; record NOT persisted");
+            // Unreachable for a null store: CanOffer gates all three methods on one (#158).
+            // Kept as a guard rather than an assertion because ServerId comes from the Noise
+            // session and a degenerate peer could still leave it unset here.
+            _logger.LogError(
+                "Pairing complete but it cannot be persisted (store configured: {HasStore}, "
+                + "server id known: {HasServerId}); record NOT persisted",
+                _pairingStore is not null,
+                ServerId is not null);
+            return;
         }
 
-        PairingCompleted?.Invoke(this, ServerId ?? string.Empty);
+        bool stored;
+        lock (_pairingStoreLock)
+        {
+            stored = _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
+        }
+
+        if (!stored)
+        {
+            // The store is full: nothing was persisted, so this client cannot authenticate
+            // the server on a future connection.
+            _logger.LogError(
+                "Pairing complete but the record store is full; record NOT persisted for {ServerId}",
+                ServerId);
+            return;
+        }
+
+        _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
+        PairingCompleted?.Invoke(this, ServerId);
     }
 
     /// <summary>

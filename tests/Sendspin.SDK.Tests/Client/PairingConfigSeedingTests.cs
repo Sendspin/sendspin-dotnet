@@ -33,19 +33,24 @@ public class PairingConfigSeedingTests
     /// would confound "withheld because disabled". Pass false to test the
     /// missing-presenter case.
     /// </param>
+    /// <param name="hasPairingRecordStore">
+    /// Present by default for the same reason. Pass false to test the missing-record-store
+    /// case (#158); it overrides <paramref name="store"/>.
+    /// </param>
     private static (SendspinClientService Client, FakeSendspinConnection Connection)
         CreateAndGreet(
             ClientCapabilities capabilities,
             IPairingRecordStore? store = null,
             PairingWindow? window = null,
             bool hasPinLockoutStore = true,
-            bool hasPresentPinAsync = true)
+            bool hasPresentPinAsync = true,
+            bool hasPairingRecordStore = true)
     {
         var (client, connection, session) = TestClient.Create(
             configure: o => o with
             {
                 Capabilities = capabilities,
-                PairingRecordStore = store ?? new InMemoryPairingRecordStore(),
+                PairingRecordStore = hasPairingRecordStore ? store ?? new InMemoryPairingRecordStore() : null,
                 PinLockoutStore = hasPinLockoutStore ? new InMemoryPinLockoutStore() : null,
                 PresentPinAsync = hasPresentPinAsync ? (_, _) => ValueTask.CompletedTask : null,
                 PairingWindow = window,
@@ -425,6 +430,83 @@ public class PairingConfigSeedingTests
         Assert.True(data.TryGetProperty("static_pin", out var methodState),
             "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
         Assert.False(methodState.GetProperty("enabled").GetBoolean());
+    }
+
+    // --- #158: a PIN method needs an IPairingRecordStore for the same reason pairing_psk
+    // does. Without one the exchange completes, the server writes a long-term record, and
+    // this client stores nothing. ---
+
+    [Theory]
+    [InlineData("dynamic_pin")]
+    [InlineData("static_pin")]
+    public void PinMethod_WithNoPairingRecordStore_IsNotAdvertised_ButStillReportedDisabled(string method)
+    {
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { method },
+            StaticPin = "12345678",
+        };
+        var (client, connection) = CreateAndGreet(capabilities, hasPairingRecordStore: false);
+        using var _c = client;
+
+        Assert.DoesNotContain(method, HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.TryGetProperty(method, out var methodState),
+            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
+        Assert.False(methodState.GetProperty("enabled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("dynamic_pin")]
+    [InlineData("static_pin")]
+    public void PinMethod_WithAPairingRecordStore_IsAdvertised(string method)
+    {
+        // Positive control for the pair above. Without it, a change that stopped advertising
+        // PIN methods altogether would pass every assertion in this block.
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { method },
+            StaticPin = "12345678",
+        };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        Assert.Contains(method, HelloPairMethods(connection));
+    }
+
+    [Theory]
+    [InlineData("dynamic_pin")]
+    [InlineData("static_pin")]
+    public void PinMethod_WithNoPairingRecordStore_ServerActivateAborts_AndNeverClaimsPairing(string method)
+    {
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { method },
+            StaticPin = "12345678",
+        };
+        var (client, connection) = CreateAndGreet(capabilities, hasPairingRecordStore: false);
+        using var _c = client;
+
+        bool paired = false;
+        client.PairingCompleted += (_, _) => paired = true;
+
+        connection.RaiseTextMessageReceived(
+            $$$$"""{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"{{{{method}}}}"}}}""");
+
+        var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+
+        // Spec #123: the abort must leave the connection open so the server can retry with
+        // another method.
+        Assert.Equal(ConnectionState.Connected, connection.State);
+
+        // A server that finalizes anyway — it never received a client/pair-finalize, but the
+        // connection is deliberately still open — must not make this client claim a pairing it
+        // has no record for. Mirrors PairingPsk_WithNoRecordStore_AbortsAndDoesNotClaimSuccess.
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+
+        Assert.False(paired, "PairingCompleted must not fire when the record cannot be persisted");
     }
 
     [Fact]
