@@ -31,15 +31,43 @@ public class PlayerTimingSerializationTests
     [Fact]
     public void ClientState_TimingFieldsAlwaysWrittenEvenWhenZero()
     {
-        // Per spec these are "always required for players", so they must serialize even at zero
-        // (unlike static_delay_ms, which is omitted at its default).
+        // All three are "REQUIRED for players", so all three must serialize even at zero.
+        // static_delay_ms used to be omitted at its default — which is 0, the common case — so
+        // essentially every player left a required field out of its initial state.
         var msg = ClientStateMessage.CreatePlayerState(
             volume: 100, muted: false, staticDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0);
 
         var json = MessageSerializer.Serialize(msg);
 
+        Assert.Contains("\"static_delay_ms\":0", json);
         Assert.Contains("\"required_lead_time_ms\":0", json);
         Assert.Contains("\"min_buffer_ms\":0", json);
+    }
+
+    [Fact]
+    public void ClientState_InitialMessage_CarriesStaticDelayAtItsDefault()
+    {
+        // The initial full state is where the presence requirement actually bites: aiosendspin
+        // reads an omitted static_delay_ms as "unchanged", which on the first message leaves it
+        // with no value at all rather than the 0 we meant.
+        var msg = ClientStateMessage.CreateInitial(available: true);
+
+        Assert.Contains("\"static_delay_ms\":0", MessageSerializer.Serialize(msg));
+    }
+
+    [Fact]
+    public void ClientState_StaticDelayIsAnIntegerOnTheWire()
+    {
+        // The spec types static_delay_ms as an integer. The scheduler's own delay is a double,
+        // so the factory takes the projected wire value rather than the raw one — this pins
+        // that the wire field cannot carry a fraction.
+        var msg = ClientStateMessage.CreatePlayerState(
+            volume: 100, muted: false, staticDelayMs: 250, requiredLeadTimeMs: 0, minBufferMs: 0);
+
+        string json = MessageSerializer.Serialize(msg);
+
+        Assert.Contains("\"static_delay_ms\":250", json);
+        Assert.DoesNotContain("\"static_delay_ms\":250.", json);
     }
 
     [Fact]

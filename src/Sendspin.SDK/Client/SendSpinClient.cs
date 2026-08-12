@@ -133,6 +133,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private const double MinStaticDelayMs = -5000.0;
     private const double MaxStaticDelayMs = 5000.0;
 
+    // Last scheduler-side value ToWireStaticDelayMs warned about, so a delay that does not
+    // survive the projection is reported once rather than on every client/state.
+    private double? _lastWarnedStaticDelayMs;
+
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
@@ -738,7 +742,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         var stateMessage = ClientStateMessage.CreatePlayerState(
-            clampedVolume, muted, staticDelayMs,
+            clampedVolume, muted, ToWireStaticDelayMs(staticDelayMs),
             _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
 
         _logger.LogDebug(
@@ -990,6 +994,44 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private List<string>? GetPlayerSupportedCommands()
         => _capabilities.SupportsSetStaticDelay ? new List<string> { Commands.SetStaticDelay } : null;
+
+    /// <summary>
+    /// Projects a scheduler-side static delay onto the wire type: an integer millisecond value
+    /// in 0-5000. Every client/state goes through here, so the internal range stays wider than
+    /// the wire's without the difference leaking onto it.
+    /// </summary>
+    /// <remarks>
+    /// The scheduler's value is a double in <see cref="MinStaticDelayMs"/>..<see cref="MaxStaticDelayMs"/> —
+    /// fractional from calibration, negative to schedule later. The spec's <c>static_delay_ms</c>
+    /// is an integer 0-5000 and states negatives are not supported; a conformant server rejects
+    /// one outright rather than tolerating it. Clamping is therefore not optional, and a clamp
+    /// that moved the value is worth saying out loud: the server is being told a delay the
+    /// client is not actually applying.
+    /// </remarks>
+    private int ToWireStaticDelayMs(double staticDelayMs)
+    {
+        // A public settable double can be NaN or infinity; Math.Clamp propagates NaN and the
+        // cast would then produce a garbage int rather than throwing.
+        double bounded = double.IsFinite(staticDelayMs)
+            ? Math.Clamp(staticDelayMs, 0.0, MaxStaticDelayMs)
+            : 0.0;
+
+        int wire = (int)Math.Round(bounded, MidpointRounding.AwayFromZero);
+
+        // Deduplicated on the value: a volume slider can drive many state sends, and a
+        // misconfigured delay would otherwise warn on every one of them.
+        if (wire != staticDelayMs && _lastWarnedStaticDelayMs != staticDelayMs)
+        {
+            _lastWarnedStaticDelayMs = staticDelayMs;
+            _logger.LogWarning(
+                "static_delay_ms {Configured}ms is reported to the server as {Reported}ms: the wire "
+                + "value is an integer 0-5000 and negatives are not supported. Audio is still "
+                + "scheduled using {Configured}ms, so the server's group calibration will differ.",
+                staticDelayMs, wire, staticDelayMs);
+        }
+
+        return wire;
+    }
 
     /// <inheritdoc/>
     public void ClearAudioBuffer()
@@ -2959,7 +3001,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             available: available,
             volume: _playerState.Volume,
             muted: _playerState.Muted,
-            staticDelayMs: _clockSynchronizer.StaticDelayMs,
+            staticDelayMs: ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
             requiredLeadTimeMs: _requiredLeadTimeMs,
             minBufferMs: _minBufferMs,
             supportedCommands: GetPlayerSupportedCommands());
