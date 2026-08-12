@@ -45,7 +45,9 @@ Check("generate an identity", () =>
     return identity.PeerId.Length > 0;
 });
 
-// 3. Cipher-suite availability probing (the BCL AEADs).
+// 3. Cipher-suite availability probing. SelectDefault runs a real KKpsk2 message-1 write, so
+//    this exercises Curve25519 and the suite's AEAD through libsodium rather than querying the
+//    BCL — which is what makes the linux-arm64 leg of this job meaningful (#144).
 Check("select a supported cipher suite", () =>
     NoiseCipherSuiteExtensions.SelectDefault().IsSupported());
 
