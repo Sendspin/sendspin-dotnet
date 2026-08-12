@@ -153,6 +153,21 @@ public class InboundMessageHardeningTests
     }
 
     [Fact]
+    public void NullTypeMember_ClosesTheConnection()
+    {
+        // #107: JsonElement.GetString() returns null for a JSON null rather than throwing,
+        // so this used to reach the unhandled-type branch with the connection left up --
+        // the one row in the malformed-input table that failed open instead of closing.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":null}""");
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void UnrecognisedMessageType_IsTolerated()
     {
         // Positive control for the malformed/unrecognised distinction: a well-formed
