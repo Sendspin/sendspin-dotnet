@@ -105,10 +105,10 @@ public sealed class VisualizerRequestFormat
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? RateMax { get; init; }
 
-    /// <summary>Requested buffer capacity in bytes.</summary>
-    [JsonPropertyName("buffer_capacity")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? BufferCapacity { get; init; }
+    // No buffer_capacity here. It is a visualizer@v1_support field in client/hello only --
+    // the spec's stream/request-format visualizer object is exactly types/rate_max/spectrum --
+    // and aiosendspin rejects a client that sends it when run strict ("stream/request-format
+    // set buffer_capacity, not a visualizer field here"). Announce capacity in the hello.
 
     /// <summary>Requested spectrum configuration.</summary>
     [JsonPropertyName("spectrum")]

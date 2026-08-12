@@ -117,7 +117,9 @@ ungated attempts. Offering `dynamic_pin`
 additionally requires `SendspinClientOptions.PresentPinAsync` (the callback that shows the
 derived PIN to the operator, taking a `PinPresentation` — the derived PIN plus the server's
 language hint); without it the SDK refuses that method with `method_not_supported` rather than
-pairing with a PIN nobody can see.
+pairing with a PIN nobody can see. Show `PinPresentation.Groups` rather than `Pin` to display
+the PIN in the spec's recommended grouping (`123456` → `123 456`); grouping is presentation-only
+and separators never enter derivation or operator entry.
 
 **A `PairingWindow` is required to complete a gesture-gated attempt** — every `static_pin`
 attempt, and a `dynamic_pin` attempt once the method has escalated or its PIN is shorter than

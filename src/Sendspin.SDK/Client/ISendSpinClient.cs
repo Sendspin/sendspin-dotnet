@@ -129,9 +129,14 @@ public interface ISendspinClient : IAsyncDisposable
     /// </summary>
     /// <param name="types">Requested feature types (subset of loudness/f_peak/spectrum/beat/peak/pitch), or null to leave unchanged.</param>
     /// <param name="rateMax">Requested maximum frame rate, or null to leave unchanged.</param>
-    /// <param name="bufferCapacity">Requested buffer capacity in bytes, or null to leave unchanged.</param>
     /// <param name="spectrum">Requested spectrum configuration, or null to leave unchanged.</param>
-    Task RequestVisualizerFormatAsync(List<string>? types = null, int? rateMax = null, int? bufferCapacity = null, VisualizerSpectrum? spectrum = null);
+    /// <remarks>
+    /// Buffer capacity is not renegotiable: it is a <c>visualizer@v1_support</c> field of
+    /// <c>client/hello</c>, and the spec's <c>stream/request-format</c> visualizer object carries
+    /// only types, rate_max and spectrum. Set it via
+    /// <see cref="ClientCapabilities.VisualizerSupport"/> before connecting.
+    /// </remarks>
+    Task RequestVisualizerFormatAsync(List<string>? types = null, int? rateMax = null, VisualizerSpectrum? spectrum = null);
 
     /// <summary>
     /// Sends the current player state (volume, muted) to the server.
