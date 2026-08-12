@@ -15,40 +15,32 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
     required public ClientStatePayload Payload { get; init; }
 
     /// <summary>
-    /// Builds the initial client/state message, which per spec MUST carry every state field.
-    /// Sent once per connection after server/activate — immediately for clients that need no
-    /// clock sync, deferred until the first sync convergence for those that do.
+    /// Builds the initial client/state message. Per spec it MUST carry every state field of the
+    /// roles the server activated — and only those.
     /// </summary>
     /// <param name="available">Whether the client is available to participate in Sendspin playback.</param>
-    /// <param name="volume">Player volume (0-100).</param>
-    /// <param name="muted">Whether the player is muted.</param>
-    /// <param name="staticDelayMs">Static delay in milliseconds (0-5000), as it goes on the wire. Project a scheduler-side <see cref="double"/> onto this range before calling.</param>
-    /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds (codec init, decode warmup, backend buffering, DAC latency). Always required for players.</param>
-    /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds (absorbs network jitter, primarily for live streams). Always required for players.</param>
-    /// <param name="supportedCommands">Optional player commands supported via server/command (subset of: 'set_static_delay'). Omitted from the wire when null.</param>
+    /// <param name="player">The player object, or null when <c>player</c> is not an active role.</param>
+    /// <param name="source">The source object, or null when <c>source</c> is not an active role.</param>
+    /// <remarks>
+    /// The role objects are parameters rather than being built here because which of them belong
+    /// depends on <c>active_roles</c>, which this type cannot see. A state object for an inactive
+    /// role is a client deviation the reference server rejects outright when run with
+    /// <c>allow_noncompliant_clients=False</c>; both objects absent is legitimate, since a client
+    /// whose active roles are artwork or visualizer still sends an initial message and
+    /// <c>available</c> alone unlocks the server's streams.
+    /// </remarks>
     public static ClientStateMessage CreateInitial(
         bool available,
-        int volume = 100,
-        bool muted = false,
-        int staticDelayMs = 0,
-        int requiredLeadTimeMs = 0,
-        int minBufferMs = 0,
-        List<string>? supportedCommands = null)
+        PlayerStatePayload? player = null,
+        SourceStatePayload? source = null)
     {
         return new ClientStateMessage
         {
             Payload = new ClientStatePayload
             {
                 Available = available,
-                Player = new PlayerStatePayload
-                {
-                    Volume = volume,
-                    Muted = muted,
-                    StaticDelayMs = staticDelayMs,
-                    RequiredLeadTimeMs = requiredLeadTimeMs,
-                    MinBufferMs = minBufferMs,
-                    SupportedCommands = supportedCommands
-                }
+                Player = player,
+                Source = source,
             }
         };
     }

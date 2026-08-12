@@ -26,6 +26,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 | Static delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
+| `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
 
 ---
 
@@ -243,7 +244,27 @@ If you were calling the three-argument form purely to report a delay you had alr
 
 ---
 
-## 9. Checklist
+## 9. `client/state` role objects follow the server's `active_roles`
+
+A `player` object used to go out on every `client/state`, and a `source` object never did.
+
+- **`player` is now sent only when the server activated the player role.** A state object for an inactive role is a client deviation the reference server rejects outright under `allow_noncompliant_clients=False`, so a source-only or artwork-only client was previously non-conformant on its very first message.
+- **`source` is now built.** If your app calls `SetSourceSignalAsync` before the initial `client/state` goes out — a line-sense client sensing signal at boot — the signal is remembered and carried by that message instead of being discarded. A client that reports only *transitions* previously left the server never knowing there was signal until it changed. The remembered signal also survives reconnects, since it describes the input, not the session.
+
+`ClientStateMessage.CreateInitial` now takes the role payloads rather than loose player fields, because which objects belong depends on `active_roles`, which the message type cannot see:
+
+```csharp
+ClientStateMessage.CreateInitial(
+    available: true,
+    player: new PlayerStatePayload { Volume = 42, Muted = false, /* ... */ },
+    source: new SourceStatePayload { Signal = "present" });
+```
+
+Only relevant if you construct these messages yourself; both parameters default to null.
+
+---
+
+## 10. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt

@@ -50,7 +50,8 @@ public class PlayerTimingSerializationTests
         // The initial full state is where the presence requirement actually bites: aiosendspin
         // reads an omitted static_delay_ms as "unchanged", which on the first message leaves it
         // with no value at all rather than the 0 we meant.
-        var msg = ClientStateMessage.CreateInitial(available: true);
+        var msg = ClientStateMessage.CreateInitial(
+            available: true, player: new PlayerStatePayload());
 
         Assert.Contains("\"static_delay_ms\":0", MessageSerializer.Serialize(msg));
     }
