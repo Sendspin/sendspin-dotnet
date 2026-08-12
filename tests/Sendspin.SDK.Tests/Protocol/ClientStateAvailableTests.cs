@@ -25,15 +25,40 @@ public class ClientStateAvailableTests
     {
         var json = MessageSerializer.Serialize(ClientStateMessage.CreateInitial(
             available: true,
-            volume: 42,
-            muted: true,
-            requiredLeadTimeMs: 200,
-            minBufferMs: 150));
+            player: new PlayerStatePayload
+            {
+                Volume = 42,
+                Muted = true,
+                RequiredLeadTimeMs = 200,
+                MinBufferMs = 150,
+            }));
 
         Assert.Contains("\"volume\":42", json);
         Assert.Contains("\"muted\":true", json);
         Assert.Contains("\"required_lead_time_ms\":200", json);
         Assert.Contains("\"min_buffer_ms\":150", json);
+    }
+
+    [Fact]
+    public void CreateInitial_OmitsRoleObjectsThatWereNotSupplied()
+    {
+        // The caller decides which role objects belong, from active_roles. An artwork-only or
+        // visualizer-only client legitimately sends available with neither object.
+        var json = MessageSerializer.Serialize(ClientStateMessage.CreateInitial(available: true));
+
+        Assert.DoesNotContain("\"player\"", json);
+        Assert.DoesNotContain("\"source\"", json);
+    }
+
+    [Fact]
+    public void CreateInitial_IncludesSourceObjectWhenSupplied()
+    {
+        var json = MessageSerializer.Serialize(ClientStateMessage.CreateInitial(
+            available: true,
+            source: new SourceStatePayload { Signal = "present" }));
+
+        Assert.Contains("\"source\":{\"signal\":\"present\"}", json);
+        Assert.DoesNotContain("\"player\"", json);
     }
 
     [Fact]

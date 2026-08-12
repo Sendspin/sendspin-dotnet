@@ -137,6 +137,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // survive the projection is reported once rather than on every client/state.
     private double? _lastWarnedStaticDelayMs;
 
+    // Last line-sense signal the app reported, or null if it never has. Survives reconnects on
+    // purpose: it describes the device's input, not the session (#114).
+    private bool? _lastSourceSignal;
+
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
@@ -467,6 +471,34 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool HasSourceRole() => HasRole("source");
 
     /// <summary>
+    /// Whether the server has activated any version of a role family. Distinct from
+    /// <see cref="HasRole"/>, which reports what this client offers: the server decides what is
+    /// active, and a client/state object for a role it did not activate is a deviation.
+    /// </summary>
+    /// <remarks>
+    /// HandleServerActivate mirrors <c>active_roles</c> into
+    /// <see cref="ServerHelloPayload.ActiveRoles"/>, so this reads the current grant rather than
+    /// the hello's opening one.
+    /// </remarks>
+    private bool IsRoleActive(string family)
+        => LastServerHello?.ActiveRoles.Any(r => r.StartsWith(family + "@", StringComparison.Ordinal))
+           ?? false;
+
+    /// <summary>
+    /// Whether a client/state may carry <paramref name="family"/>'s state object: suppressed
+    /// only on positive knowledge that the server did not activate the role.
+    /// </summary>
+    /// <remarks>
+    /// No server/activate means no statement about active roles, and production never sends
+    /// client/state in that window — the first activate is what completes the handshake and
+    /// permits client/time and client/state at all (see HandleServerActivate). So the null case
+    /// is unreachable outside test harnesses that drive the client without a handshake, and
+    /// suppressing there would only stop those exercising the paths they exist to cover.
+    /// </remarks>
+    private bool MayReportRoleState(string family)
+        => LastServerHello is null || IsRoleActive(family);
+
+    /// <summary>
     /// Whether this client's clock must be synchronized with the server before it can claim
     /// availability. True for the two roles the spec names: player and source.
     /// </summary>
@@ -479,8 +511,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (!HasSourceRole() || _capabilities.SourceRoleSupport?.LineSense != true)
             return;
 
+        // Recorded before the send gate, and deliberately not reset per connection: line sense
+        // is a property of the device's input, not of a session, so a reconnect's initial state
+        // reports what is still true. Without this the signal was simply discarded inside the
+        // pre-initial window, and a client that reports only transitions never sent it again —
+        // the server never learned there was signal until it changed (#114).
+        _lastSourceSignal = present;
+
         if (!_initialClientStateSent)
         {
+            // The initial message carries it instead. Sending a source-only delta here would
+            // make it the server's "initial" client/state, which MUST carry all state fields.
             return;
         }
 
@@ -488,10 +529,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             Payload = new ClientStatePayload
             {
-                Source = new SourceStatePayload { Signal = present ? "present" : "absent" },
+                Source = BuildSourceState(),
             },
         };
         await _connection.SendMessageAsync(message);
+    }
+
+    /// <summary>
+    /// The <c>source</c> object for a client/state, or null when it does not belong: the role is
+    /// not active, line sense is not supported, or nothing has reported a signal yet.
+    /// </summary>
+    /// <remarks>
+    /// <c>signal</c> is the only field, and it is optional ("only if 'line_sense' is supported"),
+    /// so with no reported signal there is nothing truthful to put in the object — inventing
+    /// 'absent' would assert something the app never said.
+    /// </remarks>
+    private SourceStatePayload? BuildSourceState()
+    {
+        if (!MayReportRoleState("source")
+            || _capabilities.SourceRoleSupport?.LineSense != true
+            || _lastSourceSignal is not { } signal)
+        {
+            return null;
+        }
+
+        return new SourceStatePayload { Signal = signal ? "present" : "absent" };
     }
 
     /// <summary>
@@ -751,6 +813,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 await SendInitialClientStateAsync();
             }
 
+            return;
+        }
+
+        // Same rule as the initial message: no player object without an active player role.
+        // Enforcing it there and not here would leave the deviation reachable through every
+        // app-driven volume or mute change.
+        if (!MayReportRoleState("player"))
+        {
+            _logger.LogDebug(
+                "Skipping player state: player is not an active role, so a player object would "
+                + "be a client/state deviation");
             return;
         }
 
@@ -3011,16 +3084,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // which resets the latch with the rest of the per-connection state.
         _initialClientStateSent = true;
 
-        // Send the current player state (initialized from capabilities)
+        // Role objects follow active_roles, not capabilities. A player object used to go out
+        // unconditionally, so a source-only or artwork-only client reported player state for a
+        // role the server never activated — the deviation aiosendspin rejects when strict. The
+        // source object was never built at all, which is why an in-window line-sense signal had
+        // nowhere to go (#114).
         bool available = CurrentAvailability;
         var stateMessage = ClientStateMessage.CreateInitial(
             available: available,
-            volume: _playerState.Volume,
-            muted: _playerState.Muted,
-            staticDelayMs: ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
-            requiredLeadTimeMs: _requiredLeadTimeMs,
-            minBufferMs: _minBufferMs,
-            supportedCommands: GetPlayerSupportedCommands());
+            player: MayReportRoleState("player")
+                ? new PlayerStatePayload
+                {
+                    Volume = _playerState.Volume,
+                    Muted = _playerState.Muted,
+                    StaticDelayMs = ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
+                    RequiredLeadTimeMs = _requiredLeadTimeMs,
+                    MinBufferMs = _minBufferMs,
+                    SupportedCommands = GetPlayerSupportedCommands(),
+                }
+                : null,
+            source: BuildSourceState());
 
         // Seed the availability publisher's "last sent" tracker from the value this message
         // carries, so the first delta PublishAvailabilityAsync sends afterward is neither a
