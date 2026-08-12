@@ -23,17 +23,31 @@ public class PairingConfigSeedingTests
     /// sends nothing on its own — client/hello is a reply to server/hello
     /// (SendSpinClient.cs:1327), so without this the advertisement never exists.
     /// </summary>
+    /// <param name="hasPinLockoutStore">
+    /// Present by default so a PIN method is never withheld for want of a lockout store,
+    /// which would confound "withheld because disabled". Pass false to test the
+    /// missing-store case.
+    /// </param>
+    /// <param name="hasPresentPinAsync">
+    /// Present by default so dynamic_pin is never withheld for want of a presenter, which
+    /// would confound "withheld because disabled". Pass false to test the
+    /// missing-presenter case.
+    /// </param>
     private static (SendspinClientService Client, FakeSendspinConnection Connection)
-        CreateAndGreet(ClientCapabilities capabilities, IPairingRecordStore? store = null, PairingWindow? window = null)
+        CreateAndGreet(
+            ClientCapabilities capabilities,
+            IPairingRecordStore? store = null,
+            PairingWindow? window = null,
+            bool hasPinLockoutStore = true,
+            bool hasPresentPinAsync = true)
     {
         var (client, connection, session) = TestClient.Create(
             configure: o => o with
             {
                 Capabilities = capabilities,
                 PairingRecordStore = store ?? new InMemoryPairingRecordStore(),
-                // Present so a PIN method is never withheld for want of a lockout store,
-                // which would confound "withheld because disabled".
-                PinLockoutStore = new InMemoryPinLockoutStore(),
+                PinLockoutStore = hasPinLockoutStore ? new InMemoryPinLockoutStore() : null,
+                PresentPinAsync = hasPresentPinAsync ? (_, _) => ValueTask.CompletedTask : null,
                 PairingWindow = window,
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
@@ -355,6 +369,196 @@ public class PairingConfigSeedingTests
         Assert.Contains("static_pin", HelloPairMethods(connection));
 
         var data = GetPairingConfigData(connection);
+        Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
+    }
+
+    // --- #132 item 1: a PIN method must not be advertised, or reported enabled, on a
+    // client missing a dependency CanRun requires but BuildPairMethods/get-pairing-config
+    // did not previously check (IPinLockoutStore, PresentPinAsync). ---
+
+    [Fact]
+    public void DynamicPinListedAndEnabled_NoPresentPinAsync_IsNotAdvertised_ButStillReportedDisabled()
+    {
+        // Without a presenter, a derived PIN would reach nobody. CanOffer already refused
+        // this; CanRun must also keep it out of client/hello and get-pairing-config.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var (client, connection) = CreateAndGreet(capabilities, hasPresentPinAsync: false);
+        using var _c = client;
+
+        Assert.DoesNotContain("dynamic_pin", HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.TryGetProperty("dynamic_pin", out var methodState),
+            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
+        Assert.False(methodState.GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void DynamicPinListedAndEnabled_NoPinLockoutStore_IsNotAdvertised_ButStillReportedDisabled()
+    {
+        // Without a lockout store, the failure counter can't persist, so the method could
+        // never escalate to gesture-gating.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var (client, connection) = CreateAndGreet(capabilities, hasPinLockoutStore: false);
+        using var _c = client;
+
+        Assert.DoesNotContain("dynamic_pin", HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.TryGetProperty("dynamic_pin", out var methodState),
+            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
+        Assert.False(methodState.GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void StaticPinWithValidPin_NoPinLockoutStore_IsNotAdvertised_ButStillReportedDisabled()
+    {
+        // static_pin needs a lockout store for the same reason dynamic_pin does, even
+        // though its PIN itself is valid.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
+        var (client, connection) = CreateAndGreet(capabilities, hasPinLockoutStore: false);
+        using var _c = client;
+
+        Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.TryGetProperty("static_pin", out var methodState),
+            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
+        Assert.False(methodState.GetProperty("enabled").GetBoolean());
+    }
+
+    [Fact]
+    public void DynamicPinUnrunnableForMissingStore_ServerActivateAborts_MethodNotSupported()
+    {
+        // Behaviour that was already correct via CanOffer: pin it so generalising to
+        // CanRun does not alter it. The server may retry with another method.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var (client, connection) = CreateAndGreet(capabilities, hasPinLockoutStore: false);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
+
+        var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+        Assert.Equal(ConnectionState.Connected, connection.State);
+    }
+
+    [Fact]
+    public void SetPairingConfigEnablesDynamicPinWithNoStoreOrPresenter_IsInvalid_AndRaisesNoChange()
+    {
+        // A server can't conjure an IPinLockoutStore or a PresentPinAsync -- those are app
+        // configuration. Answering ok and then continuing to report enabled: false would
+        // leave the server unable to tell why its change did not take.
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { "dynamic_pin" },
+            DynamicPinEnabled = false,
+        };
+        var (client, connection) = CreateAndGreet(capabilities, hasPinLockoutStore: false, hasPresentPinAsync: false);
+        using var _c = client;
+
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":true}}}""");
+
+        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
+        Assert.Equal("invalid", result.Result);
+        Assert.Empty(events);
+    }
+
+    [Fact]
+    public void SetPairingConfigEnablesDynamicPinWithBothDependenciesPresent_IsOk()
+    {
+        // Positive control for the check above: without it, an over-broad rejection --
+        // dropping the "&& (_pinLockoutStore is null || _presentPinAsync is null)" clause
+        // in favour of refusing every dynamic_pin enable outright -- would pass every test
+        // in this file, since nothing else asserts a dynamic_pin enable can ever succeed.
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { "dynamic_pin" },
+            DynamicPinEnabled = false,
+        };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":true}}}""");
+
+        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
+        Assert.Equal("ok", result.Result);
+        Assert.Single(events);
+    }
+
+    [Fact]
+    public void SetPairingConfigEnablesStaticPinWithNoStore_IsInvalid_AndRaisesNoChange()
+    {
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { "static_pin" },
+            StaticPin = "12345678",
+            StaticPinEnabled = false,
+        };
+        var (client, connection) = CreateAndGreet(capabilities, hasPinLockoutStore: false);
+        using var _c = client;
+
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
+
+        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
+        Assert.Equal("invalid", result.Result);
+        Assert.Empty(events);
+    }
+
+    [Fact]
+    public void OpenPairingWindow_OnlyPinMethodUnrunnableForMissingPresenter_IsInvalid()
+    {
+        // The only PIN method listed is dynamic_pin, and it lacks a presenter -- the window
+        // would have nothing runnable to admit.
+        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var window = new PairingWindow();
+        var (client, connection) = CreateAndGreet(capabilities, window: window, hasPresentPinAsync: false);
+        using var _c = client;
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/open-pairing-window","payload":{}}""");
+
+        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
+        Assert.Equal("invalid", result.Result);
+        Assert.False(window.IsOpen);
+    }
+
+    [Fact]
+    public void BothPinMethods_WithAllDependenciesPresent_AreAdvertised_AndReportedEnabled()
+    {
+        // Positive control: without it, a change that suppresses both PIN methods
+        // unconditionally would pass every unrunnable-case test above.
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { "dynamic_pin", "static_pin" },
+            StaticPin = "12345678",
+        };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        var helloMethods = HelloPairMethods(connection);
+        Assert.Contains("dynamic_pin", helloMethods);
+        Assert.Contains("static_pin", helloMethods);
+
+        var data = GetPairingConfigData(connection);
+        Assert.True(data.GetProperty("dynamic_pin").GetProperty("enabled").GetBoolean());
         Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
     }
 }
