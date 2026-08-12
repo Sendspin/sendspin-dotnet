@@ -106,10 +106,14 @@ An unpaired client connects under the published **Sentinel PSK**, which authenti
 Three methods, all optional to offer except the first:
 
 - **Pairing PSK** — every client implements it. The client surfaces a *pairing token* (an `SP:`-prefixed string) that the operator transfers to the server. Get it from `EnsurePairingPsk()`.
-- **Dynamic PIN** — the client derives a per-session PIN and displays it; the operator types it into the server. Requires both `PinLockoutStore` and `PresentPinAsync`; without either, the SDK refuses to offer the method rather than fail open.
-- **Static PIN** — a fixed 8-digit device PIN. Requires `PinLockoutStore` **and a `PairingWindow`** (below).
+- **Dynamic PIN** — the client derives a per-session PIN and displays it; the operator types it into the server. Requires `PinLockoutStore`, `PresentPinAsync`, and a `PairingRecordStore`; without any of them, the SDK refuses to offer the method rather than fail open.
+- **Static PIN** — a fixed 8-digit device PIN. Requires `PinLockoutStore`, a `PairingRecordStore`, **and a `PairingWindow`** (below).
 
 Enable the PIN methods through `ClientCapabilities.PinPairingMethods`.
+
+**Every pair method needs a `PairingRecordStore`, including the PIN methods.** Without one the exchange runs to completion and the *server* writes a long-term record while the client stores nothing — so the client fails to authenticate on its very next connection, having told your app that pairing succeeded. The SDK therefore withholds a method it cannot complete: an unrunnable method is absent from `supported_pair_methods` in `client/hello`, is reported `enabled: false` by `management/get-pairing-config`, and any activation for it is answered `method_not_supported` with the connection left open.
+
+This is the same discipline `pairing_psk` has always had. **It is silent when you get it wrong** — nothing throws; the method simply never appears. If a PIN method you configured is not being offered, check that `PairingRecordStore`, `PinLockoutStore`, and (for `dynamic_pin`) `PresentPinAsync` are all set.
 
 `PresentPinAsync` is `Func<PinPresentation, CancellationToken, ValueTask>`: the argument carries the derived `Pin` **and** the server's `Languages` hint, rather than being a bare PIN string. Read `presentation.Pin` for the digits; match `presentation.Languages` (BCP 47, most-preferred first, possibly null) against the languages your app can actually speak when you announce the PIN aloud. The hint is informational — emitting in another language is never a protocol error.
 

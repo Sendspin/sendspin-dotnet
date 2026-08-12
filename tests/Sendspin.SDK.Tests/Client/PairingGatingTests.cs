@@ -458,10 +458,12 @@ internal sealed class PairingHarness : IAsyncDisposable
                     options = options with { PairingAttemptTimeout = attemptTimeout.Value };
                 }
 
-                if (pairingPsk)
-                {
-                    options = options with { PairingRecordStore = pairingStore ?? new InMemoryPairingRecordStore() };
-                }
+                // Unconditional, not gated on pairingPsk: since #158 a record store is a
+                // dependency of the PIN methods too, so a PIN-only harness without one would
+                // find every method unrunnable and every activation aborted with
+                // method_not_supported. It does not make pairing_psk offerable on its own --
+                // that still needs a Pairing-keyed session, which only pairingPsk: true gives.
+                options = options with { PairingRecordStore = pairingStore ?? new InMemoryPairingRecordStore() };
 
                 return options;
             });

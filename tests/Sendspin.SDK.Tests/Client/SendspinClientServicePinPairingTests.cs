@@ -214,6 +214,7 @@ public class SendspinClientServicePinPairingTests
             configure: options => options with
             {
                 Capabilities = caps,
+                PairingRecordStore = new InMemoryPairingRecordStore(),
                 PinLockoutStore = lockout,
                 PresentPinAsync = (_, _) => ValueTask.CompletedTask,
                 PairingWindow = new PairingWindow(),
@@ -246,6 +247,7 @@ public class SendspinClientServicePinPairingTests
             configure: options => options with
             {
                 Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                PairingRecordStore = new InMemoryPairingRecordStore(),
                 PinLockoutStore = new InMemoryPinLockoutStore(),
                 PresentPinAsync = (_, _) => ValueTask.CompletedTask,
             });
@@ -284,6 +286,7 @@ public class SendspinClientServicePinPairingTests
             configure: options => options with
             {
                 Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                PairingRecordStore = new InMemoryPairingRecordStore(),
                 PinLockoutStore = new InMemoryPinLockoutStore(),
                 PresentPinAsync = (_, _) => ValueTask.CompletedTask,
             });
@@ -336,13 +339,15 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void DynamicPin_WithALockoutStore_IsStillOffered()
     {
-        // Positive control: the two new clauses could refuse PIN entirely and the test above
-        // would still pass.
+        // Positive control: the runnability clauses could refuse PIN entirely and the test
+        // above would still pass. Every dependency CanRun requires is present here — lockout
+        // store, presenter, and (since #158) a record store.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options => options with
             {
                 Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                PairingRecordStore = new InMemoryPairingRecordStore(),
                 PinLockoutStore = new InMemoryPinLockoutStore(),
                 PresentPinAsync = (_, _) => ValueTask.CompletedTask,
             });

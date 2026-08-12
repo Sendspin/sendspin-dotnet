@@ -57,6 +57,9 @@ public class TimeSyncPairingGatingTests
                 {
                     Capabilities = caps,
                     ClockSynchronizer = clock,
+                    // dynamic_pin needs a record store to be runnable at all (#158); without
+                    // one the activation aborts and there is no pairing attempt to gate.
+                    PairingRecordStore = new InMemoryPairingRecordStore(),
                     PinLockoutStore = new InMemoryPinLockoutStore(),
                     PresentPinAsync = (_, _) => ValueTask.CompletedTask,
                 };

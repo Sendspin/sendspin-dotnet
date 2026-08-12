@@ -62,6 +62,40 @@ public class PairingInitiationTests
     }
 
     [Fact]
+    public void PairFinalize_WithAStoreButNoServerId_PersistsNothingAndDoesNotClaimSuccess()
+    {
+        // The other half of #158's rule. Now that CanOffer guarantees a record store for every
+        // pair method, the remaining way to reach pair-finalize with nothing to persist is an
+        // unknown server id — that comes from the Noise session, not from configuration, so a
+        // degenerate peer can still produce it.
+        //
+        // The old shape logged "no record store configured" (untrue here) and then raised
+        // PairingCompleted with an empty server id, telling the app a pairing had succeeded
+        // that it holds no record for.
+        var store = new InMemoryPairingRecordStore();
+        var (client, connection, session) = CreateWithStore(store, category: PskCategory.Pairing);
+        using var _c = client;
+
+        client.EnsurePairingPsk();
+        var stored = Assert.Single(store.List(), r => r.Category == PskCategory.Pairing);
+        session.MatchedPsk = new NoisePsk(stored.Psk, PskCategory.Pairing);
+
+        // Set before server/hello: SendSpinClient captures ServerId from the session there.
+        session.ServerId = null;
+
+        bool paired = false;
+        client.PairingCompleted += (_, _) => paired = true;
+
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
+        connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
+
+        Assert.False(paired, "PairingCompleted must not fire for a pairing that persisted nothing");
+        Assert.DoesNotContain(store.List(), r => r.Category == PskCategory.LongTerm);
+    }
+
+    [Fact]
     public void CompletedPairing_DoesNotConsumeThePairingPsk()
     {
         // Spec #122's most accident-prone rule: a successful pairing writes a long-term
