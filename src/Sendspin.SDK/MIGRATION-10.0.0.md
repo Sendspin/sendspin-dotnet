@@ -229,6 +229,18 @@ Three things changed, all on what goes out on the wire:
 
 `ClientStateMessage.CreateInitial` / `CreatePlayerState` take `int staticDelayMs` rather than `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
 
+### `SendPlayerStateAsync`'s delay parameter is now nullable, and applies
+
+```csharp
+Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null);   // was double = 0.0
+```
+
+**Omit it for volume and mute changes.** The old `0.0` default reported `static_delay_ms: 0` on every such call, and the spec requires the server to *merge* each `client/state`, "retaining the last value of any field that is absent" — so a present value overwrites. One volume change after the server set a 250 ms delay wiped it back to 0. The reported delay is now always the one actually applied, regardless of what you pass.
+
+**Supplying a value is now a real update, not just a report.** It is written to `IClockSynchronizer.StaticDelayMs` *and* persisted through `IStaticDelayStore`, which is what the spec requires of a client-initiated change ("clients must persist `static_delay_ms` locally across reboots and server reconnections"). Previously the value was reported and nothing else: playback kept using the old delay, nothing was persisted, and the next reconnect silently reverted to it.
+
+If you were calling the three-argument form purely to report a delay you had already applied yourself, it now also persists it — which is almost certainly what you wanted.
+
 ---
 
 ## 9. Checklist

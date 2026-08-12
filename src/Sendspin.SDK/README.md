@@ -389,6 +389,18 @@ cannot choose where to store it, implement `IStaticDelayStore` and pass it to th
 loads on connect (before the first `client/state`) and saves whenever the delay changes (via a
 `set_static_delay` command or a GroupSync offset):
 
+To change the delay from the app (a calibration measurement, or a new audio output), pass it to
+`SendPlayerStateAsync(volume, muted, staticDelayMs)` — that applies it, persists it through the
+store, and reports it. Leave the argument off for ordinary volume and mute changes: the server
+merges each `client/state` and retains fields you omit, so the delay it already knows about
+survives.
+
+A server changes it with the `set_static_delay` command, which the SDK advertises in
+`client/state`'s player `supported_commands` (never in `client/hello` — the spec restricts
+`player@v1_support.supported_commands` to `volume` and `mute`, so `client/state` is the only
+place any conformant client can offer it). Set `ClientCapabilities.SupportsSetStaticDelay = false`
+to decline it.
+
 > `IClockSynchronizer.StaticDelayMs` is a `double` over −5000…5000: fractional values come from
 > calibration, and negative values schedule audio *later*. The spec's wire field is an integer
 > 0–5000 and states negatives are unsupported, so what the client **reports** is rounded and

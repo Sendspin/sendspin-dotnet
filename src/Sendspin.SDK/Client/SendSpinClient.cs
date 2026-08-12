@@ -712,9 +712,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <inheritdoc/>
-    public async Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0)
+    public async Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null)
     {
         var clampedVolume = Math.Clamp(volume, 0, 100);
+
+        // A supplied delay is a client-initiated update, which the spec permits ("clients may
+        // update static_delay_ms ... when audio output changes") and requires be persisted
+        // ("clients must persist static_delay_ms locally across reboots and server
+        // reconnections"). Applying it here is what makes the reported value true: this used to
+        // report the caller's number while continuing to schedule with the old one, so the
+        // server's group calibration and the client's playback disagreed, and a reconnect
+        // silently reverted to the unpersisted value.
+        if (staticDelayMs is { } requested && requested != _clockSynchronizer.StaticDelayMs)
+        {
+            _clockSynchronizer.StaticDelayMs = requested;
+            TrySaveStaticDelay(requested);
+        }
 
         // Persist the caller's values: SendInitialClientStateAsync reads _playerState, so
         // without this a reconnect's initial message would revert an app-set volume to the
@@ -741,13 +754,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // Always the applied delay, never the caller's parameter. The server MUST merge each
+        // update into existing state, so a field that is present overwrites -- reporting a
+        // defaulted 0 here wiped a delay the server had set, on the next volume change.
         var stateMessage = ClientStateMessage.CreatePlayerState(
-            clampedVolume, muted, ToWireStaticDelayMs(staticDelayMs),
+            clampedVolume, muted, ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
             _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
 
         _logger.LogDebug(
             "Sending player state: Volume={Volume}, Muted={Muted}, StaticDelay={StaticDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
-            clampedVolume, muted, staticDelayMs, _requiredLeadTimeMs, _minBufferMs);
+            clampedVolume, muted, _clockSynchronizer.StaticDelayMs, _requiredLeadTimeMs, _minBufferMs);
         await _connection.SendMessageAsync(stateMessage);
     }
 
