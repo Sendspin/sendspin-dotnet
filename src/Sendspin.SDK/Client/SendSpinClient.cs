@@ -674,13 +674,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <inheritdoc/>
     public async Task RequestVisualizerFormatAsync(
-        List<string>? types = null, int? rateMax = null, int? bufferCapacity = null, VisualizerSpectrum? spectrum = null)
+        List<string>? types = null, int? rateMax = null, VisualizerSpectrum? spectrum = null)
     {
         var message = StreamRequestFormatMessage.ForVisualizer(new VisualizerRequestFormat
         {
             Types = types,
             RateMax = rateMax,
-            BufferCapacity = bufferCapacity,
             Spectrum = spectrum
         });
 

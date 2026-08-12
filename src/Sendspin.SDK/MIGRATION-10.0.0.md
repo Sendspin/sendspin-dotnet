@@ -24,6 +24,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | `client/state` | `available` is a boolean, not a state string | Medium |
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
 | Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
+| Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 
 ---
 
@@ -171,7 +172,45 @@ The spec requires a source to run only on a paired connection, and the SDK enfor
 
 ---
 
-## 6. Checklist
+## 6. Visualizer buffer capacity is announced, not renegotiated
+
+`RequestVisualizerFormatAsync` no longer takes `bufferCapacity`, and `VisualizerRequestFormat.BufferCapacity` is gone.
+
+`buffer_capacity` is a `visualizer@v1_support` field of `client/hello`; the spec's `stream/request-format` visualizer object carries only `types`, `rate_max` and `spectrum`. Sending it there is a client deviation that `aiosendspin` names explicitly, and a server running `allow_noncompliant_clients=False` rejects the connection rather than ignoring the field.
+
+Set it once, before connecting:
+
+```csharp
+Capabilities = new ClientCapabilities
+{
+    Roles = { "visualizer@v1" },
+    VisualizerSupport = new VisualizerSupport { BufferCapacity = 65536, RateMax = 30, /* ... */ },
+}
+```
+
+Callers using named arguments — the shape the docs have always shown — are unaffected. Only a positional call breaks, and it breaks at compile time.
+
+---
+
+## 7. PIN presentation grouping
+
+New: `PinPresentation.Groups` splits the PIN into the groups the spec recommends for display and for spoken emission (`123456` → `123 456`; an 8-digit static PIN → `1234 5678`). `Pin` is unchanged and remains the contiguous digits.
+
+Grouping is presentation-only. Separators never enter PIN derivation, operator entry, or the `PRS` transcript, so join `Groups` with whatever separator suits the surface, and strip separators from anything typed back in.
+
+```csharp
+PresentPinAsync = (presentation, ct) =>
+{
+    ShowPin(string.Join(" ", presentation.Groups));   // was: presentation.Pin
+    return ValueTask.CompletedTask;
+};
+```
+
+Optional — existing code reading `presentation.Pin` keeps working and simply shows an ungrouped PIN.
+
+---
+
+## 8. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
