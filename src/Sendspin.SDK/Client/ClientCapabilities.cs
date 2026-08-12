@@ -156,8 +156,13 @@ public sealed class ClientCapabilities
 
     /// <summary>
     /// Out-channels through which the dynamic PIN is conveyed to the operator
-    /// (informational hint: "display", "speaker", "other"). Default ["display"].
+    /// (informational hint: "display" or "speaker"). Default ["display"].
     /// </summary>
+    /// <remarks>
+    /// "other" was a third permitted value until spec commit <c>3f8528a9</c> removed it. The
+    /// hint is informational and never grounds for <c>pair/abort</c>, so an out-of-vocabulary
+    /// entry does not break pairing — but it is no longer a value the spec defines.
+    /// </remarks>
     public List<string> PinOutChannels { get; set; } = new() { "display" };
 
     /// <summary>

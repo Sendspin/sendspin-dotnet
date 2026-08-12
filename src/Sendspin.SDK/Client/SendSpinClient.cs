@@ -452,8 +452,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private bool HasSourceRole()
-        => _capabilities.Roles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
+    /// <summary>
+    /// Whether <see cref="ClientCapabilities.Roles"/> lists any version of a role family
+    /// (<paramref name="family"/> is the bare name, e.g. "player", matched against the
+    /// "player@" prefix so a future @v2 still counts).
+    /// </summary>
+    private bool HasRole(string family)
+        => _capabilities.Roles.Any(r => r.StartsWith(family + "@", StringComparison.Ordinal));
+
+    private bool HasSourceRole() => HasRole("source");
 
     /// <summary>
     /// Whether this client's clock must be synchronized with the server before it can claim
@@ -504,25 +511,37 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // are omitted here; trust_level and unpaired_access are required instead.
             name: _capabilities.ClientName,
             supportedRoles: _capabilities.Roles,
-            playerSupport: new PlayerSupport
-            {
-                SupportedFormats = _capabilities.AudioFormats
-                    .Select(f => new AudioFormatSpec
-                    {
-                        Codec = f.Codec,
-                        Channels = f.Channels,
-                        SampleRate = f.SampleRate,
-                        BitDepth = f.BitDepth ?? 16,
-                    })
-                    .ToList(),
-                BufferCapacity = _capabilities.BufferCapacity,
-                SupportedCommands = new List<string> { "volume", "mute" }
-            },
-            artworkSupport: new ArtworkSupport
-            {
-                // Spec allows 1-4 channels (array index = channel number).
-                Channels = _capabilities.ArtworkChannels.Take(4).ToList()
-            },
+
+            // Every support object is gated on its role appearing in supported_roles. The spec
+            // ties the two together -- a support object belongs in client/hello exactly when its
+            // role version is listed -- and aiosendspin flags an unlisted one as a client
+            // deviation ("client/hello sent support objects for unlisted roles"), which a server
+            // running allow_noncompliant_clients=False rejects outright rather than tolerating.
+            // Roles is public and ClientCapabilities tells consumers to drop artwork@v1 from it
+            // to opt out, so this was reachable straight from our own documented advice.
+            playerSupport: HasRole("player")
+                ? new PlayerSupport
+                {
+                    SupportedFormats = _capabilities.AudioFormats
+                        .Select(f => new AudioFormatSpec
+                        {
+                            Codec = f.Codec,
+                            Channels = f.Channels,
+                            SampleRate = f.SampleRate,
+                            BitDepth = f.BitDepth ?? 16,
+                        })
+                        .ToList(),
+                    BufferCapacity = _capabilities.BufferCapacity,
+                    SupportedCommands = new List<string> { "volume", "mute" }
+                }
+                : null,
+            artworkSupport: HasRole("artwork")
+                ? new ArtworkSupport
+                {
+                    // Spec allows 1-4 channels (array index = channel number).
+                    Channels = _capabilities.ArtworkChannels.Take(4).ToList()
+                }
+                : null,
             deviceInfo: new DeviceInfo
             {
                 ProductName = _capabilities.ProductName,
@@ -530,7 +549,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 SoftwareVersion = _capabilities.SoftwareVersion,
                 MacAddress = _capabilities.MacAddress
             },
-            visualizerSupport: _capabilities.VisualizerSupport,
+            visualizerSupport: HasRole("visualizer") ? _capabilities.VisualizerSupport : null,
             sourceSupport: HasSourceRole()
                 ? new SourceSupport
                 {
