@@ -1665,7 +1665,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             methods.Add(new PairMethodDescriptor { Method = "pairing_psk" });
         }
 
-        if (IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin"))
+        if (CanRun("dynamic_pin"))
         {
             methods.Add(new PairMethodDescriptor
             {
@@ -1675,13 +1675,38 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             });
         }
 
-        if (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin") && HasUsableStaticPin)
+        if (CanRun("static_pin"))
         {
             methods.Add(new PairMethodDescriptor { Method = "static_pin" });
         }
 
         return methods;
     }
+
+    /// <summary>
+    /// Whether this client is configured to run <paramref name="method"/> to completion:
+    /// implemented, enabled, and holding every dependency the method needs. A method that
+    /// fails this must not be advertised in client/hello or reported enabled by
+    /// get-pairing-config, or the server is told an offer exists that every attempt will
+    /// refuse (#132).
+    /// </summary>
+    /// <remarks>
+    /// Deliberately excludes session-scoped conditions. Which PSK keyed the current session
+    /// is not a property of the client's configuration and can differ per connection, so it
+    /// stays in <see cref="CanOffer"/>.
+    /// </remarks>
+    private bool CanRun(string method) => method switch
+    {
+        // A PIN method without a lockout store cannot persist the failure counter, so the
+        // method could never escalate to gesture-gating and every attempt would stay ungated.
+        // Refuse rather than fail open. Dynamic PIN additionally requires a presenter: without
+        // PresentPinAsync the derived PIN would reach nobody.
+        "dynamic_pin" => IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin")
+                         && _pinLockoutStore is not null && _presentPinAsync is not null,
+        "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
+                        && HasUsableStaticPin && _pinLockoutStore is not null,
+        _ => false,
+    };
 
     /// <summary>
     /// Whether this client can currently complete <paramref name="method"/> on this
@@ -1696,15 +1721,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         "pairing_psk" => _pairingPskEnabled
                          && _session.MatchedPsk?.Category == PskCategory.Pairing
                          && _pairingStore is not null,
-        // A PIN method without a lockout store cannot persist the failure counter, so the
-        // method could never escalate to gesture-gating and every attempt would stay ungated.
-        // Refuse rather than fail open. Dynamic PIN additionally requires a presenter: without
-        // PresentPinAsync the derived PIN would reach nobody.
-        "dynamic_pin" => IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin")
-                         && _pinLockoutStore is not null
-                         && _presentPinAsync is not null,
-        "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
-                        && HasUsableStaticPin && _pinLockoutStore is not null,
+        "dynamic_pin" => CanRun("dynamic_pin"),
+        "static_pin" => CanRun("static_pin"),
         _ => false,
     };
 
@@ -2410,11 +2428,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case MessageTypes.ManagementGetPairingConfig:
             {
                 PairingMethodState? staticPinState = IsMethodImplemented("static_pin")
-                    ? new PairingMethodState(IsMethodEnabled("static_pin") && HasUsableStaticPin)
+                    ? new PairingMethodState(CanRun("static_pin"))
                     : null;
                 DynamicPinConfigState? dynamicPinState = IsMethodImplemented("dynamic_pin")
                     ? new DynamicPinConfigState(
-                        IsMethodEnabled("dynamic_pin"),
+                        CanRun("dynamic_pin"),
                         _effectiveMinPinLength,
                         IsMethodEscalated("dynamic_pin"))
                     : null;
@@ -2474,6 +2492,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                         requestedMinPinLength = value;
                     }
+
+                    // A server can supply a missing PIN but not a missing IPinLockoutStore or
+                    // PresentPinAsync -- those are app configuration. Answering ok and then
+                    // continuing to report enabled: false would leave the server unable to
+                    // tell why its change did not take.
+                    if (requestedDynamicPinEnabled == true
+                        && (_pinLockoutStore is null || _presentPinAsync is null))
+                    {
+                        result.Result = "invalid";
+                        break;
+                    }
                 }
 
                 // static_pin. The spec fixes the static PIN at 8 decimal digits (pairing.md:186) and
@@ -2508,6 +2537,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     if (requestedStaticPinEnabled == true
                         && requestedStaticPin is null
                         && !IsValidStaticPin(_effectiveStaticPin))
+                    {
+                        result.Result = "invalid";
+                        break;
+                    }
+
+                    // A server can supply a missing static PIN, but not a missing
+                    // IPinLockoutStore -- that's app configuration. Answering ok and then
+                    // continuing to report enabled: false would leave the server unable to
+                    // tell why its change did not take.
+                    if (requestedStaticPinEnabled == true && _pinLockoutStore is null)
                     {
                         result.Result = "invalid";
                         break;
@@ -2691,8 +2730,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 // Opens the window in place of the operator gesture. Rejected when no PIN
                 // method is enabled, since there would be nothing for the window to admit.
-                bool anyPinMethod = (IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin") && HasUsableStaticPin)
-                                    || (IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin"));
+                bool anyPinMethod = CanRun("static_pin") || CanRun("dynamic_pin");
                 if (!anyPinMethod || _pairingWindow is null)
                 {
                     result.Result = "invalid";

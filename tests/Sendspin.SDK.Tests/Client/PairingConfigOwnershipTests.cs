@@ -28,11 +28,15 @@ public class PairingConfigOwnershipTests
     /// <summary>
     /// A client on a paired, management-activated session, built around the caller's
     /// <see cref="ClientCapabilities"/> instance so tests can observe whether the SDK
-    /// writes to it. <paramref name="pinLockoutStore"/> is optional and only needed by
-    /// tests that go on to drive a real PIN pairing attempt on this same client.
+    /// writes to it. <paramref name="pinLockoutStore"/> and <paramref name="presentPinAsync"/>
+    /// are optional and only needed by tests that go on to drive a real PIN pairing attempt,
+    /// or that need static_pin/dynamic_pin to be runnable (CanRun, #132).
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session, InMemoryPairingRecordStore Store)
-        CreateManagementClient(ClientCapabilities capabilities, IPinLockoutStore? pinLockoutStore = null)
+        CreateManagementClient(
+            ClientCapabilities capabilities,
+            IPinLockoutStore? pinLockoutStore = null,
+            Func<PinPresentation, CancellationToken, ValueTask>? presentPinAsync = null)
     {
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId));
@@ -48,6 +52,7 @@ public class PairingConfigOwnershipTests
                 PairingRecordStore = store,
                 Capabilities = capabilities,
                 PinLockoutStore = pinLockoutStore,
+                PresentPinAsync = presentPinAsync,
                 PairingWindow = window,
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
@@ -254,7 +259,8 @@ public class PairingConfigOwnershipTests
         // `locked_out` appears in no spec file (README/connection/management/messaging/pairing).
         // The descriptor is method, out_channels?, min_pin_length?, locations? (pairing.md:279-283).
         var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 7 };
-        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        var (client, connection, _, _) = CreateManagementClient(
+            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Last();
@@ -275,7 +281,8 @@ public class PairingConfigOwnershipTests
         // #122: the client advertised dynamic_pin in client/hello while telling a management
         // server it had no PIN methods at all. Same source of truth, so same answer.
         var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8 };
-        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        var (client, connection, _, _) = CreateManagementClient(
+            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -354,7 +361,7 @@ public class PairingConfigOwnershipTests
         // management.md:98 names this case explicitly. Enabling a PIN method with no secret
         // behind it would advertise a method that can never authenticate anyone.
         var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" } };
-        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        var (client, connection, _, _) = CreateManagementClient(capabilities, new InMemoryPinLockoutStore());
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -432,7 +439,8 @@ public class PairingConfigOwnershipTests
         // end-to-end proof that Task 1's effective state is what the advertisement reads:
         // a set-pairing-config change reaches client/hello without touching capabilities.
         var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
-        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        var (client, connection, _, _) = CreateManagementClient(
+            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         // Positive control first: while enabled, the method is advertised.
@@ -572,7 +580,7 @@ public class PairingConfigOwnershipTests
         // static_pin the way SetPairingPskEnabled_RaisesEventExactlyOnce_... does for
         // pairing_psk.
         var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "11111111" };
-        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        var (client, connection, _, _) = CreateManagementClient(capabilities, new InMemoryPinLockoutStore());
         using var _c = client;
         var events = new List<PairingConfigChangedEventArgs>();
         client.PairingConfigChanged += (_, e) => events.Add(e);
@@ -653,7 +661,7 @@ public class PairingConfigOwnershipTests
         // other test in the suite. Both are asserted here against different values a swap
         // would visibly cross, so a swap fails this test instead of shipping silently.
         var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" } };
-        var (client, connection, _, store) = CreateManagementClient(capabilities);
+        var (client, connection, _, store) = CreateManagementClient(capabilities, new InMemoryPinLockoutStore());
         using var _c = client;
 
         var shared = Enumerable.Repeat((byte)8, 32).ToArray();
