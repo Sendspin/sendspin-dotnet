@@ -175,7 +175,22 @@ public sealed class SendspinConnection : ISendspinConnection
                     var goodbye = ClientGoodbyeMessage.Create(reason);
                     await SendMessageAsync(goodbye, cancellationToken);
 
-                    await _webSocket.CloseAsync(
+                    // CloseOutputAsync, not CloseAsync: the latter performs the full closing
+                    // handshake and waits for the peer's Close frame, which a crashed, hung or
+                    // non-conformant peer never sends. The listen path had the identical call
+                    // and did hang (#143); this is the same shape on the dial path (#160).
+                    //
+                    // The finally below does not bound it. A finally runs when the try exits,
+                    // and an await that never returns never exits -- so CleanupWebSocketAsync
+                    // is unreachable in exactly the case it looks like it covers. Nor can the
+                    // token save it: DisposeAsync reaches here via DisconnectAsync(shutdown)
+                    // with no token at all, and ISendSpinClient.DisconnectAsync has no
+                    // CancellationToken parameter, so no caller can supply a cancellable one.
+                    //
+                    // CloseOutputAsync sends our Close frame and returns without waiting, which
+                    // still gives the peer a clean close. The socket is left in CloseSent until
+                    // the peer replies or CleanupWebSocketAsync disposes it.
+                    await _webSocket.CloseOutputAsync(
                         WebSocketCloseStatus.NormalClosure,
                         reason,
                         cancellationToken);
