@@ -468,8 +468,11 @@ public class PairingConfigOwnershipTests
     {
         // The one case the old blanket rejection got right, kept as a control so the fix
         // cannot over-correct into accepting configuration for a method that cannot run.
+        // Both dependencies present so IsMethodImplemented is the only possible reason for
+        // invalid -- otherwise this would stay green even if that guard were deleted.
         var capabilities = new ClientCapabilities(); // no PIN methods
-        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        var (client, connection, _, _) = CreateManagementClient(
+            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -484,8 +487,13 @@ public class PairingConfigOwnershipTests
         // A disabled method is still an implemented one: absence in get-pairing-config
         // means "this client cannot do it at all", which would be a different and
         // wrong answer. Only client/hello omits a disabled method.
+        //
+        // Both dependencies present so CanRun would report true if the disable were not
+        // actually applied -- otherwise enabled: false is trivially satisfied by the
+        // missing store/presenter alone, and the disable itself is never exercised.
         var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
-        var (client, connection, _, _) = CreateManagementClient(capabilities);
+        var (client, connection, _, _) = CreateManagementClient(
+            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(

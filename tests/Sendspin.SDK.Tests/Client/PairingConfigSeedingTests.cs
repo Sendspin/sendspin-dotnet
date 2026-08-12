@@ -471,6 +471,33 @@ public class PairingConfigSeedingTests
     }
 
     [Fact]
+    public void SetPairingConfigEnablesDynamicPinWithBothDependenciesPresent_IsOk()
+    {
+        // Positive control for the check above: without it, an over-broad rejection --
+        // dropping the "&& (_pinLockoutStore is null || _presentPinAsync is null)" clause
+        // in favour of refusing every dynamic_pin enable outright -- would pass every test
+        // in this file, since nothing else asserts a dynamic_pin enable can ever succeed.
+        var capabilities = new ClientCapabilities
+        {
+            PinPairingMethods = { "dynamic_pin" },
+            DynamicPinEnabled = false,
+        };
+        var (client, connection) = CreateAndGreet(capabilities);
+        using var _c = client;
+
+        var events = new List<PairingConfigChangedEventArgs>();
+        client.PairingConfigChanged += (_, e) => events.Add(e);
+
+        ActivateManagement(connection);
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":true}}}""");
+
+        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
+        Assert.Equal("ok", result.Result);
+        Assert.Single(events);
+    }
+
+    [Fact]
     public void SetPairingConfigEnablesStaticPinWithNoStore_IsInvalid_AndRaisesNoChange()
     {
         var capabilities = new ClientCapabilities

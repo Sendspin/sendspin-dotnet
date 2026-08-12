@@ -1705,6 +1705,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                          && _pinLockoutStore is not null && _presentPinAsync is not null,
         "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
                         && HasUsableStaticPin && _pinLockoutStore is not null,
+        // pairing_psk is deliberately not covered here: it stays on BuildPairMethods's
+        // own IsMethodEnabled check even though CanOffer requires _pairingStore is not
+        // null too (#158). Folding it in here would make a store-less client advertise
+        // zero pair methods, since pairing_psk is mandatory.
         _ => false,
     };
 
