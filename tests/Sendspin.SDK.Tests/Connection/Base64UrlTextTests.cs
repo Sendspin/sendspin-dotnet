@@ -11,10 +11,18 @@ namespace Sendspin.SDK.Tests.Connection;
 /// the raw length instead of the length with whitespace stripped.
 /// </summary>
 /// <remarks>
-/// This project targets net10.0 only, so these tests can never execute the net8.0 body.
-/// They cover the divergence because the rule they pin lives on the shared path above the
-/// #if. Moving that check into either branch makes these tests stop covering net8.0 while
-/// still passing.
+/// <para>
+/// These run on both shipped frameworks (#155), so each case executes both bodies rather than
+/// covering net8.0 only by virtue of the rule sitting on the shared path above the <c>#if</c>.
+/// The several "this already passes on net10.0; it exists so the net8.0 fallback cannot
+/// regress" notes below are no longer aspirational — that half now actually executes.
+/// </para>
+/// <para>
+/// Verified rather than assumed: moving the '+'/'/' guard off the shared path into the net9+
+/// branch — the exact edit <c>Base64UrlText</c> warns against — fails
+/// <see cref="Decode_RejectsStandardBase64Characters"/> on net8.0 while net10.0 stays green.
+/// Before the suite multi-targeted, that mutation passed everywhere.
+/// </para>
 /// </remarks>
 public class Base64UrlTextTests
 {

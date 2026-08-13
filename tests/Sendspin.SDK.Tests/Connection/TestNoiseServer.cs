@@ -31,7 +31,7 @@ internal sealed class TestNoiseServer
         _clientPublicKey = clientPublicKey;
         _psk = psk;
         _protocolName = suite.ToProtocolName();
-        ServerId = Base64Url.EncodeToString(_keys.PublicKey);
+        ServerId = TestBase64Url.EncodeToString(_keys.PublicKey);
     }
 
     internal string ServerId { get; }
@@ -64,7 +64,7 @@ internal sealed class TestNoiseServer
         string msg1Text = JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["type"] = "noise/handshake",
-            ["payload"] = new Dictionary<string, object> { ["data"] = Base64Url.EncodeToString(buf.AsSpan(0, len)) },
+            ["payload"] = new Dictionary<string, object> { ["data"] = TestBase64Url.EncodeToString(buf.AsSpan(0, len)) },
         });
         return (serverInitText, msg1Text);
     }
@@ -72,7 +72,7 @@ internal sealed class TestNoiseServer
     internal void CompleteHandshake(string msg2Text)
     {
         using var doc = JsonDocument.Parse(msg2Text);
-        byte[] msg2 = Base64Url.DecodeFromChars(
+        byte[] msg2 = TestBase64Url.DecodeFromChars(
             doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         var (_, hash, transport) = _state!.ReadMessage(msg2, buf);
@@ -107,7 +107,7 @@ internal sealed class TestNoiseServer
         return JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["type"] = "noise/handshake",
-            ["payload"] = new Dictionary<string, object> { ["data"] = Base64Url.EncodeToString(buf.AsSpan(0, len)) },
+            ["payload"] = new Dictionary<string, object> { ["data"] = TestBase64Url.EncodeToString(buf.AsSpan(0, len)) },
         });
     }
 
@@ -129,7 +129,7 @@ internal sealed class TestNoiseServer
         string msg1Text = JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["type"] = "noise/handshake",
-            ["payload"] = new Dictionary<string, object> { ["data"] = Base64Url.EncodeToString(buf.AsSpan(0, len)) },
+            ["payload"] = new Dictionary<string, object> { ["data"] = TestBase64Url.EncodeToString(buf.AsSpan(0, len)) },
         });
         byte[] plain = [0, .. Encoding.UTF8.GetBytes(msg1Text)];
         return EncryptFrame(plain);

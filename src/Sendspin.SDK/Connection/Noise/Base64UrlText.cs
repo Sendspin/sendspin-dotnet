@@ -28,7 +28,10 @@ internal static class Base64UrlText
         // that the padding arithmetic counts it; see that branch for why.
         //
         // Do not move this into the #else and do not widen it into a full alphabet check.
-        // The test project targets net10.0 only, so no test can catch either mistake (#108).
+        // Both mistakes are now caught: the test project runs on net8.0 as well as net10.0, so
+        // Base64UrlTextTests executes this method's other body too (#155). Moving the guard into
+        // the #if fails Decode_RejectsStandardBase64Characters on net8.0 while net10.0 stays
+        // green — measured, and the reason that suite is worth its weight.
         if (encoded.AsSpan().IndexOfAny('+', '/') >= 0)
         {
             throw new FormatException("Input is not a valid base64url string.");

@@ -102,12 +102,19 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
             "An explicit DisconnectAsync must not trigger the reconnect path");
     }
 
+#if NET9_0_OR_GREATER
     [Fact]
     public async Task HalfOpenConnection_DrivesReconnect()
     {
         // A peer that completes the WebSocket handshake but then never answers a PING
         // (frozen container / network drop with no TCP FIN). On net9+ the keep-alive
         // timeout aborts ReceiveAsync; the client must treat that as a lost connection.
+        //
+        // net9+ only, and that is a real shipped difference rather than a test detail:
+        // ClientWebSocketOptions.KeepAliveTimeout does not exist on net8.0, so a net8.0
+        // consumer detects a half-open socket only when the OS TCP timeout fires (minutes).
+        // SendspinConnection says so in its #else branch. Running the suite on both frameworks
+        // is what makes that visible instead of implied (#155).
         using var silentServer = new SilentWebSocketServer();
         silentServer.Start();
 
@@ -142,6 +149,7 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
         Assert.True(sawHandshaking,
             "Client should reach Handshaking before Reconnecting (proves the abort, not a connect failure, drove it)");
     }
+#endif
 
     [Fact]
     public async Task AbruptServerDrop_DrivesReconnect()

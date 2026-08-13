@@ -19,7 +19,7 @@ public class NoiseWireFramingTests
     {
         Assert.Equal(
             "1b5e24dbc1aed95fc2a5a338a90c05df44bd10f5ec1f4cd66cbf86272767b9d3",
-            Convert.ToHexStringLower(NoiseConstants.SentinelPsk.ToArray()));
+            Convert.ToHexString(NoiseConstants.SentinelPsk.ToArray()).ToLowerInvariant());
         Assert.Equal("GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo", NoiseConstants.SentinelPskId);
     }
 
