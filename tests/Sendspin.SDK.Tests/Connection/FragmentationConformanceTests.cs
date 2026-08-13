@@ -15,6 +15,13 @@ public class FragmentationConformanceTests
 {
     private const string HelloJson = """{"type":"server/hello","payload":{"name":"srv"}}""";
 
+    /// <summary>
+    /// The framing's fatal for a reassembly crossing either cap. Asserted by text rather than
+    /// for non-null because an unrelated fatal on the crossing frame satisfied the old
+    /// assertion just as well (#110).
+    /// </summary>
+    private const string CapExceededFatal = "reassembled message exceeds size bound";
+
     [Fact]
     public void NonFragmentFrame_MidReassembly_IsFatal_AndReassemblyDoesNotSurvive()
     {
@@ -84,13 +91,38 @@ public class FragmentationConformanceTests
         var framing = new NoiseWireFraming(identity);
         var server = CompleteHandshake(framing, identity);
 
-        // 3 x 50 KB crosses the 128 KiB pre-first-message cap on the third frame
-        // while staying far below the 64 MiB post-first-message ceiling.
-        byte[] chunk = new byte[50_000];
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. chunk]).FatalReason);
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+        // Fixed expectation, deliberately NOT MaxReassembledMessageBytesBeforeFirstMessage:
+        // reading the cap from the constant under test is what let a silent edit of it move
+        // the boundary and still pass. The old 3 x 50 KB shape only bracketed the cap to
+        // [100_000, 150_000) (#110); feeding exactly the cap and then one byte past it pins
+        // it from both sides -- a smaller cap fatals on the fourth frame, a larger one fails
+        // to fatal on the fifth.
+        const int cap = 128 * 1024;
+        const int perFrame = cap / 4; // 4 x 32 KiB, each well under MaxTransportPlaintext
 
-        Assert.NotNull(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+        // The opening fragment spends a byte on orig_type, which is not counted toward the
+        // reassembled size, so every frame here contributes exactly perFrame bytes.
+        byte[] chunk = new byte[perFrame];
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. chunk]).FatalReason);
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+        }
+
+        // Landing exactly on the cap is still legal; the very next byte is not.
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 0x00]);
+        Assert.Equal(CapExceededFatal, result.FatalReason);
+    }
+
+    [Fact]
+    public void ReassemblyCaps_HoldTheirPublishedValues()
+    {
+        // Both caps are local hardening choices rather than spec numbers, so nothing outside
+        // this suite would notice them drifting. The behavioural tests bracket enforcement;
+        // these pin the declared values, so an edit inside a bracket cannot pass silently
+        // (#110). Changing either is a deliberate act that should update this test.
+        Assert.Equal(128 * 1024, NoiseConstants.MaxReassembledMessageBytesBeforeFirstMessage);
+        Assert.Equal(64 * 1024 * 1024, NoiseConstants.MaxReassembledMessageBytes);
     }
 
     [Fact]
@@ -101,7 +133,10 @@ public class FragmentationConformanceTests
         var server = CompleteHandshake(framing, identity);
         SurfaceFirstApplicationMessage(framing, server);
 
-        byte[] payload = new byte[NoiseConstants.MaxReassembledMessageBytesBeforeFirstMessage + 1024];
+        // Sized from a literal, not from MaxReassembledMessageBytesBeforeFirstMessage: taking
+        // it from the constant meant lowering the tight cap shrank this payload with it, so
+        // the test kept passing without ever exceeding the cap it is meant to clear (#110).
+        byte[] payload = new byte[(128 * 1024) + 1024];
         RandomNumberGenerator.Fill(payload);
         byte[] appMessage = [8, .. payload];
 
@@ -126,12 +161,16 @@ public class FragmentationConformanceTests
         framing.Reset();
         server = CompleteHandshake(framing, identity);
 
-        // Nothing has surfaced on THIS connection, so the tight cap applies again.
+        // Nothing has surfaced on THIS connection, so the tight cap applies again. The exact
+        // value is pinned by Reassembly_PastPreFirstMessageCap_...; the subject here is only
+        // which cap is in force, so 3 x 50 KB is enough to cross the tight one.
         byte[] chunk = new byte[50_000];
         Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. chunk]).FatalReason);
         Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
 
-        Assert.NotNull(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+        Assert.Equal(
+            CapExceededFatal,
+            Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
     }
 
     [Fact]
@@ -165,7 +204,9 @@ public class FragmentationConformanceTests
         Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. chunk]).FatalReason);
         Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
 
-        Assert.NotNull(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+        Assert.Equal(
+            CapExceededFatal,
+            Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
     }
 
     [Fact]
@@ -178,19 +219,26 @@ public class FragmentationConformanceTests
 
         // Stream maximum-size continuation fragments; the fatal must arrive exactly
         // when the reassembled size would first exceed the 64 MiB ceiling.
+        //
+        // Fixed expectation rather than MaxReassembledMessageBytes: bounding the loop by the
+        // constant it exists to pin made any edit of the ceiling self-consistent -- the loop
+        // just ran a different number of times and both assertions still held (#110).
+        const long ceiling = 64L * 1024 * 1024;
+
         int dataPerFrame = NoiseConstants.MaxTransportPlaintext - 1; // continuation: [2][data]
         byte[] chunk = new byte[dataPerFrame];
         var result = Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. new byte[dataPerFrame - 1]]);
         long buffered = dataPerFrame - 1;
         while (result.FatalReason is null)
         {
-            Assert.True(buffered <= NoiseConstants.MaxReassembledMessageBytes,
-                "reassembly accepted more than MaxReassembledMessageBytes without a fatal");
+            Assert.True(buffered <= ceiling,
+                "reassembly accepted more than the 64 MiB ceiling without a fatal");
             result = Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]);
             buffered += dataPerFrame;
         }
 
-        Assert.True(buffered > NoiseConstants.MaxReassembledMessageBytes);
+        Assert.Equal(CapExceededFatal, result.FatalReason);
+        Assert.True(buffered > ceiling);
     }
 
     // --- Harness ---

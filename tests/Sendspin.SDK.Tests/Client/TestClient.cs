@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
@@ -69,12 +70,19 @@ internal static class TestClient
     /// false only for tests whose subject is behavior while disconnected — the client drops
     /// received frames in that state, so no message can be delivered to an unconnected fake.
     /// </param>
+    /// <param name="logger">
+    /// Logger the client is built with; <see cref="NullLogger{T}"/> by default. Pass a
+    /// <see cref="CapturingLogger{T}"/> for a test whose subject is a diagnostic's text or
+    /// level — several client rejections are reported to the server as a bare "invalid",
+    /// so the log line is the only place the reason is observable (#110).
+    /// </param>
     internal static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session)
         Create(
             PskCategory category = PskCategory.LongTerm,
             bool unpairedAccess = false,
             Func<SendspinClientOptions, SendspinClientOptions>? configure = null,
-            bool connected = true)
+            bool connected = true,
+            ILogger<SendspinClientService>? logger = null)
     {
         var connection = new FakeSendspinConnection();
         var session = new FakeNoiseSession
@@ -107,7 +115,7 @@ internal static class TestClient
         }
 
         var client = new SendspinClientService(
-            NullLogger<SendspinClientService>.Instance,
+            logger ?? NullLogger<SendspinClientService>.Instance,
             connection,
             session,
             options);
