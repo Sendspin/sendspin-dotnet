@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace Sendspin.SDK.Connection.Noise;
 
 /// <summary>
@@ -41,9 +44,19 @@ public interface ISendspinIdentityStore
 public sealed class FileSendspinIdentityStore : ISendspinIdentityStore
 {
     private readonly string _path;
+    private readonly ILogger _logger;
 
     /// <summary>Creates a store backed by the given file path.</summary>
-    public FileSendspinIdentityStore(string path) => _path = path;
+    /// <param name="path">File to hold the identity blob.</param>
+    /// <param name="logger">
+    /// Optional. Without one, a file this store cannot narrow to owner-only is tightened — or
+    /// left as it is — with no signal at all.
+    /// </param>
+    public FileSendspinIdentityStore(string path, ILogger? logger = null)
+    {
+        _path = path;
+        _logger = logger ?? NullLogger.Instance;
+    }
 
     /// <inheritdoc/>
     /// <exception cref="InvalidOperationException">
@@ -55,6 +68,17 @@ public sealed class FileSendspinIdentityStore : ISendspinIdentityStore
         string? text = SecureFile.ReadAllTextOrNull(_path);
         if (text is null)
             return null;
+
+        // This file holds the private key, so it is the one that least wants to sit at 0644 —
+        // yet it was the one store that never narrowed, while the README claimed all of them
+        // did. Reachable whenever a consumer provisions or copies an identity.key themselves,
+        // or migrates off hand-rolled storage, which Load's own contract anticipates (#103).
+        if (SecureFile.NarrowExistingPermissions(_path, _logger))
+        {
+            _logger.LogInformation(
+                "Tightened permissions on Sendspin identity file {Path} to owner-only; it was "
+                + "readable by other users on this machine.", _path);
+        }
 
         try
         {

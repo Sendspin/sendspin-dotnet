@@ -56,10 +56,13 @@ public sealed record SendspinClientOptions
     /// <summary>
     /// Failure counter persistence for the PIN pairing methods. <b>Required</b> if
     /// <see cref="ClientCapabilities.PinPairingMethods"/> is non-empty: without a store the
-    /// counter cannot survive a restart, so a method could never escalate to gesture-gating —
-    /// the SDK declines to offer the PIN methods at all (it sends <c>pair/abort</c> and logs a
-    /// warning) rather than granting unlimited, ungated attempts.
-    /// <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/> is provided.
+    /// counter cannot survive a restart, so a method could never escalate to gesture-gating.
+    /// Rather than grant unlimited, ungated attempts, the SDK withholds the method — it is
+    /// absent from <c>supported_pair_methods</c> in <c>client/hello</c>, reported
+    /// <c>enabled: false</c> by <c>management/get-pairing-config</c>, and any activation naming
+    /// it is answered with <c>pair/abort</c> <c>method_not_supported</c>.
+    /// <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/> is provided, and takes an
+    /// optional <c>ILogger</c> so a corrupt counter file is not discarded silently.
     /// </summary>
     public IPinLockoutStore? PinLockoutStore { get; init; }
 
