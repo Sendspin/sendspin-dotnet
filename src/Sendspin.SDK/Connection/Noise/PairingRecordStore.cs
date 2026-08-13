@@ -127,7 +127,7 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
         // Unix), and Save() — the only thing that would replace the inode with a 0600 one — is
         // never reached by an already-paired client that does not re-pair. Narrow it here or it
         // stays world-readable, with raw PSKs in it, indefinitely.
-        if (SecureFile.NarrowExistingPermissions(path))
+        if (SecureFile.NarrowExistingPermissions(path, _logger))
         {
             _logger.LogInformation(
                 "Tightened permissions on pairing record store {Path} to owner-only; it was " +
@@ -160,6 +160,13 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
         try
         {
             File.Move(_path, target, overwrite: true);
+
+            // File.Move keeps the source inode's permissions, so a pre-narrowing 0644 file full
+            // of raw PSKs would become a permanent world-readable .corrupt-* artifact. The load
+            // path narrows before parsing, so this is belt-and-braces for a file that arrived
+            // between the two — but the quarantined copy outlives everything else here (#103).
+            SecureFile.NarrowExistingPermissions(target, _logger);
+
             _logger.LogError(cause,
                 "Pairing record store at {Path} could not be parsed; moved to {Target}. " +
                 "Starting with no records — the client will need to re-pair.", _path, target);

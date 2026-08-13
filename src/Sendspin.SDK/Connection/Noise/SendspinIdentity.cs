@@ -80,24 +80,38 @@ public sealed class SendspinIdentity
         ArgumentNullException.ThrowIfNull(store);
 
         if (store.Load() is { } blob)
-            return FromBlob(blob);
+            return FromBlob(blob, store.GetType().Name);
 
         var generated = Generate();
         store.Save(generated.ToBlob());
         return generated;
     }
 
-    private static SendspinIdentity FromBlob(byte[] blob)
+    /// <param name="storeName">
+    /// Type name of the store the blob came from. The wrong-length branch is where an empty or
+    /// truncated file lands, and a third-party store that returns an empty array instead of null
+    /// lands there too — reporting "0 bytes" with no hint of which store produced it sent
+    /// implementors looking for corruption rather than at their own return value.
+    /// </param>
+    private static SendspinIdentity FromBlob(byte[] blob, string storeName)
     {
         if (blob.Length != BlobSize)
         {
             throw new InvalidOperationException(
-                $"stored Sendspin identity is {blob.Length} bytes; expected {BlobSize}. " +
-                "The identity store may be corrupt.");
+                $"stored Sendspin identity from {storeName} is {blob.Length} bytes; expected " +
+                $"{BlobSize}. The identity store may be corrupt" +
+                (blob.Length == 0
+                    ? ", or returned an empty array where it meant to report no stored identity — " +
+                      "an ISendspinIdentityStore signals that with null."
+                    : "."));
         }
 
         if (blob[0] != BlobVersion)
         {
+            // The checksum below covers the key material but not this byte, so a corrupted
+            // version byte is caught here rather than there. Harmless while 0x01 is the only
+            // defined value; a v2 must either widen the checksum to include the version or
+            // accept that a 1<->2 flip selects the wrong parse silently.
             throw new InvalidOperationException(
                 $"stored Sendspin identity has format version {blob[0]}, which this SDK does " +
                 $"not understand (it writes version {BlobVersion}). The identity store may be " +

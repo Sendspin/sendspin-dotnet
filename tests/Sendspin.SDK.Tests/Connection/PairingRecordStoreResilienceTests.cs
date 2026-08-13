@@ -84,12 +84,43 @@ public class PairingRecordStoreResilienceTests : IDisposable
         // IOException - the type the original catch (IOException) missed, which would have
         // escaped Quarantine() and the constructor entirely.
         string path = WriteStoreFile("this is not json at all");
-        DateTime now = DateTime.UtcNow;
-        for (int offsetSeconds = -1; offsetSeconds <= 1; offsetSeconds++)
+
+        if (OperatingSystem.IsWindows())
         {
-            Directory.CreateDirectory($"{path}.corrupt-{now.AddSeconds(offsetSeconds):yyyyMMddTHHmmssZ}");
+            // Obstruct every quarantine target File.Move could compute for "now" - the
+            // constructor reads its own DateTime.UtcNow, which may tick past ours - with a
+            // directory. On Windows that makes File.Move throw UnauthorizedAccessException,
+            // the type the original catch (IOException) missed.
+            DateTime now = DateTime.UtcNow;
+            for (int offsetSeconds = -1; offsetSeconds <= 1; offsetSeconds++)
+            {
+                Directory.CreateDirectory($"{path}.corrupt-{now.AddSeconds(offsetSeconds):yyyyMMddTHHmmssZ}");
+            }
+
+            AssertQuarantineFailedButStoreOpened(path);
+            return;
         }
 
+        // On Linux the directory obstruction throws IOException, which the *original* narrow
+        // catch already handled - so this test passed with or without the fix on the only
+        // platform CI runs (#103 item 5). A read-only parent directory provokes EACCES ->
+        // UnauthorizedAccessException instead, which is the case that needed covering. It also
+        // removes the second-boundary race the timestamp obstruction carried: a stall across
+        // one second let the move succeed and the test assert nothing.
+        File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            AssertQuarantineFailedButStoreOpened(path);
+        }
+        finally
+        {
+            File.SetUnixFileMode(
+                _dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    private static void AssertQuarantineFailedButStoreOpened(string path)
+    {
         var store = new FilePairingRecordStore(path);
 
         Assert.Empty(store.List());
@@ -151,17 +182,31 @@ public class PairingRecordStoreResilienceTests : IDisposable
         store.Upsert(new PairingRecord(Enumerable.Repeat((byte)0x55, 32).ToArray(), PskCategory.LongTerm, "srv"));
         string before = File.ReadAllText(path);
 
-        // Obstruct the temp path SecureFile.WriteAllTextAtomic writes to, so the next Save()
-        // fails before any move can happen. A Save() reverted to a direct File.WriteAllText
-        // would never touch this obstruction and would silently clobber `path` instead -
-        // that's the regression this guards against (Save() truly routes through the atomic
-        // primitive rather than just happening to leave no .tmp behind on the happy path).
-        Directory.CreateDirectory(path + ".tmp");
+        // Make the directory unwritable so the next Save() fails before any move can happen. A
+        // Save() reverted to a direct File.WriteAllText would fail here too - but only after
+        // truncating - so the surviving `before` below is what distinguishes the two.
+        //
+        // Unix-only: SecureFile's temp name is random per write since #103, so obstructing one
+        // specific path no longer works, and Windows has no one-line equivalent of a read-only
+        // directory. ubuntu-latest is the CI platform, which is where this needs to run.
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
 
-        Exception? ex = Record.Exception(() =>
-            store.Upsert(new PairingRecord(Enumerable.Repeat((byte)0x66, 32).ToArray(), PskCategory.LongTerm, "srv2")));
+        File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            Exception? ex = Record.Exception(() =>
+                store.Upsert(new PairingRecord(Enumerable.Repeat((byte)0x66, 32).ToArray(), PskCategory.LongTerm, "srv2")));
 
-        Assert.NotNull(ex);
-        Assert.Equal(before, File.ReadAllText(path));
+            Assert.NotNull(ex);
+            Assert.Equal(before, File.ReadAllText(path));
+        }
+        finally
+        {
+            File.SetUnixFileMode(
+                _dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
     }
 }

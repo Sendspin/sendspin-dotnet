@@ -103,9 +103,13 @@ public sealed class DpapiIdentityStore : ISendspinIdentityStore
 ```
 
 **Security note.** The identity blob contains a private key, and `FilePairingRecordStore`
-holds raw PSKs. Both are written atomically and set to owner-only (`0600`) on Unix; a file
-left at looser permissions by an earlier SDK version is narrowed the first time this version
-loads it. Windows has no Unix file mode, so those files inherit their parent directory's
+holds raw PSKs. All three file stores — identity, pairing records, PIN lockout — are written
+atomically and set to owner-only (`0600`) on Unix; a file left at looser permissions, whether by
+an earlier SDK version or by however you provisioned it, is narrowed the first time this version
+loads it. Where the process cannot chmod the file at all — owned by another uid on a bind mount,
+or a mount that rejects chmod such as CIFS or exFAT — the store logs a warning and carries on
+rather than refusing to start, so pass an `ILogger` if you want to hear about it. Windows has no
+Unix file mode, so those files inherit their parent directory's
 ACL — place them under `%LOCALAPPDATA%`, which is already user-scoped, or supply a platform
 store.
 

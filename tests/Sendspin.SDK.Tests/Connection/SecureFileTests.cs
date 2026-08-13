@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Connection;
@@ -28,19 +29,50 @@ public class SecureFileTests : IDisposable
     [Fact]
     public void WriteAllTextAtomic_LeavesOriginalFileIntact_WhenTempWriteFails()
     {
+        // Unix-only. The temp name is now random per write (#103 item 3), so a test cannot
+        // obstruct one specific path any more; making the whole directory unwritable is what
+        // fails every candidate name. Windows has no equivalent one-liner — SetAttributes
+        // ReadOnly does not stop file creation — and ubuntu-latest is the CI platform, so this
+        // is where the coverage has to live.
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         string path = Path.Combine(_dir, "data.json");
         SecureFile.WriteAllTextAtomic(path, "original");
 
-        // Obstruct the temp path with a directory so the temp-file write step fails before
-        // any move can happen. A direct-write implementation (skipping the temp file and
-        // writing straight to `path`) would never touch this obstruction and would silently
-        // clobber `path` instead — that's what this test needs to fail against.
-        Directory.CreateDirectory(path + ".tmp");
+        // r-x: entries can be read but none created. A direct-write implementation (straight to
+        // `path`, no temp file) would also fail here — but it would fail *after* truncating, so
+        // the surviving "original" below is what distinguishes the two.
+        File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            Exception? ex = Record.Exception(() => SecureFile.WriteAllTextAtomic(path, "corrupted"));
 
-        Exception? ex = Record.Exception(() => SecureFile.WriteAllTextAtomic(path, "corrupted"));
+            Assert.NotNull(ex);
+            Assert.Equal("original", File.ReadAllText(path));
+        }
+        finally
+        {
+            File.SetUnixFileMode(
+                _dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
+    public void WriteAllTextAtomic_LeavesNoTempFileBehind_WhenTheMoveFails()
+    {
+        // The other half of the random-name change: a unique temp name that is never revisited
+        // would leak a file holding the secret on every failed write, where the old fixed name
+        // was at least overwritten by the next attempt.
+        string path = Path.Combine(_dir, "data.json");
+        Directory.CreateDirectory(path);   // target is a directory, so the move cannot land
+
+        Exception? ex = Record.Exception(() => SecureFile.WriteAllTextAtomic(path, "contents"));
 
         Assert.NotNull(ex);
-        Assert.Equal("original", File.ReadAllText(path));
+        Assert.Empty(Directory.GetFiles(_dir, "*.tmp"));
     }
 
     [Fact]
@@ -97,7 +129,7 @@ public class SecureFileTests : IDisposable
         {
             // No Unix file mode to inspect, so the contract on Windows is "does nothing, does
             // not throw" - the file keeps its inherited ACL.
-            Assert.False(SecureFile.NarrowExistingPermissions(path));
+            Assert.False(SecureFile.NarrowExistingPermissions(path, NullLogger.Instance));
         }
         else
         {
@@ -106,10 +138,10 @@ public class SecureFileTests : IDisposable
                 UnixFileMode.UserRead | UnixFileMode.UserWrite |
                 UnixFileMode.GroupRead | UnixFileMode.OtherRead);
 
-            Assert.True(SecureFile.NarrowExistingPermissions(path));
+            Assert.True(SecureFile.NarrowExistingPermissions(path, NullLogger.Instance));
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
             // Already narrow: reports no change, so callers can log only when it mattered.
-            Assert.False(SecureFile.NarrowExistingPermissions(path));
+            Assert.False(SecureFile.NarrowExistingPermissions(path, NullLogger.Instance));
         }
     }
 
