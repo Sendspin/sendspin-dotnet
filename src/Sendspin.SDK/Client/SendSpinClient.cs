@@ -26,6 +26,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly IStaticDelayStore? _staticDelayStore;
     private readonly INoiseSessionInfo _session;
     private bool _activateReceived;
+
+    // True from a pairing server/activate until the first non-pairing one. Gates every send
+    // (see SendAsync): the pairing exchange holds the wire alone (#118). Cleared with the rest
+    // of the per-connection state at handshake, so a reconnect never starts inside the window.
+    private bool _pairingActivationActive;
     private readonly SourceStreamPipeline? _sourcePipeline;
     private readonly IAudioCaptureDevice? _captureDevice;
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
@@ -273,8 +278,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _sourcePipeline = new SourceStreamPipeline(
                 _captureDevice,
                 _clockSynchronizer,
-                msg => _connection.SendMessageAsync(msg),
-                data => _connection.SendBinaryAsync(data),
+                msg => SendAsync(msg),
+                data => SendBinaryAsync(data),
                 _logger,
                 IsSourceStreamingPermitted,
                 _sourceEncoderFactory,
@@ -465,6 +470,80 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// (<paramref name="family"/> is the bare name, e.g. "player", matched against the
     /// "player@" prefix so a future @v2 still counts).
     /// </summary>
+    /// <summary>
+    /// Every outbound message from this client goes through here, so a pairing activation can
+    /// hold the wire for the pairing exchange alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The spec's pairing sequence and aiosendspin's <c>_receive_pairing</c> agree that the
+    /// exchange is exclusive: the reference server treats <em>any</em> non-pairing frame as a
+    /// protocol error and closes the socket with no application-level message. #117 closed the
+    /// three paths that reached the wire unprompted; this is the general form (#118).
+    /// </para>
+    /// <para>
+    /// Gating by message type rather than at each call site is the point. A dozen senders can
+    /// speak during the window — app-driven volume and format requests, a pipeline recovery ack,
+    /// a management reply — and any new one would otherwise have to know the rule. It also
+    /// subsumes the in-flight cases without cancellation plumbing: a sync burst already running
+    /// when the activation lands drains into this check instead of onto the wire.
+    /// </para>
+    /// <para>
+    /// Dropped rather than queued. Everything blocked here is either a state report, which is
+    /// last-write-wins and recovered wholesale by the full client/state sent on leaving the
+    /// window, or an app-initiated request the app can reissue. A queue would need a bound, an
+    /// overflow policy, and an ordering rule against that re-report — and could deliver a stale
+    /// volume after a newer one, which the re-report cannot get wrong.
+    /// </para>
+    /// </remarks>
+    private Task SendAsync<T>(T message, CancellationToken cancellationToken = default)
+        where T : IMessage
+    {
+        if (_pairingActivationActive && !IsAdmissibleDuringPairing(message))
+        {
+            _logger.LogDebug(
+                "Pairing activation in effect; dropping {Type}", message.GetType().Name);
+            return Task.CompletedTask;
+        }
+
+        return _connection.SendMessageAsync(message, cancellationToken);
+    }
+
+    /// <summary>Binary counterpart of <see cref="SendAsync{T}"/>: source audio, never a pairing message.</summary>
+    private Task SendBinaryAsync(ReadOnlyMemory<byte> data)
+    {
+        if (_pairingActivationActive)
+        {
+            // A pairing activate that omits active_roles leaves the prior roles standing, so a
+            // streaming source pipeline is never stopped and keeps producing chunks. The
+            // reference server sends active_roles: [], which does stop it — this is
+            // server-shape dependent, so the gate cannot rely on the roles going away.
+            _logger.LogDebug("Pairing activation in effect; dropping a binary frame");
+            return Task.CompletedTask;
+        }
+
+        return _connection.SendBinaryAsync(data);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="message"/> may travel during a pairing activation.
+    /// </summary>
+    /// <remarks>
+    /// The pairing exchange itself, plus <c>client/hello</c>: a re-handshake landing inside the
+    /// window answers <c>server/hello</c>, and dropping that reply would wedge the connection
+    /// silently — a worse failure than the stray frame it would prevent. <c>client/goodbye</c>
+    /// needs no entry: the connection layer sends it from <c>DisconnectAsync</c>, not through
+    /// this client.
+    /// </remarks>
+    private static bool IsAdmissibleDuringPairing(IMessage message) => message
+        is ClientPairInitMessage
+        or ClientPairAuthMessage
+        or ClientPairConfirmMessage
+        or ClientPairFinalizeMessage
+        or ClientPairPendingMessage
+        or PairAbortMessage
+        or ClientHelloMessage;
+
     private bool HasRole(string family)
         => _capabilities.Roles.Any(r => r.StartsWith(family + "@", StringComparison.Ordinal));
 
@@ -532,7 +611,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 Source = BuildSourceState(),
             },
         };
-        await _connection.SendMessageAsync(message);
+        await SendAsync(message);
     }
 
     /// <summary>
@@ -701,7 +780,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(command, volume, mute);
 
         _logger.LogDebug("Sending command: {Command}", command);
-        await _connection.SendMessageAsync(message);
+        await SendAsync(message);
     }
 
     public async Task SetVolumeAsync(int volume)
@@ -710,7 +789,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(Commands.Volume, volume: clampedVolume);
 
         _logger.LogDebug("Setting volume to {Volume}", clampedVolume);
-        await _connection.SendMessageAsync(message);
+        await SendAsync(message);
     }
 
     /// <inheritdoc/>
@@ -719,7 +798,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
 
         _logger.LogDebug("Setting mute to {Muted}", muted);
-        await _connection.SendMessageAsync(message);
+        await SendAsync(message);
     }
 
     /// <inheritdoc/>
@@ -736,7 +815,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogDebug("Requesting player format change (codec={Codec}, sample_rate={SampleRate}, channels={Channels}, bit_depth={BitDepth})",
             codec ?? "unchanged", sampleRate, channels, bitDepth);
-        await _connection.SendMessageAsync(message);
+        await SendAsync(message);
     }
 
     /// <inheritdoc/>
@@ -754,7 +833,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogDebug("Requesting artwork format for channel {Channel} (source={Source}, format={Format})",
             channel, source ?? "unchanged", format ?? "unchanged");
-        await _connection.SendMessageAsync(message);
+        await SendAsync(message);
     }
 
     /// <inheritdoc/>
@@ -770,7 +849,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogDebug("Requesting visualizer format change (types={Types}, rate_max={RateMax})",
             types is null ? "unchanged" : string.Join(",", types), rateMax);
-        await _connection.SendMessageAsync(message);
+        await SendAsync(message);
     }
 
     /// <inheritdoc/>
@@ -837,7 +916,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _logger.LogDebug(
             "Sending player state: Volume={Volume}, Muted={Muted}, StaticDelay={StaticDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
             clampedVolume, muted, _clockSynchronizer.StaticDelayMs, _requiredLeadTimeMs, _minBufferMs);
-        await _connection.SendMessageAsync(stateMessage);
+        await SendAsync(stateMessage);
     }
 
     /// <inheritdoc/>
@@ -1028,7 +1107,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         try
         {
             await EndSourceStreamIfUnavailableAsync(current);
-            await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(current));
+            await SendAsync(ClientStateMessage.CreateAvailability(current));
         }
         catch
         {
@@ -1540,7 +1619,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var hello = CreateClientHelloMessage();
         var helloJson = MessageSerializer.Serialize(hello);
         _logger.LogInformation("Sending client/hello (encrypted):\n{Json}", helloJson);
-        await _connection.SendMessageAsync(hello);
+        await SendAsync(hello);
     }
 
     private void HandleServerActivate(string json)
@@ -1638,6 +1717,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // therefore could not. The clock synchronizer is deliberately NOT reset when
         // stopping: its measurements remain valid across the pairing window, so playback
         // resumes without re-converging.
+        // Set before StopTimeSyncLoop so a probe racing the stop is dropped at the send choke
+        // point rather than reaching a server that is about to treat it as a protocol error.
+        bool leavingPairing = _pairingActivationActive && !pairing;
+        _pairingActivationActive = pairing;
+
         if (pairing)
         {
             StopTimeSyncLoop();
@@ -1660,6 +1744,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     SendOrDeferInitialClientState();
                 }
+            }
+            else if (leavingPairing && _initialClientStateSent)
+            {
+                // Recovers everything the window dropped. State is last-write-wins and the
+                // server merges each update, so one full report of the current values restores
+                // its view — a volume the app changed mid-window, a static delay, an
+                // availability flip — without a queue. Skipped when the initial state has yet
+                // to go out: the branch above owns that case, and a delta before it would
+                // become the connection's "initial" message.
+                ResendClientStateAfterPairingAsync().SafeFireAndForget(_logger);
             }
 
             StartTimeSyncLoop();
@@ -1954,7 +2048,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogWarning(
                 "Cannot offer pair method {Method} on this session; aborting the attempt",
                 payload.Pairing?.Method);
-            _connection.SendMessageAsync(new PairAbortMessage
+            SendAsync(new PairAbortMessage
             {
                 Payload = new PairAbortPayload { Reason = "method_not_supported" },
             }).SafeFireAndForget(_logger);
@@ -1975,7 +2069,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     "Activation pin_length {Length} is outside [{Min}, 12]; aborting the attempt",
                     length,
                     _effectiveMinPinLength);
-                _connection.SendMessageAsync(new PairAbortMessage
+                SendAsync(new PairAbortMessage
                 {
                     Payload = new PairAbortPayload { Reason = "pin_length_unacceptable" },
                 }).SafeFireAndForget(_logger);
@@ -1990,7 +2084,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case "pairing_psk":
                 _pendingPairingPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
                 _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
-                _connection.SendMessageAsync(new ClientPairFinalizeMessage
+                SendAsync(new ClientPairFinalizeMessage
                 {
                     Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(_pendingPairingPsk) },
                 }).SafeFireAndForget(_logger);
@@ -2051,7 +2145,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // Outside the lock: this sends, logs, and raises an application event, none of which
             // should run while holding a lock a subscriber's callback could contend for.
-            _connection.SendMessageAsync(new ClientPairPendingMessage
+            SendAsync(new ClientPairPendingMessage
             {
                 Payload = new ClientPairPendingPayload { PairingIndex = _pairingCounter },
             }).SafeFireAndForget(_logger);
@@ -2170,7 +2264,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _pinState = state;
         _logger.LogInformation("PIN pairing ({Method}): starting attempt", method);
-        _connection.SendMessageAsync(init).SafeFireAndForget(_logger);
+        SendAsync(init).SafeFireAndForget(_logger);
         ArmAttemptTimeout();
     }
 
@@ -2335,7 +2429,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        await _connection.SendMessageAsync(new ClientPairAuthMessage
+        await SendAsync(new ClientPairAuthMessage
         {
             Payload = new ClientPairAuthPayload { PakeMsg2 = Base64UrlText.Encode(publicShare) },
         });
@@ -2364,13 +2458,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             confirm.Payload.NonceB = Base64UrlText.Encode(state.NonceB!);
         }
 
-        _connection.SendMessageAsync(confirm).SafeFireAndForget(_logger);
+        SendAsync(confirm).SafeFireAndForget(_logger);
 
         byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
         _pendingPairingPsk = psk;
         var suite = NoiseCipherSuite.ChaChaPoly;
         byte[] wrapped = PinPairing.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
-        _connection.SendMessageAsync(new ClientPairFinalizeMessage
+        SendAsync(new ClientPairFinalizeMessage
         {
             Payload = new ClientPairFinalizePayload { WrappedPsk = Base64UrlText.Encode(wrapped) },
         }).SafeFireAndForget(_logger);
@@ -2382,7 +2476,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void AbortPin(string reason)
     {
         ClearPinState();
-        _connection.SendMessageAsync(new PairAbortMessage
+        SendAsync(new PairAbortMessage
         {
             Payload = new PairAbortPayload { Reason = reason },
         }).SafeFireAndForget(_logger);
@@ -2556,7 +2650,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
         }
 
-        _connection.SendMessageAsync(new ManagementResultMessage { Payload = result })
+        SendAsync(new ManagementResultMessage { Payload = result })
             .SafeFireAndForget(_logger);
 
         if (result.Result == "ok" && _pendingSelfRemoval)
@@ -3217,7 +3311,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         var stateJson = MessageSerializer.Serialize(stateMessage);
         _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
-        await _connection.SendMessageAsync(stateMessage);
+        await SendAsync(stateMessage);
 
         // Also apply to audio pipeline to ensure consistency
         _audioPipeline?.SetVolume(_playerState.Volume);
@@ -3382,7 +3476,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         try
         {
-            await _connection.SendMessageAsync(timeMessage, cancellationToken).ConfigureAwait(false);
+            await SendAsync(timeMessage, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -3728,6 +3822,47 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             // Per spec: send client/state to confirm the applied state back to the server.
             SendPlayerStateAckAsync().SafeFireAndForget(_logger);
+        }
+    }
+
+    /// <summary>
+    /// Re-reports the full client state after a pairing activation ends, restoring the server's
+    /// view of anything the window dropped.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately the full state rather than a delta: the client cannot know which of its
+    /// values the server last saw, because it does not track what the gate discarded. Resending
+    /// unchanged fields is explicitly permitted — "A client MAY instead resend unchanged fields,
+    /// up to its full state" — so the complete picture is both correct and the only thing that
+    /// is knowably correct here.
+    /// </remarks>
+    private async Task ResendClientStateAfterPairingAsync()
+    {
+        if (_connection.State != ConnectionState.Connected)
+        {
+            return;
+        }
+
+        await SendAsync(ClientStateMessage.CreateInitial(
+            available: CurrentAvailability,
+            player: MayReportRoleState("player")
+                ? new PlayerStatePayload
+                {
+                    Volume = _playerState.Volume,
+                    Muted = _playerState.Muted,
+                    StaticDelayMs = ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
+                    RequiredLeadTimeMs = _requiredLeadTimeMs,
+                    MinBufferMs = _minBufferMs,
+                    SupportedCommands = GetPlayerSupportedCommands(),
+                }
+                : null,
+            source: BuildSourceState()));
+
+        // Keep the availability publisher's tracker in step with what the server was just told,
+        // so the next genuine change is neither a spurious repeat nor swallowed as one.
+        lock (_availabilityLock)
+        {
+            _lastAvailabilitySent = CurrentAvailability;
         }
     }
 
