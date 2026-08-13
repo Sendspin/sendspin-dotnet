@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Noise;
@@ -271,17 +272,29 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         // placeholder PSK to learn psk_id, then rebuild the state with the resolved PSK
         // and replay message 1 (deterministic: the responder adds no randomness before
         // message 2).
+        // Each Create gets its own copy of the private key because Noise.NET takes ownership of
+        // the array it is handed. The copies are cleared in a finally rather than left to the
+        // library: every path out of this method between the copy and the state's disposal --
+        // a malformed message 1, an unresolvable psk_id, a psk_id bound to another server --
+        // otherwise leaves a live Curve25519 private key on the heap until GC (#102).
         string pskId;
-        using (var probeState = protocol.Create(
-            initiator: false, prologue: prologue,
-            s: _identity.PrivateKey.ToArray(), rs: serverPub,
-            psks: [new byte[NoiseConstants.PskSize]]))
+        byte[] probeKey = _identity.PrivateKey.ToArray();
+        try
         {
+            using var probeState = protocol.Create(
+                initiator: false, prologue: prologue,
+                s: probeKey, rs: serverPub,
+                psks: [new byte[NoiseConstants.PskSize]]);
+
             var probeBuf = new byte[NoiseProtocol.MaxMessageLength];
             var (probeLen, _, _) = probeState.ReadMessage(msg1, probeBuf);
             using var payloadDoc = JsonDocument.Parse(Encoding.UTF8.GetString(probeBuf, 0, probeLen));
             pskId = payloadDoc.RootElement.GetProperty("psk_id").GetString()
                 ?? throw new FormatException("psk_id missing");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(probeKey);
         }
 
         var resolved = _pskResolver.Resolve(pskId);
@@ -290,10 +303,41 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (resolved.ServerId is not null && resolved.ServerId != _serverId)
             return Fail("PSK is bound to a different server_id");
 
+        // Same treatment for the real exchange, and for the resolved PSK's copy alongside it:
+        // "handshake did not complete after message 2" returns between the copy and the end of
+        // the method.
+        byte[] privateKey = _identity.PrivateKey.ToArray();
+        byte[] pskCopy = resolved.Key.ToArray();
+        try
+        {
+            return CompleteResponderExchange(
+                protocol, prologue, serverPub, privateKey, pskCopy, msg1, resolved);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(privateKey);
+            CryptographicOperations.ZeroMemory(pskCopy);
+        }
+    }
+
+    /// <summary>
+    /// The half of <see cref="RunResponderExchange"/> that runs under the resolved PSK, split
+    /// out so its caller's <c>finally</c> covers every return path with one block rather than
+    /// wrapping the whole method body.
+    /// </summary>
+    private InboundFrameResult CompleteResponderExchange(
+        NoiseProtocol protocol,
+        byte[] prologue,
+        byte[] serverPub,
+        byte[] privateKey,
+        byte[] pskCopy,
+        byte[] msg1,
+        NoisePsk resolved)
+    {
         using var state = protocol.Create(
             initiator: false, prologue: prologue,
-            s: _identity.PrivateKey.ToArray(), rs: serverPub,
-            psks: [resolved.Key.ToArray()]);
+            s: privateKey, rs: serverPub,
+            psks: [pskCopy]);
 
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         state.ReadMessage(msg1, buf);
