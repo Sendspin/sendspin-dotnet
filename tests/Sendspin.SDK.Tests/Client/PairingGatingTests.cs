@@ -148,6 +148,22 @@ public class PairingGatingTests
         Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
     }
 
+    [Fact]
+    public async Task UngatedActivation_DoesNotConsumeAnOpenWindow()
+    {
+        // The window is shared across every connection, and an opening is an operator gesture
+        // spent on whoever actually needs one. An ungated attempt must not claim it in passing:
+        // doing so would silently swallow the gesture another connection is waiting for.
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(minPinLength: 6, window: window);
+
+        h.SendPairingActivate(method: "dynamic_pin", pinLength: 8);
+
+        await h.NextMessageAsync<ClientPairInitMessage>();
+        Assert.True(window.IsOpen, "an ungated attempt must leave the opening for a gated one");
+    }
+
     [Theory]
     [InlineData(4)]
     [InlineData(5)]
