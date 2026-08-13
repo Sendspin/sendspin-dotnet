@@ -53,6 +53,29 @@ public class SendspinClientServiceTimeSyncTests
         Assert.Equal(0, clockSync.ProcessMeasurementCallCount);
     }
 
+    [Fact]
+    public async Task TimeSyncBurst_PropagatesSendFailureOutsideTheTransportSet()
+    {
+        // #109: the burst's catch was a catch-all, so any failure in the probe path was logged
+        // once per burst and the loop simply tried again on the next interval — forever, with
+        // the client never converging. The filter now names the transport failures worth
+        // retrying; a type outside that set is a bug in our own send path and propagates to
+        // TimeSyncLoopAsync's guard, which ends the loop and reports it once.
+        //
+        // NotSupportedException stands in for that class of fault: nothing in SendSingleProbeAsync
+        // raises it legitimately, which is the point — the assertion is about the filter's shape,
+        // not this particular type.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+        await connection.ConnectAsync(new Uri("ws://test"));
+
+        connection.NextSendFailure = new NotSupportedException("bug in the probe send path");
+        connection.ThrowOnNextSend = true;
+
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => client.SendTimeSyncBurstAsync(CancellationToken.None));
+    }
+
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;

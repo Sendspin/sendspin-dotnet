@@ -196,6 +196,13 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad, reviewed under #109, and for the same reason as the
+            // IStaticDelayStore pair in SendspinClientService: ILastPlayedServerStore is
+            // implemented by the embedder over storage the SDK never sees, so no filter can
+            // enumerate what it raises. Degrading is right — this runs from the constructor,
+            // and the value it produces only breaks an arbitration tie between two servers that
+            // declare no activities. Without it that tie falls through to the next rule; with a
+            // throw, the host service could not be constructed at all.
             _logger.LogError(ex, "ILastPlayedServerStore.Load() threw; continuing without persisted last-played server");
             return null;
         }
@@ -214,6 +221,12 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad for the same reason as TryLoadLastPlayed (#109). Degrading is
+            // clearer still on the save side: the only caller is SetLastPlayedServerId, which
+            // has already updated the in-memory value and still has LastPlayedServerIdChanged
+            // to raise. Throwing would abandon that notification and propagate out of a
+            // GroupStateChanged handler — turning a failed write into a lost playback-state
+            // update for the embedder.
             _logger.LogError(ex, "ILastPlayedServerStore.Save({ServerId}) threw; last-played applied in-memory but not persisted", serverId);
         }
     }
@@ -302,6 +315,13 @@ public sealed class SendspinHostService : IAsyncDisposable
             }
             catch (Exception ex)
             {
+                // Deliberately broad, reviewed under #109. DisposeAsync reaches
+                // IAudioPipeline.StopAsync and the source pipeline's capture device, both
+                // embedder-supplied, so the failure set is open — a driver that throws on
+                // teardown is exactly the case this must survive. And this is a loop on the
+                // shutdown path: an escape would strand the remaining connections undisposed
+                // and skip _listener.StopAsync() below, leaving the socket accepting
+                // connections after the caller was told the host had stopped.
                 _logger.LogWarning(ex, "Error disconnecting from {ServerId}", conn.ServerId);
             }
         }
@@ -375,6 +395,13 @@ public sealed class SendspinHostService : IAsyncDisposable
             }
             catch (Exception ex)
             {
+                // Deliberately broad, reviewed under #109. IncomingConnection.DisconnectAsync
+                // already swallows the goodbye and close itself, so what actually surfaces here
+                // is its SetState — which dispatches StateChanged synchronously into the
+                // client's handler and on into the embedder's ConnectionStateChanged
+                // subscribers. Subscriber code has no enumerable failure set. The loop argument
+                // from StopAsync applies too: _connections was cleared before this ran, so an
+                // escape leaves the untouched remainder connected with nothing tracking them.
                 _logger.LogWarning(ex, "Error disconnecting from {ServerId}", conn.ServerId);
             }
         }
@@ -553,6 +580,13 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad, reviewed under #109. This guards the whole connection-setup
+            // body, not one operation: Noise framing construction, the handshake wait,
+            // arbitration, and — inside the same try — ServerConnected?.Invoke and the event
+            // subscriptions above it, which run embedder code. There is no filter that covers
+            // that span, and a per-connection setup failure must not escape into the listener's
+            // accept path and take the host down with it. The finally below is what keeps this
+            // from leaking: an unregistered client is disposed whichever way we leave.
             _logger.LogError(ex, "Error handling server connection {ConnectionId}", connectionId ?? "unknown");
         }
         finally
@@ -686,6 +720,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad, reviewed under #109. Same surface as DisconnectAllAsync's
+            // catch — the goodbye is already self-guarded, so what reaches here is state-change
+            // dispatch into subscriber code. The decision matters more than the delivery: this
+            // connection has lost arbitration and is going away regardless, and the caller
+            // reads the returned false to skip registering it. An escape would lose that false
+            // to HandleServerConnectedAsync's outer guard, which reports a rejected connection
+            // as "Error handling server connection" — the wrong diagnosis for a working
+            // arbitration whose goodbye happened not to land.
             _logger.LogWarning(ex, "Error disconnecting rejected server {ServerId}", newServerId);
         }
 
@@ -725,6 +767,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad, reviewed under #109, and the strongest case of the four
+            // teardown catches. _connections.Remove already ran above, so by the time we get
+            // here the eviction is a fact; the only thing left is to tell the embedder, on the
+            // line below. An escape would skip ServerDisconnected entirely, leaving the
+            // application still showing a server the host service has already forgotten — a
+            // worse outcome than a goodbye that did not make it onto a socket that is closing
+            // anyway. The surface is open regardless: DisposeAsync releases the socket, and the
+            // disconnect dispatches state changes into subscriber code.
             _logger.LogWarning(ex, "Error disconnecting existing server {ServerId} during arbitration",
                 existing.ServerId);
         }
