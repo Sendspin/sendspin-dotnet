@@ -50,6 +50,15 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     /// </summary>
     public bool ThrowOnNextSend { get; set; }
 
+    /// <summary>
+    /// The exception <see cref="ThrowOnNextSend"/> raises. Defaults to the
+    /// <see cref="InvalidOperationException"/> a socket dying mid-write produces, so existing
+    /// callers are unaffected. Set it to reach a catch filter that deliberately does not name
+    /// that type — the time-sync burst tolerates transport failures and propagates everything
+    /// else (#109), and only a non-transport type can exercise the second half.
+    /// </summary>
+    public Exception NextSendFailure { get; set; } = new InvalidOperationException("Simulated send failure");
+
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
     public event EventHandler<string>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
@@ -82,7 +91,7 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         if (ThrowOnNextSend)
         {
             ThrowOnNextSend = false;
-            throw new InvalidOperationException("Simulated send failure");
+            throw NextSendFailure;
         }
 
         // Locked so tests polling for fire-and-forget sends (see SnapshotSentMessages) can

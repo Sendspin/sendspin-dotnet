@@ -733,6 +733,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad, reviewed under #109. The set reaching here is narrow enough to
+            // name — SendspinHandshakeException from a permanent failure, plus whatever the
+            // inner DisconnectAsync raises — but this catch does not merely log: the disconnect
+            // below IS the recovery, and the sole caller is
+            // OnConnectionStateChanged's SafeFireAndForget. An escaping type would be logged
+            // there and then dropped, leaving the client parked in Handshaking with nothing to
+            // drive another attempt. A logged retry beats a silent wedge, so the filter stays
+            // wide enough that the recovery always runs.
             _logger.LogError(ex, "Reconnect handshake failed");
 
             // Closed set again (messaging.md:426) — "handshake_failed" is not in it. The
@@ -2692,8 +2700,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     psk = Connection.Noise.SendspinIdentity.DecodePsk(
                         payload.GetProperty("psk").GetString() ?? string.Empty);
                 }
-                catch (FormatException)
+                catch (FormatException ex)
                 {
+                    // The decoder's message is the only thing that distinguishes a malformed
+                    // PSK from a malformed peer id here -- management/result carries "invalid"
+                    // either way. Swallowing it left DecodePsk (#105) emitting a better message
+                    // that reached nobody, and the call site unpinnable by any test (#110).
+                    _logger.LogWarning("Rejecting management/add-record: {Reason}", ex.Message);
                     result.Result = "invalid";
                     break;
                 }
@@ -3386,6 +3399,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad, reviewed under #109, and the backstop the burst's narrowed
+            // filter propagates into. Two reasons to leave it wide. GetAdaptiveTimeSyncIntervalMs
+            // calls IClockSynchronizer.GetStatus(), and that is an embedder-supplied interface
+            // with no closed set of failure types. And this is the outermost frame of a loop
+            // started by SafeFireAndForget, so narrowing would not make anything louder — it
+            // would only trade this line for the generic "fire-and-forget task failed", losing
+            // the one thing worth knowing, which is that the loop is now dead and this
+            // connection's clock will drift from here on.
             _logger.LogWarning(ex, "Time sync loop ended unexpectedly");
         }
     }
@@ -3440,8 +3461,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // Cancellation is expected on disconnect; just exit.
             return;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException
+            or System.Net.WebSockets.WebSocketException or System.IO.IOException
+            or System.Net.Sockets.SocketException or TimeoutException)
         {
+            // Narrowed from catch-all (#109). Everything inside the try is our own send path —
+            // SendSingleProbeAsync and Task.Delay — so unlike the loop that calls this, the set
+            // here is closed: a socket dying mid-write, a disposed connection, or a send onto
+            // one that is no longer Connected. Those are worth tolerating, because the loop
+            // treats a returning burst as "try again next interval" and a transient write
+            // failure must not cost the connection its clock sync.
+            //
+            // Anything else — a serialization fault, a null deref in the probe code — is a bug
+            // in that path, and retrying it every interval forever buries it under a warning
+            // per burst while the client silently never converges (a player deferring its
+            // initial client/state on IsClockSynced then never reports available). It
+            // propagates to TimeSyncLoopAsync's guard instead, which ends the loop and logs it
+            // once. That guard stays broad deliberately — see its comment.
             _logger.LogWarning(ex, "Time sync burst aborted");
         }
         finally
@@ -3900,6 +3936,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad, reviewed under #109. IStaticDelayStore is implemented by the
+            // embedder over a store the SDK never sees — file, registry, SQLite, a cloud
+            // key-value API — so there is no set of types to narrow to; a filter naming
+            // IOException would let a database provider's own exception abort the handshake.
+            // The interface docs ask for a non-throwing implementation, which is exactly why
+            // this exists: it is the guard for the implementations that are not. Degrading is
+            // right here — a delay we could not read is a lost calibration, not a lost session,
+            // and the handshake behind this call still has an initial client/state to send.
             _logger.LogError(ex, "IStaticDelayStore.Load() threw; continuing without persisted static delay");
             return;
         }
@@ -3937,6 +3981,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (Exception ex)
         {
+            // Deliberately broad for the same reason as LoadPersistedStaticDelay's catch (#109):
+            // an embedder-implemented store has no enumerable failure set. Degrading is the
+            // stronger answer on the save side, because the callers are a server/command and a
+            // GroupSync offset — the delay is already applied in memory and already
+            // acknowledged, so throwing here would fail a command that in fact succeeded.
             _logger.LogError(ex, "IStaticDelayStore.Save({Delay}ms) threw; static delay applied in-memory but not persisted", staticDelayMs);
         }
     }
