@@ -22,10 +22,17 @@ internal sealed class CPaceException(string message) : Exception(message);
 /// against the aiosendspin reference implementation via known-answer vectors.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Not constant-time (see <see cref="X25519"/>); acceptable for the interactive
 /// one-shot PIN flows this backs, where all secrets are per-session.
+/// </para>
+/// <para>
+/// Disposable because it is the one type here that holds derived secrets for a long time: the
+/// ISK and the confirmation MAC key live from <see cref="Derive"/> until the attempt ends, which
+/// spans operator interaction. Dispose it when the attempt ends, however it ends (#102).
+/// </para>
 /// </remarks>
-internal sealed class CPace
+internal sealed class CPace : IDisposable
 {
     private const int FieldBytes = 32;
     private const int Sha512BlockBytes = 128;
@@ -44,6 +51,7 @@ internal sealed class CPace
     private readonly byte[] _ad;
     private byte[]? _scalar;
     private bool _derived;
+    private bool _disposed;
     private byte[] _isk = [];
     private byte[] _macKey = [];
     private (byte[] Share, byte[] Ad) _sideA;
@@ -81,27 +89,79 @@ internal sealed class CPace
     /// <summary>Ingests the peer's share, deriving the ISK and confirmation MAC key.</summary>
     public void Derive(byte[] peerShare, byte[]? peerAd = null)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
         byte[] scalar = _scalar ?? throw new CPaceException("Derive() may only be called once");
         _scalar = null;
-        if (peerShare.Length != FieldBytes)
-            throw new CPaceException($"peer share must be {FieldBytes} bytes");
 
-        byte[] shared = X25519.ScalarMultVerified(scalar, peerShare)
-            ?? throw new CPaceException("peer share encodes a low-order point");
+        // The scalar and the raw X25519 output are the two shortest-lived secrets here and the
+        // two worth clearing most: the scalar reconstructs this side of the exchange, and the
+        // shared point is the PAKE's actual secret, from which everything else is a hash.
+        byte[]? shared = null;
+        try
+        {
+            if (peerShare.Length != FieldBytes)
+                throw new CPaceException($"peer share must be {FieldBytes} bytes");
 
-        peerAd ??= [];
-        (_sideA, _sideB) = _role == CPaceRole.Initiator
-            ? ((PublicShare, _ad), (peerShare, peerAd))
-            : ((peerShare, peerAd), (PublicShare, _ad));
+            shared = X25519.ScalarMultVerified(scalar, peerShare)
+                ?? throw new CPaceException("peer share encodes a low-order point");
 
-        byte[] transcript = [.. LvCat(_sideA.Share, _sideA.Ad), .. LvCat(_sideB.Share, _sideB.Ad)];
-        _isk = SHA512.HashData([.. LvCat(DsiIsk, _sid, shared), .. transcript]);
-        _macKey = SHA512.HashData([.. MacLabel, .. _sid, .. _isk]);
-        _derived = true;
+            peerAd ??= [];
+            (_sideA, _sideB) = _role == CPaceRole.Initiator
+                ? ((PublicShare, _ad), (peerShare, peerAd))
+                : ((peerShare, peerAd), (PublicShare, _ad));
+
+            byte[] transcript = [.. LvCat(_sideA.Share, _sideA.Ad), .. LvCat(_sideB.Share, _sideB.Ad)];
+            _isk = SHA512.HashData([.. LvCat(DsiIsk, _sid, shared), .. transcript]);
+            _macKey = SHA512.HashData([.. MacLabel, .. _sid, .. _isk]);
+            _derived = true;
+        }
+        finally
+        {
+            // In a finally so the throwing paths above — a wrong-length or low-order peer share,
+            // both reachable from a hostile peer — clear them too.
+            CryptographicOperations.ZeroMemory(scalar);
+            if (shared is not null)
+            {
+                CryptographicOperations.ZeroMemory(shared);
+            }
+        }
     }
 
     /// <summary>The 64-byte intermediate session key.</summary>
-    public byte[] Isk => _derived ? _isk : throw new CPaceException("Derive() must be called first");
+    public byte[] Isk
+    {
+        get
+        {
+            // Checked before _derived: after disposal _isk is zeroed but still non-empty, so
+            // without this a use-after-dispose would hand back 64 zero bytes as if they were key
+            // material rather than failing.
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return _derived ? _isk : throw new CPaceException("Derive() must be called first");
+        }
+    }
+
+    /// <summary>Clears the derived secrets. Safe to call more than once.</summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+
+        // _scalar is non-null only for an attempt abandoned before Derive — an operator who
+        // walked away, an abort, a dropped connection. That is the common ending, not a rare one.
+        if (_scalar is not null)
+        {
+            CryptographicOperations.ZeroMemory(_scalar);
+            _scalar = null;
+        }
+
+        CryptographicOperations.ZeroMemory(_isk);
+        CryptographicOperations.ZeroMemory(_macKey);
+    }
 
     /// <summary>This side's 64-byte confirmation tag (Ta for A, Tb for B).</summary>
     public byte[] Tag() => Mac(own: true);
@@ -116,6 +176,9 @@ internal sealed class CPace
 
     private byte[] Mac(bool own)
     {
+        // Same reasoning as Isk: a zeroed _macKey after disposal would still produce a
+        // plausible-looking tag rather than an error.
+        ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_derived)
             throw new CPaceException("Derive() must be called first");
         var (share, ad) = own == (_role == CPaceRole.Initiator) ? _sideA : _sideB;

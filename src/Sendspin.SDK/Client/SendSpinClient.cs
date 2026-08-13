@@ -2437,6 +2437,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         var state = _pinState;
         _pinState = null;
+
+        // Dropped, deliberately not zeroized. PairingRecord holds its Psk as a
+        // ReadOnlyMemory<byte> over the caller's array rather than a copy, and
+        // HandleServerPairFinalize captures this field, calls this method, and only then
+        // builds the record — so clearing the array here would persist 32 zero bytes as the
+        // long-term PSK. The buffer is unreachable after this either way (#102).
         _pendingPairingPsk = null;
 
         // Read only inside an attempt, and every attempt re-reads them from its activation —
@@ -2444,6 +2450,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // value from an attempt that has already ended.
         _activationPinLength = 0;
         _activationLanguages = null;
+
+        // Clears the attempt's derived secrets (ISK, confirmation MAC key, or the unused
+        // scalar if it never got that far). Every ending routes through here — success,
+        // abort, attempt timeout, supersession, disconnect, disposal — which is why the
+        // zeroization hangs off this method rather than the success path (#102).
+        state?.CPace?.Dispose();
+
         if (state?.PresentPinCts is { } cts)
         {
             cts.Cancel();
