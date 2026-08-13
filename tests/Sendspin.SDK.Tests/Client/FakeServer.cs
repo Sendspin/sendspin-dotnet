@@ -40,7 +40,7 @@ internal class FakeServer : IAsyncDisposable
 
         // server_id IS the static public key: the host decodes it as the Noise remote
         // static, so it has to be a real 43-char base64url Curve25519 key.
-        ServerId = Base64Url.EncodeToString(_keys.PublicKey);
+        ServerId = TestBase64Url.EncodeToString(_keys.PublicKey);
     }
 
     /// <summary>The real base64url Curve25519 server id, generated or taken from the injected keys.</summary>

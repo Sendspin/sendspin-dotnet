@@ -1,7 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!--
+      Both frameworks the library ships, so the net8.0 side of every #if is executable.
+      #108 was three separate net8.0-vs-net10.0 disagreements in Base64UrlText.Decode, none
+      of them reachable from a net10.0-only suite (#155).
+    -->
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
