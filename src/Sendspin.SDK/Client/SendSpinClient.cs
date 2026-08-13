@@ -911,6 +911,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool? _lastAvailabilitySent;
 
     /// <summary>
+    /// Guards the compare-and-claim on <see cref="_lastAvailabilitySent"/>. Held only across
+    /// that decision, never across a send.
+    /// </summary>
+    private readonly object _availabilityLock = new();
+
+    /// <summary>
     /// Whether the initial client/state for the current connection has gone out. Roles that
     /// need clock sync defer it until the first convergence (see <see cref="ApplyBestSample"/>),
     /// and it must be sent exactly once per connection: a later re-convergence takes the
@@ -995,16 +1001,50 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        // Post-latch the tracker was seeded by this connection's initial send, so this
-        // compares against a value the server was actually told.
-        if (_lastAvailabilitySent == current)
+        // Post-latch the tracker was seeded by this connection's initial send, so this compares
+        // against a value the server was actually told.
+        //
+        // The transition is claimed BEFORE the sends, not after. Written afterwards, a publish
+        // that began while this one was in flight compared against the stale pre-flight value,
+        // found no difference and suppressed itself — leaving the server holding this publish's
+        // value, the client holding the other, and nothing scheduled to correct it (#114). The
+        // initial send already seeds the tracker ahead of its await for exactly this reason;
+        // the delta path simply never followed the same rule.
+        //
+        // Locked because the callers are event handlers and SafeFireAndForget continuations, so
+        // two publishes can genuinely run in parallel and both clear an unsynchronized compare.
+        bool? previous;
+        lock (_availabilityLock)
         {
-            return;
+            if (_lastAvailabilitySent == current)
+            {
+                return;
+            }
+
+            previous = _lastAvailabilitySent;
+            _lastAvailabilitySent = current;
         }
 
-        await EndSourceStreamIfUnavailableAsync(current);
-        await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(current));
-        _lastAvailabilitySent = current;
+        try
+        {
+            await EndSourceStreamIfUnavailableAsync(current);
+            await _connection.SendMessageAsync(ClientStateMessage.CreateAvailability(current));
+        }
+        catch
+        {
+            // The claim did not make it onto the wire, so release it and let the next publish
+            // retry — unless another publish has since claimed a different value, in which case
+            // that one is now the truth and restoring ours would resurrect a stale claim.
+            lock (_availabilityLock)
+            {
+                if (_lastAvailabilitySent == current)
+                {
+                    _lastAvailabilitySent = previous;
+                }
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
