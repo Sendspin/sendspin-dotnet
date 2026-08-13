@@ -2025,14 +2025,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                      || IsMethodEscalated(method)
                      || _activationPinLength < 6;
 
-        if (gated && _pairingWindow?.TryConsume() != true)
+        bool deferred = false;
+        if (gated)
         {
-            // Signals the wait without starting the attempt, so no attempt timeout is armed.
+            // Claiming the opening and marking this connection pending must be one step. Split,
+            // a window opened in the gap raised StateChanged while _pendingGatedMethod was still
+            // null, so OnPairingWindowStateChanged found nothing pending and returned — and this
+            // connection then waited for an opening that had already been and gone (#148).
+            //
+            // Locking across TryConsume is safe in this order: PairingWindow releases its own
+            // gate before raising StateChanged (see Open/Close), so the reverse nesting —
+            // window gate held while a handler takes _attemptLock — does not exist.
             lock (_attemptLock)
             {
-                _pendingGatedMethod = method;
+                if (_pairingWindow?.TryConsume() != true)
+                {
+                    // Signals the wait without starting the attempt, so no timeout is armed.
+                    _pendingGatedMethod = method;
+                    deferred = true;
+                }
             }
+        }
 
+        if (deferred)
+        {
+            // Outside the lock: this sends, logs, and raises an application event, none of which
+            // should run while holding a lock a subscriber's callback could contend for.
             _connection.SendMessageAsync(new ClientPairPendingMessage
             {
                 Payload = new ClientPairPendingPayload { PairingIndex = _pairingCounter },
@@ -2058,29 +2076,48 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void OnPairingWindowStateChanged(object? sender, EventArgs e)
     {
-        string method;
-
-        // The claim — "is this connection still pending, and can it take the opening?" — has to
-        // be atomic, or two raises on different threads both consume for the same connection.
-        // TryConsume takes the window's own lock, which is safe here: the window raises this
-        // event after releasing that lock, so the two are never taken in the other order.
-        lock (_attemptLock)
+        // PairingWindow swallows every subscriber's exceptions to stop one application handler
+        // tearing down another connection's message dispatch — which also means a fault in this
+        // handler, the SDK's own, would be completely invisible: no log, no rethrow, and a
+        // symptom of a gated attempt that silently never resumes after the operator's gesture.
+        // Logging here rather than giving PairingWindow a logger keeps the window free of
+        // logging concerns (#147).
+        try
         {
-            if (_pendingGatedMethod is not { } pending)
+            string method;
+
+            // The claim — "is this connection still pending, and can it take the opening?" — has
+            // to be atomic, or two raises on different threads both consume for the same
+            // connection. TryConsume takes the window's own lock, which is safe here: the window
+            // raises this event after releasing that lock, so the two are never taken in the
+            // other order.
+            lock (_attemptLock)
             {
-                return;
+                if (_pendingGatedMethod is not { } pending)
+                {
+                    return;
+                }
+
+                if (_pairingWindow?.TryConsume() != true)
+                {
+                    return;
+                }
+
+                _pendingGatedMethod = null;
+                method = pending;
             }
 
-            if (_pairingWindow?.TryConsume() != true)
-            {
-                return;
-            }
-
-            _pendingGatedMethod = null;
-            method = pending;
+            StartPinAttempt(dynamic: method == "dynamic_pin");
         }
-
-        StartPinAttempt(dynamic: method == "dynamic_pin");
+        catch (Exception ex)
+        {
+            // The opening may already have been consumed by the time this throws, in which case
+            // the operator's gesture is spent and the attempt did not start. Nothing here can
+            // recover that; the point is that it stops being silent.
+            _logger.LogError(
+                ex,
+                "Pairing window state-changed handler failed; a gated attempt may not have resumed");
+        }
     }
 
     /// <summary>
