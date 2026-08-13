@@ -2220,6 +2220,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (msg is null || _pinState is not { } state)
             return;
 
+        // A server/pair-auth that arrives before server/pair-init leaves the dynamic PIN
+        // underived. The spec calls a mis-sequenced pairing message a protocol error, and the
+        // dispatch catch turns a JsonException into exactly that close. Left unchecked this
+        // reached Encoding.ASCII.GetBytes(null) and threw ArgumentNullException, which the catch
+        // filter does not name — so it escaped to the receive loop as an unexplained lost
+        // connection rather than a deliberate one (#106).
+        if (state.Dynamic && state.Pin is null)
+        {
+            throw new System.Text.Json.JsonException(
+                "server/pair-auth arrived before server/pair-init; no dynamic PIN has been derived");
+        }
+
         // Static PIN: the PIN is device-printed and known from the start.
         string pin = state.Dynamic ? state.Pin! : (_effectiveStaticPin ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
@@ -3758,6 +3770,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // sees its failures — the close must happen here. Anything else (pipeline
             // start, event subscribers) is a local fault, not peer input, and propagates
             // to the fire-and-forget boundary instead of being swallowed.
+            //
+            // That leaves a deliberate asymmetry, reviewed under #106 and kept: a throwing
+            // subscriber on this path is logged by SafeFireAndForget and the connection lives,
+            // while one on a synchronous handler escapes into the receive loop and drops the
+            // connection. Containing faults everywhere was considered and rejected — an
+            // operator notices a player that stopped, and can miss a log line, so an
+            // application bug staying loud is worth the inconsistency. Peer input is
+            // unaffected either way: it closes the connection on both paths.
             _logger.LogError(ex, "Malformed stream/start from authenticated peer; closing connection");
             await DisconnectAsync("unauthorized");
         }

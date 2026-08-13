@@ -61,6 +61,29 @@ public class SendspinClientServicePinPairingTests
         $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{serverKc}}}"}}""";
 
     [Fact]
+    public void DynamicPin_PairAuthBeforePairInit_IsRejectedAsAProtocolError()
+    {
+        // The spec calls a mis-sequenced pairing message a protocol error: close, send no
+        // application-level error, persist nothing. Without an explicit check the PIN is still
+        // null here and Encoding.ASCII.GetBytes(null) threw ArgumentNullException, which the
+        // dispatch catch does not name -- so the connection died as an unexplained receive-loop
+        // failure rather than a deliberate close (#106).
+        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
+        var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
+        using var _c = client;
+
+        conn.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+        Assert.NotEmpty(conn.SentMessages.OfType<ClientPairInitMessage>());
+
+        // server/pair-auth without the server/pair-init that derives the PIN.
+        conn.RaiseTextMessageReceived(ServerPairAuth(B64(Enumerable.Repeat((byte)9, 32).ToArray())));
+
+        Assert.Equal("unauthorized", conn.LastDisconnectReason);
+        Assert.Empty(conn.SentMessages.OfType<ClientPairAuthMessage>());
+    }
+
+    [Fact]
     public void DynamicPin_FullFlow_PresentsPin_CompletesPake_DeliversUnwrappablePsk()
     {
         string? emittedPin = null;

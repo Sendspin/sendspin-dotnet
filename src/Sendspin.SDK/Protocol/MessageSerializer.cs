@@ -60,6 +60,17 @@ public static class MessageSerializer
     /// </exception>
     public static IMessage? Deserialize(string json)
     {
+        var message = DeserializeCore(json);
+        if (message is not null)
+        {
+            PeerMessageValidation.ThrowIfNullMembers(message);
+        }
+
+        return message;
+    }
+
+    private static IMessage? DeserializeCore(string json)
+    {
         var messageType = GetMessageType(json);
         return messageType switch
         {
@@ -83,9 +94,20 @@ public static class MessageSerializer
     /// <summary>
     /// Deserializes a specific message type.
     /// </summary>
+    /// <exception cref="JsonException">
+    /// The document is malformed, or a member the protocol declares non-nullable arrived as
+    /// null (see <see cref="PeerMessageValidation"/>). Callers on the receive path already
+    /// route this to closing the connection.
+    /// </exception>
     public static T? Deserialize<T>(string json) where T : class, IMessage
     {
-        return JsonSerializer.Deserialize(json, GetTypeInfo<T>());
+        var message = JsonSerializer.Deserialize(json, GetTypeInfo<T>());
+        if (message is not null)
+        {
+            PeerMessageValidation.ThrowIfNullMembers(message);
+        }
+
+        return message;
     }
 
     /// <summary>
