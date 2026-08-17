@@ -30,6 +30,27 @@ public sealed class SendspinConnection : ISendspinConnection
     private int _inboundFramesSinceReset;
     private bool _disposed;
 
+    /// <summary>
+    /// True inside the receive loop's async flow. Cleanup reached from that loop must not wait
+    /// for the loop to finish — it would be waiting on itself (#98 item 4).
+    /// </summary>
+    /// <remarks>
+    /// An <see cref="AsyncLocal{T}"/> rather than a parameter threaded through
+    /// <see cref="HandleConnectionLostAsync"/>, <see cref="TryReconnectAsync"/> and
+    /// <see cref="ConnectInternalAsync"/>, all of which sit between the loop and the cleanup.
+    /// This is safe only because the loop is started with <see cref="Task.Run(Func{Task})"/>,
+    /// which forks the execution context: started directly, the assignment below would run in
+    /// the caller's context and leak this flag back into the connect path.
+    /// </remarks>
+    private readonly AsyncLocal<bool> _onReceiveLoop = new();
+
+    /// <summary>
+    /// Cancelled by disposal. Linked into the reconnect loop so a parked reconnect delay
+    /// unwinds when the connection goes away, instead of waking minutes later to dial a dead
+    /// port (#98 item 5).
+    /// </summary>
+    private readonly CancellationTokenSource _lifetime = new();
+
     public ConnectionState State => (ConnectionState)Volatile.Read(ref _state);
     public Uri? ServerUri => _serverUri;
 
@@ -64,8 +85,8 @@ public sealed class SendspinConnection : ISendspinConnection
 
         // An explicit dial by the application is always allowed to try again, even after a
         // failure the reconnect loop refuses to retry on its own.
-        _permanentFailure = null;
-        _lastLossDuringHandshake = false;
+        Volatile.Write(ref _permanentFailure, null);
+        Volatile.Write(ref _lastLossDuringHandshake, false);
 
         try
         {
@@ -131,7 +152,7 @@ public sealed class SendspinConnection : ISendspinConnection
             _reconnectAttempt = 0;
 
             _framing.Reset();
-            _inboundFramesSinceReset = 0;
+            Volatile.Write(ref _inboundFramesSinceReset, 0);
             var startFrames = _framing.Start();
             if (startFrames.Count > 0)
             {
@@ -139,7 +160,11 @@ public sealed class SendspinConnection : ISendspinConnection
             }
 
             _receiveCts = new CancellationTokenSource();
-            _receiveTask = ReceiveLoopAsync(_receiveCts.Token);
+
+            // Task.Run, not a direct call: it forks the execution context so the loop's
+            // _onReceiveLoop marker cannot leak back into this method. Matches how
+            // WebSocketClientConnection starts its own loop. Do not "simplify" this away.
+            _receiveTask = Task.Run(() => ReceiveLoopAsync(_receiveCts.Token));
 
             SetState(ConnectionState.Handshaking);
         }
@@ -291,6 +316,10 @@ public sealed class SendspinConnection : ISendspinConnection
 
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
+        // Every terminal path below reaches CleanupWebSocketAsync, which would otherwise wait
+        // two seconds for this very task to finish before disposing the socket (#98 item 4).
+        _onReceiveLoop.Value = true;
+
         var buffer = ArrayPool<byte>.Shared.Rent(_options.ReceiveBufferSize);
         var messageBuffer = new MemoryStream();
 
@@ -319,7 +348,7 @@ public sealed class SendspinConnection : ISendspinConnection
                         // draining proxy) and must stay retryable.
                         if (!_framing.IsTransportReady
                             && result.CloseStatus == WebSocketCloseStatus.NormalClosure
-                            && _inboundFramesSinceReset == 0)
+                            && Volatile.Read(ref _inboundFramesSinceReset) == 0)
                         {
                             await FailPermanentlyAsync(
                                 new SendspinHandshakeException(HandshakeFailureKind.LegacyServer));
@@ -341,7 +370,7 @@ public sealed class SendspinConnection : ISendspinConnection
                 var messageData = messageBuffer.ToArray();
 
                 // The peer answered, so this connection cannot be the legacy signature.
-                _inboundFramesSinceReset++;
+                Interlocked.Increment(ref _inboundFramesSinceReset);
 
                 var frame = new WireFrame(
                     result.MessageType == WebSocketMessageType.Text ? WireFrameKind.Text : WireFrameKind.Binary,
@@ -435,7 +464,7 @@ public sealed class SendspinConnection : ISendspinConnection
     {
         // Record the verdict before any await, so a connection-loss handler racing us sees it
         // rather than starting a reconnect this method would then tear down.
-        _permanentFailure = failure;
+        Volatile.Write(ref _permanentFailure, failure);
 
         // Take the same guard the reconnect path takes. Without it, a concurrent
         // HandleConnectionLostAsync (the send-failure path) could establish a fresh socket
@@ -483,7 +512,7 @@ public sealed class SendspinConnection : ISendspinConnection
         // a drop before transport mode is a handshake failure, not an ordinary socket drop.
         // Only the caller that won the guard records this, so a duplicate caller arriving
         // after a reconnect has already re-armed the framing cannot overwrite it.
-        _lastLossDuringHandshake = lossDuringHandshake ?? !_framing.IsTransportReady;
+        Volatile.Write(ref _lastLossDuringHandshake, lossDuringHandshake ?? !_framing.IsTransportReady);
 
         try
         {
@@ -493,8 +522,12 @@ public sealed class SendspinConnection : ISendspinConnection
             {
                 await TryReconnectAsync(CancellationToken.None);
             }
-            else
+            else if (!await PublishPermanentFailureIfRecordedAsync())
             {
+                // Only when no verdict is pending. With AutoReconnect off this is the sole
+                // exit, and publishing a bare "Connection lost" unconditionally discarded the
+                // typed exception FailPermanentlyAsync had recorded for us to publish — the
+                // application saw a plain drop where the SDK knew the cause (#98 item 2a).
                 SetState(ConnectionState.Disconnected, "Connection lost");
             }
         }
@@ -504,13 +537,42 @@ public sealed class SendspinConnection : ISendspinConnection
         }
     }
 
+    /// <summary>
+    /// Publishes a verdict <see cref="FailPermanentlyAsync"/> recorded but could not publish,
+    /// tearing the socket down with it. Returns whether one was pending.
+    /// </summary>
+    /// <remarks>
+    /// FailPermanentlyAsync records the verdict and then bails when it finds the
+    /// connection-lost guard already held, relying on the holder to publish it. So every exit
+    /// the holder can take has to consult it. Two did not: a reconnect that succeeded returned
+    /// as though healthy, and the AutoReconnect-off path published a bare "Connection lost"
+    /// (#98 items 1, 2a and 2b). The cleanup matters as much as the state change — in the
+    /// succeeded-reconnect case there is a live socket to take down, and at the loop top a dead
+    /// one that nothing else disposes.
+    /// </remarks>
+    private async Task<bool> PublishPermanentFailureIfRecordedAsync()
+    {
+        if (Volatile.Read(ref _permanentFailure) is not { } failure)
+            return false;
+
+        await CleanupWebSocketAsync();
+        SetState(ConnectionState.Disconnected, failure.Message, failure);
+        return true;
+    }
+
     private async Task TryReconnectAsync(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested && !_disposed)
+        // Disposal has to be able to interrupt the delay below. Without this the loop parked on
+        // an uncancellable Task.Delay — up to the full handshake backoff — and woke long after
+        // the connection was gone to dial a dead port (#98 item 5).
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, _lifetime.Token);
+        var token = linkedCts.Token;
+
+        while (!token.IsCancellationRequested && !_disposed)
         {
-            if (_permanentFailure is not null)
+            if (await PublishPermanentFailureIfRecordedAsync())
             {
-                SetState(ConnectionState.Disconnected, _permanentFailure.Message, _permanentFailure);
                 return;
             }
 
@@ -529,12 +591,19 @@ public sealed class SendspinConnection : ISendspinConnection
 
             try
             {
-                await Task.Delay(delay, cancellationToken);
-                await ConnectInternalAsync(cancellationToken);
+                await Task.Delay(delay, token);
+                await ConnectInternalAsync(token);
 
                 if (State is ConnectionState.Handshaking or ConnectionState.Connected)
                 {
-                    return; // Successfully reconnected
+                    // A permanence recorded while this attempt was in flight — inside the delay
+                    // or the dial — was not visible at the loop top, and FailPermanentlyAsync
+                    // could not publish it because this loop holds the guard. Returning here
+                    // without re-reading left the verdict unpublished and the connection sitting
+                    // in Handshaking for good, and left the field set on a healthy connection so
+                    // the next ordinary drop was refused a retry (#98 items 1 and 2b).
+                    await PublishPermanentFailureIfRecordedAsync();
+                    return;
                 }
             }
             catch (OperationCanceledException)
@@ -553,7 +622,7 @@ public sealed class SendspinConnection : ISendspinConnection
         // An ambiguous handshake failure (the peer dropped us before transport mode, but
         // not with the legacy-server signature) is not a transient socket blip, so it backs
         // off on its own, slower schedule rather than hammering the server.
-        if (_lastLossDuringHandshake)
+        if (Volatile.Read(ref _lastLossDuringHandshake))
         {
             return _options.HandshakeFailureBackoffMs;
         }
@@ -566,7 +635,16 @@ public sealed class SendspinConnection : ISendspinConnection
     {
         _receiveCts?.Cancel();
 
-        if (_receiveTask is not null)
+        if (_receiveTask is not null && _onReceiveLoop.Value)
+        {
+            // Reached from the receive loop itself, so the wait below would be the loop
+            // awaiting its own completion: it can only end by timing out, and it burned the
+            // full two seconds on every legacy-server diagnostic and every receive-loop-driven
+            // reconnect (#98 item 4). Skipping it costs nothing — this loop is on its way out
+            // and does not touch the socket again, which is the only thing the wait protected.
+            _logger.LogDebug("Cleanup reached from the receive loop; not waiting for it to end");
+        }
+        else if (_receiveTask is not null)
         {
             try
             {
@@ -624,6 +702,11 @@ public sealed class SendspinConnection : ISendspinConnection
     {
         if (_disposed) return;
 
+        // Before the goodbye, not after: a reconnect loop parked in its delay has to unwind now.
+        // Nothing on the shutdown path below runs on this token, so cancelling it early cannot
+        // cut the goodbye short (#98 item 5).
+        await _lifetime.CancelAsync();
+
         // Say goodbye BEFORE marking disposed. SendMessageAsync refuses to send on a disposed
         // connection, so setting the flag first made the goodbye throw ObjectDisposedException
         // straight into DisconnectAsync's catch, where it was swallowed at Debug level — the
@@ -638,5 +721,6 @@ public sealed class SendspinConnection : ISendspinConnection
 
         _disposed = true;
         _sendLock.Dispose();
+        _lifetime.Dispose();
     }
 }

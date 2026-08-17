@@ -1343,6 +1343,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
+    /// Reads the handshake waiter's TaskCompletionSource under <see cref="_handshakeLock"/>.
+    /// </summary>
+    /// <remarks>
+    /// The four completion sites on the message-handling path read the field unlocked, against
+    /// a waiter that publishes it under the lock — the asymmetry #98 item 3 flags, and a
+    /// contradiction of what the field's own comment says the lock is for. Only the read is
+    /// guarded: completing outside the lock is deliberate, because the TCS runs its
+    /// continuations inline on the calling thread (see <see cref="CompleteHandshakeWait"/>).
+    /// </remarks>
+    private TaskCompletionSource<bool>? CurrentHandshakeWaiter()
+    {
+        lock (_handshakeLock)
+        {
+            return _handshakeTcs;
+        }
+    }
+
+    /// <summary>
     /// Ends a pending handshake wait on disconnect. A permanent handshake failure is
     /// propagated as an exception rather than a false result, so it reaches the
     /// <see cref="ConnectAsync"/> caller: an app that never subscribed to
@@ -1599,7 +1617,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (message is null)
         {
             _logger.LogWarning("Failed to deserialize server/hello");
-            _handshakeTcs?.TrySetResult(false);
+            CurrentHandshakeWaiter()?.TrySetResult(false);
             return;
         }
 
@@ -1645,7 +1663,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _logger.LogWarning("Inadmissible server/activate (activities: {Activities}); closing with {Reason}",
                 string.Join(", ", payload.ActivitiesList), goodbyeReason);
-            _handshakeTcs?.TrySetResult(false);
+            CurrentHandshakeWaiter()?.TrySetResult(false);
             DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
             return;
         }
@@ -1658,7 +1676,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
             _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
-            _handshakeTcs?.TrySetResult(false);
+            CurrentHandshakeWaiter()?.TrySetResult(false);
             DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
             return;
         }
@@ -1771,7 +1789,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (first)
         {
-            _handshakeTcs?.TrySetResult(true);
+            CurrentHandshakeWaiter()?.TrySetResult(true);
         }
     }
 

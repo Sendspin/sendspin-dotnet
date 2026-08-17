@@ -198,6 +198,66 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
             "Client should reconnect to the still-running server");
     }
 
+    /// <summary>
+    /// Disposal must end the reconnect loop, including a loop already parked in its delay.
+    /// </summary>
+    /// <remarks>
+    /// The loop delayed on <c>CancellationToken.None</c> and only re-read <c>_disposed</c> at
+    /// the top of the next iteration, so disposal could not interrupt it. The parked task
+    /// outlived the connection and woke up one delay later — up to the full 30s handshake
+    /// backoff — to dial a port nothing was listening on. Harmless in production, but in a test
+    /// run it is cross-test background noise and a latent flake source (#98 item 5).
+    /// </remarks>
+    [Fact]
+    public async Task Disposal_EndsAReconnectLoopParkedInItsDelay()
+    {
+        _server.Start(0);
+
+        var firstConnection = new TaskCompletionSource<WebSocketClientConnection>();
+        var dials = 0;
+        _server.ClientConnected += (_, c) =>
+        {
+            if (Interlocked.Increment(ref dials) == 1)
+                firstConnection.TrySetResult(c);
+        };
+
+        // Long enough that the loop is certainly still parked when disposal lands, short enough
+        // that waiting it out below stays quick. Transport-ready framing, as in the tests above,
+        // so the drop takes the ordinary socket schedule rather than the handshake backoff.
+        var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions { ReconnectDelayMs = 1500, AutoReconnect = true },
+            new StubFraming());
+
+        var reconnecting = new TaskCompletionSource<bool>();
+        connection.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Reconnecting)
+                reconnecting.TrySetResult(true);
+        };
+
+        await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{_server.Port}/sendspin"));
+        var serverConn = await firstConnection.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await serverConn.DisposeAsync();
+
+        Assert.True(await reconnecting.Task.WaitAsync(TimeSpan.FromSeconds(10)),
+            "Client should enter Reconnecting after an abrupt server-side socket teardown");
+
+        // Positive control on the setup: exactly the one original dial so far, which is what
+        // makes the count below meaningful. Were the redial already spent, this test could pass
+        // without disposal cancelling anything.
+        Assert.Equal(1, Volatile.Read(ref dials));
+
+        await connection.DisposeAsync();
+
+        // Well past the 1500ms the parked delay had left to run.
+        await Task.Delay(2500);
+
+        Assert.Equal(1, Volatile.Read(ref dials));
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _server.DisposeAsync();
