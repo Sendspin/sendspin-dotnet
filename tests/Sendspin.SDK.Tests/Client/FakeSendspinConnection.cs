@@ -157,7 +157,18 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         }
     }
 
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    /// <summary>
+    /// Whether the client disposed this connection. Pins the documented split between
+    /// <c>Dispose</c> and <c>DisposeAsync</c> — see
+    /// <c>ClientDisposal_OnlyTheAsyncOverloadDisposesTheConnection</c> (#96).
+    /// </summary>
+    public bool WasDisposed { get; private set; }
+
+    public ValueTask DisposeAsync()
+    {
+        WasDisposed = true;
+        return ValueTask.CompletedTask;
+    }
 
     /// <summary>
     /// Simulates the socket dropping with auto-reconnect: the connection moves to

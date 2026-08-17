@@ -73,8 +73,47 @@ public interface ISendspinClient : IAsyncDisposable
     bool IsClockSynced { get; }
 
     /// <summary>
-    /// Connects to a Sendspin server.
+    /// Connects to a Sendspin server and completes the encrypted handshake.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Returns only once the handshake has completed — which, under the encrypted protocol,
+    /// means the server's first <c>server/activate</c> has arrived, not merely its
+    /// <c>server/hello</c>.
+    /// </para>
+    /// <para>
+    /// <b>A permanent handshake failure is thrown, not merely reported.</b> Handle it here:
+    /// an application that only subscribes to <see cref="ConnectionStateChanged"/> — or to
+    /// nothing, as the Quick Start once showed — would otherwise see this call return
+    /// normally against a server it had just permanently rejected, and discover the problem
+    /// when its first command threw "WebSocket is not connected".
+    /// </para>
+    /// <para>
+    /// A transport-level failure to reach the server (for example
+    /// <see cref="System.Net.WebSockets.WebSocketException"/>) propagates only when
+    /// <c>ConnectionOptions.AutoReconnect</c> is false; with it enabled the connection enters
+    /// its reconnect loop instead and this call returns.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="Connection.SendspinHandshakeException">
+    /// The handshake failed permanently, so retrying cannot help.
+    /// <see cref="Connection.SendspinHandshakeException.Kind"/> distinguishes the two cases:
+    /// <see cref="Connection.HandshakeFailureKind.LegacyServer"/> — the server predates the
+    /// encrypted protocol (aiosendspin &lt; 7.0.0); upgrade it, or use the 9.x SDK line.
+    /// <see cref="Connection.HandshakeFailureKind.HandshakeRejected"/> — the server speaks the
+    /// encrypted protocol but refused this handshake: no usable pairing record, an unsupported
+    /// cipher suite, a version mismatch, or malformed input. Pair again, or check the suite.
+    /// </exception>
+    /// <exception cref="TimeoutException">
+    /// The server accepted the socket but did not complete the hello exchange within the
+    /// spec's recommended 30 s handshake window. Unlike the above this is not permanent —
+    /// retrying is reasonable.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">Already connected or connecting.</exception>
+    /// <exception cref="ObjectDisposedException">The client has been disposed.</exception>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was cancelled.
+    /// </exception>
     Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -314,10 +353,26 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<ClockSyncStatus>? ClockSyncConverged;
 
     /// <summary>
-    /// Raised when a <c>server/hello</c> message is received and parsed.
-    /// Fires once per successful handshake (including reconnects). The payload is the
-    /// same object cached on <see cref="LastServerHello"/>.
+    /// Raised once per successful handshake (including reconnects), carrying the parsed
+    /// <c>server/hello</c> payload — the same object cached on <see cref="LastServerHello"/>.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Fires on the session's first <c>server/activate</c>, not on <c>server/hello</c>
+    /// itself.</b> Under the encrypted protocol the handshake completes on that activate, and
+    /// this event marks the completed handshake rather than the arrival of the message it
+    /// carries. Anything written against the pre-encryption ordering — which raised it as
+    /// soon as the hello was parsed, before any activate — observes different state here: by
+    /// the time it fires the role grant has been applied and the client may already send.
+    /// </para>
+    /// <para>
+    /// The payload's <see cref="ServerHelloPayload.Name"/> is the only field an encrypted
+    /// server populates. In particular <see cref="ServerHelloPayload.ServerId"/> is empty:
+    /// the server's identity is its authenticated Noise static key, exposed as
+    /// <see cref="ISendspinClient.ServerId"/>. Key per-server state off that, never off the
+    /// payload's copy. See the remarks on <see cref="ServerHelloPayload"/>.
+    /// </para>
+    /// </remarks>
     event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
     /// <summary>

@@ -274,12 +274,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 
     /// <summary>
-    /// Constructs a client for the encrypted Sendspin protocol.
+    /// Constructs a client for the encrypted Sendspin protocol. Prefer
+    /// <see cref="CreateForDial"/>, which wires the framing and session together for you.
     /// </summary>
+    /// <param name="logger">Logger for client diagnostics.</param>
+    /// <param name="connection">
+    /// The transport this client speaks over. The client does not own it unless it built it
+    /// itself — see <see cref="CreateForDial"/> and <see cref="Dispose"/>.
+    /// </param>
     /// <param name="session">
     /// The Noise session backing this connection. In production this is the same
     /// <see cref="NoiseWireFraming"/> instance the connection uses for framing.
     /// </param>
+    /// <param name="options">Identity, capabilities, and the optional stores and pipelines.</param>
     internal SendspinClientService(
         ILogger<SendspinClientService> logger,
         ISendspinConnection connection,
@@ -383,6 +390,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _session.MatchedPsk?.Category == PskCategory.LongTerm
         && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false);
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Carries the interface's contract, which matters here because
+    /// <see cref="CreateForDial"/> hands back this concrete type: a caller holding a
+    /// <c>SendspinClientService</c> rather than an <see cref="ISendspinClient"/> would
+    /// otherwise see no documentation at all for the exceptions this can throw (#96).
+    /// </remarks>
     public async Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -493,11 +507,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Whether <see cref="ClientCapabilities.Roles"/> lists any version of a role family
-    /// (<paramref name="family"/> is the bare name, e.g. "player", matched against the
-    /// "player@" prefix so a future @v2 still counts).
-    /// </summary>
-    /// <summary>
     /// Every outbound message from this client goes through here, so a pairing activation can
     /// hold the wire for the pairing exchange alone.
     /// </summary>
@@ -571,6 +580,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         or PairAbortMessage
         or ClientHelloMessage;
 
+    /// <summary>
+    /// Whether <see cref="ClientCapabilities.Roles"/> lists any version of a role family
+    /// (<paramref name="family"/> is the bare name, e.g. "player", matched against the
+    /// "player@" prefix so a future @v2 still counts).
+    /// </summary>
     private bool HasRole(string family)
         => _capabilities.Roles.Any(r => r.StartsWith(family + "@", StringComparison.Ordinal));
 
@@ -4300,10 +4314,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Synchronous dispose — unsubscribes connection events to break the reference
-    /// cycle that prevents GC when <see cref="DisposeAsync"/> is not called.
-    /// Prefer <see cref="DisposeAsync"/> for full cleanup including async operations.
+    /// Synchronous dispose — stops the time-sync loop, clears pairing state, and unsubscribes
+    /// connection events to break the reference cycle that would otherwise prevent GC.
     /// </summary>
+    /// <remarks>
+    /// <b>Does not close the connection.</b> Only <see cref="DisposeAsync"/> disposes the
+    /// underlying <see cref="ISendspinConnection"/>, stops the audio pipeline, and disposes
+    /// the source pipeline's capture device — all of which need to await. Use this overload
+    /// only where the connection is owned and disposed elsewhere; a client from
+    /// <see cref="CreateForDial"/> owns its connection exclusively, so disposing one of those
+    /// synchronously leaves the socket open and the server expecting a reconnect (#96).
+    /// </remarks>
     public void Dispose()
     {
         if (_disposed) return;
@@ -4422,6 +4443,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// both the connection's framing and the client's Noise session so the two cannot
     /// drift apart.
     /// </summary>
+    /// <remarks>
+    /// <b>Dispose the returned client with <c>await using</c>, not <c>using</c>.</b> This
+    /// method constructs the <see cref="SendspinConnection"/> internally and the caller never
+    /// receives a handle to it, so the client is the only thing that can close it — and only
+    /// <see cref="DisposeAsync"/> does. Synchronous <see cref="Dispose"/> cannot: closing the
+    /// socket means sending <c>client/goodbye</c> and awaiting the close, which a synchronous
+    /// dispose has no way to do. The cost of getting it wrong is not just a leaked socket: a
+    /// server that sees a client vanish without a goodbye is told to assume <c>restart</c> and
+    /// keep reconnecting to an application that has exited (#96).
+    /// </remarks>
     public static SendspinClientService CreateForDial(
         ILoggerFactory loggerFactory,
         SendspinClientOptions options,

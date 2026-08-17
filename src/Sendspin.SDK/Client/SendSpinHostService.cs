@@ -120,11 +120,25 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<VisualizerFrame>? VisualizationReceived;
 
     /// <summary>
-    /// Raised when any connected client receives a <c>server/hello</c>.
-    /// Fires once per server handshake (including reconnects). Multiple concurrent
-    /// connections will each raise this event independently — consumers that care
-    /// about per-server state should key off <see cref="ServerHelloPayload.ServerId"/>.
+    /// Raised once per server handshake (including reconnects) for any connected client,
+    /// carrying that server's parsed <c>server/hello</c> payload.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Fires on each session's first <c>server/activate</c>, not on <c>server/hello</c>
+    /// itself</b> — the encrypted handshake completes on the activate. See
+    /// <see cref="ISendspinClient.ServerHelloReceived"/>.
+    /// </para>
+    /// <para>
+    /// Multiple concurrent connections each raise it independently, so a consumer tracking
+    /// per-server state has to distinguish them — but <b>not</b> by
+    /// <see cref="ServerHelloPayload.ServerId"/>, which this doc previously recommended and
+    /// which is always empty under the encrypted protocol: <c>server/hello</c> carries only
+    /// <c>name</c>, and the server's real identity is its authenticated Noise static key.
+    /// Track the connection instead — <see cref="ServerConnected"/> and
+    /// <see cref="ServerDisconnected"/> carry the server id the host arbitrates on.
+    /// </para>
+    /// </remarks>
     public event EventHandler<ServerHelloPayload>? ServerHelloReceived;
 
     /// <summary>
