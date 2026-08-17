@@ -167,6 +167,22 @@ internal sealed class CPace : IDisposable
     public byte[] Tag() => Mac(own: true);
 
     /// <summary>Whether the peer's tag proves knowledge of the PRS.</summary>
+    /// <remarks>
+    /// <para>
+    /// The reflection guard below <b>cannot fire in any Sendspin flow</b>, and that is by
+    /// design rather than an oversight. It requires both sides' shares <em>and</em> both sides'
+    /// associated data to be equal, and the two ADs are always the distinct constants
+    /// <c>"server"</c> and <c>"client"</c> (<c>PinPairing.AdServer</c>/<c>AdClient</c>).
+    /// </para>
+    /// <para>
+    /// That same asymmetry is what actually defeats reflection here: a peer echoing our share
+    /// back still faces a tag computed over the <em>other</em> role's AD, which it cannot
+    /// produce without the MAC key, and the MAC key needs the shared secret. The guard is the
+    /// belt to that design's braces — kept, not deleted, because it becomes load-bearing the
+    /// moment a future flow gives both sides the same AD, which is exactly when nobody would
+    /// think to add it back (#93).
+    /// </para>
+    /// </remarks>
     public bool Verify(byte[] peerTag)
     {
         if (_sideA.Share.AsSpan().SequenceEqual(_sideB.Share) && _sideA.Ad.AsSpan().SequenceEqual(_sideB.Ad))

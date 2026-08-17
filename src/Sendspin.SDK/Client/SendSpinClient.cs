@@ -54,6 +54,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly object _pairingStoreLock = new();
     private readonly SendspinIdentity _identity;
     private bool _markedPskUsed;
+
+    // Set when a management/remove-record targets the requester's own record, so the session
+    // is closed once the result has been sent. Declared here with the rest of the per-client
+    // state rather than beside its use site further down the file (#93).
+    private bool _pendingSelfRemoval;
     private byte[]? _pendingPairingPsk;
     private readonly IPinLockoutStore? _pinLockoutStore;
     private readonly Func<PinPresentation, CancellationToken, ValueTask>? _presentPinAsync;
@@ -2727,8 +2732,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
         }
     }
-
-    private bool _pendingSelfRemoval;
 
     private ManagementResultPayload ExecuteManagementOperation(
         string type, System.Text.Json.JsonElement payload)
