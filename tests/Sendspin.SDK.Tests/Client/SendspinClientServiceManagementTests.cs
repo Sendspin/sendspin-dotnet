@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Protocol.Messages;
@@ -16,13 +17,17 @@ public class SendspinClientServiceManagementTests
     private static readonly byte[] SessionPsk = Enumerable.Repeat((byte)7, 32).ToArray();
 
     // Internal so ManagementInputValidationTests can reuse the same management-activated client.
+    // logger is for tests whose subject is a rejection's diagnostic rather than its
+    // management/result, which is a bare "invalid" for every reason alike (#110).
     internal static (SendspinClientService, FakeSendspinConnection, FakeNoiseSession, InMemoryPairingRecordStore) Create(
-        bool managementActive = true)
+        bool managementActive = true,
+        ILogger<SendspinClientService>? logger = null)
     {
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, ServerId));
         var (client, connection, session) = TestClient.Create(
-            configure: options => options with { PairingRecordStore = store });
+            configure: options => options with { PairingRecordStore = store },
+            logger: logger);
 
         // The management tests remove their own record by psk_id, so the session must be
         // keyed with the same PSK the store holds.

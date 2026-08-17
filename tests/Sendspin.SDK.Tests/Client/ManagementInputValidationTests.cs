@@ -1,4 +1,6 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -96,9 +98,10 @@ public class ManagementInputValidationTests
     }
 
     [Fact]
-    public void AddRecord_MalformedPsk_IsRejected_AndTheErrorNamesThePsk()
+    public void AddRecord_MalformedPsk_IsRejected_AndTheLoggedReasonNamesThePsk()
     {
-        var (client, connection, _, store) = SendspinClientServiceManagementTests.Create();
+        var logger = new CapturingLogger<SendspinClientService>();
+        var (client, connection, _, store) = SendspinClientServiceManagementTests.Create(logger: logger);
         using var _c = client;
         var before = store.List().Select(r => r.PskId).ToList();
         string serverId = EncodeKey(23);
@@ -110,11 +113,17 @@ public class ManagementInputValidationTests
         Assert.Equal("invalid", SendspinClientServiceManagementTests.LastResult(connection).Result);
         Assert.Equal(before, store.List().Select(r => r.PskId).ToList());
 
-        // The add-record path decodes via DecodePsk; its error text names the PSK, not
-        // "peer id". The client swallows the message (NullLogger), so assert it here.
-        var ex = Assert.Throws<FormatException>(() => SendspinIdentity.DecodePsk("AAAA"));
-        Assert.Contains("PSK", ex.Message);
-        Assert.DoesNotContain("peer id", ex.Message);
+        // management/result is a bare "invalid" whichever decoder the call site picks, so the
+        // logged reason is the only place that choice is observable. #105 asserted DecodePsk's
+        // message on the helper instead, which left reverting the CALL SITE to DecodePeerId
+        // passing the whole suite (#110) — this fails on that mutation, the helper test did not.
+        // Requiring "PSK" as well as the absence of "peer id" is what keeps a call site that
+        // logs nothing, or logs below Warning, from satisfying the negative half alone.
+        string reason = Assert.Single(
+            logger.MessagesAt(LogLevel.Warning),
+            m => m.Contains("add-record", StringComparison.Ordinal));
+        Assert.Contains("PSK", reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("peer id", reason, StringComparison.Ordinal);
     }
 
     [Fact]
