@@ -1,3 +1,4 @@
+using System.Net.WebSockets;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Protocol;
@@ -294,7 +295,7 @@ public sealed class IncomingConnection : ISendspinConnection
         }
     }
 
-    private void OnClose()
+    private void OnClose(WebSocketCloseStatus? closeStatus)
     {
         // A server that predates the encrypted protocol (aiosendspin < 7.0.0) dials in, fails
         // to deserialize the client/init we sent from StartAsync, and closes without ever
@@ -302,11 +303,33 @@ public sealed class IncomingConnection : ISendspinConnection
         // the condition is visible. One inbound frame proves the peer speaks the encrypted
         // protocol, so a close after that is ambiguous (restarting server, draining proxy).
         // The Handshaking guard keeps a local disconnect (e.g. the host's handshake timeout,
-        // which closes the socket itself) from being reported as a legacy server.
+        // which routes through DisconnectAsync and so is Disconnecting by now) from being
+        // reported as a legacy server.
         if (_state == ConnectionState.Handshaking
             && !_framing.IsTransportReady
             && _inboundFramesSinceReset == 0)
         {
+            // The measured legacy signature is specifically a *1000* close with no reply,
+            // which is why the dial path requires NormalClosure too (see SendspinConnection's
+            // receive loop). Requiring it here as well is the whole point of #97: every
+            // abnormal mid-handshake end — a TCP drop, a keep-alive abort, which
+            // WebSocketClientConnection routes through this same callback with no status —
+            // was otherwise reported as a server too old to speak encryption, sending
+            // operators to upgrade a server that was never the problem.
+            if (closeStatus != WebSocketCloseStatus.NormalClosure)
+            {
+                // Still a warning, not the ordinary close below: a handshake that never
+                // completed is a failure, and this path has no reconnect loop to retry it.
+                // The message stays agnostic because the close alone cannot say why.
+                _logger.LogWarning(
+                    "Connection closed during the handshake before the server replied ({Status}); "
+                    + "the handshake did not complete",
+                    closeStatus?.ToString() ?? "no close status");
+                _isOpen = false;
+                SetState(ConnectionState.Disconnected, "Handshake incomplete: connection closed");
+                return;
+            }
+
             var failure = new SendspinHandshakeException(HandshakeFailureKind.LegacyServer);
             _logger.LogWarning("{Message}", failure.Message);
             _isOpen = false;
@@ -314,7 +337,8 @@ public sealed class IncomingConnection : ISendspinConnection
             return;
         }
 
-        _logger.LogInformation("Server closed connection");
+        _logger.LogInformation("Server closed connection ({Status})",
+            closeStatus?.ToString() ?? "no close status");
         _isOpen = false;
         SetState(ConnectionState.Disconnected, "Connection closed by server");
     }

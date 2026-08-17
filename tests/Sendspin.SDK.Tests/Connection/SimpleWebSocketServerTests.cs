@@ -104,13 +104,17 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
 
         var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        var closed = new TaskCompletionSource<bool>();
-        serverConn.OnClose = () => closed.TrySetResult(true);
+        // Captures the status rather than just the fact of a close: the receive loop reports
+        // the peer's status only from the Close-frame site and null everywhere else, and
+        // IncomingConnection's legacy-server classification is keyed off that distinction
+        // (#97). Nothing else would notice this site regressing to null.
+        var closed = new TaskCompletionSource<WebSocketCloseStatus?>();
+        serverConn.OnClose = status => closed.TrySetResult(status);
 
         await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
 
-        var wasClosed = await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.True(wasClosed);
+        var reported = await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(WebSocketCloseStatus.NormalClosure, reported);
 
         await serverConn.DisposeAsync();
     }
@@ -274,7 +278,7 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
         var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         var closed = new TaskCompletionSource<bool>();
-        serverConn.OnClose = () => closed.TrySetResult(true);
+        serverConn.OnClose = _ => closed.TrySetResult(true);
 
         // Client initiates graceful close
         await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
