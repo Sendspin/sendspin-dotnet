@@ -2750,11 +2750,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Handles a management/* request. Management is scoped to connections whose
     /// current activities include 'management'; outside that, every request answers
-    /// permission_denied. Every request is answered by exactly one management/result,
-    /// except one carrying a wrong-kind field (e.g. "psk":123 or a non-boolean
-    /// enabled): that throws InvalidOperationException past the local filter below,
-    /// so the dispatch catch closes the connection and no result is sent.
+    /// permission_denied.
     /// </summary>
+    /// <remarks>
+    /// Every request is answered by exactly one management/result, with no exceptions — which
+    /// management.md requires of all management/* requests, and which this handler did not do
+    /// until #132: a wrong-kind field (e.g. "psk":123, or a non-boolean enabled) threw
+    /// InvalidOperationException past the filter below and the dispatch catch closed the
+    /// connection with no result at all. The management reads are kind-checked now and raise
+    /// JsonException instead, so a malformed payload is answered 'invalid' as the spec defines.
+    /// See ReadBool/ReadString/ReadInt32 for why the fix is there rather than in this filter.
+    /// </remarks>
     private void HandleManagement(string type, string json)
     {
         var result = new ManagementResultPayload();
@@ -2788,6 +2794,47 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
+    /// <summary>
+    /// Reads a management payload field of an expected JSON kind, so a peer that sends the
+    /// wrong kind is answered rather than disconnected.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="System.Text.Json.JsonElement"/>'s typed getters throw
+    /// <see cref="InvalidOperationException"/> on a kind mismatch, and the dispatch catch
+    /// treats that as a malformed message and closes the connection. That is right for the
+    /// rest of the protocol and wrong here: management.md opens by saying <b>all</b>
+    /// <c>management/*</c> requests are answered by a single <c>management/result</c>, and
+    /// defines <c>invalid</c> as covering a malformed payload — so a wrong-kind field owes the
+    /// server an answer, not a dropped socket (#132).
+    /// </para>
+    /// <para>
+    /// These throw <see cref="System.Text.Json.JsonException"/>, which
+    /// <see cref="HandleManagement"/>'s own filter already turns into that answer. Widening
+    /// that filter to <see cref="InvalidOperationException"/> instead would have been one line,
+    /// but it would also swallow a genuine invalid-operation bug in our own handling and report
+    /// it to the server as the peer's fault. Narrowing the read keeps the two distinguishable.
+    /// </para>
+    /// </remarks>
+    private static bool ReadBool(System.Text.Json.JsonElement element, string field) => element.ValueKind switch
+    {
+        System.Text.Json.JsonValueKind.True => true,
+        System.Text.Json.JsonValueKind.False => false,
+        _ => throw new System.Text.Json.JsonException($"{field} must be a boolean, got {element.ValueKind}"),
+    };
+
+    /// <inheritdoc cref="ReadBool"/>
+    private static string ReadString(System.Text.Json.JsonElement element, string field) =>
+        element.ValueKind == System.Text.Json.JsonValueKind.String
+            ? element.GetString()!
+            : throw new System.Text.Json.JsonException($"{field} must be a string, got {element.ValueKind}");
+
+    /// <inheritdoc cref="ReadBool"/>
+    private static int ReadInt32(System.Text.Json.JsonElement element, string field) =>
+        element.ValueKind == System.Text.Json.JsonValueKind.Number && element.TryGetInt32(out int value)
+            ? value
+            : throw new System.Text.Json.JsonException($"{field} must be an integer, got {element.ValueKind}");
+
     private ManagementResultPayload ExecuteManagementOperation(
         string type, System.Text.Json.JsonElement payload)
     {
@@ -2815,7 +2862,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 try
                 {
                     psk = Connection.Noise.SendspinIdentity.DecodePsk(
-                        payload.GetProperty("psk").GetString() ?? string.Empty);
+                        ReadString(payload.GetProperty("psk"), "psk"));
                 }
                 catch (FormatException ex)
                 {
@@ -2828,7 +2875,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
                 }
 
-                string? serverId = payload.TryGetProperty("server_id", out var sid) ? sid.GetString() : null;
+                // An explicit JSON null keeps meaning "no server id" — a shared-PSK record —
+                // exactly as an absent field does; only a wrong kind is rejected.
+                string? serverId =
+                    payload.TryGetProperty("server_id", out var sid)
+                    && sid.ValueKind != System.Text.Json.JsonValueKind.Null
+                        ? ReadString(sid, "server_id")
+                        : null;
                 if (serverId is not null && !IsValidServerId(serverId))
                 {
                     result.Result = "invalid";
@@ -2868,8 +2921,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             case MessageTypes.ManagementRemoveRecord:
             {
-                string pskId = payload.GetProperty("psk_id").GetString()
-                    ?? throw new FormatException("psk_id missing");
+                string pskId = ReadString(payload.GetProperty("psk_id"), "psk_id");
 
                 // A record referenced by record_mode.psk_id cannot be removed while the
                 // reference exists (management.md:111); both halves of that constraint are
@@ -2955,7 +3007,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (payload.TryGetProperty("unpaired_access", out var ua)
                     && ua.TryGetProperty("enabled", out var uaEnabled))
                 {
-                    requestedUnpairedAccess = uaEnabled.GetBoolean();
+                    requestedUnpairedAccess = ReadBool(uaEnabled, "unpaired_access.enabled");
                 }
 
                 // dynamic_pin. Parsed here with the other fields so a request refused partway
@@ -2973,12 +3025,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     if (dp.TryGetProperty("enabled", out var dpEnabled))
                     {
-                        requestedDynamicPairingCodeEnabled = dpEnabled.GetBoolean();
+                        requestedDynamicPairingCodeEnabled = ReadBool(dpEnabled, "dynamic_pin.enabled");
                     }
 
                     if (dp.TryGetProperty("min_pin_length", out var minLen))
                     {
-                        int value = minLen.GetInt32();
+                        int value = ReadInt32(minLen, "dynamic_pin.min_pin_length");
                         if (value < 4 || value > 12)
                         {
                             result.Result = "invalid";
@@ -3014,19 +3066,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     if (sp.TryGetProperty("pin", out var pairingCodeEl))
                     {
-                        string pin = pairingCodeEl.GetString() ?? string.Empty;
-                        if (!IsValidStaticPairingCode(pin))
+                        string pairingCode = ReadString(pairingCodeEl, "static_pin.pin");
+                        if (!IsValidStaticPairingCode(pairingCode))
                         {
                             result.Result = "invalid";
                             break;
                         }
 
-                        requestedStaticPairingCode = pin;
+                        requestedStaticPairingCode = pairingCode;
                     }
 
                     if (sp.TryGetProperty("enabled", out var spEnabled))
                     {
-                        requestedStaticPairingCodeEnabled = spEnabled.GetBoolean();
+                        requestedStaticPairingCodeEnabled = ReadBool(spEnabled, "static_pin.enabled");
                     }
 
                     if (requestedStaticPairingCodeEnabled == true
@@ -3060,7 +3112,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                             break;
                         }
 
-                        newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(pskEl.GetString() ?? string.Empty);
+                        newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(ReadString(pskEl, "pairing_psk.psk"));
 
                         // A psk_id that already identifies a candidate in another category would make
                         // one id resolve to two trust levels at handshake time (management.md:98).
@@ -3087,7 +3139,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     if (pp.TryGetProperty("enabled", out var ppEnabled))
                     {
-                        requestedPairingPskEnabled = ppEnabled.GetBoolean();
+                        requestedPairingPskEnabled = ReadBool(ppEnabled, "pairing_psk.enabled");
                     }
                 }
 
@@ -3100,7 +3152,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (payload.TryGetProperty("record_mode", out var rm)
                     && rm.TryGetProperty("psk_id", out var rmPskId))
                 {
-                    string target = rmPskId.GetString() ?? string.Empty;
+                    string target = ReadString(rmPskId, "record_mode.psk_id");
                     bool valid;
                     lock (_pairingStoreLock)
                     {

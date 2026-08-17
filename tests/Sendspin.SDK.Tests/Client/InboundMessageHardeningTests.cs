@@ -1,4 +1,5 @@
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
 
@@ -105,22 +106,53 @@ public class InboundMessageHardeningTests
         Assert.Equal("unauthorized", connection.LastDisconnectReason);
     }
 
+    /// <summary>
+    /// A wrong-kind management field is answered, not disconnected on (#132).
+    /// </summary>
+    /// <remarks>
+    /// This test previously asserted the opposite, and the reversal is deliberate.
+    /// <c>management.md</c> opens by stating that <b>all</b> <c>management/*</c> requests are
+    /// answered by a single <c>management/result</c>, and defines <c>invalid</c> as covering a
+    /// malformed payload — so closing the socket silently was a conformance gap, not a
+    /// hardening measure. The original concern was that <c>InvalidOperationException</c> from
+    /// <c>JsonElement.GetString()</c> must not escape the receive callback unhandled, and that
+    /// still holds: the management reads are kind-checked and raise <c>JsonException</c>, which
+    /// the handler's own filter turns into this answer. Everything outside the management
+    /// surface still closes, as the tests above it assert.
+    /// </remarks>
     [Fact]
-    public void NonStringPskInManagementRequest_ClosesTheConnection()
+    public void NonStringPskInManagementRequest_IsAnsweredInvalid_WithoutClosing()
     {
-        // The management catches answer 'invalid' for JsonException/KeyNotFoundException/
-        // FormatException, but a non-string psk throws InvalidOperationException from
-        // JsonElement.GetString(), which escapes them. The dispatch filter must name it
-        // as peer-triggerable and close — not let it escape the receive callback
-        // unhandled (the condition carried from the previous change's review).
         var (client, connection, _, _) = SendspinClientServiceManagementTests.Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
             """{"type":"management/add-record","payload":{"psk":123}}""");
 
-        Assert.Equal(ConnectionState.Disconnected, connection.State);
-        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+        var result = Assert.Single(connection.SentMessages.OfType<ManagementResultMessage>());
+        Assert.Equal("invalid", result.Payload.Result);
+
+        Assert.NotEqual(ConnectionState.Disconnected, connection.State);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    /// <summary>
+    /// The same for a wrong-kind field on <c>set-pairing-config</c>, which is where #132 found
+    /// the widened surface: six reads added by one change, each previously able to drop the
+    /// connection on its own.
+    /// </summary>
+    [Fact]
+    public void NonBooleanEnabledInSetPairingConfig_IsAnsweredInvalid_WithoutClosing()
+    {
+        var (client, connection, _, _) = SendspinClientServiceManagementTests.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"management/set-pairing-config","payload":{"unpaired_access":{"enabled":"yes"}}}""");
+
+        var result = Assert.Single(connection.SentMessages.OfType<ManagementResultMessage>());
+        Assert.Equal("invalid", result.Payload.Result);
+        Assert.NotEqual(ConnectionState.Disconnected, connection.State);
     }
 
     [Fact]
