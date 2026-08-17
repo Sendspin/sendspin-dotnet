@@ -5,6 +5,35 @@ namespace Sendspin.SDK.Tests.Client;
 
 public class SendspinClientServiceEventTests
 {
+    /// <summary>
+    /// The disposal contract <c>CreateForDial</c> and <c>Dispose</c> now document: only the
+    /// async overload closes the connection (#96).
+    /// </summary>
+    /// <remarks>
+    /// Documented rather than merely true, so it needs pinning in both directions. A client
+    /// built by <c>CreateForDial</c> owns its connection exclusively and no caller ever gets a
+    /// handle to it, so if <c>DisposeAsync</c> stopped disposing it, every consumer following
+    /// the README would silently leak a socket — and leave the server, which never saw a
+    /// <c>client/goodbye</c>, reconnecting to an application that had exited. The synchronous
+    /// half matters too: it is what makes the <c>await using</c> advice non-negotiable rather
+    /// than a stylistic preference.
+    /// </remarks>
+    [Fact]
+    public async Task ClientDisposal_OnlyTheAsyncOverloadDisposesTheConnection()
+    {
+        var (syncClient, syncConnection, _) = TestClient.Create();
+        syncClient.Dispose();
+        Assert.False(syncConnection.WasDisposed,
+            "Dispose() cannot close the connection — sending client/goodbye and awaiting the "
+            + "close needs an async path.");
+
+        var (asyncClient, asyncConnection, _) = TestClient.Create();
+        await asyncClient.DisposeAsync();
+        Assert.True(asyncConnection.WasDisposed,
+            "DisposeAsync() must dispose the connection: a CreateForDial client owns it and "
+            + "nothing else can.");
+    }
+
     [Fact]
     public void ServerHello_RaisesTypedEventAndPopulatesLastServerHello()
     {

@@ -45,8 +45,10 @@ var identity = SendspinIdentity.FromStore(identityStore);
 var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
 
 // CreateForDial wires the identity, wire framing, and Noise session together so they
-// can't drift apart.
-var client = SendspinClientService.CreateForDial(
+// can't drift apart. `await using`, not `using`: the client owns the connection it built,
+// and only DisposeAsync closes it — a synchronous dispose leaves the socket open and the
+// server reconnecting to an app that has exited.
+await using var client = SendspinClientService.CreateForDial(
     loggerFactory,
     new SendspinClientOptions
     {
@@ -60,19 +62,56 @@ var client = SendspinClientService.CreateForDial(
         }
     });
 
-// Connect to server
-await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
-
 // Handle events
 client.GroupStateChanged += (sender, group) =>
 {
     Console.WriteLine($"Now playing: {group.Metadata?.Title}");
 };
 
+// Connect to server. A permanent handshake failure throws — see "Handling handshake
+// failures" below.
+await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
+
 // Send commands
 await client.SendCommandAsync("play");
 await client.SetVolumeAsync(75);
 ```
+
+### Handling handshake failures
+
+`ConnectAsync` **throws** `SendspinHandshakeException` when a handshake fails permanently, so
+an application that never subscribes to `ConnectionStateChanged` still finds out. Without
+handling it the call previously returned as though it had succeeded, and the problem surfaced
+when the first command threw *"WebSocket is not connected"*.
+
+`Kind` separates the two cases, and they call for different responses:
+
+```csharp
+try
+{
+    await client.ConnectAsync(serverUri);
+}
+catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.LegacyServer)
+{
+    // The server predates the encrypted protocol. Upgrade it to aiosendspin >= 7.0.0, or
+    // pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
+}
+catch (SendspinHandshakeException ex)   // HandshakeRejected
+{
+    // The server speaks the encrypted protocol but refused this handshake: no usable
+    // pairing record, an unsupported cipher suite, a version mismatch, or malformed input.
+    // Pair again rather than retrying.
+}
+catch (TimeoutException)
+{
+    // The socket opened but the hello exchange did not finish inside the spec's 30 s
+    // handshake window. Not permanent — retrying is reasonable.
+}
+```
+
+A transport-level failure to reach the server at all (`WebSocketException` and friends)
+propagates only when `ConnectionOptions.AutoReconnect` is false. With auto-reconnect enabled
+the connection enters its reconnect loop and `ConnectAsync` returns.
 
 ### Persisting the client identity
 
@@ -424,7 +463,7 @@ public sealed class FileStaticDelayStore : IStaticDelayStore
         => File.WriteAllText(path, staticDelayMs.ToString(CultureInfo.InvariantCulture));
 }
 
-var client = SendspinClientService.CreateForDial(
+await using var client = SendspinClientService.CreateForDial(
     loggerFactory,
     new SendspinClientOptions
     {
@@ -580,7 +619,7 @@ var caps = new ClientCapabilities
     SourceRoleSupport = new SourceRoleSupport { LineSense = true },   // optional: report signal presence
 };
 
-var client = SendspinClientService.CreateForDial(
+await using var client = SendspinClientService.CreateForDial(
     loggerFactory,
     new SendspinClientOptions
     {

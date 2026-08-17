@@ -87,6 +87,7 @@ public sealed class SendspinIdentity
         return generated;
     }
 
+    /// <param name="blob">The persisted identity blob, as returned by the store.</param>
     /// <param name="storeName">
     /// Type name of the store the blob came from. The wrong-length branch is where an empty or
     /// truncated file lands, and a third-party store that returns an empty array instead of null

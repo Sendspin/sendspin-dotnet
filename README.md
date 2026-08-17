@@ -83,6 +83,7 @@ platform stores (DPAPI, Keychain, Android keystore) and the file-permission note
 ```csharp
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 
 // Generates and persists an identity on first run; loads the same one afterwards.
@@ -94,8 +95,10 @@ var identity = SendspinIdentity.FromStore(identityStore);
 var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
 
 // CreateForDial wires the identity, wire framing, and Noise session together so they
-// can't drift apart.
-var client = SendspinClientService.CreateForDial(
+// can't drift apart. `await using`, not `using`: the client owns the connection it built,
+// and only DisposeAsync closes it — a synchronous dispose leaves the socket open and the
+// server reconnecting to an app that has exited.
+await using var client = SendspinClientService.CreateForDial(
     loggerFactory,
     new SendspinClientOptions
     {
@@ -109,13 +112,31 @@ var client = SendspinClientService.CreateForDial(
         }
     });
 
-// Connect and listen for state changes
-await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
-
 client.GroupStateChanged += (sender, group) =>
 {
     Console.WriteLine($"Now playing: {group.Metadata?.Title} - {group.Metadata?.Artist}");
 };
+
+// A permanent handshake failure throws rather than being reported only as a state change,
+// so a client that never subscribes to ConnectionStateChanged still learns about it.
+try
+{
+    await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
+}
+catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.LegacyServer)
+{
+    // The server predates the encrypted protocol. Upgrade it to aiosendspin >= 7.0.0,
+    // or pin this SDK to the 9.x line. Retrying cannot help.
+    Console.Error.WriteLine(ex.Message);
+    return;
+}
+catch (SendspinHandshakeException ex)
+{
+    // HandshakeRejected: no usable pairing record, unsupported cipher suite, or a version
+    // mismatch. Pair again rather than retrying.
+    Console.Error.WriteLine($"Handshake rejected: {ex.Message}");
+    return;
+}
 
 // Send commands
 await client.SendCommandAsync("play");
