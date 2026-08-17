@@ -188,9 +188,8 @@ back to your `ClientCapabilities` instance, so it lives in memory only: subscrib
 Every setting the event reports has a `ClientCapabilities` property to seed it back on the next
 startup — `UnpairedAccessEnabled`, `MinPinLength`, `StaticPin`, `PairingPskEnabled`,
 `DynamicPinEnabled`, `StaticPinEnabled`, `RecordModePskId`, and the two `locations` hints
-below. Persist them when the event
-fires, reapply them to the `ClientCapabilities` you construct the client with, and the
-server's change survives a restart. `PairingPskReplaced` is not one of those settings — it's a
+below. Persist them when the event fires, reapply them to the `ClientCapabilities` you
+construct the client with, and the server's change survives a restart. `PairingPskReplaced` is not one of those settings — it's a
 staleness signal, not a value to persist: when it's true, any pairing token you already handed
 out has stopped being valid, and the replaced PSK itself round-trips through your
 `IPairingRecordStore`, not through `ClientCapabilities`.
