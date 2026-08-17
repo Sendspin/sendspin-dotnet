@@ -1,7 +1,7 @@
 namespace Sendspin.SDK.Tests.Audio;
 
 /// <summary>
-/// Pins the fake to the real KalmanClockSynchronizer sign convention:
+/// PairingCodes the fake to the real KalmanClockSynchronizer sign convention:
 /// ClientToServerTime(c) = c + offset, ServerToClientTime(s) = s - offset - staticDelayUs,
 /// GetStatus().OffsetMicroseconds = offset (no static delay). A fake with an inverted
 /// convention makes drift tests pass with the wrong sign against production.

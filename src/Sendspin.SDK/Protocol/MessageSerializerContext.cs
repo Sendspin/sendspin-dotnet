@@ -42,7 +42,7 @@ namespace Sendspin.SDK.Protocol;
 [JsonSerializable(typeof(ManagementResultMessage))]
 [JsonSerializable(typeof(ManagementRecordsData))]
 [JsonSerializable(typeof(PairingConfigData))]
-[JsonSerializable(typeof(DynamicPinConfigState))]
+[JsonSerializable(typeof(DynamicPairingCodeConfigState))]
 [JsonSerializable(typeof(RecordModeState))]
 [JsonSerializable(typeof(ServerTimeMessage))]
 [JsonSerializable(typeof(StreamStartMessage))]

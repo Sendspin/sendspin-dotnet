@@ -18,13 +18,13 @@ internal sealed class CPaceException(string message) : Exception(message);
 
 /// <summary>
 /// One side of a CPACE-X25519-SHA512 run (draft-irtf-cfrg-cpace) with explicit mutual
-/// confirmation, as used by the Sendspin PIN pairing flows. Construction verified
+/// confirmation, as used by the Sendspin pairing code flows. Construction verified
 /// against the aiosendspin reference implementation via known-answer vectors.
 /// </summary>
 /// <remarks>
 /// <para>
 /// Not constant-time (see <see cref="X25519"/>); acceptable for the interactive
-/// one-shot PIN flows this backs, where all secrets are per-session.
+/// one-shot pairing code flows this backs, where all secrets are per-session.
 /// </para>
 /// <para>
 /// Disposable because it is the one type here that holds derived secrets for a long time: the
@@ -172,7 +172,7 @@ internal sealed class CPace : IDisposable
     /// The reflection guard below <b>cannot fire in any Sendspin flow</b>, and that is by
     /// design rather than an oversight. It requires both sides' shares <em>and</em> both sides'
     /// associated data to be equal, and the two ADs are always the distinct constants
-    /// <c>"server"</c> and <c>"client"</c> (<c>PinPairing.AdServer</c>/<c>AdClient</c>).
+    /// <c>"server"</c> and <c>"client"</c> (<c>PairingCodes.AdServer</c>/<c>AdClient</c>).
     /// </para>
     /// <para>
     /// That same asymmetry is what actually defeats reflection here: a peer echoing our share

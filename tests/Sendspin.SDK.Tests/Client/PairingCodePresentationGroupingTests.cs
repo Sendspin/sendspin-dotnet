@@ -3,7 +3,7 @@ using Sendspin.SDK.Client;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// PIN presentation grouping, per spec commit 3f8528a9. Grouping is display-only: the PIN value
+/// pairing code presentation grouping, per spec commit 3f8528a9. Grouping is display-only: the pairing code value
 /// is the contiguous digits, and separators never enter derivation, entry or the PRS transcript.
 /// </summary>
 public class PinPresentationGroupingTests
@@ -24,13 +24,13 @@ public class PinPresentationGroupingTests
     [InlineData("123456789012", "1234|5678|9012")]
     public void Groups_MatchTheSpecTable(string pin, string expected)
     {
-        var presentation = new PinPresentation(pin, null);
+        var presentation = new PairingCodePresentation(pin, null);
 
         Assert.Equal(expected, string.Join("|", presentation.Groups));
     }
 
     [Fact]
-    public void Groups_AlwaysReconstructThePinExactly()
+    public void Groups_AlwaysReconstructThePairingCodeExactly()
     {
         // The invariant that matters: grouping partitions the digits and invents nothing. A
         // table typo that still summed to the right length would pass the case above only if it
@@ -39,7 +39,7 @@ public class PinPresentationGroupingTests
         {
             string pin = string.Concat(Enumerable.Range(0, length).Select(i => (char)('0' + (i % 10))));
 
-            Assert.Equal(pin, string.Concat(new PinPresentation(pin, null).Groups));
+            Assert.Equal(pin, string.Concat(new PairingCodePresentation(pin, null).Groups));
         }
     }
 
@@ -52,27 +52,27 @@ public class PinPresentationGroupingTests
         // Length 5 is the spec's stated exception (3-2) and is excluded deliberately.
         string pin = new string('7', length);
 
-        Assert.All(new PinPresentation(pin, null).Groups, g => Assert.True(g.Length >= 3));
+        Assert.All(new PairingCodePresentation(pin, null).Groups, g => Assert.True(g.Length >= 3));
     }
 
     [Theory]
     [InlineData("123")]
     [InlineData("1234567890123")]
     [InlineData("")]
-    public void Groups_OutsideTheSpecRange_ReturnsTheWholePinAsOneGroup(string pin)
+    public void Groups_OutsideTheSpecRange_ReturnsTheWholePairingCodeAsOneGroup(string pin)
     {
         // Display formatting must not throw a pairing away. 4-12 is the spec's range, so nothing
-        // here is reachable from a negotiated PIN -- this pins the fallback, not a behaviour.
-        Assert.Equal(pin, Assert.Single(new PinPresentation(pin, null).Groups));
+        // here is reachable from a negotiated pairing code -- this pins the fallback, not a behaviour.
+        Assert.Equal(pin, Assert.Single(new PairingCodePresentation(pin, null).Groups));
     }
 
     [Fact]
-    public void Pin_RemainsContiguousDigits()
+    public void PairingCode_RemainsContiguousDigits()
     {
-        // Grouping is a derived view. If Pin itself ever grew separators, CPace derivation and
+        // Grouping is a derived view. If PairingCode itself ever grew separators, CPace derivation and
         // the PRS transcript would break while every grouping test above still passed.
-        var presentation = new PinPresentation("12345678", null);
+        var presentation = new PairingCodePresentation("12345678", null);
 
-        Assert.Equal("12345678", presentation.Pin);
+        Assert.Equal("12345678", presentation.PairingCode);
     }
 }

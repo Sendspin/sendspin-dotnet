@@ -79,7 +79,7 @@ public class CipherSuiteAvailabilityTests
     [Fact]
     public void TheDefaultOption_IsPlatformSelected_NotAConstant()
     {
-        // Pins the wiring: SendspinClientOptions must take its default from SelectDefault(),
+        // PairingCodes the wiring: SendspinClientOptions must take its default from SelectDefault(),
         // so a platform without ChaCha20-Poly1305 does not get handed it anyway.
         var options = new Sendspin.SDK.Client.SendspinClientOptions
         {

@@ -142,7 +142,7 @@ public sealed class DpapiIdentityStore : ISendspinIdentityStore
 ```
 
 **Security note.** The identity blob contains a private key, and `FilePairingRecordStore`
-holds raw PSKs. All three file stores — identity, pairing records, PIN lockout — are written
+holds raw PSKs. All three file stores — identity, pairing records, pairing code lockout — are written
 atomically and set to owner-only (`0600`) on Unix; a file left at looser permissions, whether by
 an earlier SDK version or by however you provisioned it, is narrowed the first time this version
 loads it. Where the process cannot chmod the file at all — owned by another uid on a bind mount,
@@ -152,22 +152,22 @@ Unix file mode, so those files inherit their parent directory's
 ACL — place them under `%LOCALAPPDATA%`, which is already user-scoped, or supply a platform
 store.
 
-If you enable the optional PIN pairing methods via `ClientCapabilities.PinPairingMethods`,
-you must also supply an `IPinLockoutStore` — `FilePinLockoutStore` is provided. Without one
+If you enable the optional pairing code methods via `ClientCapabilities.PairingCodeMethods`,
+you must also supply an `IPairingCodeLockoutStore` — `FilePairingCodeLockoutStore` is provided. Without one
 the failure counter cannot survive a restart, so a method could never escalate to
-gesture-gating; the SDK refuses to offer the PIN methods rather than granting unlimited,
-ungated attempts. They equally need an `IPairingRecordStore`: without one the PIN exchange
+gesture-gating; the SDK refuses to offer the pairing code methods rather than granting unlimited,
+ungated attempts. They equally need an `IPairingRecordStore`: without one the pairing code exchange
 completes, the server writes a long-term record, and the client stores nothing — so it fails
 to authenticate on the next connection having reported success. Offering `dynamic_pin`
-additionally requires `SendspinClientOptions.PresentPinAsync` (the callback that shows the
-derived PIN to the operator, taking a `PinPresentation` — the derived PIN plus the server's
+additionally requires `SendspinClientOptions.PresentPairingCodeAsync` (the callback that shows the
+derived pairing code to the operator, taking a `PairingCodePresentation` — the derived pairing code plus the server's
 language hint); without it the SDK refuses that method with `method_not_supported` rather than
-pairing with a PIN nobody can see. Show `PinPresentation.Groups` rather than `Pin` to display
-the PIN in the spec's recommended grouping (`123456` → `123 456`); grouping is presentation-only
+pairing with a pairing code nobody can see. Show `PairingCodePresentation.Groups` rather than `PairingCode` to display
+the pairing code in the spec's recommended grouping (`123456` → `123 456`); grouping is presentation-only
 and separators never enter derivation or operator entry.
 
 **A `PairingWindow` is required to complete a gesture-gated attempt** — every `static_pin`
-attempt, and a `dynamic_pin` attempt once the method has escalated or its PIN is shorter than
+attempt, and a `dynamic_pin` attempt once the method has escalated or its pairing code is shorter than
 6 digits. The window is device-level: construct one, share it across every connection (pass it
 to `SendspinClientOptions.PairingWindow`, which `SendspinHostService` forwards to each
 connection it accepts), and `Open()` it from a deliberate operator gesture. Leaving it null is
@@ -179,15 +179,15 @@ for the full migration note.
 
 **Runtime reconfiguration.** `ClientCapabilities` only seeds the client's *initial* pairing
 config. Once paired, a management-activated server can enable, disable, and reconfigure each
-pairing method at runtime via `management/set-pairing-config` — the Pairing PSK, dynamic PIN
-(including its minimum length), static PIN (including its value), unpaired access, and the
+pairing method at runtime via `management/set-pairing-config` — the Pairing PSK, dynamic pairing code
+(including its minimum length), static pairing code (including its value), unpaired access, and the
 record-mode fallback record. The SDK tracks this effective state itself and never writes it
 back to your `ClientCapabilities` instance, so it lives in memory only: subscribe to
 `ISendspinClient.PairingConfigChanged` to observe every change.
 
 Every setting the event reports has a `ClientCapabilities` property to seed it back on the next
-startup — `UnpairedAccessEnabled`, `MinPinLength`, `StaticPin`, `PairingPskEnabled`,
-`DynamicPinEnabled`, `StaticPinEnabled`, `RecordModePskId`, and the two `locations` hints
+startup — `UnpairedAccessEnabled`, `MinPairingCodeLength`, `StaticPairingCode`, `PairingPskEnabled`,
+`DynamicPairingCodeEnabled`, `StaticPairingCodeEnabled`, `RecordModePskId`, and the two `locations` hints
 below. Persist them when the event
 fires, reapply them to the `ClientCapabilities` you construct the client with, and the
 server's change survives a restart. `PairingPskReplaced` is not one of those settings — it's a
@@ -195,8 +195,8 @@ staleness signal, not a value to persist: when it's true, any pairing token you 
 out has stopped being valid, and the replaced PSK itself round-trips through your
 `IPairingRecordStore`, not through `ClientCapabilities`.
 
-Note that `DynamicPinEnabled`/`StaticPinEnabled` are not the same as listing the method in
-`PinPairingMethods`. That list means *implemented*: a method omitted from it is reported to
+Note that `DynamicPairingCodeEnabled`/`StaticPairingCodeEnabled` are not the same as listing the method in
+`PairingCodeMethods`. That list means *implemented*: a method omitted from it is reported to
 the server as absent and can never be re-enabled, whereas a listed-but-disabled method
 reports `enabled: false` and the server can turn it back on. `RecordModePskId` is ignored
 unless it still names a shared-PSK record in your store, since a server may have removed that
@@ -204,7 +204,7 @@ record while your app was down.
 
 ### Telling servers where the operator can find a secret
 
-`StaticPinLocations` and `PairingPskLocations` advertise the spec's `locations` hint on those
+`StaticPairingCodeLocations` and `PairingPskLocations` advertise the spec's `locations` hint on those
 two pair-method descriptors: where an operator should look for the configured secret —
 `"device"` (printed on it), `"leaflet"` (in the box), or `"operator"` (they set it themselves).
 It drives server UX copy such as *"check the label on the device"*, and nothing about pairing
@@ -213,9 +213,9 @@ depends on it.
 ```csharp
 var caps = new ClientCapabilities
 {
-    PinPairingMethods = { "static_pin" },
-    StaticPin = "12345678",
-    StaticPinLocations = { PairMethodLocations.Device },
+    PairingCodeMethods = { "static_pin" },
+    StaticPairingCode = "12345678",
+    StaticPairingCodeLocations = { PairMethodLocations.Device },
 };
 ```
 

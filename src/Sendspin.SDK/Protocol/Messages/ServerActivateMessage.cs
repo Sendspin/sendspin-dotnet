@@ -55,16 +55,16 @@ public sealed class PairingActivation
     public string Method { get; set; } = string.Empty;
 
     /// <summary>
-    /// The dynamic PIN length for this session. Required when <see cref="Method"/> is
+    /// The dynamic pairing code length for this session. Required when <see cref="Method"/> is
     /// 'dynamic_pin'; absent otherwise. Validated on receipt of the activation, because the
     /// gesture-gating policy turns on it before client/pair-init is sent.
     /// </summary>
     [JsonPropertyName("pin_length")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? PinLength { get; set; }
+    public int? PairingCodeLength { get; set; }
 
     /// <summary>
-    /// BCP 47 language tags in descending operator preference, for spoken PIN emission.
+    /// BCP 47 language tags in descending operator preference, for spoken pairing code emission.
     /// Informational: never grounds for pair/abort.
     /// </summary>
     [JsonPropertyName("languages")]

@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace Sendspin.SDK.Connection.Noise.Pairing;
 
 /// <summary>
-/// JSON-file-backed PIN lockout store, written atomically and restricted to owner-only
+/// JSON-file-backed pairing code lockout store, written atomically and restricted to owner-only
 /// access where the platform supports it.
 /// </summary>
 /// <remarks>
@@ -14,7 +14,7 @@ namespace Sendspin.SDK.Connection.Noise.Pairing;
 /// file is treated as "no failures recorded" — the conservative reading is the one that
 /// keeps the client usable, and a reset counter is the same position a fresh install is in.
 /// </remarks>
-public sealed class FilePinLockoutStore : IPinLockoutStore
+public sealed class FilePairingCodeLockoutStore : IPairingCodeLockoutStore
 {
     private readonly string _path;
     private readonly ILogger _logger;
@@ -26,7 +26,7 @@ public sealed class FilePinLockoutStore : IPinLockoutStore
     /// Optional. Without one, a corrupt file is discarded and permissions are narrowed with no
     /// signal at all — the state this store was in before #103.
     /// </param>
-    public FilePinLockoutStore(string path, ILogger? logger = null)
+    public FilePairingCodeLockoutStore(string path, ILogger? logger = null)
     {
         _path = path;
         _logger = logger ?? NullLogger.Instance;
@@ -45,7 +45,7 @@ public sealed class FilePinLockoutStore : IPinLockoutStore
         var updated = new Dictionary<string, int>(_failures) { [method] = failures };
         SecureFile.WriteAllTextAtomic(
             _path,
-            JsonSerializer.Serialize(updated, PinLockoutStoreJsonContext.Default.DictionaryStringInt32));
+            JsonSerializer.Serialize(updated, PairingCodeLockoutStoreJsonContext.Default.DictionaryStringInt32));
 
         _failures[method] = failures;
     }
@@ -57,18 +57,18 @@ public sealed class FilePinLockoutStore : IPinLockoutStore
             return new Dictionary<string, int>();
 
         // Same reason as FilePairingRecordStore: a file from an earlier SDK version keeps the
-        // platform-default mode until something replaces the inode, and only a failed PIN
+        // platform-default mode until something replaces the inode, and only a failed pairing code
         // attempt does that.
         if (SecureFile.NarrowExistingPermissions(path, logger))
         {
             logger.LogInformation(
-                "Tightened permissions on PIN lockout store {Path} to owner-only; it was "
+                "Tightened permissions on pairing code lockout store {Path} to owner-only; it was "
                 + "readable by other users on this machine.", path);
         }
 
         try
         {
-            return JsonSerializer.Deserialize(text, PinLockoutStoreJsonContext.Default.DictionaryStringInt32)
+            return JsonSerializer.Deserialize(text, PairingCodeLockoutStoreJsonContext.Default.DictionaryStringInt32)
                 ?? new Dictionary<string, int>();
         }
         catch (JsonException ex)
@@ -79,8 +79,8 @@ public sealed class FilePinLockoutStore : IPinLockoutStore
             // Error: it is a brute-force guard silently returning to zero.
             logger.LogError(
                 ex,
-                "PIN lockout store at {Path} could not be parsed; starting with no recorded "
-                + "failures. Every PIN method returns to its un-escalated state.", path);
+                "pairing code lockout store at {Path} could not be parsed; starting with no recorded "
+                + "failures. Every pairing code method returns to its un-escalated state.", path);
             return new Dictionary<string, int>();
         }
     }

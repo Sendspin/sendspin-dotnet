@@ -72,7 +72,7 @@ public class CPaceTests
     }
 
     [Fact]
-    public void CPace_WrongPin_TagsFailVerification()
+    public void CPace_WrongPairingCode_TagsFailVerification()
     {
         byte[] sid = new byte[16];
         var a = CPace.Start(CPaceRole.Initiator, "1234"u8.ToArray(), sid, ad: "server"u8.ToArray());

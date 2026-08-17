@@ -76,7 +76,7 @@ public class PairingWindowTests
     public void Window_AtExactlyItsLifetime_IsStillOpen()
     {
         // The comparison is strictly greater-than, so a window at exactly its lifetime has
-        // not yet expired. Pins the boundary the 4:59/5:01 tests leave open.
+        // not yet expired. PairingCodes the boundary the 4:59/5:01 tests leave open.
         var clock = new FakeClock();
         var window = new PairingWindow(TimeSpan.FromMinutes(5), clock);
         window.Open();

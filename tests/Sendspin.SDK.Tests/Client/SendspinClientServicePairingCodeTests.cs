@@ -8,8 +8,8 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Drives the client service through the dynamic- and static-PIN pairing flows against
-/// a CPace server counterpart, asserting the client emits the derived PIN, completes
+/// Drives the client service through the dynamic- and static-pairing code flows against
+/// a CPace server counterpart, asserting the client emits the derived pairing code, completes
 /// the PAKE, delivers a wrapped PSK the server can unwrap, and honors lockout.
 /// </summary>
 public class SendspinClientServicePinPairingTests
@@ -20,10 +20,10 @@ public class SendspinClientServicePinPairingTests
     private static byte[] B64(string s) => Base64UrlText.Decode(s);
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-    private static (SendspinClientService, FakeSendspinConnection, InMemoryPinLockoutStore, InMemoryPairingRecordStore)
-        CreateClient(ClientCapabilities caps, Func<PinPresentation, CancellationToken, ValueTask>? presentPin = null)
+    private static (SendspinClientService, FakeSendspinConnection, InMemoryPairingCodeLockoutStore, InMemoryPairingRecordStore)
+        CreateClient(ClientCapabilities caps, Func<PairingCodePresentation, CancellationToken, ValueTask>? presentPairingCode = null)
     {
-        var lockout = new InMemoryPinLockoutStore();
+        var lockout = new InMemoryPairingCodeLockoutStore();
         var records = new InMemoryPairingRecordStore();
 
         // Pre-opened so a static_pin attempt (always gesture-gated now) proceeds immediately,
@@ -36,8 +36,8 @@ public class SendspinClientServicePinPairingTests
             {
                 Capabilities = caps,
                 PairingRecordStore = records,
-                PinLockoutStore = lockout,
-                PresentPinAsync = presentPin,
+                PairingCodeLockoutStore = lockout,
+                PresentPairingCodeAsync = presentPairingCode,
                 PairingWindow = window,
             });
 
@@ -51,8 +51,8 @@ public class SendspinClientServicePinPairingTests
 
     private static T Last<T>(FakeSendspinConnection c) where T : class => c.SentMessages.OfType<T>().Last();
 
-    private static string ServerPairInit(string nonceA, int pinLength) =>
-        $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{nonceA}}}","pin_length":{{{pinLength}}}}}""";
+    private static string ServerPairInit(string nonceA, int pairingCodeLength) =>
+        $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{nonceA}}}","pin_length":{{{pairingCodeLength}}}}}""";
 
     private static string ServerPairAuth(string pakeMsg1) =>
         $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{pakeMsg1}}}"}}""";
@@ -61,14 +61,14 @@ public class SendspinClientServicePinPairingTests
         $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{serverKc}}}"}}""";
 
     [Fact]
-    public void DynamicPin_PairAuthBeforePairInit_IsRejectedAsAProtocolError()
+    public void DynamicPairingCode_PairAuthBeforePairInit_IsRejectedAsAProtocolError()
     {
         // The spec calls a mis-sequenced pairing message a protocol error: close, send no
-        // application-level error, persist nothing. Without an explicit check the PIN is still
+        // application-level error, persist nothing. Without an explicit check the pairing code is still
         // null here and Encoding.ASCII.GetBytes(null) threw ArgumentNullException, which the
         // dispatch catch does not name -- so the connection died as an unexplained receive-loop
         // failure rather than a deliberate close (#106).
-        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 6 };
         var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
@@ -76,7 +76,7 @@ public class SendspinClientServicePinPairingTests
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
         Assert.NotEmpty(conn.SentMessages.OfType<ClientPairInitMessage>());
 
-        // server/pair-auth without the server/pair-init that derives the PIN.
+        // server/pair-auth without the server/pair-init that derives the pairing code.
         conn.RaiseTextMessageReceived(ServerPairAuth(B64(Enumerable.Repeat((byte)9, 32).ToArray())));
 
         Assert.Equal("unauthorized", conn.LastDisconnectReason);
@@ -84,17 +84,17 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void DynamicPin_FullFlow_PresentsPin_CompletesPake_DeliversUnwrappablePsk()
+    public void DynamicPairingCode_FullFlow_PresentsPairingCode_CompletesPake_DeliversUnwrappablePsk()
     {
-        string? emittedPin = null;
+        string? emittedPairingCode = null;
         var caps = new ClientCapabilities
         {
-            PinPairingMethods = { "dynamic_pin" },
-            MinPinLength = 6,
+            PairingCodeMethods = { "dynamic_pin" },
+            MinPairingCodeLength = 6,
         };
         var (client, conn, _, _) = CreateClient(caps, (p, _) =>
         {
-            emittedPin = p.Pin;
+            emittedPairingCode = p.PairingCode;
             return ValueTask.CompletedTask;
         });
         using var _c = client;
@@ -109,23 +109,23 @@ public class SendspinClientServicePinPairingTests
         Assert.NotNull(init.Payload.CommitB);
         byte[] commitB = B64(init.Payload.CommitB!);
 
-        // Server picks nonce_A, derives the same PIN using the activation's pin_length.
+        // Server picks nonce_A, derives the same pairing code using the activation's pin_length.
         byte[] nonceA = Enumerable.Repeat((byte)0x42, 32).ToArray();
         conn.RaiseTextMessageReceived(
             ServerPairInit(B64(nonceA), length));
 
-        Assert.NotNull(emittedPin);
-        Assert.Equal(length, emittedPin!.Length);
+        Assert.NotNull(emittedPairingCode);
+        Assert.Equal(length, emittedPairingCode!.Length);
 
-        // Server runs CPace as initiator with the operator-entered PIN.
-        byte[] sid = PinPairing.BuildSid(HandshakeHash, 1);
-        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(emittedPin), sid, ad: PinPairing.AdServer);
+        // Server runs CPace as initiator with the operator-entered pairing code.
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(emittedPairingCode), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             ServerPairAuth(B64(server.PublicShare)));
 
         // Client replies with its share; server derives.
         var auth = Last<ClientPairAuthMessage>(conn);
-        server.Derive(B64(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(B64(auth.Payload.PakeMsg2), PairingCodes.AdClient);
 
         // Server sends its confirmation tag; client verifies and confirms + finalizes.
         conn.RaiseTextMessageReceived(
@@ -133,9 +133,9 @@ public class SendspinClientServicePinPairingTests
 
         var confirm = Last<ClientPairConfirmMessage>(conn);
         Assert.True(server.Verify(B64(confirm.Payload.ClientKc)));
-        // Dynamic PIN: client reveals nonce_B, and it opens the earlier commit.
+        // Dynamic pairing code: client reveals nonce_B, and it opens the earlier commit.
         Assert.NotNull(confirm.Payload.NonceB);
-        Assert.Equal(commitB, PinPairing.CommitB(B64(confirm.Payload.NonceB!)));
+        Assert.Equal(commitB, PairingCodes.CommitB(B64(confirm.Payload.NonceB!)));
 
         // Finalize carries a wrapped PSK the server unwraps with the shared ISK.
         var finalize = Last<ClientPairFinalizeMessage>(conn);
@@ -151,12 +151,12 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void DynamicPin_PinLengthBelowMinimum_Aborts()
+    public void DynamicPairingCode_PairingCodeLengthBelowMinimum_Aborts()
     {
         // pin_length now arrives on the activation, not server/pair-init (that field no
         // longer exists), so a too-short session length is caught there, before any
         // attempt starts.
-        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8 };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 8 };
         var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
@@ -167,50 +167,50 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void StaticPin_FullFlow_UsesConfiguredPin()
+    public void StaticPairingCode_FullFlow_UsesConfiguredPairingCode()
     {
-        var caps = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "12345678" };
         var (client, conn, _, _) = CreateClient(caps);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
 
-        // Static PIN: no commit_B in pair-init.
+        // Static pairing code: no commit_B in pair-init.
         var init = Last<ClientPairInitMessage>(conn);
         Assert.Null(init.Payload.CommitB);
 
-        byte[] sid = PinPairing.BuildSid(HandshakeHash, 1);
-        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("12345678"), sid, ad: PinPairing.AdServer);
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("12345678"), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             ServerPairAuth(B64(server.PublicShare)));
         var auth = Last<ClientPairAuthMessage>(conn);
-        server.Derive(B64(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(B64(auth.Payload.PakeMsg2), PairingCodes.AdClient);
         conn.RaiseTextMessageReceived(
             ServerPairConfirm(B64(server.Tag())));
 
         var confirm = Last<ClientPairConfirmMessage>(conn);
         Assert.True(server.Verify(B64(confirm.Payload.ClientKc)));
-        Assert.Null(confirm.Payload.NonceB); // no reveal in static PIN
+        Assert.Null(confirm.Payload.NonceB); // no reveal in static pairing code
         Assert.NotNull(Last<ClientPairFinalizeMessage>(conn).Payload.WrappedPsk);
     }
 
     [Fact]
-    public void WrongServerTag_AbortsWithPinMismatch_AndCountsFailure()
+    public void WrongServerTag_AbortsWithPairingCodeMismatch_AndCountsFailure()
     {
-        var caps = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "12345678" };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "12345678" };
         var (client, conn, lockout, _) = CreateClient(caps);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
         // Server runs CPace with the WRONG pin, so its confirmation tag won't verify.
-        byte[] sid = PinPairing.BuildSid(HandshakeHash, 1);
-        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("00000000"), sid, ad: PinPairing.AdServer);
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("00000000"), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             ServerPairAuth(B64(server.PublicShare)));
         var auth = Last<ClientPairAuthMessage>(conn);
-        server.Derive(B64(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(B64(auth.Payload.PakeMsg2), PairingCodes.AdClient);
         conn.RaiseTextMessageReceived(
             ServerPairConfirm(B64(server.Tag())));
 
@@ -225,12 +225,12 @@ public class SendspinClientServicePinPairingTests
         // Escalation state is not part of the client/hello descriptor (no spec field for it);
         // it only shows up as a gesture gate once the server actually selects the escalated
         // method. Escalation is signalled that way, not by hiding the method: an escalated
-        // method stays advertised, so the descriptor must still be there. Dynamic PIN with a
+        // method stays advertised, so the descriptor must still be there. Dynamic pairing code with a
         // session pin_length >= 6 isolates escalation as the gating cause -- static_pin is
         // gated regardless of its failure count, so it cannot tell escalation apart from the
         // method's own baseline policy.
-        var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
-        var lockout = new InMemoryPinLockoutStore();
+        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 6 };
+        var lockout = new InMemoryPairingCodeLockoutStore();
         lockout.SetFailures("dynamic_pin", 10);
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
@@ -238,8 +238,8 @@ public class SendspinClientServicePinPairingTests
             {
                 Capabilities = caps,
                 PairingRecordStore = new InMemoryPairingRecordStore(),
-                PinLockoutStore = lockout,
-                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PairingCodeLockoutStore = lockout,
+                PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
                 PairingWindow = new PairingWindow(),
             });
         using var _c = client;
@@ -262,17 +262,17 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void PairingCounter_RestartsAfterReHandshake()
     {
-        // PinPairing.BuildSid defines the counter as pairing activates *since the last
+        // PairingCodes.BuildSid defines the counter as pairing activates *since the last
         // Noise handshake*. A client-lifetime counter diverges from a conformant
         // server's after any key rotation, and CPace then fails.
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
-                PinLockoutStore = new InMemoryPinLockoutStore(),
-                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
+                PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -308,10 +308,10 @@ public class SendspinClientServicePinPairingTests
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
-                PinLockoutStore = new InMemoryPinLockoutStore(),
-                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
+                PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -331,20 +331,20 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void DynamicPin_WithNoLockoutStore_IsRefused()
+    public void DynamicPairingCode_WithNoLockoutStore_IsRefused()
     {
         // With no store, IsMethodEscalated evaluates (null?.GetFailures() ?? 0) >= 10 —
-        // always false — and RecordPinFailure returns early. So PIN attempts are unlimited
+        // always false — and RecordPairingCodeFailure returns early. So pairing code attempts are unlimited
         // and could never escalate to gesture-gating. Refuse the method instead.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
 
                 // A presenter IS configured, so the refusal below is attributable to the
                 // missing lockout store alone.
-                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -360,19 +360,19 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void DynamicPin_WithALockoutStore_IsStillOffered()
+    public void DynamicPairingCode_WithALockoutStore_IsStillOffered()
     {
-        // Positive control: the runnability clauses could refuse PIN entirely and the test
+        // Positive control: the runnability clauses could refuse pairing code entirely and the test
         // above would still pass. Every dependency CanRun requires is present here — lockout
         // store, presenter, and (since #158) a record store.
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
-                PinLockoutStore = new InMemoryPinLockoutStore(),
-                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
+                PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
@@ -386,15 +386,15 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void FilePinLockoutStore_PersistsCountersAcrossInstances()
+    public void FilePairingCodeLockoutStore_PersistsCountersAcrossInstances()
     {
         string dir = Path.Combine(Path.GetTempPath(), "sendspin-lockout-" + Guid.NewGuid().ToString("N")[..8]);
         string path = Path.Combine(dir, "lockout.json");
         try
         {
-            new FilePinLockoutStore(path).SetFailures("dynamic_pin", 3);
+            new FilePairingCodeLockoutStore(path).SetFailures("dynamic_pin", 3);
 
-            Assert.Equal(3, new FilePinLockoutStore(path).GetFailures("dynamic_pin"));
+            Assert.Equal(3, new FilePairingCodeLockoutStore(path).GetFailures("dynamic_pin"));
         }
         finally
         {
@@ -404,11 +404,11 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void FilePinLockoutStore_NarrowsALegacyWorldReadableFile()
+    public void FilePairingCodeLockoutStore_NarrowsALegacyWorldReadableFile()
     {
         // Counters are not secrets but they are security state: anyone who can rewrite this file
         // resets the lockout. A file from an earlier SDK version keeps its 0644 mode until a
-        // failed PIN attempt replaces the inode, so the load path narrows it.
+        // failed pairing code attempt replaces the inode, so the load path narrows it.
         string dir = Path.Combine(Path.GetTempPath(), "sendspin-lockout-" + Guid.NewGuid().ToString("N")[..8]);
         string path = Path.Combine(dir, "lockout.json");
         try
@@ -418,7 +418,7 @@ public class SendspinClientServicePinPairingTests
 
             if (OperatingSystem.IsWindows())
             {
-                Assert.Equal(2, new FilePinLockoutStore(path).GetFailures("dynamic_pin"));
+                Assert.Equal(2, new FilePairingCodeLockoutStore(path).GetFailures("dynamic_pin"));
             }
             else
             {
@@ -426,7 +426,7 @@ public class SendspinClientServicePinPairingTests
                     UnixFileMode.UserRead | UnixFileMode.UserWrite |
                     UnixFileMode.GroupRead | UnixFileMode.OtherRead);
 
-                var store = new FilePinLockoutStore(path);
+                var store = new FilePairingCodeLockoutStore(path);
 
                 Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
                 Assert.Equal(2, store.GetFailures("dynamic_pin"));

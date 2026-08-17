@@ -10,7 +10,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// The time-sync loop must not run while a pairing activation is in effect. A pairing
 /// activate grants no roles, so there is nothing to synchronize a clock for — and the
 /// reference server (aiosendspin) stops reading the socket while the operator enters the
-/// PIN, then treats the first buffered frame as the next pairing message, so a client/time
+/// pairing code, then treats the first buffered frame as the next pairing message, so a client/time
 /// probe sent during that window aborts the whole attempt as a protocol error. Probing
 /// resumes on the first activation that is not a pairing one.
 /// </summary>
@@ -32,14 +32,14 @@ public class TimeSyncPairingGatingTests
         """{"type":"stream/start","payload":{"player":{"codec":"pcm","channels":2,"sample_rate":48000,"bit_depth":16}}}""";
 
     /// <summary>
-    /// Client able to run a real dynamic-PIN attempt (lockout store and PIN presenter
+    /// Client able to run a real dynamic-pairing code attempt (lockout store and pairing code presenter
     /// configured), with a scripted clock so the time-sync loop keeps its dense initial
     /// cadence (~one probe burst per 500 ms) for the duration of the test. Roles default
     /// to the capability defaults (controller/player/...); pass <paramref name="roles"/>
     /// to narrow them.
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, ScriptedClockSynchronizer Clock)
-        CreatePinPairableClient(PskCategory category, bool unpairedAccess = false, string[]? roles = null)
+        CreatePairingCodePairableClient(PskCategory category, bool unpairedAccess = false, string[]? roles = null)
     {
         var clock = new ScriptedClockSynchronizer();
         var (client, connection, _) = TestClient.Create(
@@ -47,7 +47,7 @@ public class TimeSyncPairingGatingTests
             unpairedAccess,
             configure: options =>
             {
-                var caps = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+                var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } };
                 if (roles is not null)
                 {
                     caps.Roles = [.. roles];
@@ -60,8 +60,8 @@ public class TimeSyncPairingGatingTests
                     // dynamic_pin needs a record store to be runnable at all (#158); without
                     // one the activation aborts and there is no pairing attempt to gate.
                     PairingRecordStore = new InMemoryPairingRecordStore(),
-                    PinLockoutStore = new InMemoryPinLockoutStore(),
-                    PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                    PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
+                    PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
                 };
             });
         return (client, connection, clock);
@@ -79,9 +79,9 @@ public class TimeSyncPairingGatingTests
         // The interop shape on an unpaired (sentinel) session: the FIRST activate on the
         // connection is the pairing one. FinishHandshake used to start the time-sync loop
         // unconditionally here, and its probes queued in the reference server — blocked
-        // awaiting the operator's PIN — which then read a buffered client/time where it
+        // awaiting the operator's pairing code — which then read a buffered client/time where it
         // required client/pair-auth and closed the connection.
-        var (client, connection, _) = CreatePinPairableClient(PskCategory.Sentinel, unpairedAccess: true);
+        var (client, connection, _) = CreatePairingCodePairableClient(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(ServerHello);
@@ -105,9 +105,9 @@ public class TimeSyncPairingGatingTests
     {
         // The exact shape of the live failure: music playing — sync loop running under a
         // playback activation — when the server sends server/activate
-        // {activities:["pairing"], active_roles:[]} to start a PIN attempt. The already-
+        // {activities:["pairing"], active_roles:[]} to start a pairing code attempt. The already-
         // running loop must STOP; declining to start one is not enough.
-        var (client, connection, clock) = CreatePinPairableClient(PskCategory.LongTerm);
+        var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.LongTerm);
         using var _c = client;
         connection.RespondToTimeSync = true; // bursts complete, so probes flow continuously
 
@@ -145,7 +145,7 @@ public class TimeSyncPairingGatingTests
         // since no roles are active. Once a non-pairing activate resumes the loop and it
         // converges, the first-convergence branch must still release the initial state,
         // exactly once.
-        var (client, connection, clock) = CreatePinPairableClient(PskCategory.Sentinel, unpairedAccess: true);
+        var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
         connection.RespondToTimeSync = true;
 
@@ -181,7 +181,7 @@ public class TimeSyncPairingGatingTests
         // crossing a mid-session pairing activate must stay silent — but the same
         // stream/start outside a pairing window must still burst, because that burst is
         // what lets playback start before full convergence.
-        var (client, connection, clock) = CreatePinPairableClient(PskCategory.LongTerm);
+        var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.LongTerm);
         using var _c = client;
         connection.RespondToTimeSync = true;
         clock.ConvergeOnMeasurement = false;      // HasMinimalSync stays false: burst-eligible
@@ -224,7 +224,7 @@ public class TimeSyncPairingGatingTests
         // stay off the wire while the pairing activation is in effect, and go out exactly
         // once when a non-pairing activate arrives: an implementation that simply never
         // sent it would pass the first half alone.
-        var (client, connection, _) = CreatePinPairableClient(
+        var (client, connection, _) = CreatePairingCodePairableClient(
             PskCategory.Sentinel, unpairedAccess: true, roles: ["artwork@v1"]);
         using var _c = client;
 

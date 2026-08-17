@@ -42,10 +42,10 @@ public class PairingQuiescenceTests
             configure: options => options with
             {
                 ClockSynchronizer = new ConvergedClock(),
-                Capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
-                PinLockoutStore = new InMemoryPinLockoutStore(),
-                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
+                PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
             });
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");

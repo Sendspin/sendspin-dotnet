@@ -238,7 +238,7 @@ public class SendspinClientServiceManagementTests
         Assert.True(LastResult(connection).Data!.Value
             .GetProperty("unpaired_access").GetProperty("enabled").GetBoolean());
 
-        // Setting fields on an unimplemented PIN method is invalid.
+        // Setting fields on an unimplemented pairing code method is invalid.
         connection.RaiseTextMessageReceived(
             """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
         Assert.Equal("invalid", LastResult(connection).Result);

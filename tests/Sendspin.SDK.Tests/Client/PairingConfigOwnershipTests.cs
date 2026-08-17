@@ -28,15 +28,15 @@ public class PairingConfigOwnershipTests
     /// <summary>
     /// A client on a paired, management-activated session, built around the caller's
     /// <see cref="ClientCapabilities"/> instance so tests can observe whether the SDK
-    /// writes to it. <paramref name="pinLockoutStore"/> and <paramref name="presentPinAsync"/>
-    /// are optional and only needed by tests that go on to drive a real PIN pairing attempt,
+    /// writes to it. <paramref name="pairingCodeLockoutStore"/> and <paramref name="presentPairingCodeAsync"/>
+    /// are optional and only needed by tests that go on to drive a real pairing code attempt,
     /// or that need static_pin/dynamic_pin to be runnable (CanRun, #132).
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeNoiseSession Session, InMemoryPairingRecordStore Store)
         CreateManagementClient(
             ClientCapabilities capabilities,
-            IPinLockoutStore? pinLockoutStore = null,
-            Func<PinPresentation, CancellationToken, ValueTask>? presentPinAsync = null)
+            IPairingCodeLockoutStore? pairingCodeLockoutStore = null,
+            Func<PairingCodePresentation, CancellationToken, ValueTask>? presentPairingCodeAsync = null)
     {
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId));
@@ -51,8 +51,8 @@ public class PairingConfigOwnershipTests
             {
                 PairingRecordStore = store,
                 Capabilities = capabilities,
-                PinLockoutStore = pinLockoutStore,
-                PresentPinAsync = presentPinAsync,
+                PairingCodeLockoutStore = pairingCodeLockoutStore,
+                PresentPairingCodeAsync = presentPairingCodeAsync,
                 PairingWindow = window,
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
@@ -258,9 +258,9 @@ public class PairingConfigOwnershipTests
     {
         // `locked_out` appears in no spec file (README/connection/management/messaging/pairing).
         // The descriptor is method, out_channels?, min_pin_length?, locations? (pairing.md:279-283).
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 7 };
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 7 };
         var (client, connection, _, _) = CreateManagementClient(
-            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
+            capabilities, new InMemoryPairingCodeLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Last();
@@ -270,19 +270,19 @@ public class PairingConfigOwnershipTests
 
         // Positive control: the descriptor is genuinely present and populated, so the
         // assertion above is not passing on an empty supported_pair_methods list.
-        var dynamicPin = Assert.Single(
+        var dynamicPairingCode = Assert.Single(
             hello.Payload.SupportedPairMethods!, m => m.Method == "dynamic_pin");
-        Assert.Equal(7, dynamicPin.MinPinLength);
+        Assert.Equal(7, dynamicPairingCode.MinPairingCodeLength);
     }
 
     [Fact]
-    public void GetPairingConfig_ReportsTheImplementedPinMethods_NotAnEmptySurface()
+    public void GetPairingConfig_ReportsTheImplementedPairingCodeMethods_NotAnEmptySurface()
     {
         // #122: the client advertised dynamic_pin in client/hello while telling a management
-        // server it had no PIN methods at all. Same source of truth, so same answer.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 8 };
+        // server it had no pairing code methods at all. Same source of truth, so same answer.
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 8 };
         var (client, connection, _, _) = CreateManagementClient(
-            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
+            capabilities, new InMemoryPairingCodeLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -293,10 +293,10 @@ public class PairingConfigOwnershipTests
         var data = result.Data!.Value;
 
         Assert.True(data.GetProperty("pairing_psk").GetProperty("enabled").GetBoolean());
-        var dynamicPin = data.GetProperty("dynamic_pin");
-        Assert.True(dynamicPin.GetProperty("enabled").GetBoolean());
-        Assert.Equal(8, dynamicPin.GetProperty("min_pin_length").GetInt32());
-        Assert.False(dynamicPin.GetProperty("escalated").GetBoolean());
+        var dynamicPairingCode = data.GetProperty("dynamic_pin");
+        Assert.True(dynamicPairingCode.GetProperty("enabled").GetBoolean());
+        Assert.Equal(8, dynamicPairingCode.GetProperty("min_pin_length").GetInt32());
+        Assert.False(dynamicPairingCode.GetProperty("escalated").GetBoolean());
 
         // static_pin is not implemented by this client, so per spec its object is absent —
         // absent for the right reason, which the dynamic_pin clause above proves.
@@ -307,9 +307,9 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
-    public void SetDynamicPinMinLength_TakesEffect_AndIsRangeChecked()
+    public void SetDynamicPairingCodeMinLength_TakesEffect_AndIsRangeChecked()
     {
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 6 };
         var (client, connection, _, _) = CreateManagementClient(capabilities);
         using var _c = client;
         var events = new List<PairingConfigChangedEventArgs>();
@@ -321,7 +321,7 @@ public class PairingConfigOwnershipTests
         Assert.Single(events);
 
         // The app's object is untouched; the effective value moved.
-        Assert.Equal(6, capabilities.MinPinLength);
+        Assert.Equal(6, capabilities.MinPairingCodeLength);
         connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
         Assert.Equal(9, LastResult(connection).Data!.Value
             .GetProperty("dynamic_pin").GetProperty("min_pin_length").GetInt32());
@@ -340,13 +340,13 @@ public class PairingConfigOwnershipTests
     [InlineData(12, "ok")]
     [InlineData(3, "invalid")]
     [InlineData(13, "invalid")]
-    public void SetDynamicPinMinLength_AcceptsTheFullSpecRange_AndRejectsJustOutsideIt(int value, string expected)
+    public void SetDynamicPairingCodeMinLength_AcceptsTheFullSpecRange_AndRejectsJustOutsideIt(int value, string expected)
     {
-        // SetDynamicPinMinLength_TakesEffect_AndIsRangeChecked only ever exercised 9 (valid)
+        // SetDynamicPairingCodeMinLength_TakesEffect_AndIsRangeChecked only ever exercised 9 (valid)
         // and 13 (invalid), so an off-by-one in `value < 4 || value > 12` at either edge of
         // the spec's 4-12 range would pass unnoticed. Each boundary pair sits next to its
         // own positive control: 4 and 12 accepted right where 3 and 13 are rejected.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" }, MinPinLength = 6 };
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 6 };
         var (client, connection, _, _) = CreateManagementClient(capabilities);
         using var _c = client;
 
@@ -356,29 +356,29 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
-    public void EnablingStaticPin_WithNoPinConfiguredAndNoneSupplied_IsInvalid()
+    public void EnablingStaticPairingCode_WithNoPairingCodeConfiguredAndNoneSupplied_IsInvalid()
     {
-        // management.md:98 names this case explicitly. Enabling a PIN method with no secret
+        // management.md:98 names this case explicitly. Enabling a pairing code method with no secret
         // behind it would advertise a method that can never authenticate anyone.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" } };
-        var (client, connection, _, _) = CreateManagementClient(capabilities, new InMemoryPinLockoutStore());
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" } };
+        var (client, connection, _, _) = CreateManagementClient(capabilities, new InMemoryPairingCodeLockoutStore());
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
             """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
         Assert.Equal("invalid", LastResult(connection).Result);
 
-        // Positive control: the same enable succeeds when a PIN comes with it.
+        // Positive control: the same enable succeeds when a pairing code comes with it.
         connection.RaiseTextMessageReceived(
             """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true,"pin":"01234567"}}}""");
         Assert.Equal("ok", LastResult(connection).Result);
-        Assert.Null(capabilities.StaticPin); // rotation did not touch the app's object
+        Assert.Null(capabilities.StaticPairingCode); // rotation did not touch the app's object
     }
 
     [Fact]
-    public void RotatingStaticPin_RejectsAnythingButEightDigits()
+    public void RotatingStaticPairingCode_RejectsAnythingButEightDigits()
     {
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "11111111" };
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "11111111" };
         var (client, connection, _, _) = CreateManagementClient(capabilities);
         using var _c = client;
 
@@ -395,15 +395,15 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
-    public void RejectedStaticPinRotation_LeavesThePreviouslyConfiguredPinInForce()
+    public void RejectedStaticPairingCodeRotation_LeavesThePreviouslyConfiguredPairingCodeInForce()
     {
         // get-pairing-config never returns a configured secret (management.md:77), so unlike
         // the min_pin_length boundary test above, a get-pairing-config re-query cannot prove
-        // this. The only observable effect of the stored PIN is whether it authenticates a
+        // this. The only observable effect of the stored pairing code is whether it authenticates a
         // real pairing attempt, so that is what this drives: a rejected rotation must not
-        // have replaced (or cleared) the PIN configured before it.
-        var lockout = new InMemoryPinLockoutStore();
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "11111111" };
+        // have replaced (or cleared) the pairing code configured before it.
+        var lockout = new InMemoryPairingCodeLockoutStore();
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "11111111" };
         var (client, connection, session, _) = CreateManagementClient(capabilities, lockout);
         using var _c = client;
 
@@ -413,18 +413,18 @@ public class PairingConfigOwnershipTests
 
         // Re-pair on a fresh connection, still keyed by the client's existing long-term PSK
         // (admissible for a standalone 'pairing' activity), and run a real CPace exchange
-        // against the ORIGINAL PIN. It must still verify.
+        // against the ORIGINAL pairing code. It must still verify.
         connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         connection.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
 
-        byte[] sid = PinPairing.BuildSid(session.HandshakeHash!.Value.Span, 1);
-        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("11111111"), sid, ad: PinPairing.AdServer);
+        byte[] sid = PairingCodes.BuildSid(session.HandshakeHash!.Value.Span, 1);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("11111111"), sid, ad: PairingCodes.AdServer);
         connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{ToBase64Url(server.PublicShare)}}}"}}""");
         var auth = connection.SentMessages.OfType<ClientPairAuthMessage>().Last();
-        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PairingCodes.AdClient);
         connection.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{ToBase64Url(server.Tag())}}}"}}""");
 
@@ -433,14 +433,14 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
-    public void DisabledDynamicPin_IsOmittedFromTheHelloAdvertisement()
+    public void DisabledDynamicPairingCode_IsOmittedFromTheHelloAdvertisement()
     {
         // messaging.md:194 — "An implemented method that is disabled is omitted." This is the
         // end-to-end proof that Task 1's effective state is what the advertisement reads:
         // a set-pairing-config change reaches client/hello without touching capabilities.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } };
         var (client, connection, _, _) = CreateManagementClient(
-            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
+            capabilities, new InMemoryPairingCodeLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         // Positive control first: while enabled, the method is advertised.
@@ -460,7 +460,7 @@ public class PairingConfigOwnershipTests
             .Payload.SupportedPairMethods!.Select(m => m.Method).ToList();
         Assert.DoesNotContain("dynamic_pin", afterDisable);
         Assert.Contains("pairing_psk", afterDisable); // the mandatory method survives
-        Assert.Equal(["dynamic_pin"], capabilities.PinPairingMethods); // app's object untouched
+        Assert.Equal(["dynamic_pin"], capabilities.PairingCodeMethods); // app's object untouched
     }
 
     [Fact]
@@ -470,9 +470,9 @@ public class PairingConfigOwnershipTests
         // cannot over-correct into accepting configuration for a method that cannot run.
         // Both dependencies present so IsMethodImplemented is the only possible reason for
         // invalid -- otherwise this would stay green even if that guard were deleted.
-        var capabilities = new ClientCapabilities(); // no PIN methods
+        var capabilities = new ClientCapabilities(); // no pairing code methods
         var (client, connection, _, _) = CreateManagementClient(
-            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
+            capabilities, new InMemoryPairingCodeLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -482,7 +482,7 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
-    public void DisabledDynamicPin_IsStillReportedByGetPairingConfig_WithEnabledFalse()
+    public void DisabledDynamicPairingCode_IsStillReportedByGetPairingConfig_WithEnabledFalse()
     {
         // A disabled method is still an implemented one: absence in get-pairing-config
         // means "this client cannot do it at all", which would be a different and
@@ -491,9 +491,9 @@ public class PairingConfigOwnershipTests
         // Both dependencies present so CanRun would report true if the disable were not
         // actually applied -- otherwise enabled: false is trivially satisfied by the
         // missing store/presenter alone, and the disable itself is never exercised.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } };
         var (client, connection, _, _) = CreateManagementClient(
-            capabilities, new InMemoryPinLockoutStore(), (_, _) => ValueTask.CompletedTask);
+            capabilities, new InMemoryPairingCodeLockoutStore(), (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -503,9 +503,9 @@ public class PairingConfigOwnershipTests
         connection.RaiseTextMessageReceived("""{"type":"management/get-pairing-config","payload":{}}""");
         var data = LastResult(connection).Data!.Value;
 
-        Assert.True(data.TryGetProperty("dynamic_pin", out var dynamicPin),
+        Assert.True(data.TryGetProperty("dynamic_pin", out var dynamicPairingCode),
             "a disabled method is still implemented and must still be reported");
-        Assert.False(dynamicPin.GetProperty("enabled").GetBoolean());
+        Assert.False(dynamicPairingCode.GetProperty("enabled").GetBoolean());
     }
 
     [Fact]
@@ -579,7 +579,7 @@ public class PairingConfigOwnershipTests
     }
 
     [Fact]
-    public void SetStaticPinEnabled_RaisesEventExactlyOnce_AndNotOnANoOpSet()
+    public void SetStaticPairingCodeEnabled_RaisesEventExactlyOnce_AndNotOnANoOpSet()
     {
         // static_pin's changed-flag guards the same final event condition as every other
         // section, but had no independent single-section test: the only existing test that
@@ -587,8 +587,8 @@ public class PairingConfigOwnershipTests
         // alone was enough to keep that test's Assert.Single(events) green. This isolates
         // static_pin the way SetPairingPskEnabled_RaisesEventExactlyOnce_... does for
         // pairing_psk.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" }, StaticPin = "11111111" };
-        var (client, connection, _, _) = CreateManagementClient(capabilities, new InMemoryPinLockoutStore());
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "11111111" };
+        var (client, connection, _, _) = CreateManagementClient(capabilities, new InMemoryPairingCodeLockoutStore());
         using var _c = client;
         var events = new List<PairingConfigChangedEventArgs>();
         client.PairingConfigChanged += (_, e) => events.Add(e);
@@ -646,7 +646,7 @@ public class PairingConfigOwnershipTests
     {
         // The SDK holds effective config in memory only; without the values on the event the
         // app cannot persist them and every restart silently reverts a server's changes.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "dynamic_pin" } };
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } };
         var (client, connection, _, _) = CreateManagementClient(capabilities);
         using var _c = client;
         var events = new List<PairingConfigChangedEventArgs>();
@@ -656,20 +656,20 @@ public class PairingConfigOwnershipTests
             """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":false,"min_pin_length":10}}}""");
 
         var change = Assert.Single(events);
-        Assert.False(change.DynamicPinEnabled);
-        Assert.Equal(10, change.MinPinLength);
+        Assert.False(change.DynamicPairingCodeEnabled);
+        Assert.Equal(10, change.MinPairingCodeLength);
         Assert.True(change.PairingPskEnabled); // untouched fields still report their current value
     }
 
     [Fact]
-    public void PairingConfigChanged_CarriesStaticPinAndRecordModeDistinctly_SoASwapBetweenThemWouldFail()
+    public void PairingConfigChanged_CarriesStaticPairingCodeAndRecordModeDistinctly_SoASwapBetweenThemWouldFail()
     {
-        // StaticPin and RecordModePskId sit on adjacent lines in CurrentPairingConfig and are
+        // StaticPairingCode and RecordModePskId sit on adjacent lines in CurrentPairingConfig and are
         // both string?; a copy-paste swap between them would compile clean and pass every
         // other test in the suite. Both are asserted here against different values a swap
         // would visibly cross, so a swap fails this test instead of shipping silently.
-        var capabilities = new ClientCapabilities { PinPairingMethods = { "static_pin" } };
-        var (client, connection, _, store) = CreateManagementClient(capabilities, new InMemoryPinLockoutStore());
+        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" } };
+        var (client, connection, _, store) = CreateManagementClient(capabilities, new InMemoryPairingCodeLockoutStore());
         using var _c = client;
 
         var shared = Enumerable.Repeat((byte)8, 32).ToArray();
@@ -684,8 +684,8 @@ public class PairingConfigOwnershipTests
         Assert.Equal("ok", LastResult(connection).Result);
 
         var change = Assert.Single(events);
-        Assert.True(change.StaticPinEnabled);
-        Assert.Equal("13579246", change.StaticPin);
+        Assert.True(change.StaticPairingCodeEnabled);
+        Assert.Equal("13579246", change.StaticPairingCode);
         Assert.Equal(sharedId, change.RecordModePskId);
     }
 

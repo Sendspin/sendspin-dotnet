@@ -13,7 +13,7 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Connection;
 
 /// <summary>
-/// The #127 gated static-PIN flow, end to end over a real Noise session: a real
+/// The #127 gated static-pairing code flow, end to end over a real Noise session: a real
 /// <see cref="IncomingConnection"/> + <see cref="NoiseWireFraming"/> completes a genuine
 /// handshake with <see cref="TestNoiseServer"/> -- the same harness shape as
 /// <see cref="RehandshakeConcurrencyTests"/> -- then drives activation →
@@ -32,10 +32,10 @@ namespace Sendspin.SDK.Tests.Connection;
 /// </remarks>
 public class PairingWindowEndToEndTests
 {
-    private const string StaticPin = "12345678";
+    private const string StaticPairingCode = "12345678";
 
     [Fact]
-    public async Task GatedStaticPinPairing_RunsOverARealNoiseSession_AndPersistsTheRecord()
+    public async Task GatedStaticPairingCode_RunsOverARealNoiseSession_AndPersistsTheRecord()
     {
         var window = new PairingWindow();
         var store = new InMemoryPairingRecordStore();
@@ -58,15 +58,15 @@ public class PairingWindowEndToEndTests
 
         var init = await link.NextMessageAsync<ClientPairInitMessage>();
         Assert.Equal(1, init.Payload.PairingIndex);
-        Assert.Null(init.Payload.CommitB); // static PIN never commits to a nonce
+        Assert.Null(init.Payload.CommitB); // static pairing code never commits to a nonce
         Assert.False(window.IsOpen, "the opening is consumed by the attempt it started");
 
         // The PAKE round. sid is built exactly as HandleServerPairAuth builds it (same
         // handshake hash, same pairing_index), and CPace.Start(CPaceRole.Initiator, ...) is
         // the real SDK type in the server's role -- not a reimplementation of its maths.
-        byte[] sid = PinPairing.BuildSid(server.HandshakeHash!, (uint)init.Payload.PairingIndex);
+        byte[] sid = PairingCodes.BuildSid(server.HandshakeHash!, (uint)init.Payload.PairingIndex);
         var serverPake = CPace.Start(
-            CPaceRole.Initiator, Encoding.ASCII.GetBytes(StaticPin), sid, ad: PinPairing.AdServer);
+            CPaceRole.Initiator, Encoding.ASCII.GetBytes(StaticPairingCode), sid, ad: PairingCodes.AdServer);
 
         link.SendServerMessage(new ServerPairAuthMessage
         {
@@ -74,7 +74,7 @@ public class PairingWindowEndToEndTests
         });
 
         var auth = await link.NextMessageAsync<ClientPairAuthMessage>();
-        serverPake.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        serverPake.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PairingCodes.AdClient);
 
         link.SendServerMessage(new ServerPairConfirmMessage
         {
@@ -120,10 +120,10 @@ public class PairingWindowEndToEndTests
             PairingRecordStore = store,
             Capabilities = new ClientCapabilities
             {
-                PinPairingMethods = new List<string> { "static_pin" },
-                StaticPin = StaticPin,
+                PairingCodeMethods = new List<string> { "static_pin" },
+                StaticPairingCode = StaticPairingCode,
             },
-            PinLockoutStore = new InMemoryPinLockoutStore(),
+            PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
             PairingWindow = window,
         };
         var client = new SendspinClientService(

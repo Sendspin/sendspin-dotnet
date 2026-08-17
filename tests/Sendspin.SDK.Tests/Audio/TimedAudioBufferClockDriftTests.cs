@@ -143,7 +143,7 @@ public class TimedAudioBufferClockDriftTests
     }
 
     [Fact]
-    public void OffsetSlew_FlagOff_PinsPreDriftBehavior()
+    public void OffsetSlew_FlagOff_PairingCodesPreDriftBehavior()
     {
         var options = new SyncCorrectionOptions { TrackClockDrift = false };
         using var session = new Session(options, useRawReads: true);

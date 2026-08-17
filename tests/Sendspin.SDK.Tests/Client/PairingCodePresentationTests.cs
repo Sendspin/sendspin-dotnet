@@ -8,28 +8,28 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Covers <c>SendspinClientOptions.PresentPinAsync</c>: the derived dynamic PIN reaches the
+/// Covers <c>SendspinClientOptions.PresentPairingCodeAsync</c>: the derived dynamic pairing code reaches the
 /// app through an awaited delegate whose completion gates client/pair-auth, dynamic_pin is
 /// refused (fail closed) when no presenter is configured, and the delegate receives the
 /// client's own cancellation token rather than a defaulted one.
 /// </summary>
-public class PinPresentationTests
+public class PairingCodePresentationTests
 {
     private static readonly byte[] HandshakeHash = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
 
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static (SendspinClientService Client, FakeSendspinConnection Connection)
-        CreateDynamicPinClient(Func<PinPresentation, CancellationToken, ValueTask>? presentPin)
+        CreateDynamicPairingCodeClient(Func<PairingCodePresentation, CancellationToken, ValueTask>? presentPairingCode)
     {
         var (client, connection, session) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PinPairingMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
-                PinLockoutStore = new InMemoryPinLockoutStore(),
-                PresentPinAsync = presentPin,
+                PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
+                PresentPairingCodeAsync = presentPairingCode,
             });
 
         // The CPace exchange is bound to the Noise handshake hash, which the test's server
@@ -39,13 +39,13 @@ public class PinPresentationTests
         return (client, connection);
     }
 
-    private static void ActivateDynamicPin(FakeSendspinConnection conn) =>
+    private static void ActivateDynamicPairingCode(FakeSendspinConnection conn) =>
         conn.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
 
-    private static void SendServerPairInit(FakeSendspinConnection conn, byte[] nonceA, int pinLength) =>
+    private static void SendServerPairInit(FakeSendspinConnection conn, byte[] nonceA, int pairingCodeLength) =>
         conn.RaiseTextMessageReceived(
-            $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{B64(nonceA)}}}","pin_length":{{{pinLength}}}}}""");
+            $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{B64(nonceA)}}}","pin_length":{{{pairingCodeLength}}}}}""");
 
     /// <summary>
     /// Polls for a sent message of type <typeparamref name="T"/>. The pair-auth reply is sent
@@ -74,32 +74,32 @@ public class PinPresentationTests
     }
 
     [Fact]
-    public async Task DynamicPin_PresentationIsAwaited_BeforePairAuthIsSent()
+    public async Task DynamicPairingCode_PresentationIsAwaited_BeforePairAuthIsSent()
     {
-        string? presentedPin = null;
+        string? presentedPairingCode = null;
         bool presentationCompleted = false;
         var release = new TaskCompletionSource();
-        var (client, conn) = CreateDynamicPinClient(async (presentation, _) =>
+        var (client, conn) = CreateDynamicPairingCodeClient(async (presentation, _) =>
         {
-            presentedPin = presentation.Pin;
+            presentedPairingCode = presentation.PairingCode;
             await release.Task;
             await Task.Yield();
             presentationCompleted = true;
         });
         using var _c = client;
 
-        ActivateDynamicPin(conn);
+        ActivateDynamicPairingCode(conn);
         Assert.Contains(conn.SentMessages, m => m is ClientPairInitMessage);
 
         byte[] nonceA = Enumerable.Repeat((byte)0x42, 32).ToArray();
         SendServerPairInit(conn, nonceA, 6);
 
-        Assert.NotNull(presentedPin);
-        Assert.Equal(6, presentedPin!.Length);
+        Assert.NotNull(presentedPairingCode);
+        Assert.Equal(6, presentedPairingCode!.Length);
 
-        // Server side of the PAKE, keyed with the PIN the presenter received.
-        byte[] sid = PinPairing.BuildSid(HandshakeHash, 1);
-        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(presentedPin), sid, ad: PinPairing.AdServer);
+        // Server side of the PAKE, keyed with the pairing code the presenter received.
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(presentedPairingCode), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64(server.PublicShare)}}}"}}""");
 
@@ -115,9 +115,9 @@ public class PinPresentationTests
         // client/pair-auth went out proves the presentation was awaited to completion.
         Assert.True(presentationCompleted);
 
-        // And the PAKE completes against the presented PIN, proving the presenter received
-        // the PIN the server can verify.
-        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PinPairing.AdClient);
+        // And the PAKE completes against the presented pairing code, proving the presenter received
+        // the pairing code the server can verify.
+        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PairingCodes.AdClient);
         conn.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{B64(server.Tag())}}}"}}""");
         var confirm = await WaitForSentAsync<ClientPairConfirmMessage>(conn);
@@ -125,17 +125,17 @@ public class PinPresentationTests
     }
 
     [Fact]
-    public void DynamicPin_OfferedWithoutPresenter_IsRefused()
+    public void DynamicPairingCode_OfferedWithoutPresenter_IsRefused()
     {
         // Fail closed: dynamic_pin is configured and a lockout store is present, but there is
-        // no PresentPinAsync, so the derived PIN could never reach the operator. The client
+        // no PresentPairingCodeAsync, so the derived pairing code could never reach the operator. The client
         // must refuse the method — pair/abort method_not_supported with the connection left
         // open, the same shape as the missing-lockout-store refusal — rather than running an
-        // attempt whose PIN nobody ever saw.
-        var (client, conn) = CreateDynamicPinClient(presentPin: null);
+        // attempt whose pairing code nobody ever saw.
+        var (client, conn) = CreateDynamicPairingCodeClient(presentPairingCode: null);
         using var _c = client;
 
-        ActivateDynamicPin(conn);
+        ActivateDynamicPairingCode(conn);
 
         Assert.DoesNotContain(conn.SentMessages, m => m is ClientPairInitMessage);
         var abort = Assert.Single(conn.SentMessages.OfType<PairAbortMessage>());
@@ -144,20 +144,20 @@ public class PinPresentationTests
     }
 
     [Fact]
-    public void PresentPinAsync_ReceivesClientToken_CancelledOnDispose()
+    public void PresentPairingCodeAsync_ReceivesClientToken_CancelledOnDispose()
     {
         CancellationToken observed = default;
-        var (client, conn) = CreateDynamicPinClient((_, ct) =>
+        var (client, conn) = CreateDynamicPairingCodeClient((_, ct) =>
         {
             observed = ct;
 
-            // Never completes on its own: a real presenter may hold the PIN on screen until
+            // Never completes on its own: a real presenter may hold the pairing code on screen until
             // told to stop, so releasing it must come from the token, not from the SDK
             // forgetting about it.
             return new ValueTask(new TaskCompletionSource().Task);
         });
 
-        ActivateDynamicPin(conn);
+        ActivateDynamicPairingCode(conn);
         SendServerPairInit(conn, new byte[32], 6);
 
         // The token is the client's own, not a defaulted CancellationToken.None.

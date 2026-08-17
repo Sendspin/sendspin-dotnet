@@ -365,7 +365,7 @@ public class MessageSerializerTests
 
         Assert.NotNull(msg);
         Assert.Equal("dynamic_pin", msg!.Payload.Pairing!.Method);
-        Assert.Equal(8, msg.Payload.Pairing.PinLength);
+        Assert.Equal(8, msg.Payload.Pairing.PairingCodeLength);
         Assert.Equal(new[] { "ca", "es" }, msg.Payload.Pairing.Languages);
     }
 

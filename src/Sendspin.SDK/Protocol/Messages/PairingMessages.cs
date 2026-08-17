@@ -24,7 +24,7 @@ public sealed class ClientPairFinalizePayload
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? LongTermPsk { get; set; }
 
-    /// <summary>64-char base64url wrapped PSK (PIN flows only; not yet implemented).</summary>
+    /// <summary>64-char base64url wrapped PSK (pairing code flows only; not yet implemented).</summary>
     [JsonPropertyName("wrapped_psk")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? WrappedPsk { get; set; }
@@ -101,15 +101,15 @@ public sealed class PairMethodDescriptor
     [JsonPropertyName("method")]
     public string Method { get; set; } = "pairing_psk";
 
-    /// <summary>Out-channels conveying the per-session PIN (dynamic_pin only).</summary>
+    /// <summary>Out-channels conveying the per-session pairing code (dynamic_pin only).</summary>
     [JsonPropertyName("out_channels")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? OutChannels { get; set; }
 
-    /// <summary>Shortest acceptable PIN length in digits (dynamic_pin only, 4-12).</summary>
+    /// <summary>Shortest acceptable pairing code length in digits (dynamic_pin only, 4-12).</summary>
     [JsonPropertyName("min_pin_length")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? MinPinLength { get; set; }
+    public int? MinPairingCodeLength { get; set; }
 
     /// <summary>
     /// Where the operator can find this method's configured secret — <c>"device"</c> (printed
@@ -120,7 +120,7 @@ public sealed class PairMethodDescriptor
     /// Drives server UX copy such as "check the label on the device", so it has to follow the
     /// secret: the spec requires the client to update the hint when the secret is rotated,
     /// because a stale hint sends the operator to a label that no longer matches. See
-    /// <see cref="Client.ClientCapabilities.StaticPinLocations"/>.
+    /// <see cref="Client.ClientCapabilities.StaticPairingCodeLocations"/>.
     /// </remarks>
     [JsonPropertyName("locations")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -136,7 +136,7 @@ public sealed class PairMethodDescriptor
 /// follow a change to it (#93). The hint is informational and never grounds for
 /// <c>pair/abort</c>, so an out-of-vocabulary entry does not break pairing — the SDK passes
 /// through whatever the app declares rather than policing it, as it does for
-/// <see cref="Client.ClientCapabilities.PinOutChannels"/>.
+/// <see cref="Client.ClientCapabilities.PairingCodeOutChannels"/>.
 /// </remarks>
 public static class PairMethodLocations
 {
@@ -150,7 +150,7 @@ public static class PairMethodLocations
     public const string Operator = "operator";
 }
 
-/// <summary>Starts a PIN-pairing attempt (client → server).</summary>
+/// <summary>Starts a pairing code attempt (client → server).</summary>
 public sealed class ClientPairInitMessage : IMessageWithPayload<ClientPairInitPayload>
 {
     [JsonPropertyName("type")]
@@ -167,13 +167,13 @@ public sealed class ClientPairInitPayload
     [JsonPropertyName("pairing_index")]
     public int PairingIndex { get; set; }
 
-    /// <summary>Dynamic-PIN commitment over nonce_B (43-char base64url); absent in static PIN.</summary>
+    /// <summary>Dynamic-pairing code commitment over nonce_B (43-char base64url); absent in static pairing code.</summary>
     [JsonPropertyName("commit_B")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? CommitB { get; set; }
 }
 
-/// <summary>Server's nonce contribution in dynamic-PIN pairing.</summary>
+/// <summary>Server's nonce contribution in dynamic-pairing code.</summary>
 public sealed class ServerPairInitMessage : IMessageWithPayload<ServerPairInitPayload>
 {
     [JsonPropertyName("type")]
@@ -245,7 +245,7 @@ public sealed class ServerPairConfirmPayload
     public string ServerKc { get; set; } = string.Empty;
 }
 
-/// <summary>Client's mutual-confirmation tag plus the dynamic-PIN commitment opening.</summary>
+/// <summary>Client's mutual-confirmation tag plus the dynamic-pairing code commitment opening.</summary>
 public sealed class ClientPairConfirmMessage : IMessageWithPayload<ClientPairConfirmPayload>
 {
     [JsonPropertyName("type")]
@@ -262,7 +262,7 @@ public sealed class ClientPairConfirmPayload
     [JsonPropertyName("client_kc")]
     public string ClientKc { get; set; } = string.Empty;
 
-    /// <summary>The nonce_B preimage of commit_B (dynamic PIN only).</summary>
+    /// <summary>The nonce_B preimage of commit_B (dynamic pairing code only).</summary>
     [JsonPropertyName("nonce_B")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? NonceB { get; set; }

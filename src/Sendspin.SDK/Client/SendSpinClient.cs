@@ -60,8 +60,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // state rather than beside its use site further down the file (#93).
     private bool _pendingSelfRemoval;
     private byte[]? _pendingPairingPsk;
-    private readonly IPinLockoutStore? _pinLockoutStore;
-    private readonly Func<PinPresentation, CancellationToken, ValueTask>? _presentPinAsync;
+    private readonly IPairingCodeLockoutStore? _pairingCodeLockoutStore;
+    private readonly Func<PairingCodePresentation, CancellationToken, ValueTask>? _presentPairingCodeAsync;
     private readonly PairingWindow? _pairingWindow;
 
     private readonly TimeSpan _attemptTimeout;
@@ -78,21 +78,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly object _attemptLock = new object();
 
     // Bounds the in-flight pairing attempt. Armed by the attempt's first message, disposed by
-    // ClearPinState when the attempt ends for any reason. Guarded by _attemptLock.
+    // ClearPairingCodeState when the attempt ends for any reason. Guarded by _attemptLock.
     private CancellationTokenSource? _attemptTimeoutCts;
 
     // Set when a gated activation is waiting on a window; cleared when the attempt starts or
     // the activation is superseded. Guarded by _attemptLock.
     private string? _pendingGatedMethod;
-    private PinPairingState? _pinState;
+    private PairingCodeState? _pairingCodeState;
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
 
     // pin_length from the current pairing activation, validated on receipt. 0 when the
     // activation is not dynamic_pin. The gating policy reads it before client/pair-init.
-    private int _activationPinLength;
+    private int _activationPairingCodeLength;
 
-    // languages from the current pairing activation, handed to the PIN presenter. Null when
+    // languages from the current pairing activation, handed to the pairing code presenter. Null when
     // the server sent none.
     private List<string>? _activationLanguages;
 
@@ -131,15 +131,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // to persist the new values. client/hello, CanOffer, and get-pairing-config all read
     // these, so the advertisement and the management answer cannot drift apart.
     private bool _pairingPskEnabled;
-    private bool _dynamicPinEnabled;
-    private bool _staticPinEnabled;
-    private int _effectiveMinPinLength;
-    private string? _effectiveStaticPin;
+    private bool _dynamicPairingCodeEnabled;
+    private bool _staticPairingCodeEnabled;
+    private int _effectiveMinPairingCodeLength;
+    private string? _effectiveStaticPairingCode;
 
     // locations hints for the two methods that carry one. Held as effective state rather than
     // read straight off _capabilities because a server that sets the secret makes the app's
     // declared hint wrong, and the spec requires the client to follow the secret (#129).
-    private List<string> _staticPinLocations;
+    private List<string> _staticPairingCodeLocations;
     private List<string> _pairingPskLocations;
 
     // record_mode.psk_id: the shared-PSK record admitted as the storage-exhaustion fallback.
@@ -310,8 +310,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _capabilities = options.Capabilities;
         _pairingStore = options.PairingRecordStore;
         _identity = options.Identity;
-        _pinLockoutStore = options.PinLockoutStore;
-        _presentPinAsync = options.PresentPinAsync;
+        _pairingCodeLockoutStore = options.PairingCodeLockoutStore;
+        _presentPairingCodeAsync = options.PresentPairingCodeAsync;
         _pairingWindow = options.PairingWindow;
         _attemptTimeout = options.PairingAttemptTimeout;
         _captureDevice = options.CaptureDevice;
@@ -339,41 +339,41 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Implemented methods start enabled unless the app says otherwise. The three flags
         // exist so an app can reapply a server's set-pairing-config change on the next start
-        // (#131); ANDing each with PinPairingMethods keeps "not implemented" and "implemented
+        // (#131); ANDing each with PairingCodeMethods keeps "not implemented" and "implemented
         // but disabled" distinct, which is what the spec keys different behaviour off, and
         // keeps a default-constructed ClientCapabilities reporting exactly what it did before
         // these members existed.
         _pairingPskEnabled = _capabilities.PairingPskEnabled;
-        _dynamicPinEnabled = _capabilities.DynamicPinEnabled && _capabilities.PinPairingMethods.Contains("dynamic_pin");
-        _staticPinEnabled = _capabilities.StaticPinEnabled && _capabilities.PinPairingMethods.Contains("static_pin");
-        _effectiveMinPinLength = Math.Clamp(_capabilities.MinPinLength, 4, 12);
-        if (_effectiveMinPinLength != _capabilities.MinPinLength)
+        _dynamicPairingCodeEnabled = _capabilities.DynamicPairingCodeEnabled && _capabilities.PairingCodeMethods.Contains("dynamic_pin");
+        _staticPairingCodeEnabled = _capabilities.StaticPairingCodeEnabled && _capabilities.PairingCodeMethods.Contains("static_pin");
+        _effectiveMinPairingCodeLength = Math.Clamp(_capabilities.MinPairingCodeLength, 4, 12);
+        if (_effectiveMinPairingCodeLength != _capabilities.MinPairingCodeLength)
         {
             _logger.LogWarning(
-                "ClientCapabilities.MinPinLength {Value} is outside [4, 12]; clamped to {Clamped}",
-                _capabilities.MinPinLength,
-                _effectiveMinPinLength);
+                "ClientCapabilities.MinPairingCodeLength {Value} is outside [4, 12]; clamped to {Clamped}",
+                _capabilities.MinPairingCodeLength,
+                _effectiveMinPairingCodeLength);
         }
-        _effectiveStaticPin = _capabilities.StaticPin;
+        _effectiveStaticPairingCode = _capabilities.StaticPairingCode;
 
         // Copied, not aliased: these are mutated when a server rotates a secret, and the SDK
         // does not write to the ClientCapabilities instance the app owns (see
         // PairingConfigChangedEventArgs).
-        _staticPinLocations = [.. _capabilities.StaticPinLocations];
+        _staticPairingCodeLocations = [.. _capabilities.StaticPairingCodeLocations];
         _pairingPskLocations = [.. _capabilities.PairingPskLocations];
         _recordModePskId = SeedRecordModePskId();
 
-        // Usability of static_pin is evaluated live via HasUsableStaticPin, not snapshotted
-        // here, so a server that later supplies a valid PIN via set-pairing-config makes the
+        // Usability of static_pin is evaluated live via HasUsableStaticPairingCode, not snapshotted
+        // here, so a server that later supplies a valid pairing code via set-pairing-config makes the
         // method usable again without also having to resend enabled: true. This warning is
         // still worth logging once, at construction, so the app sees why the method it asked
         // for is not being offered.
-        if (_capabilities.StaticPinEnabled
-            && _capabilities.PinPairingMethods.Contains("static_pin")
-            && !IsValidStaticPin(_capabilities.StaticPin))
+        if (_capabilities.StaticPairingCodeEnabled
+            && _capabilities.PairingCodeMethods.Contains("static_pin")
+            && !IsValidStaticPairingCode(_capabilities.StaticPairingCode))
         {
             _logger.LogWarning(
-                "ClientCapabilities.StaticPin is not a valid 8-digit PIN; static_pin will not be offered until a valid PIN is configured");
+                "ClientCapabilities.StaticPairingCode is not a valid 8-digit pairing code; static_pin will not be offered until a valid pairing code is configured");
         }
 
         _playerState = new PlayerState
@@ -478,7 +478,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         // A pairing attempt cannot survive the session it was made on (the disconnect
-        // handler's ClearPinState comment states the same principle for the PIN half): the
+        // handler's ClearPairingCodeState comment states the same principle for the pairing code half): the
         // PSK here was generated for, and delivered by, a specific handshake, and
         // HandleServerPairFinalize's only gate is "this field is not null" — no activity,
         // trust, or session check. Left standing, an abandoned attempt followed by a bare
@@ -1375,8 +1375,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             StopTimeSyncLoop();
 
             // A pairing attempt cannot survive the session (the CPace counter and handshake
-            // hash reset with it), so release a presenter still showing the PIN.
-            ClearPinState();
+            // hash reset with it), so release a presenter still showing the pairing code.
+            ClearPairingCodeState();
 
             // Streaming state is per-connection (spec): a start from the old connection
             // must not survive into the next one, so tear capture down now, without a
@@ -1456,7 +1456,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// session: which record has been marked used, the CPace pairing counter (which the
     /// spec defines as the pairing activates since the last handshake), the accepted
     /// server/activate grant (including its ActiveRoles mirror on LastServerHello), any
-    /// pending pairing PSK, and an in-flight PIN attempt. Re-handshakes happen inside the
+    /// pending pairing PSK, and an in-flight pairing code attempt. Re-handshakes happen inside the
     /// framing layer, but they install a fresh handshake hash, so a change in it is our
     /// signal that the session was re-keyed.
     /// </summary>
@@ -1478,12 +1478,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pairingCounter = 0;
         _markedPskUsed = false;
 
-        // A PIN attempt's CPace state is bound to a sid built from _pairingCounter (see
+        // A pairing code attempt's CPace state is bound to a sid built from _pairingCounter (see
         // HandleServerPairAuth), which was just reset above. An attempt straddling a re-key
         // would otherwise keep a CPace transcript computed against a counter value the next
         // pairing activate on this session will reuse for something unrelated — the same
         // per-session principle the disconnect handler applies via this same helper.
-        ClearPinState();
+        ClearPairingCodeState();
 
         // An activate authorises the Noise session it arrived on. A re-key replaces that
         // session — including downward, since the spec has the server re-handshake to the
@@ -1791,7 +1791,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // The time-sync loop runs only outside a pairing activation. A pairing activate
         // grants no roles, so there is nothing to synchronize a clock for — and the
-        // reference server stops reading the socket while the operator enters the PIN,
+        // reference server stops reading the socket while the operator enters the pairing code,
         // then treats the first buffered frame as the next pairing message, so a probe
         // sent during that window aborts the attempt as a protocol error. Stopping here
         // covers a pairing activate arriving mid-session with the loop already running.
@@ -1929,37 +1929,37 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool IsMethodImplemented(string method) => method switch
     {
         "pairing_psk" => true, // every client implements it (pairing.md:65)
-        _ => _capabilities.PinPairingMethods.Contains(method),
+        _ => _capabilities.PairingCodeMethods.Contains(method),
     };
 
     /// <summary>The method's effective enablement, as set by management/set-pairing-config.</summary>
     private bool IsMethodEnabled(string method) => method switch
     {
         "pairing_psk" => _pairingPskEnabled,
-        "dynamic_pin" => _dynamicPinEnabled,
-        "static_pin" => _staticPinEnabled,
+        "dynamic_pin" => _dynamicPairingCodeEnabled,
+        "static_pin" => _staticPairingCodeEnabled,
         _ => false,
     };
 
     /// <summary>
-    /// Whether <paramref name="pin"/> is a well-formed static PIN: exactly 8 decimal digits
+    /// Whether <paramref name="pin"/> is a well-formed static pairing code: exactly 8 decimal digits
     /// (pairing.md:186).
     /// </summary>
-    private static bool IsValidStaticPin(string? pin) =>
+    private static bool IsValidStaticPairingCode(string? pin) =>
         pin is { Length: 8 } && pin.All(char.IsAsciiDigit);
 
     /// <summary>
-    /// Whether a static PIN good enough to run the method is configured. The spec forbids
+    /// Whether a static pairing code good enough to run the method is configured. The spec forbids
     /// enabling static_pin with no secret behind it (management.md:98) and set-pairing-config
     /// enforces that, but nothing validated what the app supplied at construction — so a
-    /// client could advertise the method with a null PIN and run CPace with an empty password.
+    /// client could advertise the method with a null pairing code and run CPace with an empty password.
     /// </summary>
     /// <remarks>
     /// Evaluated live rather than snapshotted at construction, so a server that supplies a
-    /// valid PIN through set-pairing-config makes the method usable again without also having
+    /// valid pairing code through set-pairing-config makes the method usable again without also having
     /// to resend <c>enabled: true</c>.
     /// </remarks>
-    private bool HasUsableStaticPin => IsValidStaticPin(_effectiveStaticPin);
+    private bool HasUsableStaticPairingCode => IsValidStaticPairingCode(_effectiveStaticPairingCode);
 
     /// <summary>
     /// Snapshots every effective pairing-config value into a <see cref="PairingConfigChangedEventArgs"/>.
@@ -1971,12 +1971,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         UnpairedAccessEnabled = _unpairedAccessEnabled,
         PairingPskReplaced = pairingPskReplaced,
         PairingPskEnabled = _pairingPskEnabled,
-        DynamicPinEnabled = _dynamicPinEnabled,
-        StaticPinEnabled = _staticPinEnabled,
-        MinPinLength = _effectiveMinPinLength,
-        StaticPin = _effectiveStaticPin,
+        DynamicPairingCodeEnabled = _dynamicPairingCodeEnabled,
+        StaticPairingCodeEnabled = _staticPairingCodeEnabled,
+        MinPairingCodeLength = _effectiveMinPairingCodeLength,
+        StaticPairingCode = _effectiveStaticPairingCode,
         RecordModePskId = _recordModePskId,
-        StaticPinLocations = [.. _staticPinLocations],
+        StaticPairingCodeLocations = [.. _staticPairingCodeLocations],
         PairingPskLocations = [.. _pairingPskLocations],
     };
 
@@ -2043,8 +2043,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             methods.Add(new PairMethodDescriptor
             {
                 Method = "dynamic_pin",
-                OutChannels = _capabilities.PinOutChannels,
-                MinPinLength = _effectiveMinPinLength,
+                OutChannels = _capabilities.PairingCodeOutChannels,
+                MinPairingCodeLength = _effectiveMinPairingCodeLength,
             });
         }
 
@@ -2053,7 +2053,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             methods.Add(new PairMethodDescriptor
             {
                 Method = "static_pin",
-                Locations = LocationsHint(_staticPinLocations),
+                Locations = LocationsHint(_staticPairingCodeLocations),
             });
         }
 
@@ -2107,26 +2107,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </remarks>
     private bool CanRun(string method) => method switch
     {
-        // A PIN method without a lockout store cannot persist the failure counter, so the
+        // A pairing code method without a lockout store cannot persist the failure counter, so the
         // method could never escalate to gesture-gating and every attempt would stay ungated.
-        // Refuse rather than fail open. Dynamic PIN additionally requires a presenter: without
-        // PresentPinAsync the derived PIN would reach nobody.
+        // Refuse rather than fail open. Dynamic pairing code additionally requires a presenter: without
+        // PresentPairingCodeAsync the derived pairing code would reach nobody.
         //
-        // A record store is a dependency in exactly the same sense (#158). Without one the PIN
+        // A record store is a dependency in exactly the same sense (#158). Without one the pairing code
         // exchange runs to completion, the server writes a long-term record, and this client
         // stores nothing -- so it fails to authenticate on the very next connection while the
         // app has been told pairing succeeded. pairing_psk has required a store since the
-        // trust-and-pairing work; the PIN methods were never given the same treatment.
+        // trust-and-pairing work; the pairing code methods were never given the same treatment.
         "dynamic_pin" => IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin")
-                         && _pinLockoutStore is not null && _presentPinAsync is not null
+                         && _pairingCodeLockoutStore is not null && _presentPairingCodeAsync is not null
                          && _pairingStore is not null,
         "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
-                        && HasUsableStaticPin && _pinLockoutStore is not null
+                        && HasUsableStaticPairingCode && _pairingCodeLockoutStore is not null
                         && _pairingStore is not null,
         // pairing_psk is deliberately not covered here: it stays on BuildPairMethods's
         // own IsMethodEnabled check even though CanOffer requires _pairingStore is not
         // null too. Folding it in here would make a store-less client advertise
-        // zero pair methods, since pairing_psk is mandatory. The PIN methods are optional,
+        // zero pair methods, since pairing_psk is mandatory. The pairing code methods are optional,
         // so withholding an unusable one costs nothing and stops the server rendering
         // pairing UX for a method every attempt would refuse.
         _ => false,
@@ -2153,14 +2153,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Starts the client side of a pairing attempt when server/activate declares the
     /// pairing activity, dispatching on the method the server selected: Pairing PSK
-    /// generates the long-term PSK and delivers it in client/pair-finalize, and the PIN
-    /// methods begin a PIN attempt. A method the matched PSK disallows, or that this
+    /// generates the long-term PSK and delivers it in client/pair-finalize, and the pairing code
+    /// methods begin a pairing code attempt. A method the matched PSK disallows, or that this
     /// client cannot currently complete, is refused with pair/abort reason
     /// 'method_not_supported' and the connection is left open (spec #123).
     /// </summary>
     private void HandlePairingActivate(ServerActivatePayload payload)
     {
-        ClearPinState();
+        ClearPairingCodeState();
 
         // Only pairing activates count. The spec defines the CPace counter as the pairing
         // activates since the last Noise handshake; the restart on re-handshake lives in
@@ -2182,20 +2182,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        _activationPinLength = 0;
+        _activationPairingCodeLength = 0;
         _activationLanguages = payload.Pairing?.Languages;
         if (payload.Pairing?.Method == "dynamic_pin")
         {
             // Validated here, not at server/pair-init: the spec moved pin_length into the
             // activation (pairing.md:149) precisely because the gating decision needs it
             // before client/pair-init is sent.
-            int? length = payload.Pairing.PinLength;
-            if (length is null || length < _effectiveMinPinLength || length > 12)
+            int? length = payload.Pairing.PairingCodeLength;
+            if (length is null || length < _effectiveMinPairingCodeLength || length > 12)
             {
                 _logger.LogWarning(
                     "Activation pin_length {Length} is outside [{Min}, 12]; aborting the attempt",
                     length,
-                    _effectiveMinPinLength);
+                    _effectiveMinPairingCodeLength);
                 SendAsync(new PairAbortMessage
                 {
                     Payload = new PairAbortPayload { Reason = "pin_length_unacceptable" },
@@ -2203,7 +2203,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 return;
             }
 
-            _activationPinLength = length.Value;
+            _activationPairingCodeLength = length.Value;
         }
 
         switch (payload.Pairing?.Method)
@@ -2220,7 +2220,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             case "dynamic_pin":
             case "static_pin":
-                BeginOrDeferPinAttempt(payload.Pairing!.Method);
+                BeginOrDeferPairingCodeAttempt(payload.Pairing!.Method);
                 break;
 
             default:
@@ -2233,18 +2233,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Starts a PIN attempt, or defers it until an operator gesture opens the pairing window.
+    /// Starts a pairing code attempt, or defers it until an operator gesture opens the pairing window.
     /// </summary>
     /// <remarks>
     /// Gating policy (pairing.md:227-230): static_pin gates every attempt; dynamic_pin gates
-    /// only when the method is escalated or the session's PIN is shorter than 6 digits — short
-    /// PINs are bought with a gesture. pairing_psk is never gated and does not reach here.
+    /// only when the method is escalated or the session's pairing code is shorter than 6 digits —
+    /// short codes are bought with a gesture. pairing_psk is never gated and does not reach here.
     /// </remarks>
-    private void BeginOrDeferPinAttempt(string method)
+    private void BeginOrDeferPairingCodeAttempt(string method)
     {
         bool gated = method == "static_pin"
                      || IsMethodEscalated(method)
-                     || _activationPinLength < 6;
+                     || _activationPairingCodeLength < 6;
 
         bool deferred = false;
         if (gated)
@@ -2278,7 +2278,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }).SafeFireAndForget(_logger);
 
             _logger.LogInformation(
-                "PIN pairing ({Method}): awaiting an operator gesture to open the pairing window",
+                "pairing code ({Method}): awaiting an operator gesture to open the pairing window",
                 method);
             PairingGestureRequested?.Invoke(this, new PairingGestureRequestedEventArgs
             {
@@ -2288,7 +2288,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        StartPinAttempt(dynamic: method == "dynamic_pin");
+        StartPairingCodeAttempt(dynamic: method == "dynamic_pin");
     }
 
     /// <summary>
@@ -2328,7 +2328,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 method = pending;
             }
 
-            StartPinAttempt(dynamic: method == "dynamic_pin");
+            StartPairingCodeAttempt(dynamic: method == "dynamic_pin");
         }
         catch (Exception ex)
         {
@@ -2352,7 +2352,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// made for whichever connection is still legitimately pending would silently do nothing
     /// for them. Not consuming the window is the other half: the opening stays available.
     /// The superseded-by-a-newer-pairing-activation case is <see cref="HandlePairingActivate"/>'s
-    /// own ClearPinState.
+    /// own ClearPairingCodeState.
     /// </remarks>
     private void DiscardPendingGatedAttempt()
     {
@@ -2371,14 +2371,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Begins a PIN-pairing attempt by sending client/pair-init. For dynamic PIN it includes
+    /// Begins a pairing code attempt by sending client/pair-init. For dynamic pairing code it includes
     /// commit_B over a fresh nonce_B. Any gesture gating has already been satisfied by
-    /// <see cref="BeginOrDeferPinAttempt"/>, which consumed the pairing window.
+    /// <see cref="BeginOrDeferPairingCodeAttempt"/>, which consumed the pairing window.
     /// </summary>
-    private void StartPinAttempt(bool dynamic)
+    private void StartPairingCodeAttempt(bool dynamic)
     {
         var method = dynamic ? "dynamic_pin" : "static_pin";
-        var state = new PinPairingState { Dynamic = dynamic, Method = method };
+        var state = new PairingCodeState { Dynamic = dynamic, Method = method };
         var init = new ClientPairInitMessage
         {
             Payload = new ClientPairInitPayload { PairingIndex = _pairingCounter },
@@ -2386,18 +2386,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (dynamic)
         {
             state.NonceB = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
-            init.Payload.CommitB = Base64UrlText.Encode(PinPairing.CommitB(state.NonceB));
+            init.Payload.CommitB = Base64UrlText.Encode(PairingCodes.CommitB(state.NonceB));
         }
 
-        _pinState = state;
-        _logger.LogInformation("PIN pairing ({Method}): starting attempt", method);
+        _pairingCodeState = state;
+        _logger.LogInformation("pairing code ({Method}): starting attempt", method);
         SendAsync(init).SafeFireAndForget(_logger);
         ArmAttemptTimeout();
     }
 
     /// <summary>
     /// Starts the attempt timeout. Called from the attempt's first message — client/pair-init
-    /// for the PIN flows, client/pair-finalize for Pairing PSK.
+    /// for the pairing code flows, client/pair-finalize for Pairing PSK.
     /// </summary>
     private void ArmAttemptTimeout()
     {
@@ -2430,7 +2430,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
 
                 _logger.LogWarning("Pairing attempt timed out; aborting");
-                AbortPin("attempt_timeout");
+                AbortPairingCode("attempt_timeout");
                 _pairingWindow?.Close();
             },
             CancellationToken.None,
@@ -2441,87 +2441,87 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void HandleServerPairInit(string json)
     {
         var msg = MessageSerializer.Deserialize<ServerPairInitMessage>(json);
-        if (msg is null || _pinState is not { Dynamic: true } state)
+        if (msg is null || _pairingCodeState is not { Dynamic: true } state)
             return;
 
         state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
         var h = _session.HandshakeHash!.Value.ToArray();
-        string pin = PinPairing.DerivePin(h, state.NonceA, state.NonceB!, _activationPinLength);
-        state.Pin = pin;
+        string pin = PairingCodes.DerivePairingCode(h, state.NonceA, state.NonceB!, _activationPairingCodeLength);
+        state.PairingCode = pin;
 
-        // Present the PIN through the app's out-channel. Started here (this method runs on
+        // Present the pairing code through the app's out-channel. Started here (this method runs on
         // the connection's synchronous receive dispatch, which cannot await); its completion
-        // gates client/pair-auth in SendPairAuthAfterPinPresentedAsync, and its token is
-        // cancelled by ClearPinState when the attempt or the connection is torn down.
-        state.PresentPinCts = new CancellationTokenSource();
-        state.PinPresented = InvokePinPresenterAsync(pin, state.PresentPinCts.Token);
-        // The PAKE begins when server/pair-auth arrives (server has the PIN by then).
+        // gates client/pair-auth in SendPairAuthAfterPairingCodePresentedAsync, and its token is
+        // cancelled by ClearPairingCodeState when the attempt or the connection is torn down.
+        state.PresentPairingCodeCts = new CancellationTokenSource();
+        state.PairingCodePresented = InvokePairingCodePresenterAsync(pin, state.PresentPairingCodeCts.Token);
+        // The PAKE begins when server/pair-auth arrives (server has the pairing code by then).
     }
 
     /// <summary>
-    /// Invokes the app's <see cref="SendspinClientOptions.PresentPinAsync"/> presenter.
+    /// Invokes the app's <see cref="SendspinClientOptions.PresentPairingCodeAsync"/> presenter.
     /// Wrapped so a synchronously-throwing presenter faults the stored task — handled where
     /// the presentation is awaited — instead of throwing into the receive dispatch, whose
     /// catch filter treats exceptions as hostile peer input.
     /// </summary>
-    private async Task InvokePinPresenterAsync(string pin, CancellationToken cancellationToken)
+    private async Task InvokePairingCodePresenterAsync(string pin, CancellationToken cancellationToken)
     {
         // Non-null on every path that reaches a dynamic pair-init: CanOffer refuses
-        // dynamic_pin without a presenter, and without StartPinAttempt(dynamic: true)
+        // dynamic_pin without a presenter, and without StartPairingCodeAttempt(dynamic: true)
         // there is no { Dynamic: true } state for HandleServerPairInit to act on.
-        await _presentPinAsync!(new PinPresentation(pin, _activationLanguages), cancellationToken);
+        await _presentPairingCodeAsync!(new PairingCodePresentation(pin, _activationLanguages), cancellationToken);
     }
 
     private void HandleServerPairAuth(string json)
     {
         var msg = MessageSerializer.Deserialize<ServerPairAuthMessage>(json);
-        if (msg is null || _pinState is not { } state)
+        if (msg is null || _pairingCodeState is not { } state)
             return;
 
-        // A server/pair-auth that arrives before server/pair-init leaves the dynamic PIN
+        // A server/pair-auth that arrives before server/pair-init leaves the dynamic pairing code
         // underived. The spec calls a mis-sequenced pairing message a protocol error, and the
         // dispatch catch turns a JsonException into exactly that close. Left unchecked this
         // reached Encoding.ASCII.GetBytes(null) and threw ArgumentNullException, which the catch
         // filter does not name — so it escaped to the receive loop as an unexplained lost
         // connection rather than a deliberate one (#106).
-        if (state.Dynamic && state.Pin is null)
+        if (state.Dynamic && state.PairingCode is null)
         {
             throw new System.Text.Json.JsonException(
-                "server/pair-auth arrived before server/pair-init; no dynamic PIN has been derived");
+                "server/pair-auth arrived before server/pair-init; no dynamic pairing code has been derived");
         }
 
-        // Static PIN: the PIN is device-printed and known from the start.
-        string pin = state.Dynamic ? state.Pin! : (_effectiveStaticPin ?? string.Empty);
+        // Static pairing code: the pairing code is device-printed and known from the start.
+        string pin = state.Dynamic ? state.PairingCode! : (_effectiveStaticPairingCode ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
-        byte[] sid = PinPairing.BuildSid(h, (uint)_pairingCounter);
+        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter);
 
         var cpace = CPace.Start(
             CPaceRole.Responder,
             System.Text.Encoding.ASCII.GetBytes(pin),
             sid,
-            ad: PinPairing.AdClient);
+            ad: PairingCodes.AdClient);
         state.CPace = cpace;
         state.Sid = sid;
 
         // Derive stays on the synchronous path: a hostile pake_msg_1 raises CPaceException
         // into the dispatch catch, which closes the connection as with any malformed input.
-        cpace.Derive(Base64UrlText.Decode(msg.Payload.PakeMsg1), PinPairing.AdServer);
+        cpace.Derive(Base64UrlText.Decode(msg.Payload.PakeMsg1), PairingCodes.AdServer);
 
-        SendPairAuthAfterPinPresentedAsync(state, cpace.PublicShare).SafeFireAndForget(_logger);
+        SendPairAuthAfterPairingCodePresentedAsync(state, cpace.PublicShare).SafeFireAndForget(_logger);
     }
 
     /// <summary>
-    /// Sends client/pair-auth once the PIN presentation has completed. The share itself
+    /// Sends client/pair-auth once the pairing code presentation has completed. The share itself
     /// leaks nothing (CPace), but the reply must not leave this client before the operator
-    /// could have seen the PIN — a presenter that has not finished displaying it cannot have
-    /// had its PIN entered — so a slow presenter delays the PAKE rather than racing it. For
-    /// static PIN (no presentation) this completes synchronously, as before. The presentation
+    /// could have seen the pairing code — a presenter that has not finished displaying it cannot have
+    /// had its pairing code entered — so a slow presenter delays the PAKE rather than racing it. For
+    /// static pairing code (no presentation) this completes synchronously, as before. The presentation
     /// itself is awaited and its failure handled here; the fire-and-forget boundary at the
     /// call site observes only the send, exactly as it did when the send was unconditional.
     /// </summary>
-    private async Task SendPairAuthAfterPinPresentedAsync(PinPairingState state, byte[] publicShare)
+    private async Task SendPairAuthAfterPairingCodePresentedAsync(PairingCodeState state, byte[] publicShare)
     {
-        if (state.PinPresented is { } presented)
+        if (state.PairingCodePresented is { } presented)
         {
             try
             {
@@ -2532,17 +2532,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 // Cancelled or failed. If the attempt was already torn down (abort,
                 // supersession, disconnect — the paths that cancel the presentation), its
                 // outcome is settled and a successor attempt's state must not be clobbered.
-                // Otherwise the app could not present the PIN, so the operator can never
+                // Otherwise the app could not present the pairing code, so the operator can never
                 // enter it: fail closed with the reason list's client-side-gave-up value
                 // rather than completing a PAKE nobody can win.
-                if (ReferenceEquals(_pinState, state))
+                if (ReferenceEquals(_pairingCodeState, state))
                 {
                     if (ex is not OperationCanceledException)
                     {
-                        _logger.LogError(ex, "PresentPinAsync failed; aborting the PIN attempt");
+                        _logger.LogError(ex, "PresentPairingCodeAsync failed; aborting the pairing code attempt");
                     }
 
-                    AbortPin("user_cancelled");
+                    AbortPairingCode("user_cancelled");
                 }
 
                 return;
@@ -2551,7 +2551,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // The attempt may have been superseded or aborted while the presentation was
         // pending; a stale share must not be sent into whatever replaced it.
-        if (!ReferenceEquals(_pinState, state))
+        if (!ReferenceEquals(_pairingCodeState, state))
         {
             return;
         }
@@ -2565,13 +2565,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void HandleServerPairConfirm(string json)
     {
         var msg = MessageSerializer.Deserialize<ServerPairConfirmMessage>(json);
-        if (msg is null || _pinState is not { CPace: { } cpace } state)
+        if (msg is null || _pairingCodeState is not { CPace: { } cpace } state)
             return;
 
         if (!cpace.Verify(Base64UrlText.Decode(msg.Payload.ServerKc)))
         {
-            RecordPinFailure(state.Method);
-            AbortPin("pin_mismatch");
+            RecordPairingCodeFailure(state.Method);
+            AbortPairingCode("pin_mismatch");
             return;
         }
 
@@ -2590,19 +2590,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
         _pendingPairingPsk = psk;
         var suite = NoiseCipherSuite.ChaChaPoly;
-        byte[] wrapped = PinPairing.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
+        byte[] wrapped = PairingCodes.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
         SendAsync(new ClientPairFinalizeMessage
         {
             Payload = new ClientPairFinalizePayload { WrappedPsk = Base64UrlText.Encode(wrapped) },
         }).SafeFireAndForget(_logger);
 
         // Success resets the method's failure counter.
-        _pinLockoutStore?.SetFailures(state.Method, 0);
+        _pairingCodeLockoutStore?.SetFailures(state.Method, 0);
     }
 
-    private void AbortPin(string reason)
+    private void AbortPairingCode(string reason)
     {
-        ClearPinState();
+        ClearPairingCodeState();
         SendAsync(new PairAbortMessage
         {
             Payload = new PairAbortPayload { Reason = reason },
@@ -2615,49 +2615,49 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// successful server_kc verification resets the counter.
     /// </summary>
     private bool IsMethodEscalated(string method)
-        => (_pinLockoutStore?.GetFailures(method) ?? 0) >= 10;
+        => (_pairingCodeLockoutStore?.GetFailures(method) ?? 0) >= 10;
 
-    private void RecordPinFailure(string method)
+    private void RecordPairingCodeFailure(string method)
     {
-        if (_pinLockoutStore is null)
+        if (_pairingCodeLockoutStore is null)
             return;
-        _pinLockoutStore.SetFailures(method, _pinLockoutStore.GetFailures(method) + 1);
+        _pairingCodeLockoutStore.SetFailures(method, _pairingCodeLockoutStore.GetFailures(method) + 1);
     }
 
-    private sealed class PinPairingState
+    private sealed class PairingCodeState
     {
         public bool Dynamic;
         public string Method = string.Empty;
         public byte[]? NonceA;
         public byte[]? NonceB;
-        public string? Pin;
+        public string? PairingCode;
         public byte[]? Sid;
         public CPace? CPace;
 
-        // Set for a dynamic attempt when server/pair-init arrives: the app's PIN
+        // Set for a dynamic attempt when server/pair-init arrives: the app's pairing code
         // presentation, awaited before client/pair-auth is sent, and the cancellation
         // fired when the attempt or connection is torn down.
-        public Task? PinPresented;
-        public CancellationTokenSource? PresentPinCts;
+        public Task? PairingCodePresented;
+        public CancellationTokenSource? PresentPairingCodeCts;
     }
 
     /// <summary>
-    /// Drops the in-flight pairing attempt, if any, and cancels its pending PIN presentation,
-    /// so a presenter still holding the PIN (dialog, speaker) is released when the attempt
+    /// Drops the in-flight pairing attempt, if any, and cancels its pending pairing code presentation,
+    /// so a presenter still holding the pairing code (dialog, speaker) is released when the attempt
     /// is aborted, superseded, or the connection or client goes away.
     /// </summary>
     /// <remarks>
-    /// This clears the whole attempt, not just its PIN half. <see cref="_pendingPairingPsk"/>
+    /// This clears the whole attempt, not just its pairing code half. <see cref="_pendingPairingPsk"/>
     /// belongs here because <see cref="HandleServerPairFinalize"/>'s only gate is "that field
     /// is not null" — no activity, trust or session check — so an attempt this method ends
     /// (an abort, an attempt_timeout, a re-key) that left the PSK armed would still persist a
     /// permanent record on a later bare server/pair-finalize. That is the same reasoning
     /// <see cref="HandlePairAbort"/> already applied to the abort path alone.
     /// </remarks>
-    private void ClearPinState()
+    private void ClearPairingCodeState()
     {
-        var state = _pinState;
-        _pinState = null;
+        var state = _pairingCodeState;
+        _pairingCodeState = null;
 
         // Dropped, deliberately not zeroized. PairingRecord holds its Psk as a
         // ReadOnlyMemory<byte> over the caller's array rather than a copy, and
@@ -2669,7 +2669,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Read only inside an attempt, and every attempt re-reads them from its activation —
         // but they are cleared with the rest of the attempt state so no read can ever see a
         // value from an attempt that has already ended.
-        _activationPinLength = 0;
+        _activationPairingCodeLength = 0;
         _activationLanguages = null;
 
         // Clears the attempt's derived secrets (ISK, confirmation MAC key, or the unused
@@ -2678,7 +2678,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // zeroization hangs off this method rather than the success path (#102).
         state?.CPace?.Dispose();
 
-        if (state?.PresentPinCts is { } cts)
+        if (state?.PresentPairingCodeCts is { } cts)
         {
             cts.Cancel();
             cts.Dispose();
@@ -2707,8 +2707,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         // The attempt succeeded: disarm its timeout so a completed attempt cannot abort itself
-        // afterwards, and release any PIN presentation still held for it.
-        ClearPinState();
+        // afterwards, and release any pairing code presentation still held for it.
+        ClearPairingCodeState();
 
         // One success path, and it is the one that actually persisted. Every early return
         // below leaves PairingCompleted unraised, because a client that stored nothing cannot
@@ -2922,20 +2922,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             case MessageTypes.ManagementGetPairingConfig:
             {
-                PairingMethodState? staticPinState = IsMethodImplemented("static_pin")
+                PairingMethodState? staticPairingCodeState = IsMethodImplemented("static_pin")
                     ? new PairingMethodState(CanRun("static_pin"))
                     : null;
-                DynamicPinConfigState? dynamicPinState = IsMethodImplemented("dynamic_pin")
-                    ? new DynamicPinConfigState(
+                DynamicPairingCodeConfigState? dynamicPairingCodeState = IsMethodImplemented("dynamic_pin")
+                    ? new DynamicPairingCodeConfigState(
                         CanRun("dynamic_pin"),
-                        _effectiveMinPinLength,
+                        _effectiveMinPairingCodeLength,
                         IsMethodEscalated("dynamic_pin"))
                     : null;
                 result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
                     new PairingConfigData(
                         new PairingMethodState(IsMethodEnabled("pairing_psk")),
-                        staticPinState,
-                        dynamicPinState,
+                        staticPairingCodeState,
+                        dynamicPairingCodeState,
                         new RecordModeState(_recordModePskId),
                         new PairingMethodState(_unpairedAccessEnabled)),
                     MessageSerializerContext.Default.PairingConfigData);
@@ -2945,7 +2945,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case MessageTypes.ManagementSetPairingConfig:
             {
                 // Patch semantics: only fields present are applied. Setting fields on an
-                // unimplemented PIN method returns invalid.
+                // unimplemented pairing code method returns invalid.
 
                 // Parse every field before applying any, so a request refused partway
                 // (no store, undecodable psk, unimplemented method, out-of-range value)
@@ -2961,8 +2961,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 // dynamic_pin. Parsed here with the other fields so a request refused partway
                 // changes nothing and the single change event below always describes a fully
                 // applied request.
-                bool? requestedDynamicPinEnabled = null;
-                int? requestedMinPinLength = null;
+                bool? requestedDynamicPairingCodeEnabled = null;
+                int? requestedMinPairingCodeLength = null;
                 if (payload.TryGetProperty("dynamic_pin", out var dp))
                 {
                     if (!IsMethodImplemented("dynamic_pin"))
@@ -2973,7 +2973,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     if (dp.TryGetProperty("enabled", out var dpEnabled))
                     {
-                        requestedDynamicPinEnabled = dpEnabled.GetBoolean();
+                        requestedDynamicPairingCodeEnabled = dpEnabled.GetBoolean();
                     }
 
                     if (dp.TryGetProperty("min_pin_length", out var minLen))
@@ -2985,25 +2985,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                             break;
                         }
 
-                        requestedMinPinLength = value;
+                        requestedMinPairingCodeLength = value;
                     }
 
-                    // A server can supply a missing PIN but not a missing IPinLockoutStore or
-                    // PresentPinAsync -- those are app configuration. Answering ok and then
+                    // A server can supply a missing pairing code but not a missing IPairingCodeLockoutStore or
+                    // PresentPairingCodeAsync -- those are app configuration. Answering ok and then
                     // continuing to report enabled: false would leave the server unable to
                     // tell why its change did not take.
-                    if (requestedDynamicPinEnabled == true
-                        && (_pinLockoutStore is null || _presentPinAsync is null))
+                    if (requestedDynamicPairingCodeEnabled == true
+                        && (_pairingCodeLockoutStore is null || _presentPairingCodeAsync is null))
                     {
                         result.Result = "invalid";
                         break;
                     }
                 }
 
-                // static_pin. The spec fixes the static PIN at 8 decimal digits (pairing.md:186) and
+                // static_pin. The spec fixes the static pairing code at 8 decimal digits (pairing.md:186) and
                 // rejects enabling the method with no secret behind it (management.md:98).
-                bool? requestedStaticPinEnabled = null;
-                string? requestedStaticPin = null;
+                bool? requestedStaticPairingCodeEnabled = null;
+                string? requestedStaticPairingCode = null;
                 if (payload.TryGetProperty("static_pin", out var sp))
                 {
                     if (!IsMethodImplemented("static_pin"))
@@ -3012,36 +3012,36 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         break;
                     }
 
-                    if (sp.TryGetProperty("pin", out var pinEl))
+                    if (sp.TryGetProperty("pin", out var pairingCodeEl))
                     {
-                        string pin = pinEl.GetString() ?? string.Empty;
-                        if (!IsValidStaticPin(pin))
+                        string pin = pairingCodeEl.GetString() ?? string.Empty;
+                        if (!IsValidStaticPairingCode(pin))
                         {
                             result.Result = "invalid";
                             break;
                         }
 
-                        requestedStaticPin = pin;
+                        requestedStaticPairingCode = pin;
                     }
 
                     if (sp.TryGetProperty("enabled", out var spEnabled))
                     {
-                        requestedStaticPinEnabled = spEnabled.GetBoolean();
+                        requestedStaticPairingCodeEnabled = spEnabled.GetBoolean();
                     }
 
-                    if (requestedStaticPinEnabled == true
-                        && requestedStaticPin is null
-                        && !IsValidStaticPin(_effectiveStaticPin))
+                    if (requestedStaticPairingCodeEnabled == true
+                        && requestedStaticPairingCode is null
+                        && !IsValidStaticPairingCode(_effectiveStaticPairingCode))
                     {
                         result.Result = "invalid";
                         break;
                     }
 
-                    // A server can supply a missing static PIN, but not a missing
-                    // IPinLockoutStore -- that's app configuration. Answering ok and then
+                    // A server can supply a missing static pairing code, but not a missing
+                    // IPairingCodeLockoutStore -- that's app configuration. Answering ok and then
                     // continuing to report enabled: false would leave the server unable to
                     // tell why its change did not take.
-                    if (requestedStaticPinEnabled == true && _pinLockoutStore is null)
+                    if (requestedStaticPairingCodeEnabled == true && _pairingCodeLockoutStore is null)
                     {
                         result.Result = "invalid";
                         break;
@@ -3167,38 +3167,38 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _unpairedAccessEnabled = enabled;
                 }
 
-                bool dynamicPinChanged = false;
-                if (requestedDynamicPinEnabled is { } dpe)
+                bool dynamicPairingCodeChanged = false;
+                if (requestedDynamicPairingCodeEnabled is { } dpe)
                 {
-                    dynamicPinChanged |= dpe != _dynamicPinEnabled;
-                    _dynamicPinEnabled = dpe;
+                    dynamicPairingCodeChanged |= dpe != _dynamicPairingCodeEnabled;
+                    _dynamicPairingCodeEnabled = dpe;
                 }
 
-                if (requestedMinPinLength is { } minPin)
+                if (requestedMinPairingCodeLength is { } minPairingCode)
                 {
-                    dynamicPinChanged |= minPin != _effectiveMinPinLength;
-                    _effectiveMinPinLength = minPin;
+                    dynamicPairingCodeChanged |= minPairingCode != _effectiveMinPairingCodeLength;
+                    _effectiveMinPairingCodeLength = minPairingCode;
                 }
 
-                bool staticPinChanged = false;
-                if (requestedStaticPin is not null)
+                bool staticPairingCodeChanged = false;
+                if (requestedStaticPairingCode is not null)
                 {
-                    staticPinChanged |= requestedStaticPin != _effectiveStaticPin;
-                    _effectiveStaticPin = requestedStaticPin;
+                    staticPairingCodeChanged |= requestedStaticPairingCode != _effectiveStaticPairingCode;
+                    _effectiveStaticPairingCode = requestedStaticPairingCode;
 
                     // The spec's "when the secret is rotated, the client updates the hint
-                    // accordingly": the operator chose this PIN, so whatever the app declared
+                    // accordingly": the operator chose this pairing code, so whatever the app declared
                     // about a printed label no longer describes where to find it, and a server
                     // still rendering "check the device" would send them to a stale number
                     // (#129). Applied on every set, not only when the value differs — a server
-                    // re-sending the PIN it already set is still the operator owning it.
-                    staticPinChanged |= SetLocationsToOperator(ref _staticPinLocations);
+                    // re-sending the pairing code it already set is still the operator owning it.
+                    staticPairingCodeChanged |= SetLocationsToOperator(ref _staticPairingCodeLocations);
                 }
 
-                if (requestedStaticPinEnabled is { } spe)
+                if (requestedStaticPairingCodeEnabled is { } spe)
                 {
-                    staticPinChanged |= spe != _staticPinEnabled;
-                    _staticPinEnabled = spe;
+                    staticPairingCodeChanged |= spe != _staticPairingCodeEnabled;
+                    _staticPairingCodeEnabled = spe;
                 }
 
                 bool pairingPskEnabledChanged = false;
@@ -3223,7 +3223,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _recordModePskId = requestedRecordModePskId;
                 }
 
-                if (unpairedAccessChanged || dynamicPinChanged || staticPinChanged || newPairingPsk is not null
+                if (unpairedAccessChanged || dynamicPairingCodeChanged || staticPairingCodeChanged || newPairingPsk is not null
                     || pairingPskEnabledChanged || recordModeChanged)
                 {
                     // One event per request, after every change is applied, and outside
@@ -3239,10 +3239,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             case MessageTypes.ManagementOpenPairingWindow:
             {
-                // Opens the window in place of the operator gesture. Rejected when no PIN
+                // Opens the window in place of the operator gesture. Rejected when no pairing code
                 // method is enabled, since there would be nothing for the window to admit.
-                bool anyPinMethod = CanRun("static_pin") || CanRun("dynamic_pin");
-                if (!anyPinMethod || _pairingWindow is null)
+                bool anyPairingCodeMethod = CanRun("static_pin") || CanRun("dynamic_pin");
+                if (!anyPairingCodeMethod || _pairingWindow is null)
                 {
                     result.Result = "invalid";
                     break;
@@ -3319,7 +3319,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = MessageSerializer.Deserialize<PairAbortMessage>(json);
         _logger.LogWarning("Pairing aborted: {Reason}", message?.Payload.Reason ?? "unknown");
         _pendingPairingPsk = null;
-        ClearPinState();
+        ClearPairingCodeState();
     }
 
     /// <summary>
@@ -4405,7 +4405,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
-        ClearPinState();
+        ClearPairingCodeState();
         UnsubscribeConnectionEvents();
     }
 
@@ -4415,7 +4415,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
-        ClearPinState();
+        ClearPairingCodeState();
         UnsubscribeConnectionEvents();
 
         // NOTE: We do NOT dispose _audioPipeline here - it's a shared singleton

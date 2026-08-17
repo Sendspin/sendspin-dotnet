@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace Sendspin.SDK.Connection.Noise.Pairing;
 
 /// <summary>
-/// Source-generated serialization for the PIN failure-counter file, so the store does not
+/// Source-generated serialization for the pairing code failure-counter file, so the store does not
 /// fall back to reflection under <c>PublishAot</c> (#89).
 /// </summary>
 /// <remarks>
@@ -13,4 +13,4 @@ namespace Sendspin.SDK.Connection.Noise.Pairing;
 /// wrong and silently destructive to files already on disk.
 /// </remarks>
 [JsonSerializable(typeof(Dictionary<string, int>))]
-internal sealed partial class PinLockoutStoreJsonContext : JsonSerializerContext;
+internal sealed partial class PairingCodeLockoutStoreJsonContext : JsonSerializerContext;
