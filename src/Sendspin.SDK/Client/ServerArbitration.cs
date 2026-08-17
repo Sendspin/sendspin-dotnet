@@ -1,3 +1,5 @@
+using Sendspin.SDK.Protocol.Messages;
+
 namespace Sendspin.SDK.Client;
 
 /// <summary>
@@ -47,17 +49,20 @@ internal static class ServerArbitration
             return ConnectionPriority.Empty;
         }
 
-        if (activities.Contains("management"))
+        // The Activities constants rather than literals: this is the same wire vocabulary the
+        // rest of the SDK matches against, and a literal here would not follow a change to it
+        // (#93).
+        if (activities.Contains(Activities.Management))
         {
             return ConnectionPriority.Management;
         }
 
-        if (activities.Contains("playback"))
+        if (activities.Contains(Activities.Playback))
         {
             return ConnectionPriority.Playback;
         }
 
-        return activities.Contains("pairing") ? ConnectionPriority.Pairing : ConnectionPriority.Empty;
+        return activities.Contains(Activities.Pairing) ? ConnectionPriority.Pairing : ConnectionPriority.Empty;
     }
 
     /// <summary>

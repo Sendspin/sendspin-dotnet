@@ -81,10 +81,20 @@ internal static class X25519
             z2 = Mod(e * (aa + A24 * e));
         }
 
+        // Structurally unreachable, and kept deliberately. The clamp above (`k[0] &= 248`)
+        // clears bit 0, and the loop's last iteration leaves `swap` equal to that bit — so
+        // `swap` is always 0 here for any scalar this method accepts. Verified, not assumed:
+        // replacing the body with a throw leaves the whole suite green.
+        //
+        // It stays because it is RFC 7748's ladder as written, and it is what makes the
+        // function correct for an unclamped scalar should the clamp ever move out of here.
+        // Only the (x2, z2) half of the RFC's cswap is needed — x3/z3 are dead after the loop,
+        // since the return reads x2 and z2 alone. It was written `(x2, _) = (x3, x2)`, which
+        // does exactly that but reads like a swap whose second half went missing (#93).
         if (swap == 1)
         {
-            (x2, _) = (x3, x2);
-            (z2, _) = (z3, z2);
+            x2 = x3;
+            z2 = z3;
         }
 
         return EncodeU(Mod(x2 * BigInteger.ModPow(z2, P - 2, P)));
