@@ -10,6 +10,19 @@ namespace Sendspin.SDK.Tests.Connection;
 /// <summary>Server-side Noise initiator, mirroring aiosendspin's server role.</summary>
 internal sealed class TestNoiseServer
 {
+    /// <summary>
+    /// Static key pair. <b>Always pass <c>(byte[])_keys.PrivateKey.Clone()</c> to
+    /// <c>Protocol.Create</c>, never <c>_keys.PrivateKey</c> itself.</b>
+    /// </summary>
+    /// <remarks>
+    /// Noise.NET <b>zeroes the private key it is handed</b> when the handshake state is
+    /// disposed. The clone is therefore the only reason one key pair can drive more than one
+    /// handshake — which is what a reconnect against the same server id depends on
+    /// (<c>SameServerReconnect_SendsUserRequestToStaleConnection</c>), and what the three
+    /// <c>Protocol.Create</c> calls below rely on. It reads like a redundant defensive cast a
+    /// cleanup pass would delete; deleting it breaks that test as an apparent arbitration bug,
+    /// a long way from the cause (#99).
+    /// </remarks>
     private readonly KeyPair _keys;
     private readonly ReadOnlyMemory<byte> _clientPublicKey;
     private readonly byte[] _psk;
@@ -50,7 +63,7 @@ internal sealed class TestNoiseServer
         var protocol = NoiseProtocol.Parse(_protocolName.AsSpan());
         _state = protocol.Create(
             initiator: true, prologue: prologue,
-            s: (byte[])_keys.PrivateKey.Clone(),
+            s: (byte[])_keys.PrivateKey.Clone(), // Load-bearing clone — see _keys.
             rs: _clientPublicKey.ToArray(),
             psks: [_psk]);
 
@@ -93,7 +106,7 @@ internal sealed class TestNoiseServer
         var protocol = NoiseProtocol.Parse(_protocolName.AsSpan());
         _state = protocol.Create(
             initiator: true, prologue: prologue,
-            s: (byte[])_keys.PrivateKey.Clone(),
+            s: (byte[])_keys.PrivateKey.Clone(), // Load-bearing clone — see _keys.
             rs: _clientPublicKey.ToArray(),
             psks: [_psk]);
 
@@ -117,7 +130,7 @@ internal sealed class TestNoiseServer
         var protocol = NoiseProtocol.Parse(_protocolName.AsSpan());
         _state = protocol.Create(
             initiator: true, prologue: HandshakeHash!,
-            s: (byte[])_keys.PrivateKey.Clone(),
+            s: (byte[])_keys.PrivateKey.Clone(), // Load-bearing clone — see _keys.
             rs: _clientPublicKey.ToArray(),
             psks: [newPsk]);
         string payload = JsonSerializer.Serialize(new Dictionary<string, string>

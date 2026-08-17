@@ -157,6 +157,13 @@ internal class FakeServer : IAsyncDisposable
                 string clientId = doc.RootElement.GetProperty("payload").GetProperty("client_id").GetString()!;
                 _noise = new TestNoiseServer(SendspinIdentity.DecodePeerId(clientId), _psk, _keys);
 
+                // Both types derive a server id from the same key pair independently. They agree
+                // only because _keys is threaded through, and nothing else pins that: a change to
+                // either encoding would desynchronise the id this double reports from the one the
+                // handshake actually authenticates, and the tests would fail somewhere far away
+                // (#99).
+                Assert.Equal(ServerId, _noise.ServerId);
+
                 // The prologue binds the exact wire bytes, so Respond gets the text as received.
                 var (serverInit, msg1) = _noise.Respond(json);
                 await SendTextAsync(serverInit);
@@ -166,7 +173,9 @@ internal class FakeServer : IAsyncDisposable
 
             case "noise/handshake":
             {
-                _noise!.CompleteHandshake(json);
+                // See HandleEncryptedFrame: client/init always precedes this.
+                Assert.NotNull(_noise);
+                _noise.CompleteHandshake(json);
                 await SendEncryptedAsync("""{"type":"server/hello","payload":{"name":"fake"}}""");
                 await SendEncryptedAsync(BuildActivateJson());
                 break;
@@ -180,10 +189,12 @@ internal class FakeServer : IAsyncDisposable
     /// </summary>
     private void HandleEncryptedFrame(byte[] frame)
     {
-        if (_noise is null)
-        {
-            return;
-        }
+        // Asserted, not guarded. The host always sends client/init before any encrypted frame,
+        // so a null here means the double's own sequencing broke — and the silent return this
+        // used to do would have swallowed that, leaving a test to fail later as an unexplained
+        // missing message. The other two sites used null-forgiving `_noise!` for the same
+        // invariant; all three now state it the same way (#99).
+        Assert.NotNull(_noise);
 
         byte[] plaintext = _noise.DecryptFrame(frame);
         if (plaintext.Length == 0 || plaintext[0] != 0)
@@ -215,7 +226,9 @@ internal class FakeServer : IAsyncDisposable
 
     private Task SendEncryptedAsync(string json)
     {
-        byte[] frame = _noise!.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)]);
+        // See HandleEncryptedFrame: nothing sends encrypted before the handshake.
+        Assert.NotNull(_noise);
+        byte[] frame = _noise.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)]);
         return _ws.SendAsync(frame, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
     }
 

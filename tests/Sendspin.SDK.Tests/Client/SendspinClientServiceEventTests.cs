@@ -32,17 +32,22 @@ public class SendspinClientServiceEventTests
         """;
 
         // The encrypted handshake completes on the initial server/activate, which is also
-        // where ServerHelloReceived fires.
+        // where ServerHelloReceived fires. The activate deliberately carries a DIFFERENT role
+        // list from the hello: HandleServerActivate mirrors active_roles into
+        // LastServerHello.ActiveRoles, so with the two lists identical this assertion passed
+        // off the mirror and could not tell the mirror from hello-side parsing (#99). Only the
+        // activate's list can be observed here; the hello's own active_roles parsing is pinned
+        // by MessageSerializerTests, which is the layer that actually does it.
         connection.RaiseTextMessageReceived(helloJson);
         connection.RaiseTextMessageReceived("""
-            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1","artwork@v1"]}}
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
             """);
 
         Assert.NotNull(received);
         Assert.Equal("srv-abc", received.ServerId);
         Assert.Equal("Kitchen", received.Name);
         Assert.Equal(1, received.Version);
-        Assert.Equal(new[] { "player@v1", "artwork@v1" }, received.ActiveRoles);
+        Assert.Equal(new[] { "player@v1" }, received.ActiveRoles);
 
         Assert.NotNull(client.LastServerHello);
         Assert.Same(received, client.LastServerHello);
@@ -52,8 +57,15 @@ public class SendspinClientServiceEventTests
         Assert.Equal("Kitchen", client.ServerName);
     }
 
+    /// <summary>
+    /// Renamed from ServerHello_EventFiresBeforeHandshakeCompletes, which overstated it: the
+    /// assignment and the event fire are a whole message apart now rather than adjacent lines,
+    /// so no plausible regression puts them in the wrong order. What it does still guard is
+    /// worth keeping — a subscriber reading the scalar accessors from inside the handler sees
+    /// them populated, not the previous session's values or null (#99).
+    /// </summary>
     [Fact]
-    public void ServerHello_EventFiresBeforeHandshakeCompletes()
+    public void ServerHelloEvent_FiresWithTheScalarAccessorsAlreadySet()
     {
         var (client, connection, session) = TestClient.Create();
         using var _c = client;

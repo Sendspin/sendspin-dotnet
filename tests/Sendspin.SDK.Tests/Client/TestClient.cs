@@ -59,7 +59,18 @@ internal static class TestClient
     /// <param name="category">Category of the PSK the fake session reports as matched.</param>
     /// <param name="unpairedAccess">
     /// Advertised unpaired-access flag. Applied after <paramref name="configure"/> runs, so a
-    /// callback that replaces <see cref="SendspinClientOptions.Capabilities"/> cannot drop it.
+    /// callback that replaces <see cref="SendspinClientOptions.Capabilities"/> cannot drop it —
+    /// which <c>PairingQuiescenceTests</c> depends on, since it does exactly that.
+    /// <para>
+    /// It is applied by <b>writing to</b> that <see cref="ClientCapabilities"/> instance, not to
+    /// a copy. Pass a fresh instance from <paramref name="configure"/> (every call site does)
+    /// rather than one held in a local and shared between two <c>Create</c> calls — the second
+    /// call would otherwise turn the flag on for the first client too. Copying instead was
+    /// considered and rejected: <see cref="ClientCapabilities"/> is a class with no copy
+    /// mechanism, so it would mean either hand-mirroring twenty-odd properties — the failure
+    /// mode <see cref="SendspinClientOptions"/> was made a record to end (#95) — or changing a
+    /// public type's semantics for a test helper's benefit (#99).
+    /// </para>
     /// </param>
     /// <param name="configure">
     /// Returns the options to build the client from, given the defaults. Take a variant with
@@ -85,6 +96,13 @@ internal static class TestClient
             ILogger<SendspinClientService>? logger = null)
     {
         var connection = new FakeSendspinConnection();
+
+        // The default pairs the SENTINEL PSK bytes with whatever category is asked for, which
+        // for the LongTerm default is a combination production can never produce — a long-term
+        // PSK is a paired secret, never the sentinel. Harmless because the category is all any
+        // current test reads, and every test that derives a psk_id overrides MatchedPsk with a
+        // real one. A future test deriving a psk_id from this default would be asserting
+        // against a fiction, so give it real bytes rather than reusing this (#99).
         var session = new FakeNoiseSession
         {
             MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), category),
@@ -102,6 +120,9 @@ internal static class TestClient
 
         if (unpairedAccess)
         {
+            // Mutates whichever ClientCapabilities is in effect, which is the caller's own
+            // instance when `configure` supplied one — see this parameter's doc comment for
+            // why that is left as it is rather than copied (#99).
             options.Capabilities.UnpairedAccessEnabled = true;
         }
 
