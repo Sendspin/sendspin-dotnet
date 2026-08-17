@@ -36,6 +36,41 @@ public class MessageSerializerTests
         Assert.DoesNotContain("\"ClientTransmitted\"", json);
     }
 
+    /// <summary>
+    /// The shape a conformant encrypted server actually sends: <c>name</c> and nothing else
+    /// (messaging.md, "Server → Client: server/hello").
+    /// </summary>
+    /// <remarks>
+    /// The test below deserializes a payload carrying four more fields, and was the only
+    /// server/hello coverage there was — so nothing pinned the shape every real server sends,
+    /// and a change that made any of those fields required would have left the suite green
+    /// (#99).
+    /// </remarks>
+    [Fact]
+    public void Deserialize_ServerHello_SpecMinimalShape_ParsesCorrectly()
+    {
+        const string json = """{"type":"server/hello","payload":{"name":"Test Server"}}""";
+
+        var msg = MessageSerializer.Deserialize(json) as ServerHelloMessage;
+
+        Assert.NotNull(msg);
+        Assert.Equal("Test Server", msg.Name);
+
+        // The absent fields land on their defaults rather than failing the parse. ServerId in
+        // particular is empty here because the encrypted protocol carries it in server/init,
+        // not server/hello — see ServerHelloPayload's remarks.
+        Assert.Equal(string.Empty, msg.ServerId);
+        Assert.Empty(msg.ActiveRoles);
+        Assert.Null(msg.ConnectionReason);
+    }
+
+    /// <summary>
+    /// Tolerance for the pre-encryption payload shape. Every field here except <c>name</c> is
+    /// residue: the encrypted protocol carries <c>server_id</c> and <c>version</c> in
+    /// <c>server/init</c>, <c>active_roles</c> in <c>server/activate</c>, and has no
+    /// <c>connection_reason</c> at all. Kept because the properties are still public API and a
+    /// server that sends them must not break the parse — not because any server does (#99).
+    /// </summary>
     [Fact]
     public void Deserialize_ServerHelloMessage_ParsesCorrectly()
     {
@@ -302,6 +337,13 @@ public class MessageSerializerTests
             supportedRoles: ["player@v1"]);
 
         string json = MessageSerializer.Serialize(hello);
+
+        // Positive control first: without it every assertion below is satisfied by an empty or
+        // malformed document, and this test would pass against a serializer that produced
+        // nothing at all (#99).
+        Assert.Contains("\"type\":\"client/hello\"", json);
+        Assert.Contains("\"name\":\"test-client\"", json);
+        Assert.Contains("\"supported_roles\":[\"player@v1\"]", json);
 
         // Under encryption both travel in client/init instead.
         Assert.DoesNotContain("client_id", json);
