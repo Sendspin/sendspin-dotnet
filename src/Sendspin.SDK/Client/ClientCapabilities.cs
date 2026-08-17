@@ -172,6 +172,38 @@ public sealed class ClientCapabilities
     public string? StaticPin { get; set; }
 
     /// <summary>
+    /// Where an operator can find this device's static PIN, advertised as the <c>locations</c>
+    /// hint on the <c>static_pin</c> pair-method descriptor. Values are <c>"device"</c>
+    /// (printed on it), <c>"leaflet"</c> (in the box), and <c>"operator"</c> (they set it).
+    /// Empty by default, which omits the hint — the SDK cannot know where your secret is
+    /// printed, and a wrong hint is worse than none.
+    /// </summary>
+    /// <remarks>
+    /// Purely informational: it drives server UX copy like "check the label on the device",
+    /// and no pairing decision depends on it. <b>The SDK overrides this to
+    /// <c>["operator"]</c> once a server sets the PIN through
+    /// <c>management/set-pairing-config</c></b> — at that point the operator chose the secret
+    /// and any printed copy is stale, which is what the spec's "the client updates the hint
+    /// accordingly" requires. The new value arrives on
+    /// <see cref="PairingConfigChangedEventArgs.StaticPinLocations"/> for the app to persist
+    /// alongside the rotated PIN (#129).
+    /// </remarks>
+    public List<string> StaticPinLocations { get; set; } = new();
+
+    /// <summary>
+    /// Where an operator can find this device's Pairing PSK, advertised as the
+    /// <c>locations</c> hint on the <c>pairing_psk</c> descriptor. Same vocabulary and same
+    /// server-rotation override as <see cref="StaticPinLocations"/>; empty by default.
+    /// </summary>
+    /// <remarks>
+    /// A Pairing PSK the client mints itself (<see cref="ISendspinClient.EnsurePairingPsk"/>,
+    /// <see cref="ISendspinClient.RotatePairingPsk"/>) does <em>not</em> flip the hint: the
+    /// client generated it, so it is still found wherever the app renders it — typically the
+    /// device's own display. Only a server supplying the PSK does.
+    /// </remarks>
+    public List<string> PairingPskLocations { get; set; } = new();
+
+    /// <summary>
     /// Whether the mandatory Pairing PSK method starts enabled. Default true. Set false only
     /// to restore a server's <c>management/set-pairing-config</c> change: a server that
     /// disabled this method expects it to stay disabled across a restart, and leaving the

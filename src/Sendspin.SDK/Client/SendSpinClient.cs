@@ -136,6 +136,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _effectiveMinPinLength;
     private string? _effectiveStaticPin;
 
+    // locations hints for the two methods that carry one. Held as effective state rather than
+    // read straight off _capabilities because a server that sets the secret makes the app's
+    // declared hint wrong, and the spec requires the client to follow the secret (#129).
+    private List<string> _staticPinLocations;
+    private List<string> _pairingPskLocations;
+
     // record_mode.psk_id: the shared-PSK record admitted as the storage-exhaustion fallback.
     // Null until a server sets one; the spec's default is a pre-provisioned shared-PSK
     // record, which for an SDK is the app's to provision.
@@ -349,6 +355,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _effectiveMinPinLength);
         }
         _effectiveStaticPin = _capabilities.StaticPin;
+
+        // Copied, not aliased: these are mutated when a server rotates a secret, and the SDK
+        // does not write to the ClientCapabilities instance the app owns (see
+        // PairingConfigChangedEventArgs).
+        _staticPinLocations = [.. _capabilities.StaticPinLocations];
+        _pairingPskLocations = [.. _capabilities.PairingPskLocations];
         _recordModePskId = SeedRecordModePskId();
 
         // Usability of static_pin is evaluated live via HasUsableStaticPin, not snapshotted
@@ -1964,6 +1976,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         MinPinLength = _effectiveMinPinLength,
         StaticPin = _effectiveStaticPin,
         RecordModePskId = _recordModePskId,
+        StaticPinLocations = [.. _staticPinLocations],
+        PairingPskLocations = [.. _pairingPskLocations],
     };
 
     /// <summary>
@@ -2017,7 +2031,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var methods = new List<PairMethodDescriptor>();
         if (IsMethodEnabled("pairing_psk"))
         {
-            methods.Add(new PairMethodDescriptor { Method = "pairing_psk" });
+            methods.Add(new PairMethodDescriptor
+            {
+                Method = "pairing_psk",
+                Locations = LocationsHint(_pairingPskLocations),
+            });
         }
 
         if (CanRun("dynamic_pin"))
@@ -2032,10 +2050,47 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (CanRun("static_pin"))
         {
-            methods.Add(new PairMethodDescriptor { Method = "static_pin" });
+            methods.Add(new PairMethodDescriptor
+            {
+                Method = "static_pin",
+                Locations = LocationsHint(_staticPinLocations),
+            });
         }
 
         return methods;
+    }
+
+    /// <summary>
+    /// The <c>locations</c> hint to advertise, or null to omit the field entirely when the app
+    /// declared none. An empty array would be a positive claim that the secret can be found
+    /// nowhere; absence is the spec's way of saying "no hint" (#129).
+    /// </summary>
+    /// <remarks>
+    /// A defensive copy, because the descriptor is handed to the serializer while the source
+    /// list can still be rewritten by a concurrent <c>set-pairing-config</c>.
+    /// </remarks>
+    private static List<string>? LocationsHint(List<string> locations) =>
+        locations.Count == 0 ? null : [.. locations];
+
+    /// <summary>
+    /// Replaces a method's locations hint with <c>["operator"]</c> because a server just set
+    /// that method's secret. Returns whether it changed, so the caller can fold it into the
+    /// single PairingConfigChanged raise.
+    /// </summary>
+    /// <remarks>
+    /// A fresh list rather than a mutation in place: <see cref="LocationsHint"/> hands copies
+    /// to descriptors, but the app may also be holding the list it passed in through
+    /// <see cref="ClientCapabilities"/>, and the SDK does not write to that.
+    /// </remarks>
+    private static bool SetLocationsToOperator(ref List<string> locations)
+    {
+        if (locations is [PairMethodLocations.Operator])
+        {
+            return false;
+        }
+
+        locations = [PairMethodLocations.Operator];
+        return true;
     }
 
     /// <summary>
@@ -3130,6 +3185,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     staticPinChanged |= requestedStaticPin != _effectiveStaticPin;
                     _effectiveStaticPin = requestedStaticPin;
+
+                    // The spec's "when the secret is rotated, the client updates the hint
+                    // accordingly": the operator chose this PIN, so whatever the app declared
+                    // about a printed label no longer describes where to find it, and a server
+                    // still rendering "check the device" would send them to a stale number
+                    // (#129). Applied on every set, not only when the value differs — a server
+                    // re-sending the PIN it already set is still the operator owning it.
+                    staticPinChanged |= SetLocationsToOperator(ref _staticPinLocations);
                 }
 
                 if (requestedStaticPinEnabled is { } spe)
@@ -3143,6 +3206,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     pairingPskEnabledChanged = ppe != _pairingPskEnabled;
                     _pairingPskEnabled = ppe;
+                }
+
+                // Same rule for the Pairing PSK, and only here: a PSK this client minted for
+                // itself (EnsurePairingPsk/RotatePairingPsk) is still found wherever the app
+                // renders it, so those paths deliberately leave the hint alone.
+                if (newPairingPsk is not null)
+                {
+                    pairingPskEnabledChanged |= SetLocationsToOperator(ref _pairingPskLocations);
                 }
 
                 bool recordModeChanged = false;

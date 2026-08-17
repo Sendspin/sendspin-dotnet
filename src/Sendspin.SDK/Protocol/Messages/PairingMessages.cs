@@ -110,6 +110,44 @@ public sealed class PairMethodDescriptor
     [JsonPropertyName("min_pin_length")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? MinPinLength { get; set; }
+
+    /// <summary>
+    /// Where the operator can find this method's configured secret — <c>"device"</c> (printed
+    /// on it), <c>"leaflet"</c> (in the box), or <c>"operator"</c> (they set it themselves).
+    /// Informational, and for <c>static_pin</c> and <c>pairing_psk</c> only.
+    /// </summary>
+    /// <remarks>
+    /// Drives server UX copy such as "check the label on the device", so it has to follow the
+    /// secret: the spec requires the client to update the hint when the secret is rotated,
+    /// because a stale hint sends the operator to a label that no longer matches. See
+    /// <see cref="Client.ClientCapabilities.StaticPinLocations"/>.
+    /// </remarks>
+    [JsonPropertyName("locations")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Locations { get; set; }
+}
+
+/// <summary>
+/// The values a pair-method descriptor's <c>locations</c> hint may carry.
+/// </summary>
+/// <remarks>
+/// Constants rather than literals for the same reason as
+/// <see cref="Activities"/>: this is wire vocabulary, and a literal at a use site does not
+/// follow a change to it (#93). The hint is informational and never grounds for
+/// <c>pair/abort</c>, so an out-of-vocabulary entry does not break pairing — the SDK passes
+/// through whatever the app declares rather than policing it, as it does for
+/// <see cref="Client.ClientCapabilities.PinOutChannels"/>.
+/// </remarks>
+public static class PairMethodLocations
+{
+    /// <summary>Printed on the device itself.</summary>
+    public const string Device = "device";
+
+    /// <summary>Printed on a leaflet in the box.</summary>
+    public const string Leaflet = "leaflet";
+
+    /// <summary>Set by the operator, who therefore already knows it.</summary>
+    public const string Operator = "operator";
 }
 
 /// <summary>Starts a PIN-pairing attempt (client → server).</summary>
