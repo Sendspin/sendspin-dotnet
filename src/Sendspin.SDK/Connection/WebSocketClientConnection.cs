@@ -42,8 +42,18 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
     /// <summary>Raised when a binary message is received.</summary>
     public Action<byte[]>? OnBinary { get; set; }
 
-    /// <summary>Raised when the connection closes.</summary>
-    public Action? OnClose { get; set; }
+    /// <summary>
+    /// Raised when the connection closes, carrying the peer's close status — or <c>null</c>
+    /// when the close carried none.
+    /// </summary>
+    /// <remarks>
+    /// Null covers every abnormal end that reaches this callback: a mid-handshake TCP drop, a
+    /// keep-alive abort, and the local-teardown fallback in the receive loop's <c>finally</c>.
+    /// A subscriber that classifies a close on its status must treat null as <i>unknown</i> and
+    /// never as a normal closure — <see cref="IncomingConnection"/> read a statusless close as
+    /// the legacy-server signature for want of this parameter (#97).
+    /// </remarks>
+    public Action<WebSocketCloseStatus?>? OnClose { get; set; }
 
     /// <summary>Raised when an error occurs.</summary>
     public Action<Exception>? OnError { get; set; }
@@ -176,7 +186,8 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
                             }
                         }
 
-                        OnClose?.Invoke();
+                        // The only site with a status to report: the peer sent a Close frame.
+                        OnClose?.Invoke(result.CloseStatus);
                         return;
                     }
 
@@ -205,7 +216,10 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
             _webSocket.State == WebSocketState.Closed)
         {
             _logger?.LogDebug(ex, "WebSocket closed during receive");
-            OnClose?.Invoke();
+
+            // Abnormal: the socket aborted rather than closing, so no Close frame and no
+            // status ever arrived.
+            OnClose?.Invoke(null);
         }
         catch (Exception ex)
         {
@@ -218,7 +232,9 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
             if (_webSocket.State != WebSocketState.Closed &&
                 _webSocket.State != WebSocketState.Aborted)
             {
-                OnClose?.Invoke();
+                // The loop left without the peer closing — cancellation, or a local close that
+                // moved the socket out of Open. No peer status exists to report.
+                OnClose?.Invoke(null);
             }
         }
     }

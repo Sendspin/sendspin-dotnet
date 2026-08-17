@@ -464,6 +464,77 @@ public class HandshakeFailureTests
     }
 
     /// <summary>
+    /// The legacy signature is specifically a <b>1000</b> close with no reply, which is why the
+    /// dial path requires NormalClosure as well. A peer that goes away mid-handshake any other
+    /// way has said nothing about whether it speaks encryption, so blaming its version sends
+    /// the operator to upgrade a server that was never the problem (#97).
+    /// </summary>
+    /// <param name="abort">
+    /// The two ways a mid-handshake close arrives without a normal closure, both of which
+    /// <see cref="WebSocketClientConnection"/> routes through the same callback. False: a clean
+    /// Close frame carrying a non-1000 status (a restarting server, a draining proxy send
+    /// 1001). True: an abrupt transport-level abort, which carries no status at all — the case
+    /// that has no status to compare and so read as legacy by default.
+    /// </param>
+    [Theory]
+    [InlineData(false, "EndpointUnavailable")]
+    [InlineData(true, "no close status")]
+    public async Task IncomingConnection_DoesNotBlameLegacyServer_WhenTheCloseIsNotANormalClosure(
+        bool abort, string expectedStatus)
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var accepted = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (_, c) => accepted.TrySetResult(c);
+
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"), CancellationToken.None);
+
+        var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var logger = new CapturingLogger();
+        await using var incoming = new IncomingConnection(
+            logger, serverSideSocket, new StubFraming { IsTransportReady = false });
+
+        var disconnected = new TaskCompletionSource<bool>();
+        incoming.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+                disconnected.TrySetResult(true);
+        };
+
+        await incoming.StartAsync();
+
+        // Both arms share the legacy signature in every respect but the close status: the peer
+        // never replies, so no frame arrives and the framing raises no fatal.
+        if (abort)
+        {
+            client.Abort();
+        }
+        else
+        {
+            await client.CloseAsync(
+                WebSocketCloseStatus.EndpointUnavailable, "going away", CancellationToken.None);
+        }
+
+        await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        (LogLevel Level, string Message) warning;
+        lock (logger.Entries)
+        {
+            warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        }
+
+        // Positive control alongside the absence assertion: an incomplete handshake is still
+        // reported as a failure, and still names what it saw. A silent downgrade to the
+        // ordinary "server closed connection" at Information would otherwise pass.
+        Assert.Contains("the handshake did not complete", warning.Message);
+        Assert.Contains(expectedStatus, warning.Message);
+        Assert.DoesNotContain("does not support Sendspin encryption", warning.Message);
+    }
+
+    /// <summary>
     /// The documented Quick Start never subscribes to ConnectionStateChanged, so a permanent
     /// handshake failure that only travels on that event leaves the app with a ConnectAsync
     /// that returned normally and a first command that throws "WebSocket is not connected".
