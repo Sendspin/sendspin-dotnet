@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -104,6 +105,61 @@ public class HandshakeFailureTests
 
         var ex = Assert.IsType<SendspinHandshakeException>(final.Exception);
         Assert.Equal(HandshakeFailureKind.LegacyServer, ex.Kind);
+    }
+
+    /// <summary>
+    /// The legacy-server diagnostic is the case the whole clean break was costed on, so it
+    /// must not arrive two seconds late (#98 item 4).
+    /// </summary>
+    /// <remarks>
+    /// <c>FailPermanentlyAsync</c> runs <i>on</i> the receive loop, and the cleanup it awaits
+    /// waits for <c>_receiveTask</c> — that same loop. A task cannot await itself to
+    /// completion, so the wait could only ever end by burning its full two-second timeout,
+    /// on the one path whose entire purpose is telling the operator what went wrong. The same
+    /// self-await sits on every receive-loop-driven reconnect.
+    /// </remarks>
+    [Fact]
+    public async Task LegacyServerDiagnostic_ReachesTheApplicationPromptly()
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var accepted = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (_, c) => accepted.TrySetResult(c);
+
+        await using var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions { AutoReconnect = true, ReconnectDelayMs = 10 },
+            new StubFraming { IsTransportReady = false });
+
+        var disconnected = new TaskCompletionSource<ConnectionStateChangedEventArgs>();
+        connection.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+                disconnected.TrySetResult(e);
+        };
+
+        await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"));
+        var serverConn = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // aiosendspin < 7.0.0 answers client/init with a normal-closure close, no reply.
+        var stopwatch = Stopwatch.StartNew();
+        await serverConn.CloseAsync();
+
+        var final = await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        stopwatch.Stop();
+
+        // Positive control: this is the permanent-failure path, not some other disconnect
+        // that happens to be fast.
+        var ex = Assert.IsType<SendspinHandshakeException>(final.Exception);
+        Assert.Equal(HandshakeFailureKind.LegacyServer, ex.Kind);
+
+        // Generous against scheduling noise but far below the 2s cleanup timeout: the healthy
+        // path only has to dispose a socket, which is milliseconds.
+        Assert.True(
+            stopwatch.Elapsed < TimeSpan.FromSeconds(1),
+            $"Diagnostic took {stopwatch.ElapsedMilliseconds}ms to reach the application; "
+            + "the receive-task self-await is back.");
     }
 
     [Fact]
@@ -524,6 +580,123 @@ public class HandshakeFailureTests
         Assert.Contains("the handshake did not complete", warning.Message);
         Assert.Contains(expectedStatus, warning.Message);
         Assert.DoesNotContain("does not support Sendspin encryption", warning.Message);
+    }
+
+    /// <summary>
+    /// A permanent verdict reached while the reconnect loop is mid-attempt must still be
+    /// published (#98 items 1 and 2b).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>FailPermanentlyAsync</c> records the verdict and then bails when the connection-lost
+    /// guard is already held, leaving the holder to publish it. The reconnect loop only read
+    /// the field at the top of an iteration, so a verdict recorded after that — while the loop
+    /// sat in its delay or its dial — was skipped, and a loop that then reconnected
+    /// successfully returned as though healthy. The verdict was never published: the connection
+    /// stayed in Handshaking with no further event, and the field stayed set so the next
+    /// ordinary drop was refused a retry.
+    /// </para>
+    /// <para>
+    /// The interleaving is constructed rather than raced for. <c>StateChanged</c> is raised
+    /// synchronously from inside the reconnect loop, so a handler that blocks on the second
+    /// Handshaking holds the loop in exactly the window the bug lives in, while the newly
+    /// started receive loop — already running by then — trips a pre-transport framing fatal.
+    /// The handler waits for the Debug line FailPermanentlyAsync emits when it finds the guard
+    /// held, so the ordering is observed rather than assumed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task PermanentFailureRecordedMidReconnect_IsStillPublished()
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        // Transport-ready to begin with, so the first drop is an ordinary socket loss and takes
+        // the reconnect path. Flipped below to make the *second* connection's first inbound
+        // frame a pre-transport fatal, which is what FailPermanentlyAsync reacts to.
+        var framing = new StubFraming();
+        var logger = new CapturingLogger<SendspinConnection>();
+
+        var firstConnection = new TaskCompletionSource<WebSocketClientConnection>();
+        var dials = 0;
+        server.ClientConnected += (_, c) =>
+        {
+            if (Interlocked.Increment(ref dials) == 1)
+            {
+                firstConnection.TrySetResult(c);
+            }
+            else
+            {
+                // Any frame trips the fatal now that the stub is armed. Sent from the accept
+                // callback so it is already in flight while the reconnect loop is held below.
+                _ = c.SendAsync("{}");
+            }
+        };
+
+        // Both schedules short: the first loss is classified on the framing's mode at that
+        // moment, and pinning the test to one classification would make it fragile.
+        await using var connection = new SendspinConnection(
+            logger,
+            new ConnectionOptions
+            {
+                AutoReconnect = true,
+                ReconnectDelayMs = 50,
+                HandshakeFailureBackoffMs = 50,
+            },
+            framing);
+
+        var handshakingCount = 0;
+        var heldTheLoop = false;
+        var disconnected = new TaskCompletionSource<ConnectionStateChangedEventArgs>();
+        connection.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+            {
+                disconnected.TrySetResult(e);
+                return;
+            }
+
+            if (e.NewState != ConnectionState.Handshaking)
+                return;
+
+            // The first Handshaking is the initial connect, where no verdict can be pending;
+            // blocking there would simply hang.
+            if (Interlocked.Increment(ref handshakingCount) != 2)
+                return;
+
+            // Hold the reconnect loop between "the dial succeeded" and "check the state and
+            // return", which is the window the missing re-read left open.
+            heldTheLoop = SpinWait.SpinUntil(
+                () => logger.MessagesAt(LogLevel.Debug)
+                    .Any(m => m.Contains("permanent failure recorded", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10));
+        };
+
+        await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"));
+        var serverConn = await firstConnection.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Arm the fatal before dropping, so the reconnect's first frame trips it. IsTransportReady
+        // has to go false here too, and not merely as a side effect of the fatal: the receive
+        // loop captures the framing's mode *before* calling ProcessInbound, and routes a fatal
+        // raised in transport mode to the ordinary reconnect path instead of FailPermanentlyAsync.
+        framing.IsTransportReady = false;
+        framing.FatalOnInbound = "no matching psk";
+
+        // Abrupt teardown: an ordinary loss, so the reconnect loop runs and takes the guard.
+        await serverConn.DisposeAsync();
+
+        var final = await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(20));
+
+        // Positive control on the construction itself: without this the test could pass because
+        // the verdict was published by the ordinary FailPermanentlyAsync path, never exercising
+        // the record-and-bail handoff this test exists for.
+        Assert.True(heldTheLoop,
+            "The reconnect loop was never held while a permanent failure was recorded, so the "
+            + "interleaving under test did not occur.");
+
+        var ex = Assert.IsType<SendspinHandshakeException>(final.Exception);
+        Assert.Equal(HandshakeFailureKind.HandshakeRejected, ex.Kind);
+        Assert.Contains("no matching psk", ex.Message);
     }
 
     /// <summary>
