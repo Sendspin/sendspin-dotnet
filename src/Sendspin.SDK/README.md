@@ -187,7 +187,8 @@ back to your `ClientCapabilities` instance, so it lives in memory only: subscrib
 
 Every setting the event reports has a `ClientCapabilities` property to seed it back on the next
 startup — `UnpairedAccessEnabled`, `MinPinLength`, `StaticPin`, `PairingPskEnabled`,
-`DynamicPinEnabled`, `StaticPinEnabled` and `RecordModePskId`. Persist them when the event
+`DynamicPinEnabled`, `StaticPinEnabled`, `RecordModePskId`, and the two `locations` hints
+below. Persist them when the event
 fires, reapply them to the `ClientCapabilities` you construct the client with, and the
 server's change survives a restart. `PairingPskReplaced` is not one of those settings — it's a
 staleness signal, not a value to persist: when it's true, any pairing token you already handed
@@ -200,6 +201,34 @@ the server as absent and can never be re-enabled, whereas a listed-but-disabled 
 reports `enabled: false` and the server can turn it back on. `RecordModePskId` is ignored
 unless it still names a shared-PSK record in your store, since a server may have removed that
 record while your app was down.
+
+### Telling servers where the operator can find a secret
+
+`StaticPinLocations` and `PairingPskLocations` advertise the spec's `locations` hint on those
+two pair-method descriptors: where an operator should look for the configured secret —
+`"device"` (printed on it), `"leaflet"` (in the box), or `"operator"` (they set it themselves).
+It drives server UX copy such as *"check the label on the device"*, and nothing about pairing
+depends on it.
+
+```csharp
+var caps = new ClientCapabilities
+{
+    PinPairingMethods = { "static_pin" },
+    StaticPin = "12345678",
+    StaticPinLocations = { PairMethodLocations.Device },
+};
+```
+
+Both default to empty, which omits the hint entirely — the SDK cannot know where your secret
+is printed, and a wrong hint is worse than none.
+
+**The SDK overrides the hint to `["operator"]` once a server sets that method's secret**
+through `management/set-pairing-config`, because the operator has chosen it and any printed
+copy is now stale — this is the spec's *"when the secret is rotated, the client updates the
+hint accordingly"*. A Pairing PSK your own client mints (`EnsurePairingPsk`,
+`RotatePairingPsk`) does **not** flip it: the client generated that one, so it is still found
+wherever your app renders it. The new value arrives on `PairingConfigChanged` beside the
+rotated secret, so persist the two together.
 
 ## Architecture
 
