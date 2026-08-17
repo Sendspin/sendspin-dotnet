@@ -337,7 +337,7 @@ public class HandshakeFailureTests
 
         var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        var logger = new CapturingLogger();
+        var logger = new CapturingLogger<IncomingConnection>();
         await using var incoming = new IncomingConnection(
             logger,
             serverSideSocket,
@@ -358,11 +358,7 @@ public class HandshakeFailureTests
 
         await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        (LogLevel Level, string Message) warning;
-        lock (logger.Entries)
-        {
-            warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
-        }
+        var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
 
         Assert.Contains(expected, warning.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -388,7 +384,7 @@ public class HandshakeFailureTests
 
         var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        var logger = new CapturingLogger();
+        var logger = new CapturingLogger<IncomingConnection>();
         await using var incoming = new IncomingConnection(
             logger, serverSideSocket, new StubFraming { IsTransportReady = false });
 
@@ -406,11 +402,7 @@ public class HandshakeFailureTests
 
         await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        (LogLevel Level, string Message) warning;
-        lock (logger.Entries)
-        {
-            warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
-        }
+        var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
 
         Assert.Contains("does not support Sendspin encryption", warning.Message);
         Assert.Contains("aiosendspin >= 7.0.0", warning.Message);
@@ -434,7 +426,7 @@ public class HandshakeFailureTests
 
         var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        var logger = new CapturingLogger();
+        var logger = new CapturingLogger<IncomingConnection>();
         await using var incoming = new IncomingConnection(
             logger, serverSideSocket, new StubFraming { IsTransportReady = false });
 
@@ -457,10 +449,14 @@ public class HandshakeFailureTests
         await client.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
         await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        lock (logger.Entries)
-        {
-            Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Warning);
-        }
+        Assert.DoesNotContain(logger.Entries, e => e.Level == LogLevel.Warning);
+
+        // Positive control for the assertion above: "no warning was logged" is equally
+        // satisfied by a logger that captured nothing and by a subject that said nothing, so
+        // pin what this case should produce instead — the ordinary close, at Information.
+        Assert.Contains(
+            logger.MessagesAt(LogLevel.Information),
+            m => m.Contains("Server closed connection", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -493,7 +489,7 @@ public class HandshakeFailureTests
 
         var serverSideSocket = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        var logger = new CapturingLogger();
+        var logger = new CapturingLogger<IncomingConnection>();
         await using var incoming = new IncomingConnection(
             logger, serverSideSocket, new StubFraming { IsTransportReady = false });
 
@@ -520,11 +516,7 @@ public class HandshakeFailureTests
 
         await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        (LogLevel Level, string Message) warning;
-        lock (logger.Entries)
-        {
-            warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
-        }
+        var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
 
         // Positive control alongside the absence assertion: an incomplete handshake is still
         // reported as a failure, and still names what it saw. A silent downgrade to the
@@ -581,26 +573,4 @@ public class HandshakeFailureTests
         Assert.Equal(HandshakeFailureKind.LegacyServer, ex.Kind);
     }
 
-    /// <summary>Captures log calls so tests can assert on the classified message text.</summary>
-    private sealed class CapturingLogger : ILogger<IncomingConnection>
-    {
-        public List<(LogLevel Level, string Message)> Entries { get; } = new();
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(
-            LogLevel logLevel,
-            EventId eventId,
-            TState state,
-            Exception? exception,
-            Func<TState, Exception?, string> formatter)
-        {
-            lock (Entries)
-            {
-                Entries.Add((logLevel, formatter(state, exception)));
-            }
-        }
-    }
 }
