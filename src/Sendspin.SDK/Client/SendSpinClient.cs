@@ -32,6 +32,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // of the per-connection state at handshake, so a reconnect never starts inside the window.
     private bool _pairingActivationActive;
     private readonly SourceStreamPipeline? _sourcePipeline;
+
+    // Task of the most recently dispatched source command; see LastSourceCommandTask (#135).
+    private Task _lastSourceCommandTask = Task.CompletedTask;
     private readonly IAudioCaptureDevice? _captureDevice;
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
@@ -198,6 +201,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// file (e.g. <c>Connection.Noise.SendspinIdentity</c>).
     /// </summary>
     internal ISendspinConnection ClientConnection => _connection;
+
+    /// <summary>
+    /// The task of the most recently dispatched <c>source</c> command, completing with that
+    /// command's own execution (test-only introspection). <see cref="Task.CompletedTask"/>
+    /// before the first one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>SourceStreamPipeline.HandleCommandAsync</c> returns exactly the signal a test needs,
+    /// and <see cref="HandleServerCommand"/> discards it — correctly, since nothing in
+    /// production waits on a source command. Without this a test could only sleep and hope.
+    /// </para>
+    /// <para>
+    /// Sleeping is worst precisely where it matters most. The pipeline chains commands, and
+    /// once the chain has passed through a channel-draining command — any <c>stop</c>, or the
+    /// per-connection reset, both of which await the consumer task — the next command's
+    /// continuation no longer resumes inline. A synchronous assertion after that seam passes
+    /// whether or not the behaviour under test is correct, and a fixed sleep only widens the
+    /// window it passes in: under CI load it degrades into "the bug did not finish in time"
+    /// rather than failing. Polling cannot substitute, because these are assertions of an
+    /// absence — you cannot poll for something never happening (#135).
+    /// </para>
+    /// </remarks>
+    internal Task LastSourceCommandTask => Volatile.Read(ref _lastSourceCommandTask);
 
     /// <inheritdoc />
     public ServerHelloPayload? LastServerHello { get; private set; }
@@ -3800,7 +3827,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (message.Payload.Source is { } sourceCommand && _sourcePipeline is not null)
         {
-            _sourcePipeline.HandleCommandAsync(sourceCommand.Command).SafeFireAndForget(_logger);
+            // Published before the fire-and-forget so a test can await this command instead of
+            // guessing a timeout; see LastSourceCommandTask (#135).
+            var dispatched = _sourcePipeline.HandleCommandAsync(sourceCommand.Command);
+            Volatile.Write(ref _lastSourceCommandTask, dispatched);
+            dispatched.SafeFireAndForget(_logger);
         }
 
         if (message.Payload.Player is null)

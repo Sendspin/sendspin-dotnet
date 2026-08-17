@@ -297,10 +297,11 @@ public class SendspinClientServiceSourceTests
         // the finding describes.
         connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
 
-        // The source command dispatch is fire-and-forget (HandleServerCommand ->
-        // SafeFireAndForget), so give a wrongly-honoured start ample time to actually open
-        // the capture device before asserting it never did.
-        await Task.Delay(300);
+        // The dispatch is fire-and-forget, and the command chain has just been through the
+        // per-connection reset, which awaits the consumer task — so this start's continuation
+        // does not resume inline and a bare assertion here would pass vacuously. Awaiting the
+        // command itself is exact where a sleep was a guess (#135).
+        await client.LastSourceCommandTask;
         Assert.False(capture.Capturing,
             "streaming must not resume from a stale LastServerHello.ActiveRoles before this session's own server/hello, let alone its activate");
     }
@@ -346,9 +347,8 @@ public class SendspinClientServiceSourceTests
 
         connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
 
-        // Fire-and-forget dispatch again: give a wrongly-honoured start ample time to
-        // actually open the capture device before asserting it never did.
-        await Task.Delay(300);
+        // Same seam as the test above: await the dispatched command rather than sleeping for it.
+        await client.LastSourceCommandTask;
         Assert.False(capture.Capturing,
             "streaming must not resume from a stale LastServerHello.ActiveRoles after an in-band re-key with no new activate");
     }
