@@ -242,7 +242,7 @@ public class SendspinClientServicePairingTests
 
     /// <summary>
     /// Builds a client whose Noise session is keyed by the given PSK category, with an
-    /// optional record store. The spec admits Sentinel + {pairing} because the PIN
+    /// optional record store. The spec admits Sentinel + {pairing} because the pairing code
     /// methods authenticate via CPace there — but pairing_psk specifically requires a
     /// session already keyed by the Pairing PSK.
     /// </summary>

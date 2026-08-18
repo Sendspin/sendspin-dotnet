@@ -385,17 +385,17 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Raised when a server changes this client's pairing configuration via
     /// <c>management/set-pairing-config</c> — any pairing method enabled, disabled, or
-    /// reconfigured (min PIN length, static PIN, record-mode fallback), unpaired access
+    /// reconfigured (min pairing code length, static pairing code, record-mode fallback), unpaired access
     /// changed, the stored Pairing PSK replaced, or any combination of these — or removes
     /// the stored Pairing record via <c>management/remove-record</c>. The SDK applies the
     /// change to its own effective state — never to the <see cref="ClientCapabilities"/>
     /// instance the app owns — so this state lives in memory only. Every setting the event
     /// reports has a <see cref="ClientCapabilities"/> property to reapply on the next startup:
     /// <see cref="ClientCapabilities.UnpairedAccessEnabled"/>,
-    /// <see cref="ClientCapabilities.MinPinLength"/>, <see cref="ClientCapabilities.StaticPin"/>,
+    /// <see cref="ClientCapabilities.MinPairingCodeLength"/>, <see cref="ClientCapabilities.StaticPairingCode"/>,
     /// <see cref="ClientCapabilities.PairingPskEnabled"/>,
-    /// <see cref="ClientCapabilities.DynamicPinEnabled"/>,
-    /// <see cref="ClientCapabilities.StaticPinEnabled"/> and
+    /// <see cref="ClientCapabilities.DynamicPairingCodeEnabled"/>,
+    /// <see cref="ClientCapabilities.StaticPairingCodeEnabled"/> and
     /// <see cref="ClientCapabilities.RecordModePskId"/>. Persist them and reapply them at
     /// construction, and the server's change survives a restart.
     /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is not one of those
@@ -408,7 +408,7 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 
     /// <summary>
-    /// Raised when a Pairing PSK or PIN pairing exchange completes, with the paired
+    /// Raised when a Pairing PSK or pairing code exchange completes, with the paired
     /// server id. Fires once per completed attempt.
     /// </summary>
     event EventHandler<string>? PairingCompleted;

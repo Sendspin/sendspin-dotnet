@@ -5,7 +5,7 @@
 // Usage: InteropClient <scenario> <port> [secret]
 //   unpaired    connect for playback over unpaired access
 //   pairing     full Pairing PSK round-trip; secret = pairing PSK as hex
-//   static-pin  full static-PIN round-trip; secret = the 8-digit PIN
+//   static-pin  full static-pairing code round-trip; secret = the 8-digit pairing code
 //   source      stream captured PCM through the source@v1 role
 using System.Text.Json;
 using Sendspin.SDK.Audio.Source;
@@ -48,8 +48,8 @@ var caps = new ClientCapabilities
 
 if (scenario == "static-pin")
 {
-    caps.PinPairingMethods.Add("static_pin");
-    caps.StaticPin = secret;
+    caps.PairingCodeMethods.Add("static_pin");
+    caps.StaticPairingCode = secret;
 }
 
 if (scenario == "source")
@@ -70,8 +70,8 @@ await using var host = new SendspinHostService(
         PairingRecordStore = records,
         PairingWindow = window,
         // The failure counter has to persist for the method to be offered at all.
-        PinLockoutStore = scenario == "static-pin"
-            ? new FilePinLockoutStore(Path.Combine(Path.GetTempPath(), $"interop-lockout-{Guid.NewGuid():N}.json"))
+        PairingCodeLockoutStore = scenario == "static-pin"
+            ? new FilePairingCodeLockoutStore(Path.Combine(Path.GetTempPath(), $"interop-lockout-{Guid.NewGuid():N}.json"))
             : null,
         CaptureDevice = scenario == "source" ? new ToneCaptureDevice() : null,
         SourceEncoderFactory = scenario == "source" ? new PcmEncoderFactory() : null,

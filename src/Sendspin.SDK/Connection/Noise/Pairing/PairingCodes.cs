@@ -5,11 +5,11 @@ using System.Text;
 namespace Sendspin.SDK.Connection.Noise.Pairing;
 
 /// <summary>
-/// Sendspin PIN-pairing constructions on top of <see cref="CPace"/>, per the spec's
-/// Pairing section: PIN derivation, commit/reveal binding, the CPace session id, and
+/// Sendspin pairing code constructions on top of <see cref="CPace"/>, per the spec's
+/// Pairing section: pairing code derivation, commit/reveal binding, the CPace session id, and
 /// PSK wrapping.
 /// </summary>
-internal static class PinPairing
+internal static class PairingCodes
 {
     /// <summary>CPace associated data for the server (role A).</summary>
     internal static readonly byte[] AdServer = "server"u8.ToArray();
@@ -31,7 +31,7 @@ internal static class PinPairing
         return sid;
     }
 
-    /// <summary>The dynamic-PIN commitment: <c>SHA-256("sendspin-pair-commit-v1" || nonce_B)</c>.</summary>
+    /// <summary>The dynamic-pairing code commitment: <c>SHA-256("sendspin-pair-commit-v1" || nonce_B)</c>.</summary>
     internal static byte[] CommitB(ReadOnlySpan<byte> nonceB)
     {
         byte[] input = new byte[23 + nonceB.Length];
@@ -41,10 +41,10 @@ internal static class PinPairing
     }
 
     /// <summary>
-    /// Derives the dynamic PIN: <c>SHA-256("sendspin-pin-derive-v1" || h || nonce_A ||
+    /// Derives the dynamic pairing code: <c>SHA-256("sendspin-pin-derive-v1" || h || nonce_A ||
     /// nonce_B)</c> as an unsigned big-endian integer mod 10^L, zero-padded to L digits.
     /// </summary>
-    internal static string DerivePin(
+    internal static string DerivePairingCode(
         ReadOnlySpan<byte> handshakeHash, ReadOnlySpan<byte> nonceA, ReadOnlySpan<byte> nonceB, int length)
     {
         byte[] input = new byte[22 + handshakeHash.Length + nonceA.Length + nonceB.Length];
@@ -86,10 +86,10 @@ internal static class PinPairing
 }
 
 /// <summary>
-/// Persists per-method PIN-pairing failure counters (spec: escalates to gesture-gating at 10,
+/// Persists per-method pairing code failure counters (spec: escalates to gesture-gating at 10,
 /// counters survive reboots, not partitioned by server).
 /// </summary>
-public interface IPinLockoutStore
+public interface IPairingCodeLockoutStore
 {
     /// <summary>The failure counter for a method ('static_pin' or 'dynamic_pin').</summary>
     int GetFailures(string method);
@@ -99,7 +99,7 @@ public interface IPinLockoutStore
 }
 
 /// <summary>In-memory lockout store (counters do not survive restarts; supply a persistent implementation in production).</summary>
-public sealed class InMemoryPinLockoutStore : IPinLockoutStore
+public sealed class InMemoryPairingCodeLockoutStore : IPairingCodeLockoutStore
 {
     private readonly Dictionary<string, int> _failures = new();
 

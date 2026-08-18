@@ -14,12 +14,12 @@ public class PairingAttemptTimeoutTests
     private static readonly TimeSpan Short = TimeSpan.FromMilliseconds(250);
 
     [Fact]
-    public async Task PinAttempt_ThatStalls_AbortsWithAttemptTimeout()
+    public async Task PairingCodeAttempt_ThatStalls_AbortsWithAttemptTimeout()
     {
         var window = new PairingWindow();
         window.Open();
         await using var h = await PairingHarness.StartAsync(
-            staticPin: "12345678", window: window, attemptTimeout: Short);
+            staticPairingCode: "12345678", window: window, attemptTimeout: Short);
 
         h.SendPairingActivate(method: "static_pin");
         await h.NextMessageAsync<ClientPairInitMessage>();
@@ -35,7 +35,7 @@ public class PairingAttemptTimeoutTests
         // pair-pending precedes an attempt and does not start it, so a client waiting on a
         // gesture must not abort itself.
         await using var h = await PairingHarness.StartAsync(
-            staticPin: "12345678", window: new PairingWindow(), attemptTimeout: Short);
+            staticPairingCode: "12345678", window: new PairingWindow(), attemptTimeout: Short);
 
         h.SendPairingActivate(method: "static_pin");
         await h.NextMessageAsync<ClientPairPendingMessage>();
@@ -73,10 +73,10 @@ public class PairingAttemptTimeoutTests
         var window = new PairingWindow();
         window.Open();
         await using var h = await PairingHarness.StartAsync(
-            staticPin: "12345678", window: window, attemptTimeout: Short);
+            staticPairingCode: "12345678", window: window, attemptTimeout: Short);
 
         h.SendPairingActivate(method: "static_pin");
-        await h.CompleteStaticPinPairingAsync();
+        await h.CompleteStaticPairingCodeAsync();
 
         await Task.Delay(Short + Short);
         Assert.Empty(h.SentOfType<PairAbortMessage>());

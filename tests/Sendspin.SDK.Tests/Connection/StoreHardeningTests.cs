@@ -82,7 +82,7 @@ public sealed class StoreHardeningTests : IDisposable
         File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
 
         Assert.Null(Record.Exception(() => new FilePairingRecordStore(records, NullLogger.Instance)));
-        Assert.Null(Record.Exception(() => new FilePinLockoutStore(lockouts, NullLogger.Instance)));
+        Assert.Null(Record.Exception(() => new FilePairingCodeLockoutStore(lockouts, NullLogger.Instance)));
     }
 
     [Fact]
@@ -118,7 +118,7 @@ public sealed class StoreHardeningTests : IDisposable
         }
 
         string path = Path.Combine(_dir, "lockout.json");
-        var store = new FilePinLockoutStore(path, NullLogger.Instance);
+        var store = new FilePairingCodeLockoutStore(path, NullLogger.Instance);
         store.SetFailures("dynamic_pin", 3);
 
         File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
@@ -135,7 +135,7 @@ public sealed class StoreHardeningTests : IDisposable
                 _dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
-        Assert.Equal(3, new FilePinLockoutStore(path, NullLogger.Instance).GetFailures("dynamic_pin"));
+        Assert.Equal(3, new FilePairingCodeLockoutStore(path, NullLogger.Instance).GetFailures("dynamic_pin"));
     }
 
     [Fact]

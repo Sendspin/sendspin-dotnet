@@ -22,42 +22,42 @@ public sealed class PairingConfigChangedEventArgs : EventArgs
     public bool PairingPskEnabled { get; init; }
 
     /// <summary>The effective <c>dynamic_pin</c> enabled setting after the change.</summary>
-    public bool DynamicPinEnabled { get; init; }
+    public bool DynamicPairingCodeEnabled { get; init; }
 
     /// <summary>The effective <c>static_pin</c> enabled setting after the change.</summary>
-    public bool StaticPinEnabled { get; init; }
+    public bool StaticPairingCodeEnabled { get; init; }
 
-    /// <summary>The effective minimum PIN length after the change.</summary>
-    public int MinPinLength { get; init; }
+    /// <summary>The effective minimum pairing code length after the change.</summary>
+    public int MinPairingCodeLength { get; init; }
 
     /// <summary>
-    /// The effective static PIN after the change, or null if none is configured. This is a
+    /// The effective static pairing code after the change, or null if none is configured. This is a
     /// secret: the app is expected to store it securely (the same expectation as the Pairing
     /// PSK), and it must never be logged. It is carried here — unlike
     /// <c>management/get-pairing-config</c>, which never returns a configured secret — because
-    /// without it the app cannot persist a PIN the server just rotated.
+    /// without it the app cannot persist a pairing code the server just rotated.
     /// </summary>
-    public string? StaticPin { get; init; }
+    public string? StaticPairingCode { get; init; }
 
     /// <summary>The effective <c>record_mode.psk_id</c> after the change, or null if unset.</summary>
     public string? RecordModePskId { get; init; }
 
     /// <summary>
     /// The effective <c>static_pin</c> <c>locations</c> hint after the change. Becomes
-    /// <c>["operator"]</c> once a server sets the PIN, since the operator then owns the secret
+    /// <c>["operator"]</c> once a server sets the pairing code, since the operator then owns the secret
     /// and any printed copy is stale.
     /// </summary>
     /// <remarks>
-    /// Carried for the same reason as <see cref="StaticPin"/>: the app persists the rotated
+    /// Carried for the same reason as <see cref="StaticPairingCode"/>: the app persists the rotated
     /// secret, and without the hint beside it the next start would re-advertise the factory
-    /// location for a PIN that is no longer the factory's. Seed
-    /// <see cref="ClientCapabilities.StaticPinLocations"/> from this on restart (#129).
+    /// location for a pairing code that is no longer the factory's. Seed
+    /// <see cref="ClientCapabilities.StaticPairingCodeLocations"/> from this on restart (#129).
     /// </remarks>
-    public IReadOnlyList<string> StaticPinLocations { get; init; } = [];
+    public IReadOnlyList<string> StaticPairingCodeLocations { get; init; } = [];
 
     /// <summary>
     /// The effective <c>pairing_psk</c> <c>locations</c> hint after the change. Same rule as
-    /// <see cref="StaticPinLocations"/>, and likewise only a server-supplied PSK flips it — a
+    /// <see cref="StaticPairingCodeLocations"/>, and likewise only a server-supplied PSK flips it — a
     /// PSK this client minted does not.
     /// </summary>
     public IReadOnlyList<string> PairingPskLocations { get; init; } = [];

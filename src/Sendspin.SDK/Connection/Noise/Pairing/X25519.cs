@@ -7,7 +7,7 @@ namespace Sendspin.SDK.Connection.Noise.Pairing;
 /// </summary>
 /// <remarks>
 /// Pure managed implementation (BigInteger Montgomery ladder). NOT constant-time — the
-/// PIN pairing flows use it for one-shot interactive PAKE runs where the secrets are
+/// pairing code flows use it for one-shot interactive PAKE runs where the secrets are
 /// per-session ephemerals; do not reuse it for long-lived static keys.
 /// </remarks>
 internal static class X25519

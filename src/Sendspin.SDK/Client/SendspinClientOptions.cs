@@ -54,26 +54,26 @@ public sealed record SendspinClientOptions
     public IStaticDelayStore? StaticDelayStore { get; init; }
 
     /// <summary>
-    /// Failure counter persistence for the PIN pairing methods. <b>Required</b> if
-    /// <see cref="ClientCapabilities.PinPairingMethods"/> is non-empty: without a store the
+    /// Failure counter persistence for the pairing code methods. <b>Required</b> if
+    /// <see cref="ClientCapabilities.PairingCodeMethods"/> is non-empty: without a store the
     /// counter cannot survive a restart, so a method could never escalate to gesture-gating.
     /// Rather than grant unlimited, ungated attempts, the SDK withholds the method — it is
     /// absent from <c>supported_pair_methods</c> in <c>client/hello</c>, reported
     /// <c>enabled: false</c> by <c>management/get-pairing-config</c>, and any activation naming
     /// it is answered with <c>pair/abort</c> <c>method_not_supported</c>.
-    /// <see cref="Connection.Noise.Pairing.FilePinLockoutStore"/> is provided, and takes an
+    /// <see cref="Connection.Noise.Pairing.FilePairingCodeLockoutStore"/> is provided, and takes an
     /// optional <c>ILogger</c> so a corrupt counter file is not discarded silently.
     /// </summary>
-    public IPinLockoutStore? PinLockoutStore { get; init; }
+    public IPairingCodeLockoutStore? PairingCodeLockoutStore { get; init; }
 
     /// <summary>
-    /// Presents a derived dynamic PIN to the operator through the app's out-channel (display,
+    /// Presents a derived dynamic pairing code to the operator through the app's out-channel (display,
     /// speaker) so it can be entered into the server. Required when <c>"dynamic_pin"</c> is
-    /// offered in <see cref="ClientCapabilities.PinPairingMethods"/>; pairing fails closed
+    /// offered in <see cref="ClientCapabilities.PairingCodeMethods"/>; pairing fails closed
     /// without it. Awaited before the client proceeds, so a slow presenter delays pairing
     /// rather than racing it.
     /// </summary>
-    public Func<PinPresentation, CancellationToken, ValueTask>? PresentPinAsync { get; init; }
+    public Func<PairingCodePresentation, CancellationToken, ValueTask>? PresentPairingCodeAsync { get; init; }
 
     /// <summary>Capture device for the <c>source@v1</c> role.</summary>
     public IAudioCaptureDevice? CaptureDevice { get; init; }
@@ -83,8 +83,8 @@ public sealed record SendspinClientOptions
 
     /// <summary>
     /// The device's pairing window, shared by every connection this application runs.
-    /// <b>Required</b> to complete any gesture-gated pairing attempt: static PIN always, and
-    /// dynamic PIN once the method is escalated or the session's PIN is shorter than 6 digits.
+    /// <b>Required</b> to complete any gesture-gated pairing attempt: static pairing code always, and
+    /// dynamic pairing code once the method is escalated or the session's pairing code is shorter than 6 digits.
     /// A null window is treated as permanently closed, so gated attempts stay pending — the
     /// fail-closed direction. Open it from the application's operator gesture.
     /// </summary>

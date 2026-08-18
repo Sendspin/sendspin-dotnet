@@ -144,18 +144,18 @@ public sealed class ClientCapabilities
     public SourceRoleSupport? SourceRoleSupport { get; set; }
 
     /// <summary>
-    /// PIN pairing methods this client offers in addition to the mandatory Pairing PSK
+    /// Pairing code methods this client offers in addition to the mandatory Pairing PSK
     /// method, in the encrypted protocol. Empty by default (Pairing PSK only). Add
-    /// "dynamic_pin" and/or "static_pin". Dynamic PIN requires
-    /// <see cref="SendspinClientOptions.PresentPinAsync"/>; without it the method is refused.
+    /// "dynamic_pin" and/or "static_pin". Dynamic pairing code requires
+    /// <see cref="SendspinClientOptions.PresentPairingCodeAsync"/>; without it the method is refused.
     /// </summary>
-    public List<string> PinPairingMethods { get; set; } = new();
+    public List<string> PairingCodeMethods { get; set; } = new();
 
-    /// <summary>Shortest dynamic PIN length in digits this client accepts (4-12). Default 6.</summary>
-    public int MinPinLength { get; set; } = 6;
+    /// <summary>Shortest dynamic pairing code length in digits this client accepts (4-12). Default 6.</summary>
+    public int MinPairingCodeLength { get; set; } = 6;
 
     /// <summary>
-    /// Out-channels through which the dynamic PIN is conveyed to the operator
+    /// Out-channels through which the dynamic pairing code is conveyed to the operator
     /// (informational hint: "display" or "speaker"). Default ["display"].
     /// </summary>
     /// <remarks>
@@ -163,16 +163,16 @@ public sealed class ClientCapabilities
     /// hint is informational and never grounds for <c>pair/abort</c>, so an out-of-vocabulary
     /// entry does not break pairing — but it is no longer a value the spec defines.
     /// </remarks>
-    public List<string> PinOutChannels { get; set; } = new() { "display" };
+    public List<string> PairingCodeOutChannels { get; set; } = new() { "display" };
 
     /// <summary>
-    /// For static PIN: the device-specific fixed PIN (8 digits). Required if
+    /// For static pairing code: the device-specific fixed pairing code (8 digits). Required if
     /// "static_pin" is offered.
     /// </summary>
-    public string? StaticPin { get; set; }
+    public string? StaticPairingCode { get; set; }
 
     /// <summary>
-    /// Where an operator can find this device's static PIN, advertised as the <c>locations</c>
+    /// Where an operator can find this device's static pairing code, advertised as the <c>locations</c>
     /// hint on the <c>static_pin</c> pair-method descriptor. Values are <c>"device"</c>
     /// (printed on it), <c>"leaflet"</c> (in the box), and <c>"operator"</c> (they set it).
     /// Empty by default, which omits the hint — the SDK cannot know where your secret is
@@ -181,19 +181,19 @@ public sealed class ClientCapabilities
     /// <remarks>
     /// Purely informational: it drives server UX copy like "check the label on the device",
     /// and no pairing decision depends on it. <b>The SDK overrides this to
-    /// <c>["operator"]</c> once a server sets the PIN through
+    /// <c>["operator"]</c> once a server sets the pairing code through
     /// <c>management/set-pairing-config</c></b> — at that point the operator chose the secret
     /// and any printed copy is stale, which is what the spec's "the client updates the hint
     /// accordingly" requires. The new value arrives on
-    /// <see cref="PairingConfigChangedEventArgs.StaticPinLocations"/> for the app to persist
-    /// alongside the rotated PIN (#129).
+    /// <see cref="PairingConfigChangedEventArgs.StaticPairingCodeLocations"/> for the app to persist
+    /// alongside the rotated pairing code (#129).
     /// </remarks>
-    public List<string> StaticPinLocations { get; set; } = new();
+    public List<string> StaticPairingCodeLocations { get; set; } = new();
 
     /// <summary>
     /// Where an operator can find this device's Pairing PSK, advertised as the
     /// <c>locations</c> hint on the <c>pairing_psk</c> descriptor. Same vocabulary and same
-    /// server-rotation override as <see cref="StaticPinLocations"/>; empty by default.
+    /// server-rotation override as <see cref="StaticPairingCodeLocations"/>; empty by default.
     /// </summary>
     /// <remarks>
     /// A Pairing PSK the client mints itself (<see cref="ISendspinClient.EnsurePairingPsk"/>,
@@ -219,24 +219,24 @@ public sealed class ClientCapabilities
 
     /// <summary>
     /// Whether <c>"dynamic_pin"</c> starts enabled, when it is listed in
-    /// <see cref="PinPairingMethods"/>. Default true, so listing the method is enough to
+    /// <see cref="PairingCodeMethods"/>. Default true, so listing the method is enough to
     /// offer it. Ignored when the method is not listed.
     /// </summary>
     /// <remarks>
-    /// Distinct from removing the method from <see cref="PinPairingMethods"/>, which means
+    /// Distinct from removing the method from <see cref="PairingCodeMethods"/>, which means
     /// <em>not implemented</em>. A disabled-but-implemented method still reports itself to a
     /// managing server with <c>enabled: false</c> and can be turned back on with
     /// <c>set-pairing-config</c>; an unimplemented one is omitted entirely and can never be
     /// re-enabled.
     /// </remarks>
-    public bool DynamicPinEnabled { get; set; } = true;
+    public bool DynamicPairingCodeEnabled { get; set; } = true;
 
     /// <summary>
     /// Whether <c>"static_pin"</c> starts enabled, when it is listed in
-    /// <see cref="PinPairingMethods"/>. Default true. See
-    /// <see cref="DynamicPinEnabled"/> for why this is not the same as omitting the method.
+    /// <see cref="PairingCodeMethods"/>. Default true. See
+    /// <see cref="DynamicPairingCodeEnabled"/> for why this is not the same as omitting the method.
     /// </summary>
-    public bool StaticPinEnabled { get; set; } = true;
+    public bool StaticPairingCodeEnabled { get; set; } = true;
 
     /// <summary>
     /// The shared-PSK record this client falls back to when its stored-pubkey record space

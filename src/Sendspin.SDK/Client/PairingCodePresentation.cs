@@ -1,20 +1,20 @@
 namespace Sendspin.SDK.Client;
 
 /// <summary>
-/// A dynamic pairing PIN to present to the operator, with the server's language hint.
+/// A dynamic pairing pairing code to present to the operator, with the server's language hint.
 /// </summary>
-/// <param name="Pin">The derived PIN, exactly the session's <c>pin_length</c> digits.</param>
+/// <param name="PairingCode">The derived pairing code, exactly the session's <c>pin_length</c> digits.</param>
 /// <param name="Languages">
 /// BCP 47 tags in descending operator preference from the activation, or null when the server
 /// sent none. Informational: emitting in another language is never a protocol error. Match
 /// with RFC 4647 Lookup against the languages the application can actually speak, falling back
 /// to its own default when nothing matches.
 /// </param>
-public sealed record PinPresentation(string Pin, IReadOnlyList<string>? Languages)
+public sealed record PairingCodePresentation(string PairingCode, IReadOnlyList<string>? Languages)
 {
     /// <summary>
-    /// Group sizes the spec recommends for each PIN length, indexed by length. Entries below
-    /// index 4 are unreachable: <c>min_pin_length</c> is bounded to 4-12, and the PIN is derived
+    /// Group sizes the spec recommends for each pairing code length, indexed by length. Entries below
+    /// index 4 are unreachable: <c>min_pin_length</c> is bounded to 4-12, and the pairing code is derived
     /// at the negotiated length.
     /// </summary>
     /// <remarks>
@@ -38,15 +38,15 @@ public sealed record PinPresentation(string Pin, IReadOnlyList<string>? Language
     ];
 
     /// <summary>
-    /// <see cref="Pin"/> split into the groups the spec recommends for display and for spoken
-    /// emission (read the digits of each group, pausing between groups). For a 6-digit PIN this
-    /// is two groups of 3; for an 8-digit static PIN, two groups of 4.
+    /// <see cref="PairingCode"/> split into the groups the spec recommends for display and for spoken
+    /// emission (read the digits of each group, pausing between groups). For a 6-digit pairing code this
+    /// is two groups of 3; for an 8-digit static pairing code, two groups of 4.
     /// </summary>
     /// <remarks>
-    /// Presentation only. The PIN value is the contiguous digits in <see cref="Pin"/>, and
+    /// Presentation only. The pairing code value is the contiguous digits in <see cref="PairingCode"/>, and
     /// separators never enter derivation, operator entry, or the <c>PRS</c> transcript -- so
     /// join these with whatever separator suits the surface and accept typed input with the
-    /// separators stripped. A PIN outside the spec's 4-12 range is returned as a single group
+    /// separators stripped. A pairing code outside the spec's 4-12 range is returned as a single group
     /// rather than throwing: this is display formatting, and failing to format is not worth
     /// failing a pairing over.
     /// </remarks>
@@ -54,14 +54,14 @@ public sealed record PinPresentation(string Pin, IReadOnlyList<string>? Language
     {
         get
         {
-            if (Pin.Length >= GroupSizes.Length || GroupSizes[Pin.Length].Length == 0)
-                return [Pin];
+            if (PairingCode.Length >= GroupSizes.Length || GroupSizes[PairingCode.Length].Length == 0)
+                return [PairingCode];
 
             var groups = new List<string>(3);
             int offset = 0;
-            foreach (int size in GroupSizes[Pin.Length])
+            foreach (int size in GroupSizes[PairingCode.Length])
             {
-                groups.Add(Pin.Substring(offset, size));
+                groups.Add(PairingCode.Substring(offset, size));
                 offset += size;
             }
 

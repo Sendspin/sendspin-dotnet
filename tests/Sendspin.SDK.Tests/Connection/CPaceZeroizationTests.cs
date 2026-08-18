@@ -81,7 +81,7 @@ public class CPaceZeroizationTests
     [Fact]
     public void Dispose_IsIdempotent()
     {
-        // ClearPinState runs on every ending, and more than one can reach the same attempt
+        // ClearPairingCodeState runs on every ending, and more than one can reach the same attempt
         // (an abort followed by a disconnect), so a second Dispose must not throw.
         var (client, server) = DerivedPair();
         using (server)

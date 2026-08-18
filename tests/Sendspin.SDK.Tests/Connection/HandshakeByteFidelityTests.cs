@@ -5,7 +5,7 @@ using Sendspin.SDK.Connection.Noise;
 namespace Sendspin.SDK.Tests.Connection;
 
 /// <summary>
-/// Pins the exact bytes of the handshake's JSON frames.
+/// PairingCodes the exact bytes of the handshake's JSON frames.
 /// </summary>
 /// <remarks>
 /// <para>

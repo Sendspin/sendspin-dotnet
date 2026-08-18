@@ -158,7 +158,7 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     }
 
     /// <summary>
-    /// Whether the client disposed this connection. Pins the documented split between
+    /// Whether the client disposed this connection. PairingCodes the documented split between
     /// <c>Dispose</c> and <c>DisposeAsync</c> — see
     /// <c>ClientDisposal_OnlyTheAsyncOverloadDisposesTheConnection</c> (#96).
     /// </summary>

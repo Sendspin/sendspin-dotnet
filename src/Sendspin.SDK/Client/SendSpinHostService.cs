@@ -153,7 +153,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// </summary>
     public event EventHandler<string>? LastPlayedServerIdChanged;
 
-    /// <summary>Raised when a Pairing PSK or PIN pairing exchange completes on any connection (arg: paired server id).</summary>
+    /// <summary>Raised when a Pairing PSK or pairing code exchange completes on any connection (arg: paired server id).</summary>
     public event EventHandler<string>? PairingCompleted;
 
     /// <summary>

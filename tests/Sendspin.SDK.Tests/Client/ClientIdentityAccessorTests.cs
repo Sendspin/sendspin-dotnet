@@ -66,7 +66,7 @@ public class ClientIdentityAccessorTests
     [Fact]
     public void TrustLevel_Throws_OnAnUnrecognisedMatchedPskCategory()
     {
-        // Pins the switch's no-default design: a category this SDK doesn't recognise must
+        // PairingCodes the switch's no-default design: a category this SDK doesn't recognise must
         // fail loudly rather than silently reading as some particular trust level — especially
         // not "untrusted", which would be a wrong security indicator baked into a shipped app.
         var (client, _, session) = TestClient.Create();

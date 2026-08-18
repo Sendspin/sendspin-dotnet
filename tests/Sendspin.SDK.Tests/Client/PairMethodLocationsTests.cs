@@ -28,7 +28,7 @@ public class PairMethodLocationsTests
 
     /// <summary>
     /// A paired, management-activated client built around the caller's capabilities, with the
-    /// dependencies <c>CanRun</c> needs so the PIN methods are actually advertised (#132).
+    /// dependencies <c>CanRun</c> needs so the pairing code methods are actually advertised (#132).
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection)
         CreateManagementClient(ClientCapabilities capabilities)
@@ -41,8 +41,8 @@ public class PairMethodLocationsTests
             {
                 PairingRecordStore = store,
                 Capabilities = capabilities,
-                PinLockoutStore = new InMemoryPinLockoutStore(),
-                PresentPinAsync = (_, _) => ValueTask.CompletedTask,
+                PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
+                PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
                 PairingWindow = new PairingWindow(),
             });
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
@@ -57,9 +57,9 @@ public class PairMethodLocationsTests
     {
         var (client, connection) = CreateManagementClient(new ClientCapabilities
         {
-            PinPairingMethods = { "static_pin" },
-            StaticPin = "12345678",
-            StaticPinLocations = { PairMethodLocations.Device, PairMethodLocations.Leaflet },
+            PairingCodeMethods = { "static_pin" },
+            StaticPairingCode = "12345678",
+            StaticPairingCodeLocations = { PairMethodLocations.Device, PairMethodLocations.Leaflet },
             PairingPskLocations = { PairMethodLocations.Device },
         });
         using var _c = client;
@@ -79,8 +79,8 @@ public class PairMethodLocationsTests
     {
         var (client, connection) = CreateManagementClient(new ClientCapabilities
         {
-            PinPairingMethods = { "static_pin" },
-            StaticPin = "12345678",
+            PairingCodeMethods = { "static_pin" },
+            StaticPairingCode = "12345678",
         });
         using var _c = client;
 
@@ -101,19 +101,19 @@ public class PairMethodLocationsTests
 
     /// <summary>The spec scopes the hint to static_pin and pairing_psk; dynamic_pin has no secret to find.</summary>
     [Fact]
-    public void DynamicPin_NeverCarriesALocationsHint()
+    public void DynamicPairingCode_NeverCarriesALocationsHint()
     {
         var (client, connection) = CreateManagementClient(new ClientCapabilities
         {
-            PinPairingMethods = { "dynamic_pin" },
-            StaticPinLocations = { PairMethodLocations.Device },
+            PairingCodeMethods = { "dynamic_pin" },
+            StaticPairingCodeLocations = { PairMethodLocations.Device },
             PairingPskLocations = { PairMethodLocations.Device },
         });
         using var _c = client;
 
-        var dynamicPin = Descriptor(connection, "dynamic_pin");
-        Assert.NotNull(dynamicPin);
-        Assert.Null(dynamicPin.Locations);
+        var dynamicPairingCode = Descriptor(connection, "dynamic_pin");
+        Assert.NotNull(dynamicPairingCode);
+        Assert.Null(dynamicPairingCode.Locations);
 
         // Positive control: the hint machinery is live on this client, so the null above is
         // dynamic_pin being excluded rather than locations being switched off wholesale.
@@ -124,13 +124,13 @@ public class PairMethodLocationsTests
     /// The spec's "when the secret is rotated, the client updates the hint accordingly".
     /// </summary>
     [Fact]
-    public void ServerSettingTheStaticPin_MovesTheHintToOperator()
+    public void ServerSettingTheStaticPairingCode_MovesTheHintToOperator()
     {
         var capabilities = new ClientCapabilities
         {
-            PinPairingMethods = { "static_pin" },
-            StaticPin = "12345678",
-            StaticPinLocations = { PairMethodLocations.Device },
+            PairingCodeMethods = { "static_pin" },
+            StaticPairingCode = "12345678",
+            StaticPairingCodeLocations = { PairMethodLocations.Device },
         };
         var (client, connection) = CreateManagementClient(capabilities);
         using var _c = client;
@@ -143,10 +143,10 @@ public class PairMethodLocationsTests
             """{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"87654321"}}}""");
         Assert.Equal("ok", LastResult(connection).Result);
 
-        // The app is told, so it can persist the hint beside the PIN it also has to persist.
+        // The app is told, so it can persist the hint beside the pairing code it also has to persist.
         var change = Assert.Single(events);
-        Assert.Equal(new[] { "operator" }, change.StaticPinLocations);
-        Assert.Equal("87654321", change.StaticPin);
+        Assert.Equal(new[] { "operator" }, change.StaticPairingCodeLocations);
+        Assert.Equal("87654321", change.StaticPairingCode);
 
         // And it is in effect: the next handshake advertises the new hint.
         connection.SimulateReconnected();
@@ -154,7 +154,7 @@ public class PairMethodLocationsTests
         Assert.Equal(new[] { "operator" }, Descriptor(connection, "static_pin")!.Locations);
 
         // The SDK does not write to the capabilities instance the app owns.
-        Assert.Equal(new[] { "device" }, capabilities.StaticPinLocations);
+        Assert.Equal(new[] { "device" }, capabilities.StaticPairingCodeLocations);
     }
 
     [Fact]
