@@ -504,8 +504,6 @@ ClientHelloPayload (client/hello message):
 RETAINED EXTENSIONS (documented):
 These SDK extensions are kept intentionally and documented as non-spec:
 - client/sync_offset, client/sync_offset_ack: GroupSync acoustic calibration support
-- PlayerStatePayload.BufferLevel: Diagnostic buffer level reporting
-- PlayerStatePayload.Error: Error message reporting
 
 DOCUMENTATION:
 - GroupState: Updated XML docs clarifying field sources:
