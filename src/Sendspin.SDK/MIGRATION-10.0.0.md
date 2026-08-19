@@ -27,6 +27,8 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 | Static delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
 | Clock sync | `IClockSynchronizer` gains `ServerToClientTimeUncompensated` | Low — compiler error, one-line fix, and only for a custom synchronizer |
+| Clock sync | Filter constants, burst cadence and timestamping now match the reference implementation | Low — behavioural, no code change; see §11 |
+| Connection | `ISendspinConnection` gains `SendTimeMessageAsync`; `TextMessageReceived` carries `TextMessageReceivedEventArgs` | Low — compiler error, only for a custom connection or a raw event subscriber |
 | `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
 | Stream teardown | `stream/end` and `stream/clear` honour `roles`; their payloads lost `Reason`, `StreamId` and `TargetTimestamp` | Low — compiler error, and the removed members never carried a value |
 | Undefined wire surface | `VisualizerTypes.Pitch` (and binary type 21), `PlayerStatePayload.BufferLevel`/`.Error`, and `AudioChunk.Slot` removed | Low — compiler error; none were spec-defined and nothing in the SDK populated them |
@@ -311,7 +313,65 @@ Both events are also forwarded by `SendspinHostService`. Playback-only apps need
 
 ---
 
-## 11. Checklist
+## 11. Clock synchronization matches the reference implementation
+
+Interoperating with C++ and JS clients means more than speaking the same messages: a group stays in sync only if every member turns the same measurements into the same clock estimate. The SDK's filter ran the reference algebra with different constants, on a different schedule, over timestamps taken at different points — so a .NET player and a C++ player on one network predicted measurably different server clocks. All of that is now the reference's.
+
+**Nothing to change in your code**, unless you supply your own `IClockSynchronizer` or `ISendspinConnection` (below) or override the filter constants yourself.
+
+### Filter defaults
+
+`KalmanClockSynchronizer`'s process noise now carries the reference's `Config` defaults, converted into this class's units (dt in seconds, drift in µs/s):
+
+| Parameter | Was | Now | Reference |
+|---|---|---|---|
+| `processNoiseOffset` | `100.0` µs²/s | `0.0` | `process_std_dev = 0.0` — no offset random walk at all |
+| `processNoiseDrift` | `1.0` (µs/s)²/s | `1e-4` | `drift_process_std_dev = 1e-11` per √µs |
+
+The old constants inflated the filter's covariance permanently: the offset estimate tracked per-burst measurement noise instead of smoothing it, and the drift estimate gained 10 (µs/s)² of variance over every 10 s interval, so it forgot history as fast as it accumulated it and never settled. Expect a **quieter offset and a drift estimate that actually converges** — and, because `OffsetUncertainty` feeds `IsConverged`, slightly different convergence timing. The derivation from the reference's units is written out at the constants.
+
+### Drift is applied through its significance gate
+
+Both conversions — `ClientToServerTime` and the two `ServerToClientTime*` — now extrapolate with the drift estimate only once it clears the 2σ SNR test, and with zero drift before that, exactly as the reference's `effective_drift` does. `IsDriftReliable` reports that gate; it used to be a diagnostic that nothing acted on.
+
+This matters most during startup. Two measurements bootstrap drift from a finite difference of two noisy offsets, which on a LAN is ~1000 µs/s of pure noise; applying it put roughly a millisecond of error into any timestamp extrapolated a second past the last update — the whole of the spec's accuracy budget — while a reference client in the same group extrapolated flat. The mapping stays linear in offset and drift either way, so the source role's inverse is as well-defined as before.
+
+### Burst cadence
+
+| Setting | Was | Now |
+|---|---|---|
+| Between probes in a burst | fixed 50 ms | none — the next probe follows the previous reply |
+| Per-probe timeout | 2 s | 10 s (the reference's `DEFAULT_RESPONSE_TIMEOUT_MS`) |
+| On a probe timeout | abandon the rest of the burst | advance to the next probe |
+| Between bursts, converged | 1–10 s, by uncertainty | 10 s (the reference's `DEFAULT_BURST_INTERVAL_MS`) |
+| Between bursts, converging | 500 ms for the first 3 measurements | 500 ms until the filter converges |
+
+A burst exists to collect candidates so the cleanest can be chosen, so a single slow reply is the worst moment to stop collecting; it used to yield a one-sample burst. The one deliberate departure from the reference is the converging-window interval — see below.
+
+### A player announces itself in about two seconds
+
+The old adaptive interval switched to 10 s pacing after three measurements while convergence needs five, so on a *good* network — where uncertainty drops below a millisecond by the third burst — measurements four and five each arrived 10 s late. A player was invisible to the server (no initial `client/state`, no `available: true`) for over twenty seconds after every connect, and perversely appeared faster on a poor network. Keeping the fast tier until the filter actually converges brings that to roughly two seconds, in line with the C++ and JS clients. The spec's gate is unchanged: nothing is announced before the filter has converged.
+
+### T1 and T4 are stamped at the transport boundary
+
+`client_transmitted` is now stamped inside the connection's send path, after the send queue and immediately before the frame is written, and the client receive time is captured in the receive loop before the frame is decrypted and parsed. Previously both were taken in the client: T1 before serialization and encryption, T4 after deserialization. Both ends of the exchange were widened by that work, inflating the measured round trip — and with it `max_error` and the measurement variance — and biasing the offset by half of any asymmetry between the two.
+
+Two interface changes fall out of this, both compile-time:
+
+- **`ISendspinConnection.SendTimeMessageAsync(Action<long> onTransmitted, CancellationToken)`** is new. A custom connection implements it by stamping T1 inside whatever lock serializes its sends, invoking `onTransmitted` with it before the frame reaches the socket, and sending `ClientTimeMessage.Create(t1)`.
+- **`TextMessageReceived` is `EventHandler<TextMessageReceivedEventArgs>`**, not `EventHandler<string>`. Read `e.Json` for the payload; `e.ReceivedAtMicroseconds` carries the transport's receive stamp. A subscriber updates one lambda; a custom connection raises the event with a timestamp taken before it decodes the frame.
+
+```csharp
+// ❌ BEFORE
+connection.TextMessageReceived += (_, json) => Handle(json);
+
+// ✅ AFTER
+connection.TextMessageReceived += (_, e) => Handle(e.Json);
+```
+
+---
+
+## 12. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt

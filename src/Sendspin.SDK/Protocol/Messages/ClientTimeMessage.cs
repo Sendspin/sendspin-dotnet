@@ -23,13 +23,29 @@ public sealed class ClientTimeMessage : IMessageWithPayload<ClientTimePayload>
     /// <summary>
     /// Creates a new time message with the current timestamp.
     /// </summary>
-    public static ClientTimeMessage CreateNow()
+    /// <remarks>
+    /// For a caller assembling a probe itself. The SDK's own probes come from
+    /// <c>ISendspinConnection.SendTimeMessageAsync</c>, which stamps T1 at the send point
+    /// instead, so serialization and send-queue latency stay out of the measured round trip.
+    /// </remarks>
+    public static ClientTimeMessage CreateNow() => Create(GetCurrentTimestampMicroseconds());
+
+    /// <summary>
+    /// Creates a time message carrying an already-captured T1.
+    /// </summary>
+    /// <param name="clientTransmitted">T1, in the <see cref="HighPrecisionTimer"/> time base.</param>
+    /// <remarks>
+    /// For the transport, which stamps T1 at the send point and then builds the message
+    /// around it, so the value on the wire is not widened by serialization or send-queue
+    /// latency the way a call-site stamp is.
+    /// </remarks>
+    public static ClientTimeMessage Create(long clientTransmitted)
     {
         return new ClientTimeMessage
         {
             Payload = new ClientTimePayload
             {
-                ClientTransmitted = GetCurrentTimestampMicroseconds()
+                ClientTransmitted = clientTransmitted
             }
         };
     }

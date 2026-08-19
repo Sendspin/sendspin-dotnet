@@ -516,6 +516,11 @@ public class InitialClientStateGatingTests
 
         public long ClientToServerTime(long clientTime) => clientTime;
 
-        public ClockSyncStatus GetStatus() => new() { IsConverged = IsConverged };
+        // Deliberately reports an unconverged status whatever IsConverged says. The time-sync
+        // loop paces on this — 500 ms while converging, the reference's 10 s once synced — and
+        // these tests are about the availability gate, which reads IsConverged instead. Left
+        // unconverged, they drive several bursts in a moment rather than spending ten seconds
+        // apiece waiting for the steady-state interval.
+        public ClockSyncStatus GetStatus() => new();
     }
 }
