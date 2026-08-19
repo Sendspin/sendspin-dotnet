@@ -21,9 +21,6 @@ public static class VisualizerTypes
 
     /// <summary>Energy-onset events with strength (binary type 20).</summary>
     public const string Peak = "peak";
-
-    /// <summary>Perceived pitch (binary type 21).</summary>
-    public const string Pitch = "pitch";
 }
 
 /// <summary>
@@ -80,7 +77,7 @@ public sealed class VisualizerSupport
 
     /// <summary>
     /// Requested feature types, a subset of <see cref="VisualizerTypes"/>
-    /// (loudness, f_peak, spectrum, beat, peak, pitch).
+    /// (loudness, f_peak, spectrum, beat, peak).
     /// </summary>
     [JsonPropertyName("types")]
     required public List<string> Types { get; init; }

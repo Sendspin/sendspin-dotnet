@@ -306,10 +306,6 @@ These non-spec features are intentionally kept and documented:
 |-----------|---------|----------|
 | `client/sync_offset` | GroupSync acoustic calibration | Protocol message |
 | `client/sync_offset_ack` | ACK for sync offset | Protocol message |
-| `PlayerStatePayload.BufferLevel` | Diagnostic buffer reporting | ClientStateMessage |
-| `PlayerStatePayload.Error` | Error message reporting | ClientStateMessage |
-
-These are marked in XML docs as "SDK extension (not part of Sendspin spec)".
 
 ---
 

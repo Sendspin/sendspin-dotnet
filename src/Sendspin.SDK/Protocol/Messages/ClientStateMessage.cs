@@ -137,8 +137,10 @@ public sealed class SourceStatePayload
 /// Player-specific state within client/state message.
 /// </summary>
 /// <remarks>
-/// Per Sendspin spec, the player object contains <c>volume</c> and <c>muted</c>.
-/// The <c>buffer_level</c> and <c>error</c> fields are SDK extensions for diagnostics.
+/// The spec closes this object at <c>volume</c>, <c>muted</c>, <c>static_delay_ms</c>,
+/// <c>required_lead_time_ms</c>, <c>min_buffer_ms</c> and <c>supported_commands</c>, and a client
+/// MUST NOT send a field it does not define. Diagnostics belong in an <c>_</c>-prefixed
+/// application-specific role object, not here.
 /// </remarks>
 public sealed class PlayerStatePayload
 {
@@ -155,26 +157,6 @@ public sealed class PlayerStatePayload
     [JsonPropertyName("muted")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Muted { get; init; }
-
-    /// <summary>
-    /// Buffer level in milliseconds.
-    /// </summary>
-    /// <remarks>
-    /// SDK extension (not part of Sendspin spec). Used for diagnostic reporting.
-    /// </remarks>
-    [JsonPropertyName("buffer_level")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? BufferLevel { get; init; }
-
-    /// <summary>
-    /// Error message if in error state.
-    /// </summary>
-    /// <remarks>
-    /// SDK extension (not part of Sendspin spec). Used for error reporting.
-    /// </remarks>
-    [JsonPropertyName("error")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Error { get; init; }
 
     /// <summary>
     /// Static delay in milliseconds (0-5000) configured for this player: additional delay

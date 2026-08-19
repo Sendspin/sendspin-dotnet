@@ -10,6 +10,9 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 internal sealed class FakeAudioPipeline : IAudioPipeline
 {
+    /// <summary>Chunks handed to <see cref="ProcessAudioChunk"/>, in arrival order.</summary>
+    public List<AudioChunk> Chunks { get; } = new();
+
     public AudioPipelineState State { get; private set; } = AudioPipelineState.Idle;
     public bool IsReady => true;
     public AudioBufferStats? BufferStats => null;
@@ -43,7 +46,7 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     public void NotifyReconnect() { }
     public void Clear(long? newTargetTimestamp = null) => ClearCount++;
     public void ReanchorTiming() { }
-    public void ProcessAudioChunk(AudioChunk chunk) { }
+    public void ProcessAudioChunk(AudioChunk chunk) => Chunks.Add(chunk);
     public void SetVolume(int volume) { }
     public void SetMuted(bool muted) { }
     public Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default) => Task.CompletedTask;

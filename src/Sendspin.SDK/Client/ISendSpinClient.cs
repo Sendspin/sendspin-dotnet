@@ -166,7 +166,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// role). Omitted parameters keep their prior value. The server responds with a
     /// <c>stream/start</c> carrying the new visualizer config.
     /// </summary>
-    /// <param name="types">Requested feature types (subset of loudness/f_peak/spectrum/beat/peak/pitch), or null to leave unchanged.</param>
+    /// <param name="types">Requested feature types (subset of loudness/f_peak/spectrum/beat/peak), or null to leave unchanged.</param>
     /// <param name="rateMax">Requested maximum frame rate, or null to leave unchanged.</param>
     /// <param name="spectrum">Requested spectrum configuration, or null to leave unchanged.</param>
     /// <remarks>
@@ -342,7 +342,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Event raised for each decoded visualizer feature frame (the <c>visualizer@v1</c> role). Each
     /// <see cref="VisualizerFrame"/> carries one feature type (loudness, f_peak, spectrum, beat,
-    /// peak, or pitch). Malformed frames are dropped and do not raise the event.
+    /// or peak). Malformed frames are dropped and do not raise the event.
     /// </summary>
     event EventHandler<VisualizerFrame>? VisualizationReceived;
 

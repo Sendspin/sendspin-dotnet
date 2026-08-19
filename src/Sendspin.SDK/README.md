@@ -601,7 +601,7 @@ Updates are deltas: a color absent from an update is left unchanged, an explicit
 
 ## Visualizer
 
-Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Six feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, **`peak`** (energy onsets), and **`pitch`**. The role is **opt-in** — set `VisualizerSupport` *and* add `visualizer@v1` to `Roles`:
+Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Five feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, and **`peak`** (energy onsets). The role is **opt-in** — set `VisualizerSupport` *and* add `visualizer@v1` to `Roles`:
 
 ```csharp
 var capabilities = new ClientCapabilities
@@ -626,7 +626,7 @@ client.VisualizationReceived += (_, frame) =>
     if (frame.Loudness is { } loud)      meter.Level = loud / 65535.0;
     if (frame.Spectrum is { } bins)      bars.Update(bins);          // NDispBins values
     if (frame.IsDownbeat is { } down)    pulse.Beat(strong: down);
-    if (frame.PitchMidi is { } note)     label.Text = $"MIDI {note:F1}"; // pitch is Q8.8 → fractional MIDI
+    if (frame.PeakStrength is { } onset) flash.Pulse(onset / 255.0);      // 0-255 energy onset
 };
 ```
 
