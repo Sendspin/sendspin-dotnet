@@ -4304,8 +4304,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
-        while (_earlyChunkQueue.TryDequeue(out _))
+        // Chunks only queue while the pipeline cannot take them, so anything queued now arrived
+        // before this stream/start. When it re-announces the format already running, the pipeline
+        // keeps that stream alive rather than restarting it (see IAudioPipeline.StartAsync), and
+        // the queued chunks belong to it: they are drained into it below instead of being dropped,
+        // per the spec's "without clearing buffers" (#201). Every other stream/start rebuilds the
+        // decode chain, which leaves anything from the previous stream undecodable.
+        var reannouncesRunningFormat =
+            _audioPipeline is { State: AudioPipelineState.Buffering or AudioPipelineState.Playing }
+            && _audioPipeline.CurrentFormat?.IsSameStreamConfiguration(payload.Format) == true;
+
+        if (!reannouncesRunningFormat)
         {
+            while (_earlyChunkQueue.TryDequeue(out _))
+            {
+            }
         }
 
         // Smart sync burst: only trigger if clock isn't already synced

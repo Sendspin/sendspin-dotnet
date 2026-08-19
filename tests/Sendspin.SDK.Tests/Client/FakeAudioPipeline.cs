@@ -6,7 +6,8 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// Minimal <see cref="IAudioPipeline"/> test double. Tests drive the client's error/recovery
-/// signaling by calling <see cref="RaiseError"/> and <see cref="SetState"/>.
+/// signaling by calling <see cref="RaiseError"/> and <see cref="SetState"/>, and inspect what
+/// the client asked of the pipeline through the recorded calls.
 /// </summary>
 internal sealed class FakeAudioPipeline : IAudioPipeline
 {
@@ -14,10 +15,21 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     public List<AudioChunk> Chunks { get; } = new();
 
     public AudioPipelineState State { get; private set; } = AudioPipelineState.Idle;
-    public bool IsReady => true;
+
+    /// <summary>
+    /// Whether the client may hand chunks straight to the pipeline; when false they queue.
+    /// </summary>
+    public bool IsReady { get; set; } = true;
+
     public AudioBufferStats? BufferStats => null;
-    public AudioFormat? CurrentFormat => null;
+
+    /// <summary>The format of the stream the pipeline reports as running.</summary>
+    public AudioFormat? CurrentFormat { get; set; }
+
     public int DetectedOutputLatencyMs => 0;
+
+    /// <summary>Formats the client started the pipeline with, in order.</summary>
+    public List<AudioFormat> StartCalls { get; } = new List<AudioFormat>();
 
     /// <summary>Calls to <see cref="StopAsync"/>, for tests asserting a role-targeted stream/end left playback alone.</summary>
     public int StopCount { get; private set; }
@@ -36,7 +48,12 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
         StateChanged?.Invoke(this, state);
     }
 
-    public Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    public Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
+    {
+        StartCalls.Add(format);
+        return Task.CompletedTask;
+    }
+
     public Task StopAsync()
     {
         StopCount++;
