@@ -268,11 +268,12 @@ public class KalmanClockSynchronizerTests
     // =========================================================================
 
     [Fact]
-    public void Localhost_ZeroRtt_DoesNotProduceNaNOrInfinity()
+    public void ZeroRtt_IsRejected_AndLeavesTheFilterStable()
     {
-        // Loopback / localhost can produce identical T1=T2=T3=T4 timestamps,
-        // making max_error = 0. The filter must remain numerically stable AND produce
-        // correct values (offset = 0, no drift) for this idealized input.
+        // T1=T2=T3=T4 makes the round trip exactly zero, which is not a fast exchange but an
+        // impossible one — max_error would be zero, an infinitely confident measurement. The
+        // reference drops non-positive max_error rather than flooring it (#224), so nothing
+        // enters the filter and it stays at its initial, numerically sound state.
         for (int i = 0; i < 10; i++)
         {
             long t = i * 1_000_000L;
@@ -281,16 +282,115 @@ public class KalmanClockSynchronizerTests
 
         var status = _sync.GetStatus();
 
+        Assert.Equal(0, status.MeasurementCount);
         Assert.False(double.IsNaN(status.OffsetMicroseconds), "OffsetMicroseconds is NaN");
         Assert.False(double.IsInfinity(status.OffsetMicroseconds), "OffsetMicroseconds is infinite");
         Assert.False(double.IsNaN(status.OffsetUncertaintyMicroseconds), "OffsetUncertaintyMicroseconds is NaN");
         Assert.False(double.IsNaN(status.DriftMicrosecondsPerSecond), "DriftMicrosecondsPerSecond is NaN");
         Assert.False(double.IsNaN(status.DriftUncertaintyMicrosecondsPerSecond), "DriftUncertaintyMicrosecondsPerSecond is NaN");
-
-        // Correctness: with T1=T2=T3=T4, the NTP offset is 0; drift should remain ~0.
         Assert.Equal(0, status.OffsetMicroseconds, precision: 0);
-        Assert.True(Math.Abs(status.DriftMicrosecondsPerSecond) < 1.0,
-            $"Drift should remain near zero on noise-free localhost input; got {status.DriftMicrosecondsPerSecond:F2} µs/s");
+        Assert.Equal(0, status.DriftMicrosecondsPerSecond, precision: 0);
+    }
+
+    [Fact]
+    public void NegativeRtt_IsRejected_LeavingEarlierStateIntact()
+    {
+        // A server clock stepping between T2 and T3 (or two server stamps from different
+        // sources) makes (T4−T1) − (T3−T2) negative. Because burst-best selection prefers the
+        // lowest round trip, such a sample reaches the filter preferentially, and with a
+        // near-zero variance it would snap offset and drift onto the corrupt value.
+        _sync.ProcessMeasurement(0, 5000, 5100, 2000);
+        _sync.ProcessMeasurement(1_000_000, 1_005_000, 1_005_100, 1_002_000);
+        var before = _sync.GetStatus();
+
+        // T3−T2 = 8000 µs against 2000 µs of elapsed client time: rtt = −6000 µs.
+        _sync.ProcessMeasurement(2_000_000, 2_400_000, 2_408_000, 2_002_000);
+
+        var after = _sync.GetStatus();
+        Assert.Equal(before.MeasurementCount, after.MeasurementCount);
+        Assert.Equal(before.OffsetMicroseconds, after.OffsetMicroseconds);
+        Assert.Equal(before.DriftMicrosecondsPerSecond, after.DriftMicrosecondsPerSecond);
+        Assert.Equal(before.OffsetUncertaintyMicroseconds, after.OffsetUncertaintyMicroseconds);
+    }
+
+    [Fact]
+    public void SubTwoMicrosecondRtt_IsAccepted_WithTheMaxErrorFloorAsItsVarianceGuard()
+    {
+        // The 1 µs floor survives the non-positive drop, and only for what it was for: a
+        // genuine but tiny round trip (loopback, embedded interconnect) whose half-delay would
+        // otherwise be a sub-microsecond — and therefore near-zero-variance — measurement.
+        // rtt = 2 µs → max_error = 1 µs → σ = max_error × 0.5.
+        _sync.ProcessMeasurement(0, 5000, 5000, 2);
+
+        var status = _sync.GetStatus();
+        Assert.Equal(1, status.MeasurementCount);
+        Assert.Equal(0.5, status.OffsetUncertaintyMicroseconds, precision: 3);
+    }
+
+    // =========================================================================
+    // Process noise (#222) — sendspin-cpp time_filter.h:48-52.
+    //
+    // process_std_dev = 0 and drift_process_std_dev = 1e-11 per √µs, which under this
+    // class's units (dt in seconds, drift in µs/s) are 0.0 µs²/s and 1e-4 (µs/s)²/s. See
+    // the derivation at the constants. The pre-fix defaults were 100.0 and 1.0.
+    // =========================================================================
+
+    [Fact]
+    public void Defaults_AreTheReferenceProcessNoise()
+    {
+        var reference = new KalmanClockSynchronizer(processNoiseOffset: 0.0, processNoiseDrift: 1e-4);
+        var previous = new KalmanClockSynchronizer(processNoiseOffset: 100.0, processNoiseDrift: 1.0);
+
+        for (int i = 0; i < 30; i++)
+        {
+            long t1 = i * 10_000_000L; // 10 s apart, the reference's steady-state cadence
+            long offsetMicros = 5000 + (25L * (t1 / 1_000_000L)); // 25 µs/s of real drift
+            long t2 = t1 + offsetMicros;
+            _sync.ProcessMeasurement(t1, t2, t2 + 100, t1 + 2000);
+            reference.ProcessMeasurement(t1, t2, t2 + 100, t1 + 2000);
+            previous.ProcessMeasurement(t1, t2, t2 + 100, t1 + 2000);
+        }
+
+        // Bit-for-bit with the reference constants...
+        Assert.Equal(reference.Offset, _sync.Offset);
+        Assert.Equal(reference.Drift, _sync.Drift);
+        Assert.Equal(reference.OffsetUncertainty, _sync.OffsetUncertainty);
+
+        // ...and materially unlike the constants they replaced, so the assertion above has
+        // something to fail against.
+        Assert.NotEqual(previous.OffsetUncertainty, _sync.OffsetUncertainty, precision: 3);
+    }
+
+    [Fact]
+    public void ReferenceProcessNoise_LetsTheDriftEstimateSettle()
+    {
+        // The concrete cost of the old constants: 1.0 (µs/s)² of drift variance added per
+        // second means 10 (µs/s)² per 10 s interval, so the drift estimate forgot its history
+        // as fast as it accumulated it and never settled. With the reference's 1e-4 the same
+        // measurements pin drift to a fraction of a µs/s, which is what a reference client
+        // fed the same data reports.
+        var previous = new KalmanClockSynchronizer(processNoiseOffset: 100.0, processNoiseDrift: 1.0);
+
+        for (int i = 0; i < 40; i++)
+        {
+            long t1 = i * 10_000_000L;
+            long offsetMicros = 5000 + (25L * (t1 / 1_000_000L));
+            long t2 = t1 + offsetMicros;
+            _sync.ProcessMeasurement(t1, t2, t2 + 100, t1 + 2000);
+            previous.ProcessMeasurement(t1, t2, t2 + 100, t1 + 2000);
+        }
+
+        var settled = _sync.GetStatus();
+        var unsettled = previous.GetStatus();
+
+        Assert.InRange(settled.DriftMicrosecondsPerSecond, 24.0, 26.0);
+        Assert.True(settled.DriftUncertaintyMicrosecondsPerSecond < 1.0,
+            $"Expected sub-µs/s drift uncertainty with the reference process noise; got " +
+            $"{settled.DriftUncertaintyMicrosecondsPerSecond:F2} µs/s.");
+        Assert.True(
+            unsettled.DriftUncertaintyMicrosecondsPerSecond > settled.DriftUncertaintyMicrosecondsPerSecond * 2,
+            $"The old defaults should be visibly worse here; got {unsettled.DriftUncertaintyMicrosecondsPerSecond:F2} " +
+            $"vs {settled.DriftUncertaintyMicrosecondsPerSecond:F2} µs/s.");
     }
 
     [Fact]
@@ -398,32 +498,79 @@ public class KalmanClockSynchronizerTests
     }
 
     // =========================================================================
-    // Spec conformance (#82, roles/source/v1.md): timestamps invert the filter's
-    // linear mapping and "apply both offset and drift, not offset alone". The
-    // significance gate (IsDriftReliable) remains a diagnostic only — it must not
-    // change what the conversions compute.
+    // Drift gating in the conversions (#223) — sendspin-cpp time_filter.cpp:141-170.
+    //
+    // Both compute_server_time and compute_client_time extrapolate with
+    // `effective_drift = use_drift_ ? drift_ : 0.0`, so a drift estimate that has not
+    // cleared the 2σ SNR test contributes nothing. The mapping stays linear in offset
+    // and drift either way (roles/source/v1.md:8) — the gate only decides which drift
+    // the linear mapping is built from, and the inverse tracks the same choice.
     // =========================================================================
 
     [Fact]
-    public void ClientToServerTime_AppliesOffsetAndDrift_EvenBeforeSignificance()
+    public void ClientToServerTime_ExtrapolatesFlat_WhileDriftIsInsignificant()
     {
         // Two measurements bootstrap an exact drift of 1000 µs/s (see
         // DriftBootstrap_AfterTwoMeasurements): offset = 5050 µs at
-        // lastUpdate = 1_002_000, drift = 1000 µs/s — but with only 2 measurements
-        // the estimate is below the significance threshold, the regime in which the
-        // old code fell back to offset alone.
+        // lastUpdate = 1_002_000, drift = 1000 µs/s — but that number is a finite
+        // difference of two noisy offsets, not yet a measured rate, and it fails the
+        // significance test. The reference zeroes the drift term in that regime; applying
+        // it instead put ~1 ms of pure noise into a chunk timestamp extrapolated one second
+        // out, at the spec's whole accuracy budget, while a C++ client in the same group
+        // scheduled the same chunk flat.
         _sync.ProcessMeasurement(0, 5000, 5100, 2000);
         _sync.ProcessMeasurement(1_000_000, 1_006_000, 1_006_100, 1_002_000);
         Assert.False(_sync.IsDriftReliable);
         Assert.Equal(1000.0, _sync.Drift, precision: 0);
 
-        // 10 s past the last update: the spec's mapping gives
-        // offset + drift·elapsed = 5050 + 1000·10 = 15_050 µs, not 5050.
+        // 10 s past the last update: offset alone, not offset + 1000·10.
         long clientTime = 1_002_000 + 10_000_000;
         long serverTime = _sync.ClientToServerTime(clientTime);
 
-        long expected = clientTime + 5050 + 10_000;
+        long expected = clientTime + 5050;
         Assert.InRange(serverTime, expected - 2, expected + 2);
+    }
+
+    [Fact]
+    public void ServerToClientTime_ExtrapolatesFlat_WhileDriftIsInsignificant()
+    {
+        // The same gate on the inverse direction: time_filter.cpp evaluates
+        // effective_drift in compute_client_time too, so a filter carrying an
+        // insignificant drift divides by (1 + 0), not by (1 + drift/1e6).
+        _sync.ProcessMeasurement(0, 5000, 5100, 2000);
+        _sync.ProcessMeasurement(1_000_000, 1_006_000, 1_006_100, 1_002_000);
+        Assert.False(_sync.IsDriftReliable);
+
+        const long lastUpdate = 1_002_000;
+        long serverTime = lastUpdate + 5050 + 10_000_000;
+        long clientTime = _sync.ServerToClientTime(serverTime);
+
+        // Ungated, the divide by (1 + 1000/1e6) would pull this ~10 ms earlier.
+        Assert.InRange(clientTime, lastUpdate + 10_000_000 - 2, lastUpdate + 10_000_000 + 2);
+    }
+
+    [Fact]
+    public void Conversions_ApplyDrift_OnceItIsSignificant()
+    {
+        // Positive control: with a real 1000 µs/s rate measured over 50 samples the gate
+        // opens and both directions carry the drift term again.
+        for (int i = 0; i < 50; i++)
+        {
+            long t1 = i * 1_000_000L;
+            long offsetMicros = 5000 + (1000L * i);
+            _sync.ProcessMeasurement(t1, t1 + offsetMicros, t1 + offsetMicros + 100, t1 + 2000);
+        }
+
+        Assert.True(_sync.IsDriftReliable);
+        Assert.InRange(_sync.Drift, 900, 1100);
+
+        long lastUpdate = (49 * 1_000_000L) + 2000;
+        long clientTime = lastUpdate + 10_000_000; // 10 s out
+        long flat = clientTime + (long)Math.Round(_sync.Offset);
+        long serverTime = _sync.ClientToServerTime(clientTime);
+
+        // 10 s × ~1000 µs/s ≈ 10 ms of drift on top of the offset.
+        Assert.InRange(serverTime - flat, 9_000, 11_000);
     }
 
     [Fact]

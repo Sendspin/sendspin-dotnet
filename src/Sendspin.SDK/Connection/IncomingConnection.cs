@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Connection;
 
@@ -26,7 +27,7 @@ public sealed class IncomingConnection : ISendspinConnection
     public Uri? ServerUri { get; private set; }
 
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
-    public event EventHandler<string>? TextMessageReceived;
+    public event EventHandler<TextMessageReceivedEventArgs>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
 
     public IncomingConnection(
@@ -141,6 +142,36 @@ public sealed class IncomingConnection : ISendspinConnection
         await SendWireFramesAsync(_framing.EncodeBinary(data), cancellationToken);
     }
 
+    public async Task SendTimeMessageAsync(Action<long> onTransmitted, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (!_isOpen)
+        {
+            throw new InvalidOperationException("WebSocket is not connected");
+        }
+
+        string json;
+
+        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Stamped inside the send lock, after the queue wait — see the dial path's
+            // SendTimeMessageAsync for why the caller must not stamp it (#227).
+            var clientTransmitted = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+            onTransmitted(clientTransmitted);
+
+            json = MessageSerializer.Serialize(ClientTimeMessage.Create(clientTransmitted));
+            await SendFramesHoldingLockAsync(_framing.EncodeText(json)).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+
+        _logger.LogDebug("Sending: {Message}", json);
+    }
+
     /// <summary>
     /// Closes after sending <c>pair/abort</c> instead of <c>client/goodbye</c>. connection.md
     /// routes an arbitration loss on a pairing handshake through pair/abort reason
@@ -232,11 +263,18 @@ public sealed class IncomingConnection : ISendspinConnection
     // Built from the received bytes, not from a decoded string: the Noise prologue binds the
     // exact wire bytes of both init messages, and WireFrame.FromText would re-encode them
     // (#124). This mirrors what SendspinConnection already does on the dial path.
-    private void OnTextMessage(byte[] data) => DispatchInbound(new WireFrame(WireFrameKind.Text, data));
+    //
+    // The receive timestamp is taken here, at the socket callback, so a server/time carried by
+    // this frame yields a T4 that predates decryption and parsing (#227). Same reason and same
+    // placement as the dial path's, and as the reference transport's, which passes a
+    // receive_time captured in its websocket callback into dispatch_completed_message.
+    private void OnTextMessage(byte[] data) => DispatchInbound(
+        new WireFrame(WireFrameKind.Text, data), HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds());
 
-    private void OnBinaryMessage(byte[] data) => DispatchInbound(new WireFrame(WireFrameKind.Binary, data));
+    private void OnBinaryMessage(byte[] data) => DispatchInbound(
+        new WireFrame(WireFrameKind.Binary, data), HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds());
 
-    private void DispatchInbound(WireFrame frame)
+    private void DispatchInbound(WireFrame frame, long receivedAtMicroseconds)
     {
         // The peer answered, so this connection cannot be the legacy signature (see OnClose).
         _inboundFramesSinceReset++;
@@ -283,7 +321,7 @@ public sealed class IncomingConnection : ISendspinConnection
         if (inbound.Text is { } text)
         {
             _logger.LogDebug("Received text: {Message}", text.Length > 500 ? text[..500] + "..." : text);
-            TextMessageReceived?.Invoke(this, text);
+            TextMessageReceived?.Invoke(this, new TextMessageReceivedEventArgs(text, receivedAtMicroseconds));
         }
 
         if (inbound.Binary is { } binary)

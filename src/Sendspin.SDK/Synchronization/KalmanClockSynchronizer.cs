@@ -38,6 +38,31 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     private const int MinMeasurementsForPlayback = 2;
     private const double MaxOffsetUncertaintyForConvergence = 1000.0;
 
+    // Process noise, carried over from the reference filter's Config defaults
+    // (sendspin-cpp time_filter.h: process_std_dev = 0.0, drift_process_std_dev = 1e-11)
+    // and converted into this class's units. Both codebases run the same predict step; only
+    // the units of dt and of drift differ, so the conversion is a pure change of variables.
+    //
+    //   reference        dt in µs; drift dimensionless (µs of offset per µs of elapsed time)
+    //                    offset variance += process_std_dev²       · dt_µs
+    //                    drift  variance += drift_process_std_dev² · dt_µs
+    //   this class       dt in seconds; drift in µs/s
+    //                    offset variance += _processNoiseOffset · dt_s
+    //                    drift  variance += _processNoiseDrift  · dt_s
+    //
+    // dt_µs = 1e6 · dt_s, and drift_here = 1e6 · drift_reference, so a drift variance here is
+    // 1e12 × the reference's. Matching the two growth rates term by term:
+    //
+    //   _processNoiseOffset = 1e6  · process_std_dev²       = 1e6  · 0     = 0.0    µs²/s
+    //   _processNoiseDrift  = 1e18 · drift_process_std_dev² = 1e18 · 1e-22 = 1e-4   (µs/s)²/s
+    //                         (1e12 for the drift unit change × 1e6 for dt)
+    //
+    // The prior defaults (100.0 and 1.0) inflated both by orders of magnitude, so an SDK
+    // client's filter tracked per-burst measurement noise where a reference client smoothed
+    // it, and its drift estimate forgot history fast enough never to settle (#222).
+    private const double DefaultProcessNoiseOffset = 0.0;
+    private const double DefaultProcessNoiseDrift = 1e-4;
+
     private bool _driftReliableLogged;
 
     // RTT tracking for clock-sync diagnostics
@@ -114,10 +139,9 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
 
     /// <summary>
     /// True when the drift estimate is statistically significant (z-score above the
-    /// configured threshold, default 2σ ≈ 95% confidence). Diagnostic only: the time
-    /// conversions apply offset and drift unconditionally, per the spec's source
-    /// timestamp rule ("apply both offset and drift, not offset alone").
-    /// See upstream time-filter PR #5.
+    /// configured threshold, default 2σ ≈ 95% confidence). This is the gate the time
+    /// conversions apply drift through: below it they extrapolate on offset alone, exactly
+    /// as the reference filter's <c>use_drift_</c> flag does. See upstream time-filter PR #5.
     /// </summary>
     public bool IsDriftReliable
     {
@@ -132,18 +156,38 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
 
     // Caller must hold _lock. Squared form avoids sqrt and divide-by-zero on
     // the equivalent |drift|/σ_drift > k test.
+    //
+    // The reference filter (time_filter.cpp) assigns use_drift_ only at the end of its full
+    // update step, so its own floor is three measurements — the two initialization branches
+    // leave the flag false. This class keeps the stricter five-measurement floor it already
+    // had: the extra window is the one where the bootstrap drift (z1−z0)/dt is pure
+    // measurement noise, and a false positive there is the very error the gate exists to
+    // prevent. The two agree from the fifth measurement on.
     private bool IsDriftStatisticallySignificantUnsafe()
     {
         return _measurementCount >= MinMeasurementsForConvergence
                && _drift * _drift > _driftSignificanceThresholdSquared * _driftVariance;
     }
 
+    // Caller must hold _lock. The drift the conversions actually apply: the estimate once it
+    // clears the significance gate, zero before that. Mirrors time_filter.cpp's
+    // `const double effective_drift = this->use_drift_ ? this->drift_ : 0.0;`, which both
+    // compute_server_time and compute_client_time evaluate.
+    private double EffectiveDriftUnsafe()
+        => IsDriftStatisticallySignificantUnsafe() ? _drift : 0.0;
+
     /// <summary>
     /// Creates a new Kalman clock synchronizer.
     /// </summary>
     /// <param name="logger">Optional logger for diagnostics.</param>
-    /// <param name="processNoiseOffset">Process noise variance for offset (μs²/s).</param>
-    /// <param name="processNoiseDrift">Process noise variance for drift (μs²/s²).</param>
+    /// <param name="processNoiseOffset">Rate at which offset variance grows between updates
+    /// (μs² per second). Default 0.0 is the reference filter's <c>process_std_dev = 0</c>: the
+    /// model carries no offset random walk. See the derivation at
+    /// <c>DefaultProcessNoiseOffset</c>.</param>
+    /// <param name="processNoiseDrift">Rate at which drift variance grows between updates
+    /// ((μs/s)² per second). Default 1e-4 is the reference filter's
+    /// <c>drift_process_std_dev = 1e-11</c> per √μs expressed in these units. See the
+    /// derivation at <c>DefaultProcessNoiseDrift</c>.</param>
     /// <param name="measurementNoiseFloor">Optional additive floor on measurement variance (μs²).
     /// Default 0 matches the upstream time-filter reference; set above 0 to add a fixed
     /// noise floor on top of the RTT-derived variance.</param>
@@ -156,10 +200,16 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// (default 2.0, ≈95% confidence). Mirrors <c>drift_significance_threshold</c> upstream.</param>
     /// <param name="maxErrorScale">Scale applied to <c>max_error</c> before it is used as a 1σ
     /// measurement-noise estimate. Default 0.5: <c>max_error</c> is a worst-case bound, not a 1σ value.</param>
+    /// <remarks>
+    /// Every default here is the reference time filter's, restated in this class's units — the
+    /// two implementations run the same predict/update algebra, so identical measurements now
+    /// produce near-identical estimates on both. Deviating from a default deviates from the
+    /// reference clients this one shares a playback group with.
+    /// </remarks>
     public KalmanClockSynchronizer(
         ILogger<KalmanClockSynchronizer>? logger = null,
-        double processNoiseOffset = 100.0,
-        double processNoiseDrift = 1.0,
+        double processNoiseOffset = DefaultProcessNoiseOffset,
+        double processNoiseDrift = DefaultProcessNoiseDrift,
         double measurementNoiseFloor = 0.0,
         double forgetFactor = 2.0,
         double adaptiveCutoff = 3.0,
@@ -220,9 +270,24 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
         double measuredOffset = ((t2 - t1) + (t3 - t4)) / 2.0;
         double rtt = (t4 - t1) - (t3 - t2);
 
-        // max_error is half the network round-trip delay; floored to 1µs so
-        // localhost (RTT=0) and pathological clock-skew (RTT<0) don't yield
-        // zero or negative measurement variance / forgetting thresholds.
+        // A non-positive round trip is not a fast exchange, it is a corrupt one: the server
+        // clock stepped between T2 and T3, the two server stamps came from different sources,
+        // or a VM's counter jumped. Its max_error would be zero or negative, which is an
+        // "infinitely confident" measurement that drives the Kalman gain to 1 and snaps the
+        // filter onto the corrupt value. The reference discards these before they can be
+        // selected as a burst best (time_burst.cpp: "Dropping time response with non-positive
+        // max_error"); this is the same rule at the filter's own boundary, so a caller that
+        // feeds measurements directly cannot poison the state either (#224).
+        if (rtt <= 0)
+        {
+            _logger?.LogWarning(
+                "Dropping time measurement with non-positive round trip: {Rtt}μs", rtt);
+            return;
+        }
+
+        // max_error is half the network round-trip delay, floored to 1µs so a genuine
+        // sub-2µs round trip (loopback, embedded interconnect) still yields a usable
+        // measurement variance rather than a near-zero one.
         double maxError = Math.Max(rtt / 2.0, 1.0);
 
         // Measurement variance derived from max_error (used in init branches and update step).
@@ -376,10 +441,11 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// <returns>Estimated server time in microseconds.</returns>
     /// <remarks>
     /// The filter's mapping is <c>t_server = t_client + offset + drift·elapsed</c> with
-    /// <c>elapsed</c> measured from the last update in client time. Both terms are applied
-    /// unconditionally, per the spec ("apply both offset and drift, not offset alone");
-    /// the drift-significance test remains a diagnostic only (<see cref="IsDriftReliable"/>).
-    /// Exact inverse of <see cref="ServerToClientTime"/> up to integer rounding, ignoring
+    /// <c>elapsed</c> measured from the last update in client time. The drift term is applied
+    /// through the significance gate (<see cref="IsDriftReliable"/>): an estimate that has not
+    /// cleared 2σ is noise, so the extrapolation stays flat until it has, exactly as the
+    /// reference filter's <c>effective_drift</c> does. Exact inverse of
+    /// <see cref="ServerToClientTime"/> up to integer rounding, ignoring
     /// <see cref="StaticDelayMs"/> which only the server→client direction applies.
     /// </remarks>
     public long ClientToServerTime(long clientTime)
@@ -389,7 +455,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
             if (_lastUpdateTime > 0)
             {
                 double elapsedSeconds = (clientTime - _lastUpdateTime) / 1_000_000.0;
-                return clientTime + (long)Math.Round(_offset + _drift * elapsedSeconds);
+                return clientTime + (long)Math.Round(_offset + EffectiveDriftUnsafe() * elapsedSeconds);
             }
 
             return clientTime + (long)_offset;
@@ -407,7 +473,9 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// drift·(t_client − t_lastUpdate)/1e6</c> for <c>t_client</c> exactly, rather than
     /// evaluating the drift term at an approximated client time: the mapping is linear, so
     /// its inverse is well-defined (spec), and the approximation left a residual of
-    /// drift²·elapsed that broke round-tripping with <see cref="ClientToServerTime"/>.
+    /// drift²·elapsed that broke round-tripping with <see cref="ClientToServerTime"/>. The
+    /// drift it inverts is the gated one (<see cref="IsDriftReliable"/>), so both directions
+    /// stay exact inverses of each other in either regime.
     /// </para>
     /// <para>
     /// Subtracts <see cref="StaticDelayMs"/> from the converted client time per the Sendspin
@@ -457,7 +525,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
         {
             // t_client = t_last + (t_server − t_last − offset) / (1 + drift/1e6).
             double clientRelative = (serverTime - _lastUpdateTime - _offset)
-                                    / (1.0 + _drift / 1_000_000.0);
+                                    / (1.0 + EffectiveDriftUnsafe() / 1_000_000.0);
             return _lastUpdateTime + (long)Math.Round(clientRelative);
         }
 

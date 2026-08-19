@@ -121,8 +121,8 @@ public class TimeSyncPairingGatingTests
         connection.RaiseTextMessageReceived(PairingActivate);
 
         // Let a probe already past the loop's cancellation check land, then require
-        // silence for longer than the loop's densest cadence (50 ms between probes,
-        // 500 ms between bursts).
+        // silence for longer than the loop's densest cadence (probes back to back within a
+        // burst, 500 ms between bursts).
         await Task.Delay(200);
         int probesWhenStopped = Probes(connection).Count;
         await Task.Delay(700);
@@ -184,9 +184,8 @@ public class TimeSyncPairingGatingTests
         var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.LongTerm);
         using var _c = client;
         connection.RespondToTimeSync = true;
-        clock.ConvergeOnMeasurement = false;      // HasMinimalSync stays false: burst-eligible
-        clock.ReportedMeasurementCount = 10;      // loop reports good quality and sleeps
-        clock.ReportedUncertaintyMicroseconds = 500; // ~10 s between loop bursts
+        clock.ConvergeOnMeasurement = false;  // HasMinimalSync stays false: burst-eligible
+        clock.StatusIsConverged = true;       // loop reports a synced clock and sleeps ~10 s
 
         TestClient.CompleteHandshake(connection, "player@v1");
 
@@ -204,9 +203,12 @@ public class TimeSyncPairingGatingTests
         await Task.Delay(500);
         Assert.Equal(probesAfterLoopBurst, Probes(connection).Count);
 
-        // Leave pairing: the restarted loop bursts once and goes back to sleep.
-        connection.RaiseTextMessageReceived(PlaybackActivate);
+        // Leave pairing: the restarted loop bursts once and goes back to sleep. The count is
+        // read before the activate, not after: a burst against this fixture completes in
+        // microseconds now that probes advance on the reply rather than on a fixed delay, so
+        // reading it afterwards races the very measurement being waited for.
         int measured = clock.Measurements;
+        connection.RaiseTextMessageReceived(PlaybackActivate);
         await WaitForAsync(() => clock.Measurements > measured, TimeSpan.FromSeconds(5));
         int probesAfterResume = Probes(connection).Count;
 
@@ -261,10 +263,9 @@ public class TimeSyncPairingGatingTests
     /// <summary>
     /// Clock synchronizer the test scripts: each processed measurement copies
     /// <see cref="ConvergeOnMeasurement"/> into <see cref="IsConverged"/>. By default the
-    /// reported status carries no measurement count, so the client's time-sync loop keeps
-    /// its dense initial cadence instead of backing off to 10 s intervals; a test that
-    /// wants the loop asleep between bursts scripts <see cref="ReportedMeasurementCount"/>
-    /// and <see cref="ReportedUncertaintyMicroseconds"/> instead.
+    /// reported status is unconverged, so the client's time-sync loop keeps its dense
+    /// converging cadence instead of backing off to 10 s intervals; a test that wants the
+    /// loop asleep between bursts scripts <see cref="StatusIsConverged"/> instead.
     /// </summary>
     private sealed class ScriptedClockSynchronizer : IClockSynchronizer
     {
@@ -272,9 +273,12 @@ public class TimeSyncPairingGatingTests
 
         public int Measurements { get; private set; }
 
-        public int ReportedMeasurementCount { get; set; }
-
-        public double ReportedUncertaintyMicroseconds { get; set; }
+        /// <summary>
+        /// Convergence as reported through <see cref="GetStatus"/>, which is what the
+        /// time-sync loop paces on — scripted separately from <see cref="IsConverged"/>, the
+        /// flag the availability gate reads.
+        /// </summary>
+        public bool StatusIsConverged { get; set; }
 
         public bool IsConverged { get; private set; }
 
@@ -296,11 +300,6 @@ public class TimeSyncPairingGatingTests
 
         public long ClientToServerTime(long clientTime) => clientTime;
 
-        public ClockSyncStatus GetStatus() => new()
-        {
-            IsConverged = IsConverged,
-            MeasurementCount = ReportedMeasurementCount,
-            OffsetUncertaintyMicroseconds = ReportedUncertaintyMicroseconds,
-        };
+        public ClockSyncStatus GetStatus() => new() { IsConverged = StatusIsConverged };
     }
 }

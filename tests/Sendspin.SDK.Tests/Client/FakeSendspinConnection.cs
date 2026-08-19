@@ -1,5 +1,6 @@
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Tests.Client;
 
@@ -10,6 +11,10 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 internal sealed class FakeSendspinConnection : ISendspinConnection
 {
+    private bool _respondToTimeSync;
+    private long _unansweredProbeT1;
+    private int _probesSent;
+
     public ConnectionState State { get; private set; } = ConnectionState.Disconnected;
     public Uri? ServerUri { get; private set; }
     public List<IMessage> SentMessages { get; } = new();
@@ -23,13 +28,57 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public bool EnforceConnectionState { get; set; }
 
     /// <summary>
-    /// When true, every <see cref="ClientTimeMessage"/> probe passed to
-    /// <see cref="SendMessageAsync"/> is answered synchronously with a matching server/time
-    /// reply, so the client's time-sync bursts complete and feed measurements into its clock
-    /// synchronizer. This is how a fixture drives clock-sync convergence over the wire without
-    /// a real server. Off by default: most tests want no unsolicited inbound traffic.
+    /// When true, every probe sent through <see cref="SendTimeMessageAsync"/> is answered
+    /// synchronously with a matching server/time reply, so the client's time-sync bursts
+    /// complete and feed measurements into its clock synchronizer. This is how a fixture drives
+    /// clock-sync convergence over the wire without a real server. Off by default: most tests
+    /// want no unsolicited inbound traffic.
+    /// <para>
+    /// Switching it on also answers the probe left unanswered while it was off, the way a
+    /// server coming back answers what it had been sitting on. Without that, a fixture that
+    /// flips it mid-test would have to wait out the client's full per-probe timeout (10 s)
+    /// before the next probe is even sent.
+    /// </para>
     /// </summary>
-    public bool RespondToTimeSync { get; set; }
+    public bool RespondToTimeSync
+    {
+        get => _respondToTimeSync;
+        set
+        {
+            _respondToTimeSync = value;
+            if (value && Interlocked.Exchange(ref _unansweredProbeT1, 0) is var t1 and not 0)
+            {
+                RaiseTimeSyncReply(t1);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Round trip the scripted server/time replies imply, in microseconds. The whole exchange
+    /// is synthetic (see <see cref="RaiseTimeSyncReply"/>), so this is exactly what the client
+    /// computes — which matters most for its sign, since non-positive round trips are dropped
+    /// outright (#224).
+    /// </summary>
+    public long TimeSyncRttMicroseconds { get; set; } = 2000;
+
+    /// <summary>
+    /// Overrides the clock this transport stamps T1 from. A test that pins a distinctive value
+    /// here can tell a T1 taken at the send point from one the caller captured beforehand,
+    /// which is otherwise invisible: both are "some recent microsecond".
+    /// </summary>
+    public Func<long>? TimeSyncTransmitClock { get; set; }
+
+    /// <summary>
+    /// Replaces the synthetic reply for a probe, given its ordinal within the connection and
+    /// its T1. Returns the two server stamps and the T4 the transport reports, or null for a
+    /// probe the server never answers. For tests that need one probe of a burst to differ
+    /// from the rest.
+    /// </summary>
+    public Func<int, long, (long ServerReceived, long ServerTransmitted, long ReceivedAt)?>? TimeSyncReplyOverride
+    {
+        get;
+        set;
+    }
 
     /// <summary>
     /// When set, the next message passed to <see cref="SendMessageAsync"/> is recorded (it hit
@@ -60,7 +109,7 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public Exception NextSendFailure { get; set; } = new InvalidOperationException("Simulated send failure");
 
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
-    public event EventHandler<string>? TextMessageReceived;
+    public event EventHandler<TextMessageReceivedEventArgs>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
 
     public Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
@@ -106,15 +155,87 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
             HoldNextSend = null;
             await hold.Task;
         }
+    }
 
-        if (RespondToTimeSync && message is ClientTimeMessage probe)
+    /// <summary>
+    /// Stamps T1 the way a real transport does — at the send point, handed back through the
+    /// callback before anything can answer it — records the probe among
+    /// <see cref="SentMessages"/> so probe-counting tests keep working, and answers it when
+    /// <see cref="RespondToTimeSync"/> is set.
+    /// </summary>
+    public async Task SendTimeMessageAsync(Action<long> onTransmitted, CancellationToken cancellationToken = default)
+    {
+        if (EnforceConnectionState && State != ConnectionState.Connected)
         {
-            long t1 = probe.ClientTransmitted;
-            RaiseTextMessageReceived(
-                $$$"""
-                {"type":"server/time","payload":{"client_transmitted":{{{t1}}},"server_received":{{{t1 + 10}}},"server_transmitted":{{{t1 + 20}}} }}
-                """);
+            throw new InvalidOperationException("WebSocket is not connected");
         }
+
+        if (ThrowOnNextSend)
+        {
+            ThrowOnNextSend = false;
+            throw NextSendFailure;
+        }
+
+        long t1 = TimeSyncTransmitClock?.Invoke() ?? HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+        onTransmitted(t1);
+
+        lock (SentMessages)
+        {
+            SentMessages.Add(ClientTimeMessage.Create(t1));
+        }
+
+        if (HoldNextSend is { } hold)
+        {
+            HoldNextSend = null;
+            await hold.Task;
+        }
+
+        if (RespondToTimeSync)
+        {
+            RaiseTimeSyncReply(t1);
+        }
+        else
+        {
+            // Remembered so switching RespondToTimeSync on can answer it retroactively.
+            Interlocked.Exchange(ref _unansweredProbeT1, t1);
+        }
+    }
+
+    /// <summary>
+    /// Answers one probe with a complete synthetic exchange: server stamps a half-RTT out and
+    /// back, and the T4 the transport reports for the reply.
+    /// </summary>
+    /// <remarks>
+    /// T4 is supplied rather than read from the clock so the exchange is exact — the client
+    /// computes a round trip of precisely <see cref="TimeSyncRttMicroseconds"/> and an offset
+    /// of precisely zero, whatever the machine is doing. It has to be exact in the RTT's sign
+    /// above all: a reply whose server interval assumed more processing time than this
+    /// in-memory fake actually takes would compute a negative round trip, and the client drops
+    /// those samples outright (#224), leaving every burst empty.
+    /// </remarks>
+    public void RaiseTimeSyncReply(long t1)
+    {
+        const long serverProcessing = 100;
+        long half = TimeSyncRttMicroseconds / 2;
+        long t2 = t1 + half;
+        long t3 = t2 + serverProcessing;
+        long t4 = t3 + half;
+
+        if (TimeSyncReplyOverride is { } custom)
+        {
+            if (custom(Interlocked.Increment(ref _probesSent), t1) is not { } stamps)
+            {
+                return; // a probe the server never answers; the client sits out its timeout
+            }
+
+            (t2, t3, t4) = stamps;
+        }
+
+        RaiseTextMessageReceived(
+            $$$"""
+            {"type":"server/time","payload":{"client_transmitted":{{{t1}}},"server_received":{{{t2}}},"server_transmitted":{{{t3}}} }}
+            """,
+            t4);
     }
 
     /// <summary>
@@ -185,7 +306,15 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public void SimulateReconnected() => SetState(ConnectionState.Handshaking);
 
     public void RaiseTextMessageReceived(string json)
-        => TextMessageReceived?.Invoke(this, json);
+        => RaiseTextMessageReceived(json, HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds());
+
+    /// <summary>
+    /// Delivers a frame with an explicit transport receive timestamp, the way a real
+    /// connection stamps one before decrypting and parsing. Only the clock-sync exchange reads
+    /// it, so everything else uses the overload above and lets it default to now.
+    /// </summary>
+    public void RaiseTextMessageReceived(string json, long receivedAtMicroseconds)
+        => TextMessageReceived?.Invoke(this, new TextMessageReceivedEventArgs(json, receivedAtMicroseconds));
 
     public void RaiseBinaryMessageReceived(ReadOnlyMemory<byte> data)
         => BinaryMessageReceived?.Invoke(this, data);

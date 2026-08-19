@@ -67,7 +67,7 @@ public class SendspinConnectionRehandshakeTests
 
         // Server -> client under the new keys still surfaces.
         var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        connection.TextMessageReceived += (_, t) => received.TrySetResult(t);
+        connection.TextMessageReceived += (_, e) => received.TrySetResult(e.Json);
         const string json = """{"type":"server/hello","payload":{"name":"again"}}""";
         await serverConn.SendAsync(noiseServer.EncryptFrame([0, .. Encoding.UTF8.GetBytes(json)]));
         Assert.Equal(json, await received.Task.WaitAsync(TimeSpan.FromSeconds(5)));
