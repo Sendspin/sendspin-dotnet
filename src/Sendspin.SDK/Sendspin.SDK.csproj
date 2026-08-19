@@ -40,6 +40,10 @@ v10.0.0 - Encrypted Transport (BREAKING):
   which DisposeAsync calls with no cancellation, so an app exit could previously hang
   indefinitely. The socket is left in CloseSent rather than Closed until the peer replies or
   the connection is disposed.
+- Undefined wire vocabulary removed: VisualizerTypes.Pitch and binary type 21 (the spec
+  reserves 21-23), PlayerStatePayload.BufferLevel and .Error (the spec closes the player
+  state object), and AudioChunk.Slot. Undefined player-audio types 5-7 are now dropped with
+  a warning instead of being decoded into the audio pipeline, matching the C++ reference.
 - See MIGRATION-10.0.0.md. The 9.x line remains maintained for now.
 
 ----

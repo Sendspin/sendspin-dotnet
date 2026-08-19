@@ -27,6 +27,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 | Static delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
 | `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
+| Undefined wire surface | `VisualizerTypes.Pitch` (and binary type 21), `PlayerStatePayload.BufferLevel`/`.Error`, and `AudioChunk.Slot` removed | Low — compiler error; none were spec-defined and nothing in the SDK populated them |
 
 ---
 

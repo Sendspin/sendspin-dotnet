@@ -86,6 +86,11 @@ public static class BinaryMessageTypes
     public const byte VisualizerPeak = 20;     // slot 4
     // Types 21-23 are reserved for future visualizer types and must not be used.
 
+    /// <summary>
+    /// True for a type in the player role's 4-7 binary allocation. Only <see cref="PlayerAudio0"/>
+    /// is defined by <c>player@v1</c>; 5-7 are allocated but carry no defined payload, so the
+    /// client drops them rather than decoding them as audio.
+    /// </summary>
     public static bool IsPlayerAudio(byte type) => type >= 4 && type <= 7;
     public static bool IsSourceAudio(byte type) => type >= 12 && type <= 15;
     public static bool IsArtwork(byte type) => type >= 8 && type <= 11;

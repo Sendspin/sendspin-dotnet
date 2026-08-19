@@ -160,6 +160,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // purpose: it describes the device's input, not the session (#114).
     private bool? _lastSourceSignal;
 
+    // One bit per undefined player-audio type (5-7) already warned about. A lost race on this
+    // field costs a duplicate warning and nothing else, so it needs no synchronization.
+    private int _warnedUndefinedPlayerAudioTypes;
+
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
@@ -4378,6 +4382,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         switch (category)
         {
             case BinaryMessageCategory.PlayerAudio:
+                if (type != BinaryMessageTypes.PlayerAudio0)
+                {
+                    // player@v1 defines one audio slot; 5-7 are allocated to the role but carry no
+                    // defined payload. Feeding them to the pipeline would interleave unknown bytes
+                    // with the real stream, so they are dropped as the C++ reference client does.
+                    WarnOnceOnUndefinedPlayerAudioType(type);
+                    break;
+                }
+
                 var audioChunk = BinaryMessageParser.ParseAudioChunk(data.Span);
                 if (audioChunk != null)
                 {
@@ -4437,6 +4450,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// Logs the first chunk seen on each undefined player-audio type, so a server emitting them at
+    /// chunk rate produces one line per type rather than one per chunk.
+    /// </summary>
+    private void WarnOnceOnUndefinedPlayerAudioType(byte type)
+    {
+        int bit = 1 << (type - BinaryMessageTypes.PlayerAudio0);
+        if ((_warnedUndefinedPlayerAudioTypes & bit) != 0)
+        {
+            return;
+        }
+
+        _warnedUndefinedPlayerAudioTypes |= bit;
+        _logger.LogWarning(
+            "Dropping binary type {Type}: player@v1 defines only audio type {DefinedType}",
+            type,
+            BinaryMessageTypes.PlayerAudio0);
     }
 
     /// <summary>
