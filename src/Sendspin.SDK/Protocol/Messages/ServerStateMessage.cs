@@ -164,10 +164,16 @@ public sealed class ControllerState
 
     /// <summary>
     /// Maximum absolute position in milliseconds a <c>seek</c> may target (e.g. the end of the
-    /// current track). Per the Sendspin spec the server includes this whenever <c>seek</c> is in
-    /// <see cref="SupportedCommands"/>, and omits <c>seek</c> when the seekable range is unknown
-    /// (e.g. live streams) — <c>seek_relative</c> may still be offered in that case.
+    /// current track). Absent = keep the last bound, present-null = the seekable range became
+    /// unknown (clear it), present-with-value = update.
     /// </summary>
+    /// <remarks>
+    /// The only OPTIONAL leaf on this object, which is why it needs <see cref="Optional{T}"/> while
+    /// its always-reported siblings can be plain nullables. The server omits <c>seek</c> from
+    /// <see cref="SupportedCommands"/> and nulls this out together when the range goes away — e.g.
+    /// a seekable track giving way to a live stream — and <c>seek_relative</c> may still be offered.
+    /// </remarks>
     [JsonPropertyName("seek_max_ms")]
-    public int? SeekMaxMs { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<int?> SeekMaxMs { get; init; } = Optional<int?>.Absent();
 }

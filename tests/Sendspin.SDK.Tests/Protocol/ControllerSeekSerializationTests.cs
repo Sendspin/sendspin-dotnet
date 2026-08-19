@@ -63,20 +63,22 @@ public class ControllerSeekSerializationTests
 
         var controller = msg?.Payload.Controller.Value;
         Assert.NotNull(controller);
-        Assert.Equal(245_000, controller.SeekMaxMs);
+        Assert.True(controller.SeekMaxMs.IsPresent);
+        Assert.Equal(245_000, controller.SeekMaxMs.Value);
         Assert.Equal(new[] { "play", "seek", "seek_relative" }, controller.SupportedCommands);
     }
 
     [Fact]
-    public void ServerState_SeekMaxMs_Absent_IsNull()
+    public void ServerState_SeekMaxMs_Absent_IsAbsentNotNull()
     {
-        // The server omits seek_max_ms when the seekable range is unknown (e.g. live streams),
-        // and drops 'seek' from supported_commands along with it.
+        // A partial update that says nothing about the seekable range: absent, which the merge
+        // reads as "keep the bound you have". Distinguishing this from the explicit null below is
+        // the whole reason the leaf is Optional rather than a plain nullable.
         const string Json = """
             {
                 "type": "server/state",
                 "payload": {
-                    "controller": { "supported_commands": ["play", "seek_relative"], "volume": 50 }
+                    "controller": { "supported_commands": ["play", "seek"], "volume": 50 }
                 }
             }
             """;
@@ -85,6 +87,28 @@ public class ControllerSeekSerializationTests
 
         var controller = msg?.Payload.Controller.Value;
         Assert.NotNull(controller);
-        Assert.Null(controller.SeekMaxMs);
+        Assert.True(controller.SeekMaxMs.IsAbsent);
+    }
+
+    [Fact]
+    public void ServerState_SeekMaxMs_ExplicitNull_IsPresentWithNull()
+    {
+        // The server nulls the leaf out when the seekable range becomes unknown — e.g. a seekable
+        // track giving way to a live stream — and drops 'seek' from supported_commands with it.
+        const string Json = """
+            {
+                "type": "server/state",
+                "payload": {
+                    "controller": { "supported_commands": ["play", "seek_relative"], "seek_max_ms": null }
+                }
+            }
+            """;
+
+        var msg = MessageSerializer.Deserialize<ServerStateMessage>(Json);
+
+        var controller = msg?.Payload.Controller.Value;
+        Assert.NotNull(controller);
+        Assert.True(controller.SeekMaxMs.IsPresent);
+        Assert.Null(controller.SeekMaxMs.Value);
     }
 }

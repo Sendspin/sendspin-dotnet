@@ -51,8 +51,9 @@ public sealed class GroupState
     /// <summary>
     /// Maximum absolute position in milliseconds a <c>seek</c> command may target, from the
     /// <c>server/state</c> controller object — the upper bound for a seek bar. Null until the
-    /// server reports it; gate on <see cref="SupportedCommands"/> containing <c>seek</c> rather
-    /// than on this being non-null, since a partial update that omits it keeps the last value.
+    /// server reports it, and null again once it says the seekable range is unknown (a partial
+    /// update that omits the field keeps the last value, an explicit null clears it). Still gate
+    /// the control itself on <see cref="SupportedCommands"/> containing <c>seek</c>.
     /// </summary>
     [JsonPropertyName("seek_max_ms")]
     public int? SeekMaxMs { get; set; }

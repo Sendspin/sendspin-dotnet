@@ -3985,7 +3985,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             if (payload.Controller.Value is not { } controller)
             {
-                // HandleServerState is the only writer of these five, so the controller role
+                // HandleServerState is the only writer of these six, so the controller role
                 // owns them outright and clearing it returns each to the value a group carries
                 // before the server has reported any of them. Read off a fresh GroupState
                 // rather than repeating its literals, so the two cannot drift.
@@ -3995,6 +3995,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _currentGroup.Repeat = unreported.Repeat;
                 _currentGroup.Shuffle = unreported.Shuffle;
                 _currentGroup.SupportedCommands = unreported.SupportedCommands;
+                _currentGroup.SeekMaxMs = unreported.SeekMaxMs;
             }
             else
             {
@@ -4008,7 +4009,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _currentGroup.Shuffle = controller.Shuffle.Value;
                 if (controller.SupportedCommands is not null)
                     _currentGroup.SupportedCommands = controller.SupportedCommands;
-                if (controller.SeekMaxMs.HasValue)
+
+                // The one OPTIONAL controller leaf, so unlike its always-reported siblings it
+                // needs Optional<T> to tell "not in this partial update" (keep the bound) from
+                // an explicit null (the seekable range became unknown — drop the bound).
+                if (controller.SeekMaxMs.IsPresent)
                     _currentGroup.SeekMaxMs = controller.SeekMaxMs.Value;
             }
         }

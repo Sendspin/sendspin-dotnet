@@ -57,8 +57,9 @@ public sealed class OptionalJsonConverterFactory : JsonConverterFactory
             return new OptionalJsonConverter<ColorState?>();
         }
 
-        // ServerMetadata fields: string? (reference type — typeof(string?) == typeof(string) at runtime),
-        // int? and long? (value types — each is a distinct Nullable<T> at runtime).
+        // Leaf fields of ServerMetadata, plus ControllerState.SeekMaxMs (int?): string? (reference
+        // type — typeof(string?) == typeof(string) at runtime), int? and long? (value types — each
+        // is a distinct Nullable<T> at runtime).
         if (valueType == typeof(string))
         {
             return new OptionalJsonConverter<string?>();

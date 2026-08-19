@@ -187,8 +187,6 @@ public class SendspinClientServiceControllerTests
     {
         // The controller object is a partial update, so an update carrying only volume must not
         // wipe seek_max_ms — same keep-on-absent rule its siblings (volume/muted/repeat) follow.
-        // Consumers gate on supported_commands, which the server drops 'seek' from when the
-        // seekable range goes away.
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
@@ -202,5 +200,27 @@ public class SendspinClientServiceControllerTests
         Assert.NotNull(client.CurrentGroup);
         Assert.Equal(245_000, client.CurrentGroup.SeekMaxMs);
         Assert.Equal(30, client.CurrentGroup.Volume);
+    }
+
+    [Fact]
+    public void ServerState_SeekMaxMsExplicitNull_ClearsPreviousValue()
+    {
+        // The counterpart to the absent case above, and the reason this leaf is Optional: the
+        // server nulls it when the seekable range becomes unknown (a seekable track giving way to
+        // a live stream), and a leaf set to null is a clear. Keeping the old bound would leave a
+        // seek bar pointing at the length of a track that is no longer playing.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"supported_commands":["play","seek"],"seek_max_ms":245000}}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"supported_commands":["play"],"seek_max_ms":null}}}
+            """);
+
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Null(client.CurrentGroup.SeekMaxMs);
+        Assert.Equal(new[] { "play" }, client.CurrentGroup.SupportedCommands);
     }
 }
