@@ -1,10 +1,12 @@
+using Sendspin.SDK.Models;
 
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// Coverage for server/state handling: repeat/shuffle in controller, Optional-field merge
 /// semantics (absent = keep, explicit null = clear) for all metadata string/numeric fields,
-/// and the reference-identity contract for the merged progress object.
+/// the same three states one level up on the role objects themselves, and the
+/// reference-identity contract for the merged progress object.
 /// </summary>
 public class SendspinClientServiceServerStateTests
 {
@@ -49,6 +51,190 @@ public class SendspinClientServiceServerStateTests
         Assert.Equal("Song", client.CurrentGroup.Metadata?.Title);
         Assert.Null(client.CurrentGroup.Repeat);
         Assert.False(client.CurrentGroup.Shuffle);
+    }
+
+    // --- Role objects: absent / present-null / present-value (#196) ---
+
+    [Fact]
+    public void MetadataRoleObject_ExplicitNull_ClearsAllMetadataState()
+    {
+        // messaging.md: "a whole role object set to null clears all of that role's state".
+        // The server sends this when metadata leaves active_roles, and on pairing quiesce, so
+        // the client must stop exposing the last track rather than holding it indefinitely.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": {
+                        "title": "Track A",
+                        "artist": "Artist",
+                        "progress": { "track_progress": 5000, "track_duration": 180000 }
+                    }
+                }
+            }
+            """);
+
+        Assert.NotNull(client.CurrentGroup?.Metadata);
+
+        GroupState? raised = null;
+        client.GroupStateChanged += (_, g) => raised = g;
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": null } }
+            """);
+
+        Assert.Null(client.CurrentGroup?.Metadata);
+
+        // A UI only drops the stale track if it is told to: the clear must be announced, not
+        // just applied.
+        Assert.Same(client.CurrentGroup, raised);
+    }
+
+    [Fact]
+    public void MetadataRoleObject_Absent_LeavesMetadataState()
+    {
+        // The control the null case turns on: a server/state carrying only another role must
+        // not be mistaken for a metadata clear.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": { "title": "Track A" } } }
+            """);
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "controller": { "volume": 30 } } }
+            """);
+
+        Assert.Equal("Track A", client.CurrentGroup?.Metadata?.Title);
+        Assert.Equal(30, client.CurrentGroup?.Volume);
+    }
+
+    [Fact]
+    public void MetadataRoleObject_ExplicitNull_ThenValue_StartsFromEmpty()
+    {
+        // The clear must drop the merge base too, not just the exposed object: a later partial
+        // update has to start from empty rather than resurrecting pre-clear fields.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": { "title": "Track A", "artist": "Artist" } } }
+            """);
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": null } }
+            """);
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": { "title": "Track B" } } }
+            """);
+
+        var meta = client.CurrentGroup?.Metadata;
+        Assert.NotNull(meta);
+        Assert.Equal("Track B", meta.Title);
+        Assert.Null(meta.Artist);
+    }
+
+    [Fact]
+    public void ControllerRoleObject_ExplicitNull_ClearsControllerState()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "controller": {
+                        "volume": 40, "muted": true, "repeat": "all", "shuffle": true,
+                        "supported_commands": ["play", "pause"]
+                    }
+                }
+            }
+            """);
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "controller": null } }
+            """);
+
+        // Everything the controller role owns returns to the value a group carries before the
+        // server has reported any of it.
+        var group = client.CurrentGroup;
+        Assert.NotNull(group);
+        var unreported = new GroupState();
+        Assert.Equal(unreported.Volume, group.Volume);
+        Assert.Equal(unreported.Muted, group.Muted);
+        Assert.Null(group.Repeat);
+        Assert.False(group.Shuffle);
+        Assert.Null(group.SupportedCommands);
+    }
+
+    [Fact]
+    public void ControllerRoleObject_Absent_LeavesControllerState()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "controller": { "volume": 40, "repeat": "one" } } }
+            """);
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": { "title": "Track A" } } }
+            """);
+
+        Assert.Equal(40, client.CurrentGroup?.Volume);
+        Assert.Equal("one", client.CurrentGroup?.Repeat);
+    }
+
+    [Fact]
+    public void MetadataRoleObject_ExplicitNull_LeavesSiblingRolesAlone()
+    {
+        // "Clear all of THAT role's state": deactivating metadata must not disturb the
+        // controller or color state carried on the same GroupState.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": { "title": "Track A" },
+                    "controller": { "volume": 40 },
+                    "color": { "primary": [1, 2, 3] }
+                }
+            }
+            """);
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": null } }
+            """);
+
+        Assert.Null(client.CurrentGroup?.Metadata);
+        Assert.Equal(40, client.CurrentGroup?.Volume);
+        Assert.Equal(new RgbColor(1, 2, 3), client.CurrentGroup?.Colors.Primary);
+    }
+
+    [Fact]
+    public void MetadataLeafNull_StillClearsOnlyThatLeaf()
+    {
+        // Regression guard for the level the role-object fix sits above: wrapping the role
+        // objects must not turn a leaf null into a whole-role clear.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": { "title": "Track A", "artist": "Artist" } } }
+            """);
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "metadata": { "artist": null } } }
+            """);
+
+        var meta = client.CurrentGroup?.Metadata;
+        Assert.NotNull(meta);
+        Assert.Equal("Track A", meta.Title);
+        Assert.Null(meta.Artist);
     }
 
     // --- Optional-field merge: artwork_url ---

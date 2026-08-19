@@ -19,28 +19,40 @@ public sealed class ServerStateMessage : IMessageWithPayload<ServerStatePayload>
 /// <summary>
 /// Payload for server/state message.
 /// </summary>
+/// <remarks>
+/// The role objects use <see cref="Optional{T}"/> for the same reason their leaf fields do, one
+/// level up. The spec gives an explicit null role object its own meaning — "a whole role object
+/// set to <c>null</c> clears all of that role's state" — and the server sends exactly that when a
+/// state role leaves <c>active_roles</c>, and when pairing quiesces. Plain nullables collapsed
+/// that into "absent", so the clear deserialized into a no-op and the client kept exposing the
+/// deactivated role's last values indefinitely (#196).
+/// </remarks>
 public sealed class ServerStatePayload
 {
     /// <summary>
-    /// Current track metadata and playback progress.
+    /// Current track metadata and playback progress. Absent = no change, present-null = clear all
+    /// metadata state, present-with-value = merge the delta.
     /// </summary>
     [JsonPropertyName("metadata")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public ServerMetadata? Metadata { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<ServerMetadata?> Metadata { get; init; } = Optional<ServerMetadata?>.Absent();
 
     /// <summary>
-    /// Controller state (volume, mute, supported commands).
+    /// Controller state (volume, mute, supported commands). Absent = no change, present-null =
+    /// clear all controller state, present-with-value = merge the delta.
     /// </summary>
     [JsonPropertyName("controller")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public ControllerState? Controller { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<ControllerState?> Controller { get; init; } = Optional<ControllerState?>.Absent();
 
     /// <summary>
-    /// Color palette derived from the current audio. Only sent to clients with the <c>color</c> role.
+    /// Color palette derived from the current audio. Only sent to clients with the <c>color</c>
+    /// role. Absent = no change, present-null = clear the whole palette, present-with-value =
+    /// merge the delta.
     /// </summary>
     [JsonPropertyName("color")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public ColorState? Color { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<ColorState?> Color { get; init; } = Optional<ColorState?>.Absent();
 }
 
 /// <summary>
