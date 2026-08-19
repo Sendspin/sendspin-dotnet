@@ -23,6 +23,7 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
     private const int MaxHttpHeaderSize = 8192;
 
     private readonly ILogger? _logger;
+    private readonly ConnectionOptions _connectionOptions;
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private Task? _acceptLoop;
@@ -39,9 +40,15 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
     /// </summary>
     public event EventHandler<WebSocketClientConnection>? ClientConnected;
 
-    public SimpleWebSocketServer(ILogger? logger = null)
+    /// <param name="logger">Optional logger.</param>
+    /// <param name="connectionOptions">
+    /// Supplies the keep-alive settings applied to every accepted WebSocket. Defaults to
+    /// <see cref="ConnectionOptions"/>'s own defaults, which match the dial path.
+    /// </param>
+    public SimpleWebSocketServer(ILogger? logger = null, ConnectionOptions? connectionOptions = null)
     {
         _logger = logger;
+        _connectionOptions = connectionOptions ?? new ConnectionOptions();
     }
 
     /// <summary>
@@ -181,9 +188,7 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
                 .ConfigureAwait(false);
 
             // Create WebSocket from the stream
-            var webSocket = WebSocket.CreateFromStream(
-                stream,
-                new WebSocketCreationOptions { IsServer = true });
+            var webSocket = WebSocket.CreateFromStream(stream, BuildWebSocketOptions());
 
             var clientIp = remoteEndPoint?.Address ?? IPAddress.Loopback;
             var clientPort = remoteEndPoint?.Port ?? 0;
@@ -208,6 +213,46 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
             _logger?.LogError(ex, "Error handling WebSocket upgrade from {Endpoint}", remoteEndPoint);
             tcpClient.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Builds the creation options for an accepted WebSocket, giving it the same
+    /// <see cref="ConnectionOptions"/>-driven keep-alive the dial path configures on its
+    /// <see cref="System.Net.WebSockets.ClientWebSocket"/>.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="WebSocketCreationOptions.KeepAliveInterval"/> defaults to
+    /// <see cref="TimeSpan.Zero"/> — keep-alive disabled — unlike ClientWebSocket. Left at that,
+    /// an accepted connection sends nothing and a peer that dies without a FIN/RST (power loss,
+    /// network partition, sleeping laptop) stays ESTABLISHED until the OS TCP timeout, ten
+    /// minutes or more later, holding its arbitration slot the whole time.
+    /// </remarks>
+    private WebSocketCreationOptions BuildWebSocketOptions()
+    {
+        var options = new WebSocketCreationOptions
+        {
+            IsServer = true,
+            KeepAliveInterval = TimeSpan.FromMilliseconds(_connectionOptions.KeepAliveIntervalMs),
+        };
+
+#if NET9_0_OR_GREATER
+        // PING/PONG keep-alive: abort the socket if no PONG arrives in time, so a
+        // half-open connection (frozen peer / network drop without a TCP FIN) surfaces
+        // as a faulted ReceiveAsync instead of blocking forever. .NET 9+ only.
+        if (_connectionOptions.KeepAliveTimeoutMs > 0)
+        {
+            options.KeepAliveTimeout = TimeSpan.FromMilliseconds(_connectionOptions.KeepAliveTimeoutMs);
+        }
+#else
+        if (_connectionOptions.KeepAliveTimeoutMs > 0)
+        {
+            _logger?.LogDebug(
+                "KeepAliveTimeoutMs is set but has no effect on this runtime (requires .NET 9+); " +
+                "half-open connections are detected only by the OS TCP timeout.");
+        }
+#endif
+
+        return options;
     }
 
     private static async Task<string?> ReadHttpHeaderAsync(

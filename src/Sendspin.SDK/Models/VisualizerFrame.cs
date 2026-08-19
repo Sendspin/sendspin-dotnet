@@ -28,18 +28,6 @@ public sealed class VisualizerFrame
     /// <summary>Energy-onset strength (binary type 20), 0-255.</summary>
     public int? PeakStrength { get; init; }
 
-    /// <summary>
-    /// Perceived pitch as a MIDI note in Q8.8 fixed point (binary type 21); divide by 256 for the
-    /// MIDI note number. Paired with <see cref="PitchConfidence"/>. See <see cref="PitchMidi"/>.
-    /// </summary>
-    public int? PitchMidiQ88 { get; init; }
-
-    /// <summary>Pitch confidence (binary type 21), 0-255.</summary>
-    public int? PitchConfidence { get; init; }
-
     /// <summary>True for a downbeat, false for a regular beat (binary type 17). Null for non-beat frames.</summary>
     public bool? IsDownbeat { get; init; }
-
-    /// <summary>The pitch as a fractional MIDI note number, or null when this is not a pitch frame.</summary>
-    public double? PitchMidi => PitchMidiQ88 is { } q ? q / 256.0 : null;
 }

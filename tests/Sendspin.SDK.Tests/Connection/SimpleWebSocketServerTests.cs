@@ -390,6 +390,67 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Server_SendsKeepAliveFrames_ToASilentPeer()
+    {
+        // WebSocketCreationOptions.KeepAliveInterval defaults to TimeSpan.Zero — keep-alive
+        // off — unlike ClientWebSocket, so an accepted connection used to send nothing at all
+        // and a peer that died without a FIN/RST was only noticed by the OS TCP timeout.
+        await using var server = new SimpleWebSocketServer(
+            logger: null,
+            connectionOptions: new ConnectionOptions { KeepAliveIntervalMs = 100 });
+        server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (s, c) => connected.TrySetResult(c);
+
+        using var peer = await ConnectSilentPeerAsync(server.Port);
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Ping (0x9) when a keep-alive timeout is configured, unsolicited Pong (0xA) otherwise —
+        // a runtime detail. That a frame arrives at all is the behaviour under test.
+        var opcode = await ReadNextFrameOpcodeAsync(peer.GetStream(), TimeSpan.FromSeconds(5));
+        Assert.True(
+            opcode is 0x9 or 0xA,
+            $"Expected a keep-alive Ping or Pong frame; got {(opcode is null ? "nothing" : $"opcode 0x{opcode:X}")}");
+
+        await serverConn.DisposeAsync();
+    }
+
+#if NET9_0_OR_GREATER
+    [Fact]
+    public async Task Server_AbortsTheConnection_WhenASilentPeerMissesTheKeepAliveTimeout()
+    {
+        // net9+ only, and that is a shipped difference rather than a test detail:
+        // WebSocketCreationOptions.KeepAliveTimeout does not exist on net8.0, where a half-open
+        // peer is still detected only by the OS TCP timeout. SimpleWebSocketServer says so in
+        // its #else branch, mirroring SendspinConnection on the dial path.
+        await using var server = new SimpleWebSocketServer(
+            logger: null,
+            connectionOptions: new ConnectionOptions { KeepAliveIntervalMs = 250, KeepAliveTimeoutMs = 250 });
+        server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (s, c) => connected.TrySetResult(c);
+
+        using var peer = await ConnectSilentPeerAsync(server.Port);
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The abort surfaces as an OperationCanceledException("Aborted") out of ReceiveAsync, so
+        // it reaches OnError rather than OnClose. Either ends the connection —
+        // IncomingConnection maps both to Disconnected, which is what makes the host raise
+        // ServerDisconnected — and which one it is is a runtime detail, so accept both. With
+        // keep-alive off, the peer's silence is invisible and this never completes.
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        serverConn.OnClose = _ => ended.TrySetResult();
+        serverConn.OnError = _ => ended.TrySetResult();
+
+        await ended.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await serverConn.DisposeAsync();
+    }
+#endif
+
+    [Fact]
     public async Task Server_RejectsOversizedHttpHeaders()
     {
         // A client sending more than MaxHttpHeaderSize bytes without a \r\n\r\n
@@ -424,5 +485,59 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _server.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Completes a raw WebSocket upgrade and then stays silent, never answering a keep-alive —
+    /// the half-open peer. The returned client's stream carries the server's frames only: the
+    /// 101 response is consumed exactly, byte by byte, so nothing following it is swallowed.
+    /// </summary>
+    private static async Task<TcpClient> ConnectSilentPeerAsync(int port)
+    {
+        var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", port);
+        var stream = tcp.GetStream();
+
+        var key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
+        var request = $"GET /sendspin HTTP/1.1\r\n" +
+                      $"Host: 127.0.0.1:{port}\r\n" +
+                      $"Upgrade: websocket\r\n" +
+                      $"Connection: Upgrade\r\n" +
+                      $"Sec-WebSocket-Key: {key}\r\n" +
+                      $"Sec-WebSocket-Version: 13\r\n" +
+                      $"\r\n";
+        await stream.WriteAsync(Encoding.UTF8.GetBytes(request));
+
+        var terminator = "\r\n\r\n"u8.ToArray();
+        var response = new List<byte>();
+        var one = new byte[1];
+        while (!response.TakeLast(terminator.Length).SequenceEqual(terminator))
+        {
+            var read = await stream.ReadAsync(one.AsMemory());
+            Assert.Equal(1, read);
+            response.Add(one[0]);
+        }
+
+        return tcp;
+    }
+
+    /// <summary>
+    /// The opcode of the next frame the server sends, or null if nothing arrives within the
+    /// bound — which is what keep-alive being disabled looks like from the wire.
+    /// </summary>
+    private static async Task<int?> ReadNextFrameOpcodeAsync(NetworkStream stream, TimeSpan within)
+    {
+        var firstByte = new byte[1];
+        using var cts = new CancellationTokenSource(within);
+
+        try
+        {
+            var read = await stream.ReadAsync(firstByte.AsMemory(), cts.Token);
+            return read == 0 ? null : firstByte[0] & 0x0F;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
     }
 }

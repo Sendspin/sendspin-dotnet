@@ -93,6 +93,9 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     NoisePsk? INoiseSessionInfo.MatchedPsk => _matchedPsk;
 
     /// <inheritdoc/>
+    NoiseCipherSuite INoiseSessionInfo.Suite => _suite;
+
+    /// <inheritdoc/>
     public IReadOnlyList<WireFrame> Start()
     {
         // Fail here, naming the suite and the alternative, rather than several messages later

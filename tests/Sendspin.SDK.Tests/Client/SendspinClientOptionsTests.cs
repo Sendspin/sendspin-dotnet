@@ -12,6 +12,7 @@ public class SendspinClientOptionsTests
         public string? ServerId => "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo";
         public NoisePsk? MatchedPsk => new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Sentinel);
         public ReadOnlyMemory<byte>? HandshakeHash => new byte[32];
+        public NoiseCipherSuite Suite => NoiseCipherSuite.ChaChaPoly;
     }
 
     [Fact]

@@ -86,35 +86,33 @@ public sealed class IncomingConnection : ISendspinConnection
             "Use SendspinConnection for client-initiated connections.");
     }
 
-    public async Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default)
+    public Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default)
+        => CloseAfterSendingAsync(ClientGoodbyeMessage.Create(reason), reason, cancellationToken);
+
+    /// <summary>
+    /// Closes the connection without sending <c>client/goodbye</c> — the spec's literal
+    /// "dropped".
+    /// </summary>
+    /// <remarks>
+    /// For the ends the spec defines no goodbye reason for, such as a provisional connection
+    /// that never activates (connection.md:40). <c>client/goodbye.reason</c> is a closed set
+    /// (messaging.md:426), so inventing a reason is worse than silence: a server cannot parse
+    /// it, reads it as no goodbye at all, and may immediately reconnect — while the invented
+    /// string still tells an unauthenticated peer exactly why it was dropped. Mirrors how a
+    /// framing failure already closes here, with no application-level message.
+    /// </remarks>
+    /// <param name="reason">Local reason, for the state change and the log only. Never sent.</param>
+    public async Task CloseWithoutGoodbyeAsync(string reason)
     {
         if (_state == ConnectionState.Disconnected || !_isOpen)
             return;
 
-        SetState(ConnectionState.Disconnecting, reason);
-
-        try
-        {
-            if (_isOpen)
-            {
-                try
-                {
-                    var goodbye = ClientGoodbyeMessage.Create(reason);
-                    await SendMessageAsync(goodbye, cancellationToken);
-
-                    await _socket.CloseAsync(cancellationToken);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, "Error during graceful disconnect");
-                }
-            }
-        }
-        finally
-        {
-            _isOpen = false;
-            SetState(ConnectionState.Disconnected, reason);
-        }
+        // State before the close, as the framing-failure path does: the socket close can bring
+        // the peer's own Close frame back through OnClose, and a state still reading
+        // Handshaking there would be misclassified as the legacy-server signature (#97).
+        _isOpen = false;
+        SetState(ConnectionState.Disconnected, reason);
+        await CloseSocketSafeAsync();
     }
 
     public async Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default) where T : IMessage
@@ -141,6 +139,55 @@ public sealed class IncomingConnection : ISendspinConnection
         }
 
         await SendWireFramesAsync(_framing.EncodeBinary(data), cancellationToken);
+    }
+
+    /// <summary>
+    /// Closes after sending <c>pair/abort</c> instead of <c>client/goodbye</c>. connection.md
+    /// routes an arbitration loss on a pairing handshake through pair/abort reason
+    /// <c>concurrent_attempt</c>, and pairing.md gives that reason close-after-send semantics —
+    /// so this is the same close as <see cref="DisconnectAsync"/> with a different farewell on
+    /// the way out, not an extra message before one (#203).
+    /// </summary>
+    internal Task DisconnectWithPairAbortAsync(string reason, CancellationToken cancellationToken = default)
+        => CloseAfterSendingAsync(
+            new PairAbortMessage { Payload = new PairAbortPayload { Reason = reason } },
+            reason,
+            cancellationToken);
+
+    /// <summary>
+    /// Sends one farewell message and closes. Generic in the message type rather than taking an
+    /// <see cref="IMessage"/>: serialization is source-generated per concrete type, which an
+    /// interface-typed argument would defeat under PublishAot.
+    /// </summary>
+    private async Task CloseAfterSendingAsync<T>(T farewell, string reason, CancellationToken cancellationToken)
+        where T : IMessage
+    {
+        if (_state == ConnectionState.Disconnected || !_isOpen)
+            return;
+
+        SetState(ConnectionState.Disconnecting, reason);
+
+        try
+        {
+            if (_isOpen)
+            {
+                try
+                {
+                    await SendMessageAsync(farewell, cancellationToken);
+
+                    await _socket.CloseAsync(cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Error during graceful disconnect");
+                }
+            }
+        }
+        finally
+        {
+            _isOpen = false;
+            SetState(ConnectionState.Disconnected, reason);
+        }
     }
 
     private async Task SendWireFramesAsync(IEnumerable<WireFrame> frames, CancellationToken cancellationToken)
