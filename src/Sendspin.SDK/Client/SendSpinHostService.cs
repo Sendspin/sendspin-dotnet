@@ -851,9 +851,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// </summary>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
-    /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
+    /// <param name="staticDelayMs">
+    /// A new static delay in milliseconds to apply, persist, and report, or null (the default)
+    /// to leave the current delay untouched and simply report it. Same semantics as
+    /// <see cref="ISendspinClient.SendPlayerStateAsync"/>: a supplied value is written to the
+    /// clock synchronizer and to <see cref="SendspinClientOptions.StaticDelayStore"/>, so omit
+    /// it for an ordinary volume or mute change.
+    /// </param>
     /// <param name="serverId">Target server ID, or null for all servers.</param>
-    public async Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0, string? serverId = null)
+    public async Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null, string? serverId = null)
     {
         List<SendspinClientService> clients;
         lock (_connectionsLock)

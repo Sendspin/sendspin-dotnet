@@ -233,8 +233,14 @@ Three things changed, all on what goes out on the wire:
 ### `SendPlayerStateAsync`'s delay parameter is now nullable, and applies
 
 ```csharp
+// ISendspinClient (dial path)
 Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null);   // was double = 0.0
+
+// SendspinHostService (listen path)
+Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null, string? serverId = null);
 ```
+
+Both facades carry the same signature and the same semantics.
 
 **Omit it for volume and mute changes.** The old `0.0` default reported `static_delay_ms: 0` on every such call, and the spec requires the server to *merge* each `client/state`, "retaining the last value of any field that is absent" — so a present value overwrites. One volume change after the server set a 250 ms delay wiped it back to 0. The reported delay is now always the one actually applied, regardless of what you pass.
 
