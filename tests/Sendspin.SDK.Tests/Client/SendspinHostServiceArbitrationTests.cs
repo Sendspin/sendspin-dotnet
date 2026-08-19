@@ -139,6 +139,45 @@ public class SendspinHostServiceArbitrationTests
     }
 
     [Fact]
+    public async Task DisplacedPairingConnection_GetsPairAbortNotGoodbye()
+    {
+        // connection.md: a displaced connection that is a pairing handshake receives pair/abort
+        // concurrent_attempt, not client/goodbye another_server — a goodbye is not something a
+        // pairing state machine processes as an attempt teardown (#203). Management is the only
+        // priority that displaces a pairing attempt at all.
+        await using var host = await StartHostAsync();
+        await using var pairing = new FakeServer(TestPsk, ["pairing"]);
+        await pairing.ConnectAsync(host.ListeningPort);
+        await WaitForServerConnectedAsync(host, pairing.ServerId);
+
+        await using var incoming = new FakeServer(TestPsk, ["management"]);
+        await incoming.ConnectAsync(host.ListeningPort);
+
+        Assert.True(await pairing.WaitForPairAbortAsync("concurrent_attempt", Timeout));
+
+        // And no goodbye alongside it: the pair/abort replaces the goodbye, it does not precede
+        // one. A short wait, since by here the abort has already been observed.
+        Assert.Null(await pairing.WaitForGoodbyeAsync(TimeSpan.FromMilliseconds(750)));
+    }
+
+    [Fact]
+    public async Task RejectedIncomingPairing_GetsPairAbortNotGoodbye()
+    {
+        // The other half of connection.md's rule: a rejected incoming pairing is told
+        // pair/abort concurrent_attempt. A playback holder outranks it.
+        await using var host = await StartHostAsync();
+        await using var existing = new FakeServer(TestPsk, ["playback"]);
+        await existing.ConnectAsync(host.ListeningPort);
+        await WaitForServerConnectedAsync(host, existing.ServerId);
+
+        await using var incoming = new FakeServer(TestPsk, ["pairing"]);
+        await incoming.ConnectAsync(host.ListeningPort);
+
+        Assert.True(await incoming.WaitForPairAbortAsync("concurrent_attempt", Timeout));
+        Assert.Null(await incoming.WaitForGoodbyeAsync(TimeSpan.FromMilliseconds(750)));
+    }
+
+    [Fact]
     public async Task SameServerReconnect_SendsUserRequestToStaleConnection()
     {
         await using var host = await StartHostAsync();
