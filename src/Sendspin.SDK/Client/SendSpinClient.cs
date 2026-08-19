@@ -179,16 +179,92 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private const int MaxEarlyChunks = 100;
 
     // 8 probes lets us pick the lowest-RTT sample and still complete a burst quickly.
+    // The reference burst strategy's burst_size_ (sendspin-cpp time_burst.h).
     private const int BurstSize = 8;
 
-    // 50 ms between probes — short enough for fast bursts, long enough to avoid TCP queuing.
-    private const int BurstIntervalMs = 50;
+    /// <summary>
+    /// Per-probe timeout for time sync responses: the reference's
+    /// <c>DEFAULT_RESPONSE_TIMEOUT_MS</c>.
+    /// </summary>
+    /// <remarks>
+    /// Generous on purpose. A probe that is merely slow still yields a usable — if
+    /// high-<c>max_error</c> — sample, and burst-best selection discards it in favour of any
+    /// quicker one, so there is nothing to gain by giving up on it early. The former 2 s
+    /// timeout turned an ordinary WiFi stall into a lost sample, and because a timeout also
+    /// abandoned the rest of the burst, into a lost burst (#225).
+    /// </remarks>
+    private const int ProbeTimeoutMs = 10000;
 
     /// <summary>
-    /// Per-probe timeout for time sync responses.
-    /// Matches the JS reference player and aborts a burst if any probe stalls.
+    /// Interval between bursts once the clock has converged: the reference's
+    /// <c>DEFAULT_BURST_INTERVAL_MS</c>.
     /// </summary>
-    private const int ProbeTimeoutMs = 2000;
+    /// <remarks>
+    /// Long intervals are what make drift observable — the estimate improves with the baseline
+    /// between updates, not with the number of updates — and matching the reference here is
+    /// what keeps a .NET player's filter dynamics in step with the C++ and JS players sharing
+    /// its group.
+    /// </remarks>
+    private const int SyncedTimeSyncIntervalMs = 10000;
+
+    /// <summary>
+    /// Interval between bursts before the clock has converged.
+    /// </summary>
+    /// <remarks>
+    /// The one deliberate departure from the reference's single fixed interval. The reference
+    /// reports itself time-synced after its first measurement, so it has no converging window
+    /// to hurry through; this SDK withholds <c>available: true</c> — and with it the initial
+    /// <c>client/state</c> — until its filter has five measurements and sub-millisecond
+    /// uncertainty, which at a 10 s cadence would leave a player invisible to the server for
+    /// the better part of a minute after every connect. Pacing the converging window at 500 ms
+    /// instead reaches that gate in about two seconds, like the reference clients (#226).
+    /// <para>
+    /// It is a budget, not a mode: see <see cref="MaxConvergingBursts"/>. On a link where the
+    /// convergence gate is simply out of reach the tier would otherwise never end, and "not
+    /// converged yet" is exactly when a client can least afford to be the loudest thing on the
+    /// network.
+    /// </para>
+    /// </remarks>
+    private const int ConvergingTimeSyncIntervalMs = 500;
+
+    /// <summary>
+    /// Bursts the converging tier may spend before the interval widens to
+    /// <see cref="SyncedTimeSyncIntervalMs"/> whether the clock has converged or not.
+    /// </summary>
+    /// <remarks>
+    /// About 30 seconds of fast pacing, which is far more than the five bursts a healthy link
+    /// needs and still enough for a slow one — at 20 ms RTT the offset uncertainty crosses the
+    /// millisecond gate in roughly 25 measurements. Past that the pacing is not buying
+    /// convergence, it is buying packets: measurement uncertainty falls as the square root of
+    /// the sample count, so a link whose per-sample noise is tens of milliseconds needs
+    /// hundreds to thousands of samples, and 8 probes every 500 ms would sustain 5-6 probes a
+    /// second for the best part of an hour to get there. The reference client does not converge
+    /// on such a link either — it never leaves its fixed 10 s cadence — so widening loses
+    /// nothing real and stops a struggling client from making its own network worse. The client
+    /// keeps probing at the steady cadence and still reports <c>available</c> the moment the
+    /// gate is finally met.
+    /// </remarks>
+    private const int MaxConvergingBursts = 60;
+
+    // Converging-tier budget, refilled by StartTimeSyncLoop. Touched from the time-sync loop;
+    // a loop being replaced can spend one burst of its successor's fresh budget before its
+    // Task.Delay observes cancellation — harmless (59 instead of 60), noted for honesty.
+    private int _convergingBurstsSpent;
+    private bool _convergingBudgetExhausted;
+
+    /// <summary>
+    /// Cancelled when this connection ends, and only then.
+    /// </summary>
+    /// <remarks>
+    /// The stream-start rescue burst runs on it. That burst has to outlive
+    /// <see cref="StopTimeSyncLoop"/> — a pairing activation stops the loop, and the burst is
+    /// gated against pairing at its own source instead — but it must not outlive the
+    /// connection. On <see cref="CancellationToken.None"/> it did: against a server that
+    /// accepts <c>client/time</c> and never answers, the orphan ran the whole burst (8 probes,
+    /// each waiting the full per-probe timeout) while holding the single-burst guard, so the
+    /// loop restarted by a fast reconnect had its own bursts skipped until it finished.
+    /// </remarks>
+    private CancellationTokenSource? _connectionLifetimeCts;
 
     // Sequential burst tracking: at most one probe is in flight at any time.
     // _burstInFlight is the awaiter for that probe's reply; _burstInFlightT1
@@ -844,6 +920,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _logger.LogInformation("Disconnecting: {Reason}", reason);
 
         StopTimeSyncLoop();
+        EndConnectionLifetime();
 
         await _connection.DisconnectAsync(reason);
 
@@ -1466,6 +1543,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             StopTimeSyncLoop();
 
+            // The loop's own token does not reach the stream-start rescue burst, which runs on
+            // the connection's lifetime precisely so a pairing activation cannot stop it. This
+            // is the disconnect that must.
+            EndConnectionLifetime();
+
             // A pairing attempt cannot survive the session (the CPace counter and handshake
             // hash reset with it), so release a presenter still showing the pairing code.
             ClearPairingCodeState();
@@ -1644,8 +1726,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _markedPskUsed = true;
     }
 
-    private void OnTextMessageReceived(object? sender, string json)
+    private void OnTextMessageReceived(object? sender, TextMessageReceivedEventArgs e)
     {
+        var json = e.Json;
+
         // Once we have decided to close, nothing the peer sends may still take effect.
         // Neither receive path stops on its own: SendspinConnection's loop keeps reading
         // while the goodbye and the socket close are in flight, and IncomingConnection
@@ -1713,7 +1797,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
 
                 case MessageTypes.ServerTime:
-                    HandleServerTime(json);
+                    HandleServerTime(json, e.ReceivedAtMicroseconds);
                     break;
 
                 case MessageTypes.GroupUpdate:
@@ -3517,6 +3601,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
 
+        // Connection-scoped work started from here on belongs to this connection and dies with
+        // it — see the field's remarks for the orphan this replaced.
+        BeginConnectionLifetime();
+
         // When the connection's first activate is the pairing one, the send-or-defer
         // decision is withheld wholesale: a non-sync role's initial client/state would
         // otherwise go out right here, into a server that admits nothing but pairing
@@ -3620,6 +3708,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void StartTimeSyncLoop()
     {
         StopTimeSyncLoop();
+
+        // A fresh converging window for the new loop: this runs on (re)connect and on the
+        // return from a pairing window, both of which are moments where reaching the
+        // convergence gate promptly is worth the extra probes again.
+        _convergingBurstsSpent = 0;
+        _convergingBudgetExhausted = false;
+
         _timeSyncCts = new CancellationTokenSource();
         TimeSyncLoopAsync(_timeSyncCts.Token).SafeFireAndForget(_logger);
         _logger.LogDebug("Time sync loop started (adaptive intervals)");
@@ -3634,30 +3729,86 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Calculates the next time sync interval based on synchronization quality.
-    /// Uses longer intervals when well-synced to improve drift measurement signal-to-noise ratio.
+    /// Arms a fresh <see cref="_connectionLifetimeCts"/> for a connection that has just
+    /// completed its handshake, cancelling any left over from the previous one.
     /// </summary>
-    private int GetAdaptiveTimeSyncIntervalMs()
+    private void BeginConnectionLifetime()
+        => CancelConnectionLifetime(Interlocked.Exchange(ref _connectionLifetimeCts, new CancellationTokenSource()));
+
+    /// <summary>
+    /// Cancels connection-scoped work — currently the stream-start rescue burst — because the
+    /// connection has ended.
+    /// </summary>
+    private void EndConnectionLifetime()
+        => CancelConnectionLifetime(Interlocked.Exchange(ref _connectionLifetimeCts, null));
+
+    private static void CancelConnectionLifetime(CancellationTokenSource? cts)
+    {
+        if (cts is null)
+        {
+            return;
+        }
+
+        // Cancel before Dispose, and Cancel runs its registrations synchronously, so anything
+        // awaiting this token has already been released by the time the source goes away.
+        cts.Cancel();
+        cts.Dispose();
+    }
+
+    /// <summary>
+    /// Interval to wait before the next time-sync burst: fast while the clock is still
+    /// converging, the reference's steady-state cadence once it has.
+    /// </summary>
+    /// <remarks>
+    /// Two tiers, not a ladder. The ladder this replaced switched to slow pacing at three
+    /// measurements while convergence needs five, so on a good network — where uncertainty
+    /// drops under a millisecond after the third burst — measurements four and five each
+    /// arrived 10 s late and the player took over twenty seconds to appear on the server,
+    /// slower on a good network than on a poor one (#226). Keying the tier on convergence
+    /// itself, rather than on a proxy for it, is what makes that impossible to reintroduce.
+    /// <para>
+    /// The fast tier is a per-loop budget of <see cref="MaxConvergingBursts"/> bursts, not a
+    /// mode that lasts until convergence: a link that cannot reach the gate would otherwise
+    /// hold the loop at 500 ms indefinitely. Spending the budget is not fatal — the client
+    /// keeps probing at the steady cadence and reports <c>available</c> whenever the gate is
+    /// finally met — and the budget is refilled by <see cref="StartTimeSyncLoop"/>, so a
+    /// reconnect or a return from a pairing window gets a fresh converging window.
+    /// </para>
+    /// <para>
+    /// Marked <c>internal</c> so the cadence tiers can be asserted directly; the only
+    /// production caller is <see cref="TimeSyncLoopAsync"/>.
+    /// </para>
+    /// </remarks>
+    internal int GetAdaptiveTimeSyncIntervalMs()
     {
         var status = _clockSynchronizer.GetStatus();
 
-        // If not enough measurements yet, sync rapidly (but after burst, so this is inter-burst interval)
-        if (status.MeasurementCount < 3)
-            return 500; // 500ms between initial bursts
+        if (status.IsConverged)
+        {
+            return SyncedTimeSyncIntervalMs;
+        }
 
-        // Uncertainty in milliseconds
-        var uncertaintyMs = status.OffsetUncertaintyMicroseconds / 1000.0;
+        if (_convergingBurstsSpent < MaxConvergingBursts)
+        {
+            _convergingBurstsSpent++;
+            return ConvergingTimeSyncIntervalMs;
+        }
 
-        // Adaptive intervals based on sync quality
-        // Longer intervals when synced = better drift signal detection over time
-        if (uncertaintyMs < 1.0)
-            return 10000; // Well synchronized: 10s (allows drift to accumulate measurably)
-        else if (uncertaintyMs < 2.0)
-            return 5000;  // Good sync: 5s
-        else if (uncertaintyMs < 5.0)
-            return 2000;  // Moderate sync: 2s
-        else
-            return 1000;  // Poor sync: 1s
+        if (!_convergingBudgetExhausted)
+        {
+            _convergingBudgetExhausted = true;
+            _logger.LogWarning(
+                "Clock sync has not converged after {Bursts} bursts (offset uncertainty " +
+                "{Uncertainty:F0}μs over {Count} measurements); falling back to the {Interval}ms " +
+                "steady-state cadence. Probing faster than this cannot fix a link this noisy, and " +
+                "this client will not report available until the filter converges.",
+                MaxConvergingBursts,
+                status.OffsetUncertaintyMicroseconds,
+                status.MeasurementCount,
+                SyncedTimeSyncIntervalMs);
+        }
+
+        return SyncedTimeSyncIntervalMs;
     }
 
     private async Task TimeSyncLoopAsync(CancellationToken cancellationToken)
@@ -3698,16 +3849,54 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Sends a burst of NTP-style time-sync probes sequentially and feeds the
-    /// lowest-RTT sample into the clock synchronizer. Each probe is awaited with
-    /// a per-probe timeout; if any probe times out the remainder of the burst
-    /// is abandoned (matches the JS reference player, since TCP head-of-line
-    /// blocking means later probes likely face the same delay).
+    /// The stream-start rescue burst: a one-off burst on the connection's lifetime rather than
+    /// on the time-sync loop's, for a stream starting before the clock has minimal sync.
     /// </summary>
     /// <remarks>
+    /// The token is the whole point — see <see cref="_connectionLifetimeCts"/>. It has to
+    /// survive <see cref="StopTimeSyncLoop"/>, because a pairing activation stops the loop and
+    /// this burst answers to a pairing gate of its own, but it has to die with the connection.
+    /// A null source means the connection ended (or never finished its handshake), so there is
+    /// nothing to rescue.
+    /// </remarks>
+    private Task SendRescueSyncBurstAsync()
+    {
+        if (Volatile.Read(ref _connectionLifetimeCts) is not { } lifetime)
+        {
+            return Task.CompletedTask;
+        }
+
+        try
+        {
+            return SendTimeSyncBurstAsync(lifetime.Token);
+        }
+        catch (ObjectDisposedException)
+        {
+            // A disconnect can cancel-and-dispose the source between the read above and the
+            // Token property evaluating. The connection is dying either way — same as null.
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// Sends a burst of NTP-style time-sync probes sequentially and feeds the lowest-RTT
+    /// sample into the clock synchronizer.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The reference burst strategy, followed here: each probe is sent as soon as the previous
+    /// one is answered — no fixed spacing, since the reply is the pacing signal — and a probe
+    /// that times out advances to the next one rather than abandoning the burst. Both matter
+    /// for the same reason: the burst exists to collect candidates so the cleanest can be
+    /// chosen, and one slow reply is exactly the condition under which the remaining seven are
+    /// worth having. The previous shape (50 ms between probes, abort on the first timeout)
+    /// turned a single stalled reply into a one-sample burst (#225).
+    /// </para>
+    /// <para>
     /// Marked <c>internal</c> for direct invocation from concurrent-burst regression tests;
     /// production callers reach this via <see cref="StartTimeSyncLoop"/> or
     /// <see cref="HandleStreamStartAsync"/>'s smart-sync trigger.
+    /// </para>
     /// </remarks>
     internal async Task SendTimeSyncBurstAsync(CancellationToken cancellationToken)
     {
@@ -3733,13 +3922,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 var sample = await SendSingleProbeAsync(i + 1, cancellationToken).ConfigureAwait(false);
                 if (sample is null)
-                    break; // probe timed out or aborted; stop the burst
+                    continue; // probe timed out; the next one still gets its chance
+
+                // A round trip of zero or less is a corrupt exchange, not a fast one — the
+                // server clock stepped between T2 and T3, its two stamps came from different
+                // sources, or a counter jumped. Because burst-best selection prefers the
+                // LOWEST round trip, such a sample would always win and would then enter the
+                // filter with a near-zero variance that drives the Kalman gain to 1. The
+                // reference drops it as it arrives, before it can be a candidate at all (#224).
+                if (sample.Value.Rtt <= 0)
+                {
+                    _logger.LogWarning(
+                        "Dropping time response {Index}/{Total} with non-positive round trip: {Rtt:F0}μs",
+                        i + 1, BurstSize, sample.Value.Rtt);
+                    continue;
+                }
 
                 samples.Add(sample.Value);
-
-                // Pace probes so a fast localhost burst doesn't saturate the wire.
-                if (i < BurstSize - 1)
-                    await Task.Delay(BurstIntervalMs, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -3782,23 +3981,44 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Sends one client/time message and awaits its server/time reply.
-    /// Returns null if the reply doesn't arrive within ProbeTimeoutMs.
+    /// Returns null if the probe was dropped or the reply doesn't arrive within ProbeTimeoutMs.
     /// </summary>
+    /// <remarks>
+    /// T1 is not stamped here. The transport stamps it at the send point and hands it back
+    /// through <see cref="ISendspinConnection.SendTimeMessageAsync"/>'s callback, which is what
+    /// keeps serialization, encryption and send-queue latency out of the measured round trip
+    /// (#227). The callback runs before the frame reaches the socket, so the reply-matching
+    /// slot below is always populated ahead of any answer to it.
+    /// </remarks>
     private async Task<TimeSyncSample?> SendSingleProbeAsync(int index, CancellationToken cancellationToken)
     {
-        var tcs = new TaskCompletionSource<TimeSyncSample>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var timeMessage = ClientTimeMessage.CreateNow();
-        var t1 = timeMessage.ClientTransmitted;
-
-        lock (_burstLock)
+        // The gate SendAsync applies to every other message. Probes bypass SendAsync now that
+        // the transport builds them, so the rule is restated rather than inherited: the
+        // reference server stops reading the socket during a pairing attempt and treats the
+        // first frame it reads afterwards as the next pairing message, so a probe sent into
+        // that window aborts the attempt as a protocol error.
+        if (_pairingActivationActive)
         {
-            _burstInFlight = tcs;
-            _burstInFlightT1 = t1;
+            _logger.LogDebug("Pairing activation in effect; dropping ClientTimeMessage");
+            return null;
         }
+
+        var tcs = new TaskCompletionSource<TimeSyncSample>(TaskCreationOptions.RunContinuationsAsynchronously);
+        long t1 = 0;
 
         try
         {
-            await SendAsync(timeMessage, cancellationToken).ConfigureAwait(false);
+            await _connection.SendTimeMessageAsync(
+                transmitted =>
+                {
+                    t1 = transmitted;
+                    lock (_burstLock)
+                    {
+                        _burstInFlight = tcs;
+                        _burstInFlightT1 = transmitted;
+                    }
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -3905,12 +4125,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private void HandleServerTime(string json)
+    /// <summary>
+    /// Completes the in-flight probe this <c>server/time</c> answers, turning the four
+    /// timestamps into a burst sample.
+    /// </summary>
+    /// <param name="json">The received <c>server/time</c> payload.</param>
+    /// <param name="t4">
+    /// The client receive time the transport captured before this frame was decrypted and
+    /// parsed. Passed in rather than read here: a T4 taken after deserialization charges
+    /// decrypt and parse time to the round trip, inflating <c>max_error</c> and biasing the
+    /// offset by half the send/receive asymmetry (#227).
+    /// </param>
+    private void HandleServerTime(string json, long t4)
     {
         var message = MessageSerializer.Deserialize<ServerTimeMessage>(json);
         if (message is null) return;
 
-        var t4 = ClientTimeMessage.GetCurrentTimestampMicroseconds();
         var t1 = message.ClientTransmitted;
         var t2 = message.ServerReceived;
         var t3 = message.ServerTransmitted;
@@ -4414,8 +4644,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // Same rule as the time-sync loop's gate in HandleServerActivate: no
             // client/time may leave the client while a pairing activation is in effect —
             // the reference server would read the probe where it requires the next pairing
-            // message and abort the attempt. This burst is not the loop (its token is
-            // CancellationToken.None, so StopTimeSyncLoop cannot reach it) and it fires
+            // message and abort the attempt. This burst is not the loop (it runs on the
+            // connection's lifetime, so StopTimeSyncLoop cannot reach it) and it fires
             // without app action, so it is gated at the source: a stream/start crossing a
             // mid-session pairing activate on a clock without minimal sync must stay
             // silent. The loop's restart on the next non-pairing activate covers the
@@ -4425,7 +4655,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         else if (!_clockSynchronizer.HasMinimalSync)
         {
             _logger.LogDebug("Clock not synced, triggering re-sync burst (fire-and-forget)");
-            _ = SendTimeSyncBurstAsync(CancellationToken.None);
+            SendRescueSyncBurstAsync().SafeFireAndForget(_logger);
         }
         else
         {
@@ -4729,6 +4959,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        EndConnectionLifetime();
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
         _displayScheduler.Dispose();
@@ -4740,6 +4971,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        EndConnectionLifetime();
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
         _displayScheduler.Dispose();

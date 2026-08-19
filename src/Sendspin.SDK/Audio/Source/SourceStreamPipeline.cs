@@ -43,7 +43,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// its buffer size and the SDK does not control it, so an oversized buffer is split to this
     /// ceiling rather than assumed never to arrive.
     /// </summary>
-    internal const int MaxChunkMilliseconds = 150;
+    internal const int MaxChunkMilliseconds = AudioChunkLimits.MaxChunkMilliseconds;
 
     private readonly IAudioCaptureDevice _capture;
     private readonly ISourceAudioEncoderFactory _encoderFactory;

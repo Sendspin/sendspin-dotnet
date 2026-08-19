@@ -33,7 +33,7 @@ public sealed class AudioDecoderFactory : IAudioDecoderFactory
         return format.Codec.ToLowerInvariant() switch
         {
             AudioCodecs.Opus => new OpusDecoder(format),
-            AudioCodecs.Pcm => new PcmDecoder(format),
+            AudioCodecs.Pcm => new PcmDecoder(format, _loggerFactory.CreateLogger<PcmDecoder>()),
             AudioCodecs.Flac => new FlacDecoder(format, _loggerFactory.CreateLogger<FlacDecoder>()),
             _ => throw new NotSupportedException($"Unsupported audio codec: {format.Codec}"),
         };

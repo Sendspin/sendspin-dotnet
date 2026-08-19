@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Connection;
 
@@ -58,7 +59,7 @@ public sealed class SendspinConnection : ISendspinConnection
     internal IWireFraming Framing => _framing;
 
     public event EventHandler<ConnectionStateChangedEventArgs>? StateChanged;
-    public event EventHandler<string>? TextMessageReceived;
+    public event EventHandler<TextMessageReceivedEventArgs>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
 
     public SendspinConnection(
@@ -271,6 +272,47 @@ public sealed class SendspinConnection : ISendspinConnection
         await SendWireFramesAsync(_framing.EncodeBinary(data), cancellationToken);
     }
 
+    public async Task SendTimeMessageAsync(Action<long> onTransmitted, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_webSocket?.State != WebSocketState.Open)
+        {
+            if (State is ConnectionState.Connected or ConnectionState.Handshaking)
+            {
+                _ = Task.Run(() => HandleConnectionLostAsync());
+            }
+
+            throw new InvalidOperationException("WebSocket is not connected");
+        }
+
+        string json;
+
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            // T1 is stamped here and not by the caller: after the wait on the send lock, so a
+            // probe queued behind another message does not carry a timestamp from before that
+            // message was even written, and inside the lock, so nothing can be written between
+            // the stamp and this frame. Serialization and Noise encryption still fall between
+            // the two, exactly as they do in the reference transport, which likewise captures
+            // client_transmitted and then formats the JSON inline (#227).
+            var clientTransmitted = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+            onTransmitted(clientTransmitted);
+
+            json = MessageSerializer.Serialize(ClientTimeMessage.Create(clientTransmitted));
+            await SendFramesHoldingLockAsync(_framing.EncodeText(json), cancellationToken);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+
+        // Logged after the write rather than before it, so the logging sink's cost cannot land
+        // between the T1 stamp and the socket.
+        _logger.LogDebug("Sending: {Message}", json);
+    }
+
     private async Task SendWireFramesAsync(IEnumerable<WireFrame> frames, CancellationToken cancellationToken)
     {
         await _sendLock.WaitAsync(cancellationToken);
@@ -367,6 +409,12 @@ public sealed class SendspinConnection : ISendspinConnection
                 }
                 while (!result.EndOfMessage);
 
+                // T4 for any clock-sync exchange this frame carries. Taken here — the frame is
+                // complete, nothing has been decrypted or parsed yet — because the spec defines
+                // it as the receive time "captured locally when the response arrives". Stamping
+                // it after deserialization charged decrypt and parse time to the round trip.
+                var receivedAtMicroseconds = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+
                 var messageData = messageBuffer.ToArray();
 
                 // The peer answered, so this connection cannot be the legacy signature.
@@ -417,7 +465,7 @@ public sealed class SendspinConnection : ISendspinConnection
                 if (inbound.Text is { } text)
                 {
                     _logger.LogDebug("Received text: {Message}", text.Length > 500 ? text[..500] + "..." : text);
-                    TextMessageReceived?.Invoke(this, text);
+                    TextMessageReceived?.Invoke(this, new TextMessageReceivedEventArgs(text, receivedAtMicroseconds));
                 }
 
                 if (inbound.Binary is { } binary)
