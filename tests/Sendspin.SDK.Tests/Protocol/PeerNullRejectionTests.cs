@@ -56,6 +56,7 @@ public class PeerNullRejectionTests
     [InlineData("""{"type":"server/pair-auth","payload":{"pake_msg_1":null}}""")]
     [InlineData("""{"type":"server/pair-confirm","payload":{"server_kc":null}}""")]
     [InlineData("""{"type":"group/update","payload":{"group_id":null}}""")]
+    [InlineData("""{"type":"server/state","payload":null}""")]
     [InlineData("""{"type":"server/command","payload":null}""")]
     [InlineData("""{"type":"stream/end","payload":null}""")]
     [InlineData("""{"type":"stream/clear","payload":null}""")]
@@ -81,5 +82,24 @@ public class PeerNullRejectionTests
         Assert.Equal("opus", start.Payload.Format!.Codec);
         Assert.Equal("album", start.Payload.Artwork!.Channels[0].Source);
         Assert.Equal(new[] { "beat" }, start.Payload.Visualizer!.Types);
+    }
+
+    [Fact]
+    public void ServerStateNullRoleObjects_AreAccepted()
+    {
+        // The server/state arm (#206) rejects a null payload, but a null ROLE object is the
+        // spec's "clear all of this role's state" signal and must survive validation — as must
+        // an absent one. Without this the arm could be "fixed" by rejecting every null in the
+        // message and the theory above would still pass.
+        var msg = MessageSerializer.Deserialize("""
+            {"type":"server/state","payload":{"metadata":null,"color":null}}
+            """);
+
+        var state = Assert.IsType<ServerStateMessage>(msg);
+        Assert.True(state.Payload.Metadata.IsPresent);
+        Assert.Null(state.Payload.Metadata.Value);
+        Assert.True(state.Payload.Color.IsPresent);
+        Assert.Null(state.Payload.Color.Value);
+        Assert.True(state.Payload.Controller.IsAbsent);
     }
 }
