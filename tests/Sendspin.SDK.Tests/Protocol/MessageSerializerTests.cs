@@ -222,6 +222,7 @@ public class MessageSerializerTests
         var json = MessageSerializer.Serialize(new ServerUnpairMessage());
 
         Assert.Contains("\"type\":\"server/unpair\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"payload\":{}", json, StringComparison.Ordinal);
         Assert.IsType<ServerUnpairMessage>(MessageSerializer.Deserialize(json));
     }
 
