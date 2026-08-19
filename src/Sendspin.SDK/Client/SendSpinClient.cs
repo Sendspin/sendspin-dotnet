@@ -3781,13 +3781,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     continue;
                 }
 
-                // A round trip of zero or less is a corrupt exchange, not a fast one — the
-                // server clock stepped between T2 and T3, its two stamps came from different
-                // sources, or a counter jumped. Because burst-best selection prefers the
-                // LOWEST round trip, such a sample would always win and would then enter the
-                // filter with a near-zero variance that drives the Kalman gain to 1. The
-                // reference drops it as it arrives, before it can be a candidate at all (#224).
-
                 samples.Add(sample.Value);
             }
         }
