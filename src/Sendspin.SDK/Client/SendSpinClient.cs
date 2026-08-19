@@ -207,6 +207,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     internal INoiseSessionInfo Session => _session;
 
     /// <summary>
+    /// The <c>pairing_psk</c> method's effective enablement, as set by
+    /// <c>management/set-pairing-config</c>. Read live by this connection's
+    /// <see cref="RecordPskResolver"/>, which excludes Pairing-category records from the
+    /// handshake candidate set while the method is off (#202).
+    /// </summary>
+    internal bool IsPairingPskEnabled => _pairingPskEnabled;
+
+    /// <summary>
     /// The connection this client was constructed with (test-only introspection). Named to
     /// avoid shadowing the <c>Sendspin.SDK.Connection</c> namespace used elsewhere in this
     /// file (e.g. <c>Connection.Noise.SendspinIdentity</c>).
@@ -4584,9 +4592,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         SendspinClientOptions options,
         ConnectionOptions? connectionOptions = null)
     {
+        // Assigned below, before anything can dial and so before the resolver can be asked
+        // anything. The closure is how the resolver reaches this connection's live pairing
+        // config, which only exists once the client does; until then the configured value is
+        // the same one the client will start from.
+        SendspinClientService? client = null;
+
         var framing = new NoiseWireFraming(
             options.Identity,
-            options.PairingRecordStore is null ? null : new RecordPskResolver(options.PairingRecordStore),
+            options.PairingRecordStore is null
+                ? null
+                : new RecordPskResolver(
+                    options.PairingRecordStore,
+                    () => client?.IsPairingPskEnabled ?? options.Capabilities.PairingPskEnabled),
             options.Suite);
 
         var connection = new SendspinConnection(
@@ -4594,10 +4612,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             connectionOptions,
             framing);
 
-        return new SendspinClientService(
+        client = new SendspinClientService(
             loggerFactory.CreateLogger<SendspinClientService>(),
             connection,
             framing,
             options);
+
+        return client;
     }
 }
