@@ -251,7 +251,8 @@ public sealed class SendspinHostService : IAsyncDisposable
         ListenerOptions? listenerOptions = null,
         AdvertiserOptions? advertiserOptions = null,
         string? lastPlayedServerId = null,
-        ILastPlayedServerStore? lastPlayedServerStore = null)
+        ILastPlayedServerStore? lastPlayedServerStore = null,
+        ConnectionOptions? connectionOptions = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
@@ -272,7 +273,8 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         _listener = new SendspinListener(
             loggerFactory.CreateLogger<SendspinListener>(),
-            listenOpts);
+            listenOpts,
+            connectionOptions);
 
         _advertiserOptions = advertiseOpts;
         _advertiser = new MdnsServiceAdvertiser(
