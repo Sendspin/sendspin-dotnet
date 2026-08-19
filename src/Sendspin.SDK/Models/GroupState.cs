@@ -49,6 +49,16 @@ public sealed class GroupState
     public List<string>? SupportedCommands { get; set; }
 
     /// <summary>
+    /// Maximum absolute position in milliseconds a <c>seek</c> command may target, from the
+    /// <c>server/state</c> controller object — the upper bound for a seek bar. Null until the
+    /// server reports it, and null again once it says the seekable range is unknown (a partial
+    /// update that omits the field keeps the last value, an explicit null clears it). Still gate
+    /// the control itself on <see cref="SupportedCommands"/> containing <c>seek</c>.
+    /// </summary>
+    [JsonPropertyName("seek_max_ms")]
+    public int? SeekMaxMs { get; set; }
+
+    /// <summary>
     /// Current color palette derived from the audio (the <c>color</c> role). Populated from
     /// <c>server/state</c> color updates; individual colors are null until the server provides them.
     /// </summary>

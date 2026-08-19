@@ -149,7 +149,7 @@ public class SendspinClientServiceServerStateTests
                 "payload": {
                     "controller": {
                         "volume": 40, "muted": true, "repeat": "all", "shuffle": true,
-                        "supported_commands": ["play", "pause"]
+                        "supported_commands": ["play", "pause", "seek"], "seek_max_ms": 245000
                     }
                 }
             }
@@ -160,7 +160,8 @@ public class SendspinClientServiceServerStateTests
             """);
 
         // Everything the controller role owns returns to the value a group carries before the
-        // server has reported any of it.
+        // server has reported any of it — every field, or a deactivated role leaves a stale
+        // fragment of itself behind for a UI to keep rendering.
         var group = client.CurrentGroup;
         Assert.NotNull(group);
         var unreported = new GroupState();
@@ -169,6 +170,7 @@ public class SendspinClientServiceServerStateTests
         Assert.Null(group.Repeat);
         Assert.False(group.Shuffle);
         Assert.Null(group.SupportedCommands);
+        Assert.Null(group.SeekMaxMs);
     }
 
     [Fact]

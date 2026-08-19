@@ -842,9 +842,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     public async Task SendCommandAsync(string command, Dictionary<string, object>? parameters = null)
     {
-        // Extract volume and mute from parameters if present
+        // Extract the typed controller parameters from the loosely-typed dictionary
         int? volume = null;
         bool? mute = null;
+        int? positionMs = null;
+        int? offsetMs = null;
 
         if (parameters != null)
         {
@@ -859,13 +861,55 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 mute = m;
             }
+
+            if (parameters.TryGetValue("position_ms", out var posObj))
+            {
+                positionMs = AsMilliseconds(posObj);
+            }
+
+            if (parameters.TryGetValue("offset_ms", out var offObj))
+            {
+                offsetMs = AsMilliseconds(offObj);
+            }
         }
 
-        var message = ClientCommandMessage.Create(command, volume, mute);
+        // The spec makes position_ms/offset_ms mandatory on their commands (controller/v1.md:34),
+        // so a seek whose parameter is missing or unreadable has no valid wire form — sending it
+        // bare would put a forbidden shape on the socket. Drop it with a warning instead, the same
+        // way the rest of this class handles input it cannot use; the typed SeekAsync /
+        // SeekRelativeAsync are the way to seek without this failure mode.
+        if (command == Commands.Seek && positionMs is null)
+        {
+            _logger.LogWarning("Dropping 'seek': no usable position_ms parameter");
+            return;
+        }
+
+        if (command == Commands.SeekRelative && offsetMs is null)
+        {
+            _logger.LogWarning("Dropping 'seek_relative': no usable offset_ms parameter");
+            return;
+        }
+
+        var message = ClientCommandMessage.Create(command, volume, mute, positionMs, offsetMs);
 
         _logger.LogDebug("Sending command: {Command}", command);
         await SendAsync(message);
     }
+
+    /// <summary>
+    /// Reads a millisecond count out of <see cref="SendCommandAsync"/>'s loosely-typed parameter
+    /// dictionary. Callers pass whatever their arithmetic produced — <see cref="TimeSpan"/>'s
+    /// TotalMilliseconds is a double, a JSON round-trip lands on long — so all three numeric
+    /// widths are accepted, fractional milliseconds rounded. Null when the value is not a number
+    /// or does not fit an <see cref="int"/> (NaN and the infinities fail both comparisons).
+    /// </summary>
+    private static int? AsMilliseconds(object? value) => value switch
+    {
+        int i => i,
+        long l when l is >= int.MinValue and <= int.MaxValue => (int)l,
+        double d when d is >= int.MinValue and <= int.MaxValue => (int)Math.Round(d),
+        _ => null
+    };
 
     public async Task SetVolumeAsync(int volume)
     {
@@ -882,6 +926,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
 
         _logger.LogDebug("Setting mute to {Muted}", muted);
+        await SendAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task SeekAsync(int positionMs)
+    {
+        var message = ClientCommandMessage.Create(Commands.Seek, positionMs: positionMs);
+
+        _logger.LogDebug("Seeking to {PositionMs} ms", positionMs);
+        await SendAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task SeekRelativeAsync(int offsetMs)
+    {
+        var message = ClientCommandMessage.Create(Commands.SeekRelative, offsetMs: offsetMs);
+
+        _logger.LogDebug("Seeking by {OffsetMs} ms", offsetMs);
         await SendAsync(message);
     }
 
@@ -3955,7 +4017,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             if (payload.Controller.Value is not { } controller)
             {
-                // HandleServerState is the only writer of these five, so the controller role
+                // HandleServerState is the only writer of these six, so the controller role
                 // owns them outright and clearing it returns each to the value a group carries
                 // before the server has reported any of them. Read off a fresh GroupState
                 // rather than repeating its literals, so the two cannot drift.
@@ -3965,6 +4027,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _currentGroup.Repeat = unreported.Repeat;
                 _currentGroup.Shuffle = unreported.Shuffle;
                 _currentGroup.SupportedCommands = unreported.SupportedCommands;
+                _currentGroup.SeekMaxMs = unreported.SeekMaxMs;
             }
             else
             {
@@ -3978,6 +4041,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _currentGroup.Shuffle = controller.Shuffle.Value;
                 if (controller.SupportedCommands is not null)
                     _currentGroup.SupportedCommands = controller.SupportedCommands;
+
+                // The one OPTIONAL controller leaf, so unlike its always-reported siblings it
+                // needs Optional<T> to tell "not in this partial update" (keep the bound) from
+                // an explicit null (the seekable range became unknown — drop the bound).
+                if (controller.SeekMaxMs.IsPresent)
+                    _currentGroup.SeekMaxMs = controller.SeekMaxMs.Value;
             }
         }
 

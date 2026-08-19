@@ -83,6 +83,64 @@ public class SendspinClientServiceControllerTests
     }
 
     [Fact]
+    public async Task SendCommandAsync_RoutesPositionMsParameter()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.Seek, new Dictionary<string, object> { ["position_ms"] = 42_000 });
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.Seek, cmd.Command);
+        Assert.Equal(42_000, cmd.PositionMs);
+        Assert.Null(cmd.OffsetMs);
+    }
+
+    [Fact]
+    public async Task SendCommandAsync_RoutesOffsetMsParameter()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.SeekRelative, new Dictionary<string, object> { ["offset_ms"] = -15_000 });
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.SeekRelative, cmd.Command);
+        Assert.Equal(-15_000, cmd.OffsetMs);
+        Assert.Null(cmd.PositionMs);
+    }
+
+    [Fact]
+    public async Task SeekAsync_SendsControllerSeekCommand()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SeekAsync(90_000);
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.Seek, cmd.Command);
+        Assert.Equal(90_000, cmd.PositionMs);
+        Assert.Null(cmd.OffsetMs);
+    }
+
+    [Fact]
+    public async Task SeekRelativeAsync_SendsControllerSeekRelativeCommand()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SeekRelativeAsync(30_000);
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.SeekRelative, cmd.Command);
+        Assert.Equal(30_000, cmd.OffsetMs);
+        Assert.Null(cmd.PositionMs);
+    }
+
+    [Fact]
     public void ServerState_SupportedCommands_SurfacedOnGroup()
     {
         var (client, connection, _) = TestClient.Create();
@@ -99,5 +157,127 @@ public class SendspinClientServiceControllerTests
 
         Assert.NotNull(client.CurrentGroup);
         Assert.Equal(new[] { "play", "pause", "next" }, client.CurrentGroup.SupportedCommands);
+    }
+
+    [Fact]
+    public void ServerState_SeekSupport_SurfacedOnGroup()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "controller": {
+                        "supported_commands": ["play", "seek", "seek_relative"],
+                        "seek_max_ms": 245000
+                    }
+                }
+            }
+            """);
+
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Equal(new[] { "play", "seek", "seek_relative" }, client.CurrentGroup.SupportedCommands);
+        Assert.Equal(245_000, client.CurrentGroup.SeekMaxMs);
+    }
+
+    [Fact]
+    public void ServerState_SeekMaxMsAbsent_KeepsPreviousValue()
+    {
+        // The controller object is a partial update, so an update carrying only volume must not
+        // wipe seek_max_ms — same keep-on-absent rule its siblings (volume/muted/repeat) follow.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"seek_max_ms":245000}}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"volume":30}}}
+            """);
+
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Equal(245_000, client.CurrentGroup.SeekMaxMs);
+        Assert.Equal(30, client.CurrentGroup.Volume);
+    }
+
+    [Fact]
+    public void ServerState_SeekMaxMsExplicitNull_ClearsPreviousValue()
+    {
+        // The counterpart to the absent case above, and the reason this leaf is Optional: the
+        // server nulls it when the seekable range becomes unknown (a seekable track giving way to
+        // a live stream), and a leaf set to null is a clear. Keeping the old bound would leave a
+        // seek bar pointing at the length of a track that is no longer playing.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"supported_commands":["play","seek"],"seek_max_ms":245000}}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"supported_commands":["play"],"seek_max_ms":null}}}
+            """);
+
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Null(client.CurrentGroup.SeekMaxMs);
+        Assert.Equal(new[] { "play" }, client.CurrentGroup.SupportedCommands);
+    }
+
+    [Theory]
+    [InlineData(42_000L)]
+    [InlineData(42_000d)]
+    public async Task SendCommandAsync_AcceptsWiderNumericPositionMs(object positionMs)
+    {
+        // A caller reaching for the untyped overload has whatever its arithmetic produced —
+        // TimeSpan.TotalMilliseconds is a double, a JSON round-trip lands on long.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.Seek, new Dictionary<string, object> { ["position_ms"] = positionMs });
+
+        Assert.Equal(42_000, LastControllerCommand(connection).PositionMs);
+    }
+
+    [Fact]
+    public async Task SendCommandAsync_SeekRelative_AcceptsWiderNumericOffsetMs()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.SeekRelative, new Dictionary<string, object> { ["offset_ms"] = -15_000d });
+
+        Assert.Equal(-15_000, LastControllerCommand(connection).OffsetMs);
+    }
+
+    [Theory]
+    [InlineData(null)] // no parameters at all
+    [InlineData("42000")] // a string, not a number
+    [InlineData(long.MaxValue)] // numeric, but nowhere near an int
+    public async Task SendCommandAsync_SeekWithoutUsablePosition_SendsNothing(object? positionMs)
+    {
+        // position_ms is mandatory on 'seek', so a bare {"controller":{"command":"seek"}} is a
+        // shape the spec forbids. Dropping it keeps the malformed command off the wire.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.Seek,
+            positionMs is null ? null : new Dictionary<string, object> { ["position_ms"] = positionMs });
+
+        Assert.Empty(connection.SentMessages);
+    }
+
+    [Fact]
+    public async Task SendCommandAsync_SeekRelativeWithoutUsableOffset_SendsNothing()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(Commands.SeekRelative);
+
+        Assert.Empty(connection.SentMessages);
     }
 }

@@ -161,4 +161,19 @@ public sealed class ControllerState
     /// </summary>
     [JsonPropertyName("shuffle")]
     public bool? Shuffle { get; init; }
+
+    /// <summary>
+    /// Maximum absolute position in milliseconds a <c>seek</c> may target (e.g. the end of the
+    /// current track). Absent = keep the last bound, present-null = the seekable range became
+    /// unknown (clear it), present-with-value = update.
+    /// </summary>
+    /// <remarks>
+    /// The only OPTIONAL leaf on this object, which is why it needs <see cref="Optional{T}"/> while
+    /// its always-reported siblings can be plain nullables. The server omits <c>seek</c> from
+    /// <see cref="SupportedCommands"/> and nulls this out together when the range goes away — e.g.
+    /// a seekable track giving way to a live stream — and <c>seek_relative</c> may still be offered.
+    /// </remarks>
+    [JsonPropertyName("seek_max_ms")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public Optional<int?> SeekMaxMs { get; init; } = Optional<int?>.Absent();
 }

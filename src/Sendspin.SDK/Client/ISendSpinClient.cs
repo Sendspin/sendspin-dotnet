@@ -122,7 +122,13 @@ public interface ISendspinClient : IAsyncDisposable
     Task DisconnectAsync(string reason = "restart");
 
     /// <summary>
-    /// Sends a playback command.
+    /// Sends a playback command. Recognised parameter keys are <c>volume</c>, <c>mute</c> (or
+    /// legacy <c>muted</c>), <c>position_ms</c> and <c>offset_ms</c>; anything else is ignored.
+    /// The two millisecond values accept <see cref="int"/>, <see cref="long"/> or
+    /// <see cref="double"/>. A <c>seek</c> or <c>seek_relative</c> whose millisecond parameter is
+    /// missing or unusable is logged and dropped rather than sent, since the spec requires those
+    /// commands to carry it — prefer the typed <see cref="SeekAsync"/> and
+    /// <see cref="SeekRelativeAsync"/>, which cannot get this wrong.
     /// </summary>
     Task SendCommandAsync(string command, Dictionary<string, object>? parameters = null);
 
@@ -136,6 +142,25 @@ public interface ISendspinClient : IAsyncDisposable
     /// </summary>
     /// <param name="muted">True to mute, false to unmute.</param>
     Task SetMuteAsync(bool muted);
+
+    /// <summary>
+    /// Seeks to an absolute position via a controller <c>seek</c> command.
+    /// </summary>
+    /// <param name="positionMs">
+    /// Absolute position in milliseconds. Not clamped here: the valid range is 0 to the server's
+    /// <see cref="GroupState.SeekMaxMs"/>, which may be unknown, and the server ignores the
+    /// command when the position falls outside it.
+    /// </param>
+    Task SeekAsync(int positionMs);
+
+    /// <summary>
+    /// Seeks by an offset from the current position via a controller <c>seek_relative</c> command.
+    /// </summary>
+    /// <param name="offsetMs">
+    /// Signed offset in milliseconds (positive forward, negative backward). The server applies it
+    /// on a best-effort basis and clamps the result to the seekable range.
+    /// </param>
+    Task SeekRelativeAsync(int offsetMs);
 
     /// <summary>
     /// Requests a different player audio format via <c>stream/request-format</c> — use this to adapt
