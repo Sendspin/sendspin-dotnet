@@ -36,6 +36,18 @@ public sealed class FlacDecoder : IAudioDecoder
     /// </summary>
     private const int HeaderSize = 42;
 
+    /// <summary>
+    /// Smallest maximum block size the decoder will size for, whatever the sample rate says.
+    /// The synthetic STREAMINFO has always advertised this, and SimpleFlac rejects any frame
+    /// larger than what STREAMINFO declares, so lowering it would break streams that work.
+    /// </summary>
+    private const int MinimumMaxBlockSize = 8192;
+
+    /// <summary>
+    /// Largest block size FLAC can express: STREAMINFO stores it in 16 bits.
+    /// </summary>
+    private const int FlacMaxBlockSize = 65535;
+
     private readonly ILogger _logger;
     private readonly byte[] _header;
     private float _sampleScaleFactor;
@@ -63,9 +75,14 @@ public sealed class FlacDecoder : IAudioDecoder
         // Use 1L to avoid integer overflow at 32-bit (1 << 31 overflows int, but not long)
         _sampleScaleFactor = 1.0f / (1L << (bitsPerSample - 1));
 
-        // FLAC typically uses 4096 sample blocks, but can go up to 65535
-        // We use 8192 as a reasonable max for streaming
-        const int maxBlockSize = 8192;
+        // A chunk carries one or more complete FLAC frames and may run to the spec's 150 ms
+        // limit, which at 96 kHz is 14400 frames and at 192 kHz is 28800 - both past the 8192
+        // this used to assume. Keep 8192 as a floor rather than a ceiling: it is what the
+        // synthetic STREAMINFO has always advertised, and dropping below it at 44.1/48 kHz
+        // would make SimpleFlac reject the larger blocks that decode today.
+        var maxBlockSize = Math.Min(
+            Math.Max(AudioChunkLimits.MaxSamplesPerChannel(format.SampleRate), MinimumMaxBlockSize),
+            FlacMaxBlockSize);
         MaxSamplesPerFrame = maxBlockSize * format.Channels;
 
         // Use server-provided codec_header (real STREAMINFO) when available,
@@ -145,7 +162,17 @@ public sealed class FlacDecoder : IAudioDecoder
 
                 if (totalSamplesWritten + samplesNeeded > decodedSamples.Length)
                 {
-                    break; // Output buffer full
+                    // The buffer holds a full 150 ms chunk, so only a server that broke the
+                    // spec's MUST can get here. A FLAC frame cannot be split, so the remainder
+                    // is dropped - but it is reported rather than left as an unexplained gap.
+                    _logger.LogError(
+                        "FLAC chunk exceeds the {Capacity}-sample decode buffer sized for {MaxChunkMs} ms at {SampleRate} Hz, {Channels}ch: kept {Written} samples and dropped the rest of the chunk. The server sent a chunk longer than the spec allows.",
+                        decodedSamples.Length,
+                        AudioChunkLimits.MaxChunkMilliseconds,
+                        Format.SampleRate,
+                        Format.Channels,
+                        totalSamplesWritten);
+                    break;
                 }
 
                 // Convert from long[][] (per-channel) to interleaved float
