@@ -84,7 +84,7 @@ public static class BinaryMessageTypes
     public const byte VisualizerFPeak = 18;    // slot 2
     public const byte VisualizerSpectrum = 19; // slot 3
     public const byte VisualizerPeak = 20;     // slot 4
-    public const byte VisualizerPitch = 21;    // slot 5
+    // Types 21-23 are reserved for future visualizer types and must not be used.
 
     public static bool IsPlayerAudio(byte type) => type >= 4 && type <= 7;
     public static bool IsSourceAudio(byte type) => type >= 12 && type <= 15;

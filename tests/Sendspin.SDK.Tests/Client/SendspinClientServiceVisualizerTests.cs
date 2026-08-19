@@ -149,6 +149,22 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
+    public void ReservedType21Frame_RaisesNoEvent()
+    {
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
+
+        var fired = false;
+        client.VisualizationReceived += (_, _) => fired = true;
+
+        // 21-23 are reserved by the spec and must not be used, so a frame on one reaches no
+        // subscriber even when its payload would have decoded under the old 'pitch' arm (#197).
+        connection.RaiseBinaryMessageReceived(Frame(21, 1, U16(0x4500).Concat(new byte[] { 200 }).ToArray()));
+
+        Assert.False(fired);
+    }
+
+    [Fact]
     public void DefaultCapabilities_DoNotAdvertiseVisualizer()
     {
         // Default capabilities: no VisualizerSupport, no visualizer@v1 role.

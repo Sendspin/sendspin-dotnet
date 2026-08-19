@@ -145,16 +145,6 @@ public static class BinaryMessageParser
                     ? new Sendspin.SDK.Models.VisualizerFrame { Timestamp = timestamp, PeakStrength = payload[0] }
                     : null;
 
-            case BinaryMessageTypes.VisualizerPitch:
-                return payload.Length == 3
-                    ? new Sendspin.SDK.Models.VisualizerFrame
-                    {
-                        Timestamp = timestamp,
-                        PitchMidiQ88 = BinaryPrimitives.ReadUInt16BigEndian(payload),
-                        PitchConfidence = payload[2]
-                    }
-                    : null;
-
             default:
                 return null;
         }
