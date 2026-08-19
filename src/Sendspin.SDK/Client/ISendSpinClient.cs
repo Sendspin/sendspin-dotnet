@@ -138,6 +138,25 @@ public interface ISendspinClient : IAsyncDisposable
     Task SetMuteAsync(bool muted);
 
     /// <summary>
+    /// Seeks to an absolute position via a controller <c>seek</c> command.
+    /// </summary>
+    /// <param name="positionMs">
+    /// Absolute position in milliseconds. Not clamped here: the valid range is 0 to the server's
+    /// <see cref="GroupState.SeekMaxMs"/>, which may be unknown, and the server ignores the
+    /// command when the position falls outside it.
+    /// </param>
+    Task SeekAsync(int positionMs);
+
+    /// <summary>
+    /// Seeks by an offset from the current position via a controller <c>seek_relative</c> command.
+    /// </summary>
+    /// <param name="offsetMs">
+    /// Signed offset in milliseconds (positive forward, negative backward). The server applies it
+    /// on a best-effort basis and clamps the result to the seekable range.
+    /// </param>
+    Task SeekRelativeAsync(int offsetMs);
+
+    /// <summary>
     /// Requests a different player audio format via <c>stream/request-format</c> — use this to adapt
     /// to changing network or CPU conditions (e.g. downgrade codec/sample rate). Omitted parameters
     /// are left to the server, which responds with a <c>stream/start</c> for the player role.

@@ -824,9 +824,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     public async Task SendCommandAsync(string command, Dictionary<string, object>? parameters = null)
     {
-        // Extract volume and mute from parameters if present
+        // Extract the typed controller parameters from the loosely-typed dictionary
         int? volume = null;
         bool? mute = null;
+        int? positionMs = null;
+        int? offsetMs = null;
 
         if (parameters != null)
         {
@@ -841,9 +843,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 mute = m;
             }
+
+            if (parameters.TryGetValue("position_ms", out var posObj) && posObj is int pos)
+            {
+                positionMs = pos;
+            }
+
+            if (parameters.TryGetValue("offset_ms", out var offObj) && offObj is int off)
+            {
+                offsetMs = off;
+            }
         }
 
-        var message = ClientCommandMessage.Create(command, volume, mute);
+        var message = ClientCommandMessage.Create(command, volume, mute, positionMs, offsetMs);
 
         _logger.LogDebug("Sending command: {Command}", command);
         await SendAsync(message);
@@ -864,6 +876,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
 
         _logger.LogDebug("Setting mute to {Muted}", muted);
+        await SendAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task SeekAsync(int positionMs)
+    {
+        var message = ClientCommandMessage.Create(Commands.Seek, positionMs: positionMs);
+
+        _logger.LogDebug("Seeking to {PositionMs} ms", positionMs);
+        await SendAsync(message);
+    }
+
+    /// <inheritdoc/>
+    public async Task SeekRelativeAsync(int offsetMs)
+    {
+        var message = ClientCommandMessage.Create(Commands.SeekRelative, offsetMs: offsetMs);
+
+        _logger.LogDebug("Seeking by {OffsetMs} ms", offsetMs);
         await SendAsync(message);
     }
 
@@ -3927,6 +3957,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _currentGroup.Shuffle = payload.Controller.Shuffle.Value;
             if (payload.Controller.SupportedCommands is not null)
                 _currentGroup.SupportedCommands = payload.Controller.SupportedCommands;
+            if (payload.Controller.SeekMaxMs.HasValue)
+                _currentGroup.SeekMaxMs = payload.Controller.SeekMaxMs.Value;
         }
 
         // Merge color deltas (color role). Each field is Optional: absent keeps the existing color,

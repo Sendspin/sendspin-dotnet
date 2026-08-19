@@ -83,6 +83,64 @@ public class SendspinClientServiceControllerTests
     }
 
     [Fact]
+    public async Task SendCommandAsync_RoutesPositionMsParameter()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.Seek, new Dictionary<string, object> { ["position_ms"] = 42_000 });
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.Seek, cmd.Command);
+        Assert.Equal(42_000, cmd.PositionMs);
+        Assert.Null(cmd.OffsetMs);
+    }
+
+    [Fact]
+    public async Task SendCommandAsync_RoutesOffsetMsParameter()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.SeekRelative, new Dictionary<string, object> { ["offset_ms"] = -15_000 });
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.SeekRelative, cmd.Command);
+        Assert.Equal(-15_000, cmd.OffsetMs);
+        Assert.Null(cmd.PositionMs);
+    }
+
+    [Fact]
+    public async Task SeekAsync_SendsControllerSeekCommand()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SeekAsync(90_000);
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.Seek, cmd.Command);
+        Assert.Equal(90_000, cmd.PositionMs);
+        Assert.Null(cmd.OffsetMs);
+    }
+
+    [Fact]
+    public async Task SeekRelativeAsync_SendsControllerSeekRelativeCommand()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SeekRelativeAsync(30_000);
+
+        var cmd = LastControllerCommand(connection);
+        Assert.Equal(Commands.SeekRelative, cmd.Command);
+        Assert.Equal(30_000, cmd.OffsetMs);
+        Assert.Null(cmd.PositionMs);
+    }
+
+    [Fact]
     public void ServerState_SupportedCommands_SurfacedOnGroup()
     {
         var (client, connection, _) = TestClient.Create();
@@ -99,5 +157,50 @@ public class SendspinClientServiceControllerTests
 
         Assert.NotNull(client.CurrentGroup);
         Assert.Equal(new[] { "play", "pause", "next" }, client.CurrentGroup.SupportedCommands);
+    }
+
+    [Fact]
+    public void ServerState_SeekSupport_SurfacedOnGroup()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "controller": {
+                        "supported_commands": ["play", "seek", "seek_relative"],
+                        "seek_max_ms": 245000
+                    }
+                }
+            }
+            """);
+
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Equal(new[] { "play", "seek", "seek_relative" }, client.CurrentGroup.SupportedCommands);
+        Assert.Equal(245_000, client.CurrentGroup.SeekMaxMs);
+    }
+
+    [Fact]
+    public void ServerState_SeekMaxMsAbsent_KeepsPreviousValue()
+    {
+        // The controller object is a partial update, so an update carrying only volume must not
+        // wipe seek_max_ms — same keep-on-absent rule its siblings (volume/muted/repeat) follow.
+        // Consumers gate on supported_commands, which the server drops 'seek' from when the
+        // seekable range goes away.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"seek_max_ms":245000}}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"volume":30}}}
+            """);
+
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Equal(245_000, client.CurrentGroup.SeekMaxMs);
+        Assert.Equal(30, client.CurrentGroup.Volume);
     }
 }

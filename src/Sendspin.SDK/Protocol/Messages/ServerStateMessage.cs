@@ -149,4 +149,13 @@ public sealed class ControllerState
     /// </summary>
     [JsonPropertyName("shuffle")]
     public bool? Shuffle { get; init; }
+
+    /// <summary>
+    /// Maximum absolute position in milliseconds a <c>seek</c> may target (e.g. the end of the
+    /// current track). Per the Sendspin spec the server includes this whenever <c>seek</c> is in
+    /// <see cref="SupportedCommands"/>, and omits <c>seek</c> when the seekable range is unknown
+    /// (e.g. live streams) — <c>seek_relative</c> may still be offered in that case.
+    /// </summary>
+    [JsonPropertyName("seek_max_ms")]
+    public int? SeekMaxMs { get; init; }
 }

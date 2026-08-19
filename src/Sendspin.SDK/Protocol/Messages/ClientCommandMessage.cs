@@ -17,7 +17,13 @@ public sealed class ClientCommandMessage : IMessageWithPayload<ClientCommandPayl
     /// <summary>
     /// Creates a command message with the specified command.
     /// </summary>
-    public static ClientCommandMessage Create(string command, int? volume = null, bool? mute = null)
+    /// <param name="command">Controller command to send (see <see cref="Commands"/>).</param>
+    /// <param name="volume">Volume level (0-100), only for the 'volume' command.</param>
+    /// <param name="mute">Mute state, only for the 'mute' command.</param>
+    /// <param name="positionMs">Absolute position in milliseconds, only for the 'seek' command.</param>
+    /// <param name="offsetMs">Signed offset in milliseconds, only for the 'seek_relative' command.</param>
+    public static ClientCommandMessage Create(
+        string command, int? volume = null, bool? mute = null, int? positionMs = null, int? offsetMs = null)
     {
         return new ClientCommandMessage
         {
@@ -27,7 +33,9 @@ public sealed class ClientCommandMessage : IMessageWithPayload<ClientCommandPayl
                 {
                     Command = command,
                     Volume = volume,
-                    Mute = mute
+                    Mute = mute,
+                    PositionMs = positionMs,
+                    OffsetMs = offsetMs
                 }
             }
         };
@@ -70,6 +78,24 @@ public sealed class ControllerCommand
     [JsonPropertyName("mute")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? Mute { get; init; }
+
+    /// <summary>
+    /// Absolute playback position in milliseconds, only used when command is "seek".
+    /// The server ignores the command when this falls outside 0 to
+    /// <see cref="ControllerState.SeekMaxMs"/>.
+    /// </summary>
+    [JsonPropertyName("position_ms")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? PositionMs { get; init; }
+
+    /// <summary>
+    /// Signed offset in milliseconds from the current position (positive forward, negative
+    /// backward), only used when command is "seek_relative". The server clamps the result to the
+    /// seekable range.
+    /// </summary>
+    [JsonPropertyName("offset_ms")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? OffsetMs { get; init; }
 }
 
 /// <summary>
@@ -90,6 +116,8 @@ public static class Commands
     public const string RepeatOne = "repeat_one";
     public const string RepeatAll = "repeat_all";
     public const string Switch = "switch";
+    public const string Seek = "seek";
+    public const string SeekRelative = "seek_relative";
 
     /// <summary>
     /// Player command: set the player's static delay (server/command player object).
