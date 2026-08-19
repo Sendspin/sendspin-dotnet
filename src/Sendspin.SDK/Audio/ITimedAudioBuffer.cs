@@ -161,9 +161,20 @@ public interface ITimedAudioBuffer : IDisposable
     /// <returns>Number of samples written (always matches samples read from buffer).</returns>
     /// <remarks>
     /// <para>
-    /// Unlike <see cref="Read"/>, this method does NOT apply drop/insert correction.
-    /// It still calculates and updates <see cref="SyncErrorMicroseconds"/> and
-    /// <see cref="SmoothedSyncErrorMicroseconds"/>.
+    /// Unlike <see cref="Read"/>, this method does NOT apply continuous drop/insert or
+    /// rate correction. It still calculates and updates <see cref="SyncErrorMicroseconds"/>
+    /// and <see cref="SmoothedSyncErrorMicroseconds"/>.
+    /// </para>
+    /// <para>
+    /// <b>It does apply the one-shot hard sync</b>
+    /// (<see cref="SyncCorrectionOptions.HardSyncThresholdMicroseconds"/>). Skipping buffered
+    /// content, or emitting silence the buffer never held, is a timeline operation no external
+    /// corrector can perform on the samples it has already been handed — so the snap belongs to
+    /// the buffer on both paths. While one is in flight, a
+    /// <see cref="SyncCorrectionCalculator"/> reports
+    /// <see cref="SyncCorrectionMode.HardSync"/> with a neutral rate; a custom
+    /// <see cref="ISyncCorrectionProvider"/> should treat that mode the same way rather than
+    /// correcting on top of it.
     /// </para>
     /// <para>
     /// The caller is responsible for:
@@ -427,6 +438,30 @@ public record AudioBufferStats
     /// Zero until the first stats poll after pipeline start.
     /// </summary>
     public double MinBufferedMsRecent { get; init; }
+
+    /// <summary>
+    /// Gets the number of one-shot hard syncs applied since the pipeline was started
+    /// (see <see cref="SyncCorrectionOptions.HardSyncThresholdMicroseconds"/>).
+    /// </summary>
+    /// <remarks>
+    /// The spec requires these to be rare. A count that keeps climbing during steady playback
+    /// means the continuous corrector cannot keep up — investigate the clock or the network
+    /// rather than raising the threshold.
+    /// </remarks>
+    public long HardSyncCount { get; init; }
+
+    /// <summary>
+    /// Gets the number of breaks detected in the delivered content timeline — a chunk boundary
+    /// whose timestamp did not continue where the previous one ended, or audio discarded
+    /// mid-play. Each is folded into the sync error so alignment is restored.
+    /// </summary>
+    public long ContentHolesDetected { get; init; }
+
+    /// <summary>
+    /// Gets the number of incoming chunks discarded because their timestamps were already
+    /// behind the read cursor (spec roles/player/v1.md:145).
+    /// </summary>
+    public long LateChunksDropped { get; init; }
 }
 
 /// <summary>
@@ -441,19 +476,33 @@ public enum SyncCorrectionMode
 
     /// <summary>
     /// Using playback rate adjustment via resampling (smooth, imperceptible correction).
-    /// This is the preferred mode for small errors (2-15ms).
+    /// This is the preferred mode for errors between the dead band and
+    /// <see cref="SyncCorrectionOptions.HardSyncThresholdMicroseconds"/>.
     /// </summary>
     Resampling,
 
     /// <summary>
-    /// Dropping samples to catch up (playing too slow).
-    /// Used for larger errors (&gt;15ms) that need faster correction.
+    /// Dropping samples to catch up (playing too slow), one frame every N.
+    /// Reached only when <see cref="SyncCorrectionOptions.ResamplingThresholdMicroseconds"/>
+    /// is lowered below the hard-sync threshold, or that tier is disabled.
     /// </summary>
     Dropping,
 
     /// <summary>
-    /// Inserting samples to slow down (playing too fast).
-    /// Used for larger errors (&gt;15ms) that need faster correction.
+    /// Inserting samples to slow down (playing too fast), one frame every N.
+    /// Reached under the same conditions as <see cref="Dropping"/>.
     /// </summary>
     Inserting,
+
+    /// <summary>
+    /// Closing the error in a single discontinuity: skipping the late excess or emitting
+    /// silence for the early excess (see
+    /// <see cref="SyncCorrectionOptions.HardSyncThresholdMicroseconds"/>).
+    /// </summary>
+    /// <remarks>
+    /// <see cref="TimedAudioBuffer"/> performs the snap itself on both read paths. An
+    /// external <see cref="ISyncCorrectionProvider"/> reporting this mode is telling its
+    /// caller to stand down for the duration, not to apply a correction of its own.
+    /// </remarks>
+    HardSync,
 }

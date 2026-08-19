@@ -47,8 +47,32 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
     // Timestamp tracking - maps sample ranges to their playback times
     private readonly Queue<TimestampedSegment> _segments;
-    private long _nextExpectedPlaybackTime;
+    private int _headConsumedSamples;     // Samples already consumed from the head segment
     private bool _playbackStarted;
+
+    // Segment-timeline integrity (issue #229). Server timestamps are re-validated at every
+    // segment boundary, not just before playback starts, mirroring the C++ reference's
+    // per-chunk check (sync_task.cpp:596-600) and re-align (:250-344). Without this a
+    // content hole — a lost chunk, a mid-play overrun drop — shifts every later sample
+    // earlier in absolute time while the pace-based error reads zero, so nothing corrects it.
+    private long _readCursorServerTimestamp;   // Server timestamp of the next sample to consume
+    private bool _readCursorValid;
+    private double _segmentGapMicroseconds;    // Content time that advanced without being output
+    private long _contentHolesDetected;
+    private long _lateChunksDropped;
+    private long _lastTimelineLogTime;
+
+    // Segment timestamps that tile exactly still round by up to a microsecond per chunk.
+    // Anything at or below this is rounding and is absorbed silently; a real hole is at
+    // least one chunk, and servers should not send chunks under 15 ms (roles/player/v1.md:153).
+    private const long SegmentTimestampToleranceMicroseconds = 1_000;
+
+    // One-shot hard sync (issue #232). Positive = skip this many samples (we are late),
+    // negative = emit this many silent samples (we are early). Drains across callbacks
+    // because the excess routinely exceeds one callback's worth of output.
+    private long _pendingHardSyncSamples;
+    private bool _hardSyncCompleted;      // Re-seed the EMA from the post-snap raw error
+    private long _hardSyncCount;
 
     // Configuration
     private readonly int _sampleRate;
@@ -66,6 +90,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private long _lastReanchorCooldownLogTime;  // Rate-limit cooldown suppression logging
     private int _reanchorEventPending;    // 0 = not pending, 1 = pending (for thread-safe event coalescing)
     private float[]? _lastOutputFrame;    // Last output frame for smooth drop/insert (Python CLI approach)
+
+    // Mode the policy last chose on the internal path, reported verbatim by GetStats
+    private SyncCorrectionMode _correctionMode = SyncCorrectionMode.None;
 
     // Correction mode transition tracking (for diagnostic logging)
     private SyncCorrectionMode _previousCorrectionMode = SyncCorrectionMode.None;
@@ -150,6 +177,31 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <inheritdoc/>
     public double TargetBufferMilliseconds { get; set; } = 250;
 
+    /// <summary>
+    /// Gets or sets the negotiated minimum ongoing buffer depth in milliseconds — the same
+    /// value the client reports to the server as <c>min_buffer_ms</c>. Default 150 ms, matching
+    /// <c>ClientCapabilities.MinBufferMs</c>.
+    /// </summary>
+    /// <remarks>
+    /// This bounds <see cref="IsReadyForPlayback"/>. A live stream's first chunk is scheduled
+    /// only <c>min_buffer_ms + static_delay_ms</c> ahead (spec roles/player/v1.md:30), so the
+    /// buffer will never hold more than this before the scheduled start arrives. Gating
+    /// readiness on the (larger) target depth therefore guarantees a late start on exactly the
+    /// streams that can least afford one. Keep this in step with what the app advertises.
+    /// </remarks>
+    public double MinBufferMilliseconds { get; set; } = 150;
+
+    /// <summary>
+    /// Gets the buffer's decoded-audio capacity in milliseconds, as constructed.
+    /// </summary>
+    /// <remarks>
+    /// This is the real number that <c>ClientCapabilities.BufferCapacity</c> must be derived
+    /// from: the server treats the advertised byte figure as a hard limit it may fill toward
+    /// (spec roles/player/v1.md:34-35), so advertising more than this holds means legally-sent
+    /// audio is silently discarded. See <see cref="PlayerBufferCapacity"/>.
+    /// </remarks>
+    public double CapacityMilliseconds { get; }
+
     /// <inheritdoc/>
     public double TargetPlaybackRate { get; private set; } = 1.0;
 
@@ -179,8 +231,12 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         {
             lock (_lock)
             {
-                // Ready when we have at least 80% of target buffer
-                return BufferedMilliseconds >= TargetBufferMilliseconds * 0.8;
+                // Ready at 80% of the target depth, but never asking for more than the
+                // negotiated minimum buffer: for a live stream that minimum is all the audio
+                // that will ever exist before the scheduled start, so a higher gate can only
+                // make the start late (issue #233).
+                var required = Math.Min(TargetBufferMilliseconds * 0.8, MinBufferMilliseconds);
+                return BufferedMilliseconds >= required;
             }
         }
     }
@@ -223,13 +279,19 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// </summary>
     /// <param name="format">Audio format for samples.</param>
     /// <param name="clockSync">Clock synchronizer for timestamp conversion.</param>
-    /// <param name="bufferCapacityMs">Maximum buffer capacity in milliseconds. Should be large enough to absorb the server's initial burst. Compact codecs like OPUS can burst 40-60+ seconds; 120s recommended.</param>
+    /// <param name="bufferCapacityMs">
+    /// Decoded-audio capacity in milliseconds. This is the figure
+    /// <c>ClientCapabilities.BufferCapacity</c> must be derived from — pass the same value to
+    /// <c>ClientCapabilities.AudioBufferCapacityMs</c> so the server is never told it may send
+    /// more than this holds. Defaults to
+    /// <see cref="PlayerBufferCapacity.DefaultDecodedBufferMilliseconds"/>.
+    /// </param>
     /// <param name="syncOptions">Optional sync correction options. Uses <see cref="SyncCorrectionOptions.Default"/> if not provided.</param>
     /// <param name="logger">Optional logger for diagnostics (uses NullLogger if not provided).</param>
     public TimedAudioBuffer(
         AudioFormat format,
         IClockSynchronizer clockSync,
-        int bufferCapacityMs = 500,
+        int bufferCapacityMs = PlayerBufferCapacity.DefaultDecodedBufferMilliseconds,
         SyncCorrectionOptions? syncOptions = null,
         ILogger<TimedAudioBuffer>? logger = null)
     {
@@ -247,9 +309,16 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         var bufferSamples = bufferCapacityMs * _samplesPerMs;
         _buffer = new float[bufferSamples];
+        CapacityMilliseconds = bufferCapacityMs;
         _segments = new Queue<TimestampedSegment>();
         _microsecondsPerSample = 1_000_000.0 / (_sampleRate * _channels);
     }
+
+    /// <summary>
+    /// Duration of <paramref name="samples"/> interleaved samples, in microseconds.
+    /// </summary>
+    private long SamplesToMicroseconds(long samples) =>
+        (long)Math.Round(samples * _microsecondsPerSample);
 
     /// <summary>
     /// Local time at which to begin emitting the sample carrying <paramref name="serverTimestamp"/>.
@@ -264,6 +333,128 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private long ScheduledLocalTimeFor(long serverTimestamp)
         => _clockSync.ServerToClientTime(serverTimestamp) - OutputLatencyMicroseconds;
 
+    /// <summary>
+    /// Waits for the first segment's scheduled playback time, then anchors playback to it.
+    /// Must be called under lock.
+    /// </summary>
+    /// <param name="currentLocalTime">Current local time in microseconds.</param>
+    /// <param name="path">Read path name, for diagnostics.</param>
+    /// <returns>False while still waiting for the scheduled start (caller emits silence).</returns>
+    /// <remarks>
+    /// <para>
+    /// The clock conversion already has StaticDelayMs applied by
+    /// <see cref="IClockSynchronizer.ServerToClientTime"/> (subtracted per spec, so a positive
+    /// static delay schedules earlier). It is re-derived from the raw server timestamp on every
+    /// poll rather than cached at enqueue: segments written before clock sync converged would
+    /// otherwise carry a meaningless conversion and the whole pre-sync burst would look stale.
+    /// </para>
+    /// <para>
+    /// The anchor is the <em>scheduled</em> start, not the moment the callback happened to fire
+    /// (issue #233). Anchoring to "now" defines a late start as zero error — the player then
+    /// trails the group for the whole stream while its own diagnostics read perfect. Anchoring
+    /// to the schedule turns that lateness into an error the corrector can see, and the residual
+    /// is snapped away immediately below so the first sample lands on its scheduled time.
+    /// </para>
+    /// </remarks>
+    private bool EnsurePlaybackStarted(long currentLocalTime, string path)
+    {
+        if (_playbackStarted || _segments.Count == 0)
+        {
+            return true;
+        }
+
+        var firstSegment = _segments.Peek();
+        _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
+        _waitingForScheduledStart = true;
+
+        var timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
+        if (timeUntilStart > _syncOptions.ScheduledStartGraceWindowMicroseconds)
+        {
+            return false; // Not due yet — the caller emits silence and waits.
+        }
+
+        // Scheduled time is well in the past: discard the audio that can no longer be played
+        // and re-derive the start from whatever is actually still due.
+        if (timeUntilStart < -_syncOptions.ScheduledStartGraceWindowMicroseconds)
+        {
+            SkipStaleAudio(currentLocalTime);
+            timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
+        }
+
+        _logger.LogInformation(
+            "[Buffer] Playback starting ({Path}): timeUntilStart={TimeUntilStart:F1}ms, " +
+            "buffered={BufferedMs:F0}ms, segments={Segments}, scheduledStart={Scheduled}",
+            path, timeUntilStart / 1000.0, _count / (double)_samplesPerMs,
+            _segments.Count, _scheduledStartLocalTime);
+
+        _playbackStarted = true;
+        _waitingForScheduledStart = false;
+
+        // Initialize sync error tracking (CLI-style: track samples READ)
+        //
+        // For push-model backends (ALSA), we've already consumed samples to pre-fill
+        // the output buffer before playback starts. By backdating the anchor by the
+        // startup latency, elapsed time matches the samples we've already read.
+        //
+        // sync_error = elapsedWallClock - samplesReadTime
+        //   Positive = wall clock ahead = playing too slow = DROP to catch up
+        //   Negative = wall clock behind = playing too fast = INSERT to slow down
+        //
+        // This handles static buffer fill time architecturally, so sync correction
+        // only needs to handle drift and fluctuations.
+        _playbackStartLocalTime = _scheduledStartLocalTime - CalibratedStartupLatencyMicroseconds;
+        _samplesReadSinceStart = 0;
+        _samplesOutputSinceStart = 0;
+
+        // The content cursor restarts from the sample we are about to emit — re-read from the
+        // queue, because SkipStaleAudio above may have discarded the segment we peeked at.
+        // Holes are only meaningful relative to a running timeline, so anything discarded
+        // before the anchor is not one.
+        if (_segments.Count > 0)
+        {
+            var startSegment = _segments.Peek();
+            _readCursorServerTimestamp =
+                startSegment.ServerTimestamp + SamplesToMicroseconds(_headConsumedSamples);
+            _readCursorValid = true;
+        }
+
+        _segmentGapMicroseconds = 0;
+
+        CaptureClockOffsetReference();
+        ScheduleStartupAlignment(-timeUntilStart);
+        return true;
+    }
+
+    /// <summary>
+    /// Snaps the sub-grace-window residual between the scheduled start and the callback that
+    /// actually started playback, so the first sample emitted is the one due now.
+    /// Must be called under lock.
+    /// </summary>
+    /// <param name="latenessMicroseconds">
+    /// How late the start is; negative when the callback ran early.
+    /// </param>
+    /// <remarks>
+    /// The audio callback grid almost never lands on the scheduled instant, so without this
+    /// every stream starts up to one grace window out and the corrector spends its first
+    /// seconds grinding down a constant that a single splice removes. The spec explicitly
+    /// allows a one-shot snap on startup (roles/player/v1.md:178) and the C++ reference does
+    /// the same thing (silence priming when early, prefix drop when late).
+    /// </remarks>
+    private void ScheduleStartupAlignment(long latenessMicroseconds)
+    {
+        if (Math.Abs(latenessMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
+        {
+            return; // Catastrophic: leave it to the re-anchor tier.
+        }
+
+        var samples = (long)Math.Round(latenessMicroseconds / _microsecondsPerSample);
+        samples -= samples % _channels; // Whole frames only.
+        if (samples != 0)
+        {
+            _pendingHardSyncSamples = samples;
+        }
+    }
+
     /// <inheritdoc/>
     public void Write(ReadOnlySpan<float> samples, long serverTimestamp)
     {
@@ -276,6 +467,21 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         lock (_lock)
         {
+            // Drop chunks that arrived too late to play. The read cursor has already passed
+            // their content, so enqueueing them would splice already-played audio back into
+            // the timeline and shift everything after it. Spec roles/player/v1.md:145 says to
+            // drop these; the C++ reference makes the same check per chunk before decoding
+            // (sync_task.cpp:596-600), against the same hard-sync tolerance.
+            if (_playbackStarted && _readCursorValid && IsChunkTooLate(serverTimestamp))
+            {
+                _lateChunksDropped++;
+                LogTimelineEventIfNeeded(
+                    "[Buffer] Dropped late chunk: timestamp {LateMs:F1}ms behind the read cursor (total {Total})",
+                    (_readCursorServerTimestamp - serverTimestamp) / 1000.0,
+                    _lateChunksDropped);
+                return;
+            }
+
             // Check for overrun
             if (_count + samples.Length > _buffer.Length)
             {
@@ -342,64 +548,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
-            // Scheduled start: wait for the first segment's playback time before emitting audio.
-            // The conversion already has StaticDelayMs applied by IClockSynchronizer.ServerToClientTime
-            // (subtracted per spec, so positive static_delay schedules earlier). Without this wait,
-            // we'd start immediately and the static delay would only affect sync error calculation,
-            // which can't handle large offsets (exceeds re-anchor threshold).
-            if (_segments.Count > 0 && !_playbackStarted)
+            if (!EnsurePlaybackStarted(currentLocalTime, "Read"))
             {
-                var firstSegment = _segments.Peek();
-
-                // Derive playback time from the raw server timestamp on every poll
-                // rather than once at enqueue: segments written before clock sync
-                // converged would otherwise carry a meaningless conversion (offset 0)
-                // and the entire pre-sync burst would be discarded as "stale".
-                _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
-                _waitingForScheduledStart = true;
-                _nextExpectedPlaybackTime = _scheduledStartLocalTime;
-
-                // Check if we've reached the scheduled start time (with grace window)
-                var timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
-                if (timeUntilStart > _syncOptions.ScheduledStartGraceWindowMicroseconds)
-                {
-                    // Not ready yet - output silence and wait
-                    buffer.Fill(0f);
-                    return 0;
-                }
-
-                // If scheduled time is significantly in the past, skip forward to near-current audio.
-                if (timeUntilStart < -_syncOptions.ScheduledStartGraceWindowMicroseconds)
-                {
-                    SkipStaleAudio(currentLocalTime);
-                }
-
-                _logger.LogInformation(
-                    "[Buffer] Playback starting (Read): timeUntilStart={TimeUntilStart:F1}ms, " +
-                    "buffered={BufferedMs:F0}ms, segments={Segments}, scheduledStart={Scheduled}",
-                    timeUntilStart / 1000.0, _count / (double)_samplesPerMs,
-                    _segments.Count, _scheduledStartLocalTime);
-
-                // Scheduled time arrived - start playback!
-                _playbackStarted = true;
-                _waitingForScheduledStart = false;
-
-                // Initialize sync error tracking (CLI-style: track samples READ)
-                //
-                // For push-model backends (ALSA), we've already consumed samples to pre-fill
-                // the output buffer before playback starts. By backdating the anchor by the
-                // startup latency, elapsed time matches the samples we've already read.
-                //
-                // sync_error = elapsedWallClock - samplesReadTime
-                //   Positive = wall clock ahead = playing too slow = DROP to catch up
-                //   Negative = wall clock behind = playing too fast = INSERT to slow down
-                //
-                // This handles static buffer fill time architecturally, so sync correction
-                // only needs to handle drift and fluctuations.
-                _playbackStartLocalTime = currentLocalTime - CalibratedStartupLatencyMicroseconds;
-                _samplesReadSinceStart = 0;
-                _samplesOutputSinceStart = 0;
-                CaptureClockOffsetReference();
+                buffer.Fill(0f);
+                return 0;
             }
 
             // Check for re-anchor condition before reading
@@ -439,11 +591,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
+            // One-shot hard sync, ahead of any continuous correction (issue #232).
+            var hardSyncSilence = ApplyPendingHardSync(buffer);
+
             // Calculate how many samples we want to read, potentially adjusted for sync correction
-            var toRead = Math.Min(buffer.Length, _count);
+            var toRead = Math.Min(buffer.Length - hardSyncSilence, _count);
 
             // Apply sync correction: drop or insert frames
-            var (actualRead, outputCount) = ReadWithSyncCorrection(buffer, toRead);
+            var (actualRead, outputCount) = ReadWithSyncCorrection(buffer.Slice(hardSyncSilence), toRead);
+            outputCount += hardSyncSilence;
 
             _count -= actualRead;
             _totalRead += actualRead;
@@ -518,41 +674,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
-            // Scheduled start logic (same as Read): derive playback time from the
-            // raw server timestamp on every poll so pre-sync segments self-heal.
-            if (_segments.Count > 0 && !_playbackStarted)
+            if (!EnsurePlaybackStarted(currentLocalTime, "ReadRaw"))
             {
-                var firstSegment = _segments.Peek();
-
-                _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
-                _waitingForScheduledStart = true;
-                _nextExpectedPlaybackTime = _scheduledStartLocalTime;
-
-                var timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
-                if (timeUntilStart > _syncOptions.ScheduledStartGraceWindowMicroseconds)
-                {
-                    buffer.Fill(0f);
-                    return 0;
-                }
-
-                // Skip stale audio if scheduled time is in the past
-                if (timeUntilStart < -_syncOptions.ScheduledStartGraceWindowMicroseconds)
-                {
-                    SkipStaleAudio(currentLocalTime);
-                }
-
-                _logger.LogInformation(
-                    "[Buffer] Playback starting: timeUntilStart={TimeUntilStart:F1}ms, " +
-                    "buffered={BufferedMs:F0}ms, segments={Segments}, scheduledStart={Scheduled}",
-                    timeUntilStart / 1000.0, _count / (double)_samplesPerMs,
-                    _segments.Count, _scheduledStartLocalTime);
-
-                _playbackStarted = true;
-                _waitingForScheduledStart = false;
-                _playbackStartLocalTime = currentLocalTime - CalibratedStartupLatencyMicroseconds;
-                _samplesReadSinceStart = 0;
-                _samplesOutputSinceStart = 0;
-                CaptureClockOffsetReference();
+                buffer.Fill(0f);
+                return 0;
             }
 
             // Check for re-anchor condition
@@ -589,19 +714,28 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 return 0;
             }
 
-            // Read samples directly WITHOUT sync correction
-            var toRead = Math.Min(buffer.Length, _count);
-            ReadSamplesFromBuffer(buffer.Slice(0, toRead));
+            // One-shot hard sync runs on this path too. The snap is a buffer-timeline
+            // operation — skipping buffered content, or manufacturing silence — that an
+            // external corrector cannot perform on the samples it has already been handed,
+            // and SyncCorrectionCalculator stands down while it is in flight so the two
+            // never both act. See SyncCorrectionOptions.HardSyncThresholdMicroseconds.
+            var hardSyncSilence = ApplyPendingHardSync(buffer);
+
+            // Read samples directly WITHOUT continuous sync correction
+            var toRead = Math.Min(buffer.Length - hardSyncSilence, _count);
+            ReadSamplesFromBuffer(buffer.Slice(hardSyncSilence, toRead));
 
             _count -= toRead;
             _totalRead += toRead;
             ConsumeSegments(toRead);
 
+            var outputCount = toRead + hardSyncSilence;
+
             // Update sync error tracking (but don't apply correction - caller does that)
-            if (_playbackStarted && toRead > 0)
+            if (_playbackStarted && outputCount > 0)
             {
                 _samplesReadSinceStart += toRead;
-                _samplesOutputSinceStart += toRead;
+                _samplesOutputSinceStart += outputCount;
 
                 CalculateSyncError(currentLocalTime);
 
@@ -638,6 +772,18 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     }
                 }
 
+                // The one-shot snap belongs to the buffer on both read paths, so evaluate it
+                // here too — under the same startup-grace and reconnect suppression the
+                // internal path applies in UpdateCorrectionRate, and through the same policy
+                // decision. Only the snap is taken from that decision: the continuous tiers
+                // are the external corrector's to apply on this path.
+                if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
+                    && !_inReconnectStabilization)
+                {
+                    EvaluateHardSync(SyncCorrectionPolicy.Decide(
+                        _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels));
+                }
+
                 // Check re-anchor threshold
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
@@ -659,12 +805,12 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             }
 
             // Fill remainder with silence if needed
-            if (toRead < buffer.Length)
+            if (outputCount < buffer.Length)
             {
-                buffer.Slice(toRead).Fill(0f);
+                buffer.Slice(outputCount).Fill(0f);
             }
 
-            return toRead;
+            return outputCount;
         }
     }
 
@@ -743,10 +889,17 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _reconnectStabilizationStartOutput = _samplesOutputSinceStart;
 
             // Reset internal correction state to neutral
+            _correctionMode = SyncCorrectionMode.None;
             _dropEveryNFrames = 0;
             _insertEveryNFrames = 0;
             _framesSinceLastCorrection = 0;
             SetTargetPlaybackRate(1.0);
+
+            // A snap still draining was sized from a pre-disconnect error the re-converging
+            // clock is about to invalidate. Abandon it for the same reason the EMA is reset;
+            // whatever it had already applied is absorbed by the end-of-window baseline.
+            _pendingHardSyncSamples = 0;
+            _hardSyncCompleted = false;
 
             _logger.LogInformation("[Correction] Reconnect stabilization started (suppressing corrections for {DurationMs}ms)",
                 _syncOptions.ReconnectStabilizationMicroseconds / 1000);
@@ -762,8 +915,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _readPos = 0;
             _count = 0;
             _segments.Clear();
+            _headConsumedSamples = 0;
             _playbackStarted = false;
-            _nextExpectedPlaybackTime = 0;
+
+            // Timeline state belongs to the discarded stream, not the next one
+            _readCursorValid = false;
+            _readCursorServerTimestamp = 0;
+            _segmentGapMicroseconds = 0;
+            _pendingHardSyncSamples = 0;
+            _hardSyncCompleted = false;
 
             // Reset scheduled start state
             _scheduledStartLocalTime = 0;
@@ -783,6 +943,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _clockDriftUs = 0;
 
             // Reset sync correction state
+            _correctionMode = SyncCorrectionMode.None;
             _dropEveryNFrames = 0;
             _insertEveryNFrames = 0;
             _framesSinceLastCorrection = 0;
@@ -828,6 +989,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _scheduledStartLocalTime = 0;
             _waitingForScheduledStart = false;
 
+            // The next start re-derives the content cursor from the segment it begins on, and
+            // a snap scheduled against the old anchor would be measured from nothing.
+            _readCursorValid = false;
+            _readCursorServerTimestamp = 0;
+            _segmentGapMicroseconds = 0;
+            _pendingHardSyncSamples = 0;
+            _hardSyncCompleted = false;
+
             // Reset sync error tracking
             _playbackStartLocalTime = 0;
             _lastElapsedMicroseconds = 0;
@@ -841,6 +1010,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _clockDriftUs = 0;
 
             // Reset sync correction state
+            _correctionMode = SyncCorrectionMode.None;
             _dropEveryNFrames = 0;
             _insertEveryNFrames = 0;
             _framesSinceLastCorrection = 0;
@@ -878,12 +1048,16 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 ? _externalPlaybackRate
                 : TargetPlaybackRate;
 
+            // Report the mode the policy actually chose. Re-deriving it from the applied rate
+            // used to hide a Resampling decision whose rate was under the 0.0001 change
+            // hysteresis, so the buffer and an external corrector fed the same error could
+            // disagree about what mode they were in.
             SyncCorrectionMode correctionMode;
-            if (_dropEveryNFrames > 0)
-                correctionMode = SyncCorrectionMode.Dropping;
-            else if (_insertEveryNFrames > 0)
-                correctionMode = SyncCorrectionMode.Inserting;
-            else if (Math.Abs(effectivePlaybackRate - 1.0) > 0.0001)
+            if (_pendingHardSyncSamples != 0)
+                correctionMode = SyncCorrectionMode.HardSync;
+            else if (_correctionMode != SyncCorrectionMode.None)
+                correctionMode = _correctionMode;
+            else if (Math.Abs(_externalPlaybackRate - 1.0) > 0.0001)
                 correctionMode = SyncCorrectionMode.Resampling;
             else
                 correctionMode = SyncCorrectionMode.None;
@@ -928,6 +1102,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 TimingSourceName = TimingSourceName,
                 ReanchorCount = _reanchorCount,
                 MinBufferedMsRecent = _minBufferedMsRecent,
+                HardSyncCount = _hardSyncCount,
+                ContentHolesDetected = _contentHolesDetected,
+                LateChunksDropped = _lateChunksDropped,
             };
         }
     }
@@ -1042,22 +1219,31 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     {
         var totalSkipped = 0;
 
-        // Skip segments whose playback time is in the past, but keep at least
-        // the target buffer depth worth of audio so we have something to play
-        while (_segments.Count > 1 && _count > _samplesPerMs * (int)TargetBufferMilliseconds)
+        // Skip every segment whose playback time has already passed, keeping only the last
+        // one so there is something to start from.
+        //
+        // There used to be a clamp here that stopped skipping once the buffer was down to the
+        // target depth. It made the skip a no-op in exactly the case it exists for — a live
+        // stream primed to just under the target — leaving the player anchored on audio that
+        // was already due (issue #233). Retained audio that is stale is not a reserve; playing
+        // it is the bug.
+        while (_segments.Count > 1)
         {
             var segment = _segments.Peek();
 
             // Stop skipping once we reach audio that's near-current or in the future.
             // Use the grace window as tolerance (default 10ms). Playback time is
             // derived from the raw server timestamp using the CURRENT sync state —
-            // never a conversion cached before sync converged.
-            var segmentPlaybackTime = _clockSync.ServerToClientTime(segment.ServerTimestamp);
+            // never a conversion cached before sync converged — and through the same
+            // ScheduledLocalTimeFor the actual schedule uses, so the output latency
+            // pre-roll is included here as well. Comparing against the un-pre-rolled
+            // conversion under-skipped by exactly the output latency.
+            var segmentPlaybackTime = ScheduledLocalTimeFor(segment.ServerTimestamp);
             if (segmentPlaybackTime >= currentLocalTime - _syncOptions.ScheduledStartGraceWindowMicroseconds)
                 break;
 
             // This segment is stale — skip it
-            var toSkip = Math.Min(segment.SampleCount, _count);
+            var toSkip = Math.Min(segment.SampleCount - _headConsumedSamples, _count);
             _readPos = (_readPos + toSkip) % _buffer.Length;
             _count -= toSkip;
             _droppedSamples += toSkip;
@@ -1077,8 +1263,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             {
                 var newFirst = _segments.Peek();
                 _scheduledStartLocalTime = ScheduledLocalTimeFor(newFirst.ServerTimestamp);
-                _nextExpectedPlaybackTime = _scheduledStartLocalTime;
-            }
+                    }
         }
 
         return totalSkipped;
@@ -1104,31 +1289,132 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         // Also update segment tracking
         ConsumeSegments(dropped);
+
+        // Content discarded mid-play is a hole: everything after it now plays that much
+        // early. ConsumeSegments moves the read cursor over it silently (so the next
+        // segment boundary looks continuous), so the shift has to be recorded here or it
+        // would never reach the sync error at all (issue #229).
+        if (_playbackStarted && dropped > 0)
+        {
+            _segmentGapMicroseconds += SamplesToMicroseconds(dropped);
+            _contentHolesDetected++;
+        }
     }
 
     /// <summary>
-    /// Consumes segment tracking entries for read/dropped samples.
+    /// Consumes segment tracking entries for read/dropped samples and advances the content
+    /// cursor, re-validating each segment's timestamp as it reaches the head.
     /// Must be called under lock.
     /// </summary>
+    /// <remarks>
+    /// A partially consumed head segment stays at the head, tracked by
+    /// <see cref="_headConsumedSamples"/>. It used to be dequeued and re-enqueued, which put
+    /// the remainder at the <em>tail</em> — harmless while segment timestamps were only read
+    /// before playback started, and fatal now that they are the timeline.
+    /// </remarks>
     private void ConsumeSegments(int samplesConsumed)
     {
         var remaining = samplesConsumed;
         while (remaining > 0 && _segments.Count > 0)
         {
             var segment = _segments.Peek();
-            if (segment.SampleCount <= remaining)
+
+            if (_headConsumedSamples == 0)
             {
-                remaining -= segment.SampleCount;
-                _segments.Dequeue();
+                ObserveSegmentBoundary(segment.ServerTimestamp);
             }
-            else
+
+            var take = Math.Min(segment.SampleCount - _headConsumedSamples, remaining);
+            _headConsumedSamples += take;
+            remaining -= take;
+
+            // Recomputed from the segment base rather than accumulated, so splitting a
+            // segment across callbacks cannot drift by rounding.
+            _readCursorServerTimestamp =
+                segment.ServerTimestamp + SamplesToMicroseconds(_headConsumedSamples);
+
+            if (_headConsumedSamples >= segment.SampleCount)
             {
-                // Partial segment - update remaining count
                 _segments.Dequeue();
-                _segments.Enqueue(segment with { SampleCount = segment.SampleCount - remaining });
-                break;
+                _headConsumedSamples = 0;
             }
         }
+    }
+
+    /// <summary>
+    /// Re-validates a segment's server timestamp against where the content cursor expected it,
+    /// as the C++ reference does for every chunk (sync_task.cpp:596-600, 250-344).
+    /// Must be called under lock.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A step here means the delivered timeline is not continuous: a chunk was lost in a stall,
+    /// or audio was discarded. The samples after the step would otherwise play that much
+    /// earlier in absolute time forever, and the pace-based error — which only compares samples
+    /// consumed against wall clock — would read zero throughout, so no correction would ever
+    /// fire. Folding the step into <see cref="_segmentGapMicroseconds"/> puts it in front of
+    /// the corrector as what it is: the player running early by the size of the hole.
+    /// </para>
+    /// <para>
+    /// A hole the player already sat through as silence (an underrun) cancels out: the wall
+    /// clock advanced with no samples consumed, which pushes the error the other way by the
+    /// same amount. That is the correct outcome — the silence filled the hole and absolute
+    /// alignment was preserved.
+    /// </para>
+    /// </remarks>
+    private void ObserveSegmentBoundary(long segmentServerTimestamp)
+    {
+        if (!_readCursorValid)
+        {
+            _readCursorServerTimestamp = segmentServerTimestamp;
+            _readCursorValid = true;
+            return;
+        }
+
+        var gap = segmentServerTimestamp - _readCursorServerTimestamp;
+        _readCursorServerTimestamp = segmentServerTimestamp;
+
+        if (Math.Abs(gap) <= SegmentTimestampToleranceMicroseconds || !_playbackStarted)
+        {
+            return;
+        }
+
+        _segmentGapMicroseconds += gap;
+        _contentHolesDetected++;
+        LogTimelineEventIfNeeded(
+            "[Buffer] Content timeline step of {GapMs:F1}ms at a chunk boundary (total {Total}); " +
+            "folding it into the sync error so alignment is restored",
+            gap / 1000.0,
+            _contentHolesDetected);
+    }
+
+    /// <summary>
+    /// Whether a chunk arriving now is already behind the content cursor and can never play.
+    /// Must be called under lock.
+    /// </summary>
+    private bool IsChunkTooLate(long serverTimestamp)
+    {
+        var tolerance = _syncOptions.HardSyncThresholdMicroseconds > 0
+            ? _syncOptions.HardSyncThresholdMicroseconds
+            : SegmentTimestampToleranceMicroseconds;
+
+        return serverTimestamp < _readCursorServerTimestamp - tolerance;
+    }
+
+    /// <summary>
+    /// Rate-limited logging for timeline anomalies (holes, late chunks), which arrive in
+    /// bursts when a network stalls. Must be called under lock.
+    /// </summary>
+    private void LogTimelineEventIfNeeded(string message, double magnitude, long total)
+    {
+        var nowTick = Environment.TickCount64 * 1000L;
+        if (nowTick - _lastTimelineLogTime < UnderrunLogIntervalMicroseconds)
+        {
+            return;
+        }
+
+        _lastTimelineLogTime = nowTick;
+        _logger.LogWarning(message, magnitude, total);
     }
 
     /// <summary>
@@ -1199,8 +1485,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             // mid-flight, never follow unconverged readings).
         }
 
+        // Content-timeline term. The pace terms above see only samples consumed versus wall
+        // clock, which is blind to a break in the material itself: a lost chunk or a discard
+        // makes every later sample play early by the size of the hole while those two stay in
+        // perfect step. This carries the accumulated break so the corrector sees it.
+        // Sign: content that advanced without being played means we are running early, i.e.
+        // ahead, i.e. a negative contribution. See ObserveSegmentBoundary (issue #229).
         _currentSyncErrorMicroseconds = elapsedTimeMicroseconds - samplesReadTimeMicroseconds
-            - (long)_syncErrorBaselineMicroseconds + (long)_clockDriftUs;
+            - (long)_syncErrorBaselineMicroseconds + (long)_clockDriftUs
+            - (long)_segmentGapMicroseconds;
 
         // Apply EMA smoothing to filter measurement jitter.
         // This prevents rapid correction changes from noisy measurements while still
@@ -1208,7 +1501,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         //
         // Special case: if smoothed error is 0 (just started or after reset), initialize
         // it to the current raw error to avoid slow ramp-up that causes rate oscillation.
-        if (_smoothedSyncErrorMicroseconds == 0 && _currentSyncErrorMicroseconds != 0)
+        if (_hardSyncCompleted)
+        {
+            // A snap just landed. The raw error already reflects it; the smoothed value still
+            // carries the pre-snap magnitude and would decay through the hard-sync band for
+            // another dozen callbacks, scheduling a second snap on an error that is gone.
+            _hardSyncCompleted = false;
+            _smoothedSyncErrorMicroseconds = _currentSyncErrorMicroseconds;
+        }
+        else if (_smoothedSyncErrorMicroseconds == 0 && _currentSyncErrorMicroseconds != 0)
         {
             _smoothedSyncErrorMicroseconds = _currentSyncErrorMicroseconds;
         }
@@ -1286,12 +1587,24 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// </summary>
     private void UpdateCorrectionRate()
     {
+        // A snap in flight owns the correction: layering a rate change or frame stepping on
+        // top would correct the same error twice.
+        if (_pendingHardSyncSamples != 0)
+        {
+            SetTargetPlaybackRate(1.0);
+            _correctionMode = SyncCorrectionMode.None;
+            _dropEveryNFrames = 0;
+            _insertEveryNFrames = 0;
+            return;
+        }
+
         // Suppress corrections during the startup grace period; initial timing
         // jitter would otherwise drive over-corrections.
         var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
         if (elapsedSinceStart < _syncOptions.StartupGracePeriodMicroseconds)
         {
             SetTargetPlaybackRate(1.0);
+            _correctionMode = SyncCorrectionMode.None;
             _dropEveryNFrames = 0;
             _insertEveryNFrames = 0;
             return;
@@ -1320,71 +1633,158 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             else
             {
                 SetTargetPlaybackRate(1.0);
+                _correctionMode = SyncCorrectionMode.None;
                 _dropEveryNFrames = 0;
                 _insertEveryNFrames = 0;
                 return;
             }
         }
 
-        var absError = Math.Abs(_smoothedSyncErrorMicroseconds);
-        var deadbandThreshold = _syncOptions.DeadbandMicroseconds;
-        var resamplingThreshold = _syncOptions.ResamplingThresholdMicroseconds;
+        // One decision ladder for the whole SDK — see SyncCorrectionPolicy.
+        var decision = SyncCorrectionPolicy.Decide(
+            _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels);
 
-        if (absError < deadbandThreshold)
+        EvaluateHardSync(decision);
+
+        LogCorrectionModeTransition(decision.Mode);
+        SetTargetPlaybackRate(decision.TargetPlaybackRate);
+        _correctionMode = decision.Mode;
+        _dropEveryNFrames = decision.DropEveryNFrames;
+        _insertEveryNFrames = decision.InsertEveryNFrames;
+    }
+
+    /// <summary>
+    /// Schedules a one-shot snap when <paramref name="decision"/> calls for one and none is
+    /// already in flight. Must be called under lock.
+    /// </summary>
+    /// <param name="decision">
+    /// The policy's verdict for the current smoothed error. Taking it as a parameter is what
+    /// keeps both read paths on the same gate: the threshold, the re-anchor ceiling and the
+    /// "tier disabled" case all live in <see cref="SyncCorrectionPolicy"/>, so neither caller
+    /// can decide to snap on its own terms.
+    /// </param>
+    /// <remarks>
+    /// Triggered on the smoothed error but sized from the raw one. The two jobs differ:
+    /// deciding <em>whether</em> we are out of sync wants noise immunity, while deciding
+    /// <em>how far</em> wants the freshest reading, because the splice happens at this
+    /// instant. Sizing from the smoothed value instead makes the first snap deliberately
+    /// short — at α=0.1 it lags a step change by an order of magnitude — so a single 60 ms
+    /// disturbance becomes a 6 ms snap followed by a 54 ms one, and "rare" starts to slip.
+    /// Requiring the two to agree in sign keeps a transient from splicing the wrong way; any
+    /// residual is picked up on the next evaluation, as the C++ reference's settle loop does.
+    /// </remarks>
+    private void EvaluateHardSync(SyncCorrectionDecision decision)
+    {
+        if (decision.Mode != SyncCorrectionMode.HardSync)
         {
-            LogCorrectionModeTransition(SyncCorrectionMode.None);
-            SetTargetPlaybackRate(1.0);
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
             return;
         }
 
-        if (absError < resamplingThreshold)
+        if (_pendingHardSyncSamples != 0)
         {
-            LogCorrectionModeTransition(SyncCorrectionMode.Resampling);
+            return; // Already snapping; a second schedule would over-correct.
+        }
 
-            // Rate = 1 + error / (targetSeconds × 1e6); clamp to MaxSpeedCorrection.
-            var correctionFactor = _smoothedSyncErrorMicroseconds
-                / _syncOptions.CorrectionTargetSeconds
-                / 1_000_000.0;
-            correctionFactor = Math.Clamp(correctionFactor,
-                -_syncOptions.MaxSpeedCorrection,
-                _syncOptions.MaxSpeedCorrection);
-
-            SetTargetPlaybackRate(1.0 + correctionFactor);
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
+        if (Math.Sign(_currentSyncErrorMicroseconds) != Math.Sign(_smoothedSyncErrorMicroseconds))
+        {
             return;
         }
 
-        // Large error: switch from rate adjustment to discrete frame drop/insert.
-        SetTargetPlaybackRate(1.0);
-
-        var framesError = absError * _sampleRate / 1_000_000.0;
-        var desiredCorrectionsPerSec = framesError / _syncOptions.CorrectionTargetSeconds;
-        var framesPerSecond = (double)_sampleRate;
-        var maxCorrectionsPerSec = framesPerSecond * _syncOptions.MaxSpeedCorrection;
-        var actualCorrectionsPerSec = Math.Min(desiredCorrectionsPerSec, maxCorrectionsPerSec);
-
-        var correctionInterval = actualCorrectionsPerSec > 0
-            ? (int)(framesPerSecond / actualCorrectionsPerSec)
-            : 0;
-
-        // Floor to channels × 10 frames so corrections don't run faster than ~440Hz at 48kHz stereo.
-        correctionInterval = Math.Max(correctionInterval, _channels * 10);
-
-        if (_smoothedSyncErrorMicroseconds > 0)
+        var samples = (long)Math.Round(_currentSyncErrorMicroseconds / _microsecondsPerSample);
+        samples -= samples % _channels; // Whole frames only.
+        if (samples == 0)
         {
-            _dropEveryNFrames = correctionInterval;
-            _insertEveryNFrames = 0;
-            LogCorrectionModeTransition(SyncCorrectionMode.Dropping);
+            return;
         }
-        else
+
+        _pendingHardSyncSamples = samples;
+        _hardSyncCount++;
+
+        _logger.LogInformation(
+            "[Correction] Hard sync #{Count}: {Action} {AmountMs:F1}ms in one step " +
+            "(error {ErrorMs:+0.00;-0.00}ms exceeds {ThresholdMs:F1}ms, timing={TimingSource})",
+            _hardSyncCount,
+            samples > 0 ? "skipping" : "inserting silence for",
+            Math.Abs(samples) * _microsecondsPerSample / 1000.0,
+            _currentSyncErrorMicroseconds / 1000.0,
+            _syncOptions.HardSyncThresholdMicroseconds / 1000.0,
+            TimingSourceName ?? "unknown");
+    }
+
+    /// <summary>
+    /// Applies as much of a scheduled one-shot snap as this callback allows.
+    /// Must be called under lock.
+    /// </summary>
+    /// <param name="buffer">Output buffer; silence is written at its head when inserting.</param>
+    /// <returns>Samples of silence written at the head of <paramref name="buffer"/>.</returns>
+    /// <remarks>
+    /// Late (positive pending) skips buffered content, which advances the read cursor without
+    /// producing output and closes the error immediately. Early (negative pending) emits
+    /// silence, which produces output without advancing the cursor and closes the error over
+    /// the duration of the silence. Either way the excess routinely exceeds one callback, so
+    /// the remainder carries to the next one.
+    /// </remarks>
+    private int ApplyPendingHardSync(Span<float> buffer)
+    {
+        if (_pendingHardSyncSamples == 0)
         {
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = correctionInterval;
-            LogCorrectionModeTransition(SyncCorrectionMode.Inserting);
+            return 0;
         }
+
+        var frameSamples = _channels;
+
+        if (_pendingHardSyncSamples > 0)
+        {
+            var toSkip = (int)Math.Min(_pendingHardSyncSamples, _count);
+            toSkip -= toSkip % frameSamples;
+
+            if (toSkip > 0)
+            {
+                _readPos = (_readPos + toSkip) % _buffer.Length;
+                _count -= toSkip;
+
+                // Credited as read, not as a timeline hole: this is the correction, so it must
+                // move the error toward zero rather than be reported as new misalignment.
+                _samplesReadSinceStart += toSkip;
+                _samplesDroppedForSync += toSkip;
+                ConsumeSegments(toSkip);
+                _pendingHardSyncSamples -= toSkip;
+            }
+
+            if (_pendingHardSyncSamples < frameSamples)
+            {
+                CompleteHardSync();
+            }
+
+            return 0;
+        }
+
+        var toInsert = (int)Math.Min(-_pendingHardSyncSamples, buffer.Length);
+        toInsert -= toInsert % frameSamples;
+
+        if (toInsert > 0)
+        {
+            buffer.Slice(0, toInsert).Fill(0f);
+            _samplesInsertedForSync += toInsert;
+            _pendingHardSyncSamples += toInsert;
+        }
+
+        if (-_pendingHardSyncSamples < frameSamples)
+        {
+            CompleteHardSync();
+        }
+
+        return toInsert;
+    }
+
+    /// <summary>
+    /// Ends the current snap and asks the next error calculation to re-seed the EMA.
+    /// Must be called under lock.
+    /// </summary>
+    private void CompleteHardSync()
+    {
+        _pendingHardSyncSamples = 0;
+        _hardSyncCompleted = true;
     }
 
     /// <summary>
@@ -1695,7 +2095,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <summary>
     /// Represents a segment of samples with its target playback time.
     /// </summary>
-    /// <param name="ServerTimestamp">Raw server timestamp (microseconds) for this segment.
+    /// <param name="ServerTimestamp">Raw server timestamp (microseconds) of this segment's
+    /// FIRST sample, unchanged for the segment's whole life — partial consumption is tracked
+    /// separately in <see cref="_headConsumedSamples"/>, so this stays a fixed reference point
+    /// for the content cursor rather than something that has to be kept in step.
     /// Stored unconverted: clock sync may not have converged when the segment was enqueued
     /// (e.g. the initial burst on a mid-track join arrives before the first time-sync round
     /// completes), so local playback time must be derived at read time via

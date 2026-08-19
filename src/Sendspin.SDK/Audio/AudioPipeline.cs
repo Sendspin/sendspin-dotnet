@@ -838,6 +838,7 @@ public sealed class AudioPipeline : IAudioPipeline
             {
                 SyncCorrectionMode.Dropping => $"DROPPING (dropped={stats.SamplesDroppedForSync})",
                 SyncCorrectionMode.Inserting => $"INSERTING (inserted={stats.SamplesInsertedForSync})",
+                SyncCorrectionMode.HardSync => $"HARD SYNC (snaps={stats.HardSyncCount})",
                 _ => "none",
             };
 

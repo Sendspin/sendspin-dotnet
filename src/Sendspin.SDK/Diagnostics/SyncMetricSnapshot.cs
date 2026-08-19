@@ -68,6 +68,7 @@ public readonly record struct SyncMetricSnapshot
             SyncCorrectionMode.Resampling => "RSMP",
             SyncCorrectionMode.Dropping => "DROP",
             SyncCorrectionMode.Inserting => "INS",
+            SyncCorrectionMode.HardSync => "SNAP",
             _ => "OK",
         };
 

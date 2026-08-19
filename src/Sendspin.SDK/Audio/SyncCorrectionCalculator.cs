@@ -10,6 +10,13 @@ namespace Sendspin.SDK.Audio;
 /// when those parameters change. Subscribers are responsible for unsubscribing
 /// before discarding the reference.
 /// </summary>
+/// <remarks>
+/// The decision itself lives in <see cref="SyncCorrectionPolicy"/>, shared with
+/// <see cref="TimedAudioBuffer"/>'s internal corrector so the two cannot diverge.
+/// When the policy selects <see cref="SyncCorrectionMode.HardSync"/> this reports
+/// a neutral correction: the buffer applies that snap itself on both read paths,
+/// and a caller adding its own on top would double-correct.
+/// </remarks>
 public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
 {
     private readonly SyncCorrectionOptions _options;
@@ -236,64 +243,14 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
         }
 
-        var absError = Math.Abs(smoothedMicroseconds);
-        var deadbandThreshold = _options.DeadbandMicroseconds;
-        var resamplingThreshold = _options.ResamplingThresholdMicroseconds;
+        // One decision ladder, shared with TimedAudioBuffer's internal corrector.
+        var decision = SyncCorrectionPolicy.Decide(
+            smoothedMicroseconds, _options, _sampleRate, _channels);
 
-        if (absError < deadbandThreshold)
-        {
-            _currentMode = SyncCorrectionMode.None;
-            _targetPlaybackRate = 1.0;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
-            return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
-        }
-
-        if (absError < resamplingThreshold)
-        {
-            _currentMode = SyncCorrectionMode.Resampling;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
-
-            // Rate = 1 + error / (targetSeconds × 1e6); clamp to MaxSpeedCorrection.
-            var correctionFactor = smoothedMicroseconds
-                / _options.CorrectionTargetSeconds
-                / 1_000_000.0;
-            correctionFactor = Math.Clamp(correctionFactor,
-                -_options.MaxSpeedCorrection,
-                _options.MaxSpeedCorrection);
-
-            _targetPlaybackRate = 1.0 + correctionFactor;
-            return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
-        }
-
-        _targetPlaybackRate = 1.0;
-
-        var framesError = absError * _sampleRate / 1_000_000.0;
-        var desiredCorrectionsPerSec = framesError / _options.CorrectionTargetSeconds;
-        var framesPerSecond = (double)_sampleRate;
-        var maxCorrectionsPerSec = framesPerSecond * _options.MaxSpeedCorrection;
-        var actualCorrectionsPerSec = Math.Min(desiredCorrectionsPerSec, maxCorrectionsPerSec);
-
-        var correctionInterval = actualCorrectionsPerSec > 0
-            ? (int)(framesPerSecond / actualCorrectionsPerSec)
-            : 0;
-
-        // Floor to channels × 10 frames so corrections don't run faster than ~440Hz at 48kHz stereo.
-        correctionInterval = Math.Max(correctionInterval, _channels * 10);
-
-        if (smoothedMicroseconds > 0)
-        {
-            _currentMode = SyncCorrectionMode.Dropping;
-            _dropEveryNFrames = correctionInterval;
-            _insertEveryNFrames = 0;
-        }
-        else
-        {
-            _currentMode = SyncCorrectionMode.Inserting;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = correctionInterval;
-        }
+        _currentMode = decision.Mode;
+        _targetPlaybackRate = decision.TargetPlaybackRate;
+        _dropEveryNFrames = decision.DropEveryNFrames;
+        _insertEveryNFrames = decision.InsertEveryNFrames;
 
         return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
     }
