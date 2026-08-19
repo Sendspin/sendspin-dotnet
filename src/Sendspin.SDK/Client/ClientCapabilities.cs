@@ -1,3 +1,4 @@
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -8,6 +9,8 @@ namespace Sendspin.SDK.Client;
 /// </summary>
 public sealed class ClientCapabilities
 {
+    private int? _bufferCapacityOverride;
+
     /// <summary>
     /// Human-readable client name.
     /// </summary>
@@ -37,11 +40,41 @@ public sealed class ClientCapabilities
     };
 
     /// <summary>
-    /// Audio buffer capacity in compressed bytes. The server uses this to limit how much
-    /// audio it sends ahead. Should be derived from your PCM buffer duration and the
-    /// highest-bitrate codec you support. Default is 32MB (reference implementation fallback).
+    /// Decoded audio, in milliseconds, that this client's audio buffer holds. This is the
+    /// single source of truth for buffering: <see cref="BufferCapacity"/> is derived from it,
+    /// and the same value must be passed to <c>TimedAudioBuffer</c>'s <c>bufferCapacityMs</c>.
+    /// Defaults to <see cref="PlayerBufferCapacity.DefaultDecodedBufferMilliseconds"/>, which
+    /// is also that constructor's default, so leaving both alone keeps them in step.
     /// </summary>
-    public int BufferCapacity { get; set; } = 32_000_000;
+    public int AudioBufferCapacityMs { get; set; } = PlayerBufferCapacity.DefaultDecodedBufferMilliseconds;
+
+    /// <summary>
+    /// Audio buffer capacity in compressed bytes, advertised in <c>client/hello</c>. Derived
+    /// from <see cref="AudioBufferCapacityMs"/> and <see cref="AudioFormats"/> unless set
+    /// explicitly.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The spec makes this a hard per-player byte limit that servers fill toward
+    /// (roles/player/v1.md:34-35), so it is a promise about what this client can hold, not a
+    /// hint. It used to default to a flat 32 MB with no relationship to the actual buffer —
+    /// which meant a server behaving exactly as the spec allows could send minutes of Opus to
+    /// a client holding a fraction of a second of it, and everything past the buffer was
+    /// discarded before it played.
+    /// </para>
+    /// <para>
+    /// Setting this explicitly overrides the derivation, and hands you responsibility for the
+    /// promise: the value must be one the audio buffer can actually hold for every format in
+    /// <see cref="AudioFormats"/>. <see cref="PlayerBufferCapacity.HoldableMilliseconds"/>
+    /// checks that. Prefer setting <see cref="AudioBufferCapacityMs"/> instead.
+    /// </para>
+    /// </remarks>
+    public int BufferCapacity
+    {
+        get => _bufferCapacityOverride
+            ?? PlayerBufferCapacity.AdvertisedBytes(AudioBufferCapacityMs, AudioFormats);
+        set => _bufferCapacityOverride = value;
+    }
 
     /// <summary>
     /// Artwork channels this client can display, advertised in <c>client/hello</c>. The Sendspin
