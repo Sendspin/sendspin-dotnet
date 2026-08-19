@@ -3,6 +3,8 @@
 // </copyright>
 
 using System.Buffers.Binary;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Models;
 
 namespace Sendspin.SDK.Audio.Codecs;
@@ -13,6 +15,7 @@ namespace Sendspin.SDK.Audio.Codecs;
 /// </summary>
 public sealed class PcmDecoder : IAudioDecoder
 {
+    private readonly ILogger _logger;
     private readonly int _bytesPerSample;
     private bool _disposed;
 
@@ -26,19 +29,22 @@ public sealed class PcmDecoder : IAudioDecoder
     /// Initializes a new instance of the <see cref="PcmDecoder"/> class.
     /// </summary>
     /// <param name="format">Audio format configuration.</param>
+    /// <param name="logger">Optional logger for diagnostic output.</param>
     /// <exception cref="ArgumentException">Thrown when format is not PCM.</exception>
-    public PcmDecoder(AudioFormat format)
+    public PcmDecoder(AudioFormat format, ILogger<PcmDecoder>? logger = null)
     {
         if (!string.Equals(format.Codec, AudioCodecs.Pcm, StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException($"Expected PCM format, got {format.Codec}", nameof(format));
         }
 
+        _logger = logger ?? NullLogger<PcmDecoder>.Instance;
         Format = format;
         _bytesPerSample = (format.BitDepth ?? 16) / 8;
 
-        // Assume max 50ms frames for PCM at any sample rate
-        MaxSamplesPerFrame = (format.SampleRate / 20) * format.Channels;
+        // Size for the longest chunk the spec permits, not for the length servers usually
+        // send: anything up to 150 ms is legal input that has to survive intact.
+        MaxSamplesPerFrame = AudioChunkLimits.MaxSamplesPerChannel(format.SampleRate) * format.Channels;
     }
 
     /// <inheritdoc/>
@@ -48,6 +54,22 @@ public sealed class PcmDecoder : IAudioDecoder
 
         var sampleCount = encodedData.Length / _bytesPerSample;
         var outputCount = Math.Min(sampleCount, decodedSamples.Length);
+
+        if (outputCount < sampleCount)
+        {
+            // The buffer holds a full 150 ms chunk, so only a server that broke the spec's MUST
+            // can get here. Decode the prefix rather than throwing — the pipeline drops the
+            // whole chunk on an exception — but never let the loss pass unreported.
+            _logger.LogError(
+                "PCM chunk of {SampleCount} samples exceeds the {Capacity}-sample decode buffer sized for {MaxChunkMs} ms at {SampleRate} Hz, {Channels}ch: decoding the first {Decoded} and dropping {Dropped}. The server sent a chunk longer than the spec allows.",
+                sampleCount,
+                decodedSamples.Length,
+                AudioChunkLimits.MaxChunkMilliseconds,
+                Format.SampleRate,
+                Format.Channels,
+                outputCount,
+                sampleCount - outputCount);
+        }
 
         var bitDepth = Format.BitDepth ?? 16;
 
