@@ -122,4 +122,32 @@ public class PlayerBufferCapacityTests
             PlayerBufferCapacity.CompressedBytesPerSecond(Flac)
                 < PlayerBufferCapacity.CompressedBytesPerSecond(Pcm));
     }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    public void OpusWithoutADeclaredBitrate_IsNotTreatedAsUncompressed(int? bitrate)
+    {
+        // Falling through to the PCM byte rate overstated this roughly sixfold, silently
+        // breaking the holdability invariant for anyone advertising opus without a bitrate.
+        var opus = new AudioFormat
+        {
+            Codec = "opus", SampleRate = 48_000, Channels = 2, Bitrate = bitrate,
+        };
+
+        Assert.True(
+            PlayerBufferCapacity.CompressedBytesPerSecond(opus)
+                < PlayerBufferCapacity.CompressedBytesPerSecond(Pcm));
+
+        var capabilities = new ClientCapabilities
+        {
+            AudioFormats = new List<AudioFormat> { opus, Pcm },
+        };
+        var holdableMs = PlayerBufferCapacity.HoldableMilliseconds(capabilities.BufferCapacity, opus);
+
+        Assert.True(
+            holdableMs <= capabilities.AudioBufferCapacityMs,
+            $"advertised {capabilities.BufferCapacity} bytes decodes to {holdableMs:F0}ms of opus, " +
+            $"over the {capabilities.AudioBufferCapacityMs}ms the buffer holds");
+    }
 }

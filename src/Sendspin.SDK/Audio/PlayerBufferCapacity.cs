@@ -62,6 +62,20 @@ public static class PlayerBufferCapacity
     private const double FlacCompressionFloor = 0.5;
 
     /// <summary>
+    /// Byte rate assumed for an <c>opus</c> format that declares no bitrate.
+    /// </summary>
+    /// <remarks>
+    /// Safety runs one way here. Assuming a rate <em>higher</em> than the server actually
+    /// encodes at inflates the advertisement, because more real seconds then fit in a byte than
+    /// were assumed — which is how falling through to the PCM rate overstated a bitrate-less
+    /// Opus entry roughly sixfold. The fallback therefore assumes a low bitrate: 64 kbps sits
+    /// below anything a server would choose for music, without collapsing the advertisement to
+    /// something unusable. Declare <see cref="AudioFormat.Bitrate"/> to get an advertisement
+    /// matched to what you actually asked for.
+    /// </remarks>
+    private const int UndeclaredOpusBytesPerSecond = 64 * 1000 / 8;
+
+    /// <summary>
     /// Compressed bytes per second the given format is expected to occupy on the wire.
     /// </summary>
     /// <param name="format">Advertised audio format.</param>
@@ -78,6 +92,7 @@ public static class PlayerBufferCapacity
         {
             // The bitrate we ask for is the rate the server encodes at.
             "opus" when format.Bitrate > 0 => format.Bitrate.Value * 1000 / 8,
+            "opus" => UndeclaredOpusBytesPerSecond,
             "flac" => (int)(pcmBytesPerSecond * FlacCompressionFloor),
             _ => (int)pcmBytesPerSecond,
         };
