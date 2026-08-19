@@ -96,14 +96,19 @@ public class SendspinClientServiceArtworkTests
     [InlineData(BinaryMessageTypes.Artwork3, 3)]
     public void ArtworkBinary_RaisesReceivedWithChannelAndTimestamp(byte type, int expectedChannel)
     {
-        var (client, connection, _) = TestClient.Create();
+        // A timestamp with every byte distinct so a little-endian regression can't pass. The
+        // local clock is frozen at that same instant, making the image due the moment it
+        // arrives: this test's subject is channel/timestamp plumbing, not the display
+        // scheduling that MediaDisplaySchedulingTests covers.
+        const long timestamp = 0x0102030405060708;
+
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options with { PrecisionTimer = new FakePrecisionTimer { CurrentTime = timestamp } });
         using var _c = client;
 
         ArtworkReceivedEventArgs? received = null;
         client.ArtworkReceived += (_, e) => received = e;
 
-        // A timestamp with every byte distinct so a little-endian regression can't pass.
-        const long timestamp = 0x0102030405060708;
         var image = new byte[] { 1, 2, 3, 4 };
         connection.RaiseBinaryMessageReceived(ArtworkBinary(type, timestamp, image));
 

@@ -321,15 +321,26 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<PlayerState>? PlayerStateChanged;
 
     /// <summary>
-    /// Event raised when an artwork image is received on a channel (0-3). Carries the channel,
-    /// display timestamp, and encoded image bytes.
+    /// Event raised when an artwork image is due for display on a channel (0-3). Carries the
+    /// channel, display timestamp, and encoded image bytes.
     /// </summary>
+    /// <remarks>
+    /// The SDK translates the message's server timestamp to the local clock and holds the image
+    /// until then, so the event marks the display moment rather than the arrival moment — an
+    /// image pre-sent for the next track is raised when that track starts. A timestamp already
+    /// past on arrival raises immediately; artwork is never dropped for lateness, and a newer
+    /// image for a channel supersedes one still held for it. See
+    /// <see cref="VisualizationReceived"/> for which thread raises the event.
+    /// </remarks>
     event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
 
     /// <summary>
     /// Event raised when a single artwork channel is cleared (an empty artwork binary message).
     /// Carries the channel that was cleared.
     /// </summary>
+    /// <remarks>
+    /// Scheduled against its display timestamp exactly as <see cref="ArtworkReceived"/> is.
+    /// </remarks>
     event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
 
     /// <summary>
@@ -340,10 +351,30 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<ColorPalette>? ColorChanged;
 
     /// <summary>
-    /// Event raised for each decoded visualizer feature frame (the <c>visualizer@v1</c> role). Each
-    /// <see cref="VisualizerFrame"/> carries one feature type (loudness, f_peak, spectrum, beat,
-    /// peak, or pitch). Malformed frames are dropped and do not raise the event.
+    /// Event raised when a decoded visualizer feature frame is due for display (the
+    /// <c>visualizer@v1</c> role). Each <see cref="VisualizerFrame"/> carries one feature type
+    /// (loudness, f_peak, spectrum, beat, peak, or pitch). Malformed frames are dropped and do
+    /// not raise the event.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Servers send frames ahead of when they should be shown — that is what the advertised
+    /// <c>buffer_capacity</c> is for — so the SDK translates each frame's server timestamp to the
+    /// local clock and raises this event at that moment, keeping the visualization aligned with
+    /// the audio. Frames that are already more than 20 ms late on arrival are dropped rather than
+    /// rendered stale, as are frames still pending when the stream is cleared or ends, or when
+    /// the connection drops. Frames beyond the advertised <c>buffer_capacity</c> are dropped
+    /// oldest-first.
+    /// </para>
+    /// <para>
+    /// <b>Threading:</b> a frame already due on arrival is raised on the receive loop, as before;
+    /// a frame held for a future display time is raised on an SDK background thread instead. Both
+    /// orderings are preserved, but a subscriber must be safe to call from either thread, and
+    /// must marshal to a UI thread itself. An exception from a subscriber still faults the
+    /// connection when the event was raised inline; on the scheduled path it is logged and the
+    /// remaining frames continue.
+    /// </para>
+    /// </remarks>
     event EventHandler<VisualizerFrame>? VisualizationReceived;
 
     /// <summary>

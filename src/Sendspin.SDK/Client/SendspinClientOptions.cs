@@ -47,6 +47,14 @@ public sealed record SendspinClientOptions
     /// <summary>Clock synchronizer. A <see cref="KalmanClockSynchronizer"/> is created when null.</summary>
     public IClockSynchronizer? ClockSynchronizer { get; init; }
 
+    /// <summary>
+    /// Local monotonic clock the SDK schedules visualizer and artwork display against.
+    /// <see cref="HighPrecisionTimer.Shared"/> when null, which is the same time base
+    /// <see cref="IClockSynchronizer.ServerToClientTime"/> converts into. Internal because it
+    /// exists to let tests hold "now" still, not as a knob applications are expected to turn.
+    /// </summary>
+    internal IHighPrecisionTimer? PrecisionTimer { get; init; }
+
     /// <summary>Audio pipeline for the player role.</summary>
     public IAudioPipeline? AudioPipeline { get; init; }
 
