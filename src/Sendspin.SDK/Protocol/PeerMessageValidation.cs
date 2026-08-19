@@ -116,8 +116,10 @@ internal static class PeerMessageValidation
                 break;
 
             default:
-                // Client-authored messages reach this only from tests round-tripping their own
-                // output, where the SDK built every member and there is nothing to police.
+                // Only client-authored messages reach this: from tests round-tripping their own
+                // output, and from a caller routing one through Deserialize(string), which since
+                // #207 models them too. Neither is peer input on this client's receive path —
+                // the SDK built every member — so there is nothing to police.
                 break;
         }
     }
