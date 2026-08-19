@@ -246,8 +246,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </remarks>
     private const int MaxConvergingBursts = 60;
 
-    // Converging-tier budget, refilled by StartTimeSyncLoop. Touched only from the time-sync
-    // loop, which is single-threaded across its own lifetime.
+    // Converging-tier budget, refilled by StartTimeSyncLoop. Touched from the time-sync loop;
+    // a loop being replaced can spend one burst of its successor's fresh budget before its
+    // Task.Delay observes cancellation — harmless (59 instead of 60), noted for honesty.
     private int _convergingBurstsSpent;
     private bool _convergingBudgetExhausted;
 
@@ -3859,9 +3860,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// nothing to rescue.
     /// </remarks>
     private Task SendRescueSyncBurstAsync()
-        => Volatile.Read(ref _connectionLifetimeCts) is { } lifetime
-            ? SendTimeSyncBurstAsync(lifetime.Token)
-            : Task.CompletedTask;
+    {
+        if (Volatile.Read(ref _connectionLifetimeCts) is not { } lifetime)
+        {
+            return Task.CompletedTask;
+        }
+
+        try
+        {
+            return SendTimeSyncBurstAsync(lifetime.Token);
+        }
+        catch (ObjectDisposedException)
+        {
+            // A disconnect can cancel-and-dispose the source between the read above and the
+            // Token property evaluating. The connection is dying either way — same as null.
+            return Task.CompletedTask;
+        }
+    }
 
     /// <summary>
     /// Sends a burst of NTP-style time-sync probes sequentially and feeds the lowest-RTT
