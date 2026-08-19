@@ -70,6 +70,14 @@ public interface IAudioPipeline : IAsyncDisposable
     /// Starts the pipeline with the specified stream format.
     /// Called when stream/start is received.
     /// </summary>
+    /// <remarks>
+    /// A <c>stream/start</c> for a stream that is already running is a configuration update, not a
+    /// restart: implementations must apply it without clearing buffered audio, and must continue
+    /// the existing timeline rather than re-anchoring it or re-applying the startup lead, since the
+    /// server does neither. Buffers may be cleared only where the change genuinely requires it —
+    /// see <see cref="AudioPipeline"/> for what the shipped pipeline updates in place and what it
+    /// restarts for.
+    /// </remarks>
     /// <param name="format">Audio format for the stream.</param>
     /// <param name="targetTimestamp">Optional target timestamp for playback alignment.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
