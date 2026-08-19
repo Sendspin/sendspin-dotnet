@@ -117,6 +117,18 @@ public class MessageSerializerTests
             ["stream/clear"] = typeof(StreamClearMessage),
             ["group/update"] = typeof(GroupUpdateMessage),
             ["server/command"] = typeof(ServerCommandMessage),
+
+            // #207: routed through the internal client by GetMessageType + typed Deserialize<T>,
+            // so nothing in-repo noticed that this public entry point dropped them.
+            ["server/state"] = typeof(ServerStateMessage),
+            ["server/unpair"] = typeof(ServerUnpairMessage),
+            ["server/activate"] = typeof(ServerActivateMessage),
+            ["server/pair-finalize"] = typeof(ServerPairFinalizeMessage),
+            ["pair/abort"] = typeof(PairAbortMessage),
+            ["server/pair-init"] = typeof(ServerPairInitMessage),
+            ["server/pair-auth"] = typeof(ServerPairAuthMessage),
+            ["server/pair-confirm"] = typeof(ServerPairConfirmMessage),
+            ["management/result"] = typeof(ManagementResultMessage),
         };
 
         foreach (var (type, expectedType) in testCases)
@@ -126,6 +138,92 @@ public class MessageSerializerTests
             Assert.NotNull(msg);
             Assert.IsType(expectedType, msg);
         }
+    }
+
+    /// <summary>
+    /// The client-authored half of the switch (#207). These are the messages this SDK sends, so
+    /// nothing in-repo deserializes them — but a null return here was indistinguishable from a
+    /// type the SDK has never heard of, which is what the entry point's contract now promises
+    /// null means.
+    /// </summary>
+    [Fact]
+    public void Deserialize_ClientAuthoredMessageTypes_Succeeds()
+    {
+        var testCases = new Dictionary<string, Type>
+        {
+            ["""{"type":"client/hello","payload":{"name":"c","supported_roles":[]}}"""] =
+                typeof(ClientHelloMessage),
+            ["""{"type":"client/goodbye","payload":{"reason":"user_request"}}"""] =
+                typeof(ClientGoodbyeMessage),
+            ["""{"type":"client/time","payload":{"client_transmitted":1}}"""] = typeof(ClientTimeMessage),
+            ["""{"type":"client/state","payload":{"available":true}}"""] = typeof(ClientStateMessage),
+            ["""{"type":"client/command","payload":{"controller":{"command":"play"}}}"""] =
+                typeof(ClientCommandMessage),
+            ["""{"type":"client/pair-finalize","payload":{}}"""] = typeof(ClientPairFinalizeMessage),
+            ["""{"type":"client/pair-pending","payload":{"pairing_index":1}}"""] =
+                typeof(ClientPairPendingMessage),
+            ["""{"type":"client/pair-init","payload":{}}"""] = typeof(ClientPairInitMessage),
+            ["""{"type":"client/pair-auth","payload":{}}"""] = typeof(ClientPairAuthMessage),
+            ["""{"type":"client/pair-confirm","payload":{}}"""] = typeof(ClientPairConfirmMessage),
+            ["""{"type":"stream/request-format","payload":{}}"""] = typeof(StreamRequestFormatMessage),
+            ["""{"type":"client_stream/start","payload":{}}"""] = typeof(ClientStreamStartMessage),
+            ["""{"type":"client_stream/end","payload":{}}"""] = typeof(ClientStreamEndMessage),
+        };
+
+        foreach (var (json, expectedType) in testCases)
+        {
+            Assert.IsType(expectedType, MessageSerializer.Deserialize(json));
+        }
+    }
+
+    [Fact]
+    public void Deserialize_ManagementRequests_ReturnNull_TheOneDocumentedGap()
+    {
+        // The management/* requests are the only Sendspin types the switch deliberately omits:
+        // their payloads differ per operation and the client reads them as raw JSON rather than
+        // through a message class. Pinned so the entry point's doc stays true — if one of these
+        // ever gains a model, this test is what says the doc needs updating too.
+        string[] requests =
+        [
+            MessageTypes.ManagementListRecords,
+            MessageTypes.ManagementAddRecord,
+            MessageTypes.ManagementRemoveRecord,
+            MessageTypes.ManagementGetPairingConfig,
+            MessageTypes.ManagementSetPairingConfig,
+            MessageTypes.ManagementOpenPairingWindow,
+        ];
+
+        foreach (var type in requests)
+        {
+            Assert.Null(MessageSerializer.Deserialize($$"""{ "type": "{{type}}", "payload": {} }"""));
+        }
+    }
+
+    [Fact]
+    public void Deserialize_ServerState_CarriesTheRoleObjectsThrough()
+    {
+        // server/state is the message #207 costs the most: a consumer dispatching on this entry
+        // point lost every metadata, controller and color update with no error to notice.
+        var msg = MessageSerializer.Deserialize("""
+            {"type":"server/state","payload":{"metadata":{"title":"T"},"controller":{"volume":7},
+             "color":null}}
+            """);
+
+        var state = Assert.IsType<ServerStateMessage>(msg);
+        Assert.Equal("T", state.Payload.Metadata.Value!.Title.Value);
+        Assert.Equal(7, state.Payload.Controller.Value!.Volume);
+        Assert.True(state.Payload.Color.IsPresent);
+        Assert.Null(state.Payload.Color.Value);
+    }
+
+    [Fact]
+    public void Serialize_ServerUnpair_RoundTrips()
+    {
+        var json = MessageSerializer.Serialize(new ServerUnpairMessage());
+
+        Assert.Contains("\"type\":\"server/unpair\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"payload\":{}", json, StringComparison.Ordinal);
+        Assert.IsType<ServerUnpairMessage>(MessageSerializer.Deserialize(json));
     }
 
     [Fact]

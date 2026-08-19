@@ -163,6 +163,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // purpose: it describes the device's input, not the session (#114).
     private bool? _lastSourceSignal;
 
+    // One bit per undefined player-audio type (5-7) already warned about. A lost race on this
+    // field costs a duplicate warning and nothing else, so it needs no synchronization.
+    private int _warnedUndefinedPlayerAudioTypes;
+
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
@@ -208,6 +212,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>The Noise session this client was constructed with (test-only introspection).</summary>
     internal INoiseSessionInfo Session => _session;
+
+    /// <summary>
+    /// The <c>pairing_psk</c> method's effective enablement, as set by
+    /// <c>management/set-pairing-config</c>. Read live by this connection's
+    /// <see cref="RecordPskResolver"/>, which excludes Pairing-category records from the
+    /// handshake candidate set while the method is off (#202).
+    /// </summary>
+    internal bool IsPairingPskEnabled => _pairingPskEnabled;
 
     /// <summary>
     /// The connection this client was constructed with (test-only introspection). Named to
@@ -280,6 +292,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<string>? PairingCompleted;
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<StreamEndPayload>? StreamEndReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<StreamClearPayload>? StreamClearReceived;
 
     /// <inheritdoc />
     public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
@@ -2606,8 +2624,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
         _pendingPairingPsk = psk;
-        var suite = NoiseCipherSuite.ChaChaPoly;
-        byte[] wrapped = PairingCodes.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
+
+        // The AEAD of the connection's *negotiated* suite, not a fixed one: the server unwraps
+        // with whatever client/init announced, so hardcoding ChaCha20-Poly1305 broke every
+        // code-based pairing on an AES-GCM session — including the automatic fallback on a
+        // platform without ChaCha20-Poly1305 (#192).
+        byte[] wrapped = PairingCodes.WrapPsk(state.Sid!, cpace.Isk, psk, _session.Suite);
         SendAsync(new ClientPairFinalizeMessage
         {
             Payload = new ClientPairFinalizePayload { WrappedPsk = Base64UrlText.Encode(wrapped) },
@@ -3906,25 +3928,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var payload = message.Payload;
         _currentGroup ??= new GroupState();
 
-        // Update metadata from server/state (merge with existing to preserve data across partial updates)
-        if (payload.Metadata is not null)
-        {
-            var meta = payload.Metadata;
-            var existing = _currentGroup.Metadata ?? new TrackMetadata();
+        // Each role object is itself Optional: absent = no change, present-null = clear all of
+        // that role's state (sent when the role leaves active_roles, and on pairing quiesce),
+        // present-with-value = merge the delta. Clearing one role leaves the others alone.
+        // Every branch below is announced by the GroupStateChanged at the end of this method,
+        // which is how a UI learns to drop the deactivated role's data (#196).
 
-            // All fields use Optional<T>: absent = keep existing, present-null = clear, present-with-value = update.
-            _currentGroup.Metadata = new TrackMetadata
+        // Update metadata from server/state (merge with existing to preserve data across partial updates)
+        if (payload.Metadata.IsPresent)
+        {
+            if (payload.Metadata.Value is not { } meta)
             {
-                Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
-                Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
-                Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
-                AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
-                Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
-                ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
-                Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
-                Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
-                Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
-            };
+                // Dropping the merge base too, not just the exposed object: a later partial
+                // update must start from empty rather than resurrect pre-clear fields.
+                _currentGroup.Metadata = null;
+            }
+            else
+            {
+                var existing = _currentGroup.Metadata ?? new TrackMetadata();
+
+                // All fields use Optional<T>: absent = keep existing, present-null = clear, present-with-value = update.
+                _currentGroup.Metadata = new TrackMetadata
+                {
+                    Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
+                    Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
+                    Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
+                    AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
+                    Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
+                    ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
+                    Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
+                    Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
+                    Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
+                };
+            }
         }
 
         // Update controller state for UI display only.
@@ -3932,37 +3968,65 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The server sends server/command with player-specific volume when it wants
         // to change THIS player's output.
         // Per the Sendspin spec, repeat/shuffle live in the controller object (not metadata).
-        if (payload.Controller is not null)
+        if (payload.Controller.IsPresent)
         {
-            if (payload.Controller.Volume.HasValue)
-                _currentGroup.Volume = payload.Controller.Volume.Value;
-            if (payload.Controller.Muted.HasValue)
-                _currentGroup.Muted = payload.Controller.Muted.Value;
-            if (payload.Controller.Repeat is not null)
-                _currentGroup.Repeat = payload.Controller.Repeat;
-            if (payload.Controller.Shuffle.HasValue)
-                _currentGroup.Shuffle = payload.Controller.Shuffle.Value;
-            if (payload.Controller.SupportedCommands is not null)
-                _currentGroup.SupportedCommands = payload.Controller.SupportedCommands;
+            if (payload.Controller.Value is not { } controller)
+            {
+                // HandleServerState is the only writer of these five, so the controller role
+                // owns them outright and clearing it returns each to the value a group carries
+                // before the server has reported any of them. Read off a fresh GroupState
+                // rather than repeating its literals, so the two cannot drift.
+                var unreported = new GroupState();
+                _currentGroup.Volume = unreported.Volume;
+                _currentGroup.Muted = unreported.Muted;
+                _currentGroup.Repeat = unreported.Repeat;
+                _currentGroup.Shuffle = unreported.Shuffle;
+                _currentGroup.SupportedCommands = unreported.SupportedCommands;
+            }
+            else
+            {
+                if (controller.Volume.HasValue)
+                    _currentGroup.Volume = controller.Volume.Value;
+                if (controller.Muted.HasValue)
+                    _currentGroup.Muted = controller.Muted.Value;
+                if (controller.Repeat is not null)
+                    _currentGroup.Repeat = controller.Repeat;
+                if (controller.Shuffle.HasValue)
+                    _currentGroup.Shuffle = controller.Shuffle.Value;
+                if (controller.SupportedCommands is not null)
+                    _currentGroup.SupportedCommands = controller.SupportedCommands;
+            }
         }
 
         // Merge color deltas (color role). Each field is Optional: absent keeps the existing color,
         // present-null clears it, present-with-value updates it.
-        var colorChanged = false;
-        if (payload.Color is not null)
+        var colorChanged = payload.Color.IsPresent;
+        if (colorChanged)
         {
-            var c = payload.Color;
+            // Mutated in place rather than replaced, so a consumer holding the ColorPalette it
+            // was handed by an earlier ColorChanged sees the update — including a clear.
             var colors = _currentGroup.Colors;
 
-            colors.Timestamp = c.Timestamp ?? colors.Timestamp;
-            if (c.BackgroundDark.IsPresent) colors.BackgroundDark = c.BackgroundDark.Value;
-            if (c.BackgroundLight.IsPresent) colors.BackgroundLight = c.BackgroundLight.Value;
-            if (c.Primary.IsPresent) colors.Primary = c.Primary.Value;
-            if (c.Accent.IsPresent) colors.Accent = c.Accent.Value;
-            if (c.OnDark.IsPresent) colors.OnDark = c.OnDark.Value;
-            if (c.OnLight.IsPresent) colors.OnLight = c.OnLight.Value;
-
-            colorChanged = true;
+            if (payload.Color.Value is not { } c)
+            {
+                colors.Timestamp = null;
+                colors.BackgroundDark = null;
+                colors.BackgroundLight = null;
+                colors.Primary = null;
+                colors.Accent = null;
+                colors.OnDark = null;
+                colors.OnLight = null;
+            }
+            else
+            {
+                colors.Timestamp = c.Timestamp ?? colors.Timestamp;
+                if (c.BackgroundDark.IsPresent) colors.BackgroundDark = c.BackgroundDark.Value;
+                if (c.BackgroundLight.IsPresent) colors.BackgroundLight = c.BackgroundLight.Value;
+                if (c.Primary.IsPresent) colors.Primary = c.Primary.Value;
+                if (c.Accent.IsPresent) colors.Accent = c.Accent.Value;
+                if (c.OnDark.IsPresent) colors.OnDark = c.OnDark.Value;
+                if (c.OnLight.IsPresent) colors.OnLight = c.OnLight.Value;
+            }
         }
 
         _logger.LogDebug("server/state [{Player}]: Volume={Volume}, Muted={Muted}, Track={Track} by {Artist}",
@@ -4257,8 +4321,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
-        while (_earlyChunkQueue.TryDequeue(out _))
+        // Chunks only queue while the pipeline cannot take them, so anything queued now arrived
+        // before this stream/start. When it re-announces the format already running, the pipeline
+        // keeps that stream alive rather than restarting it (see IAudioPipeline.StartAsync), and
+        // the queued chunks belong to it: they are drained into it below instead of being dropped,
+        // per the spec's "without clearing buffers" (#201). Every other stream/start rebuilds the
+        // decode chain, which leaves anything from the previous stream undecodable.
+        var reannouncesRunningFormat =
+            _audioPipeline is { State: AudioPipelineState.Buffering or AudioPipelineState.Playing }
+            && _audioPipeline.CurrentFormat?.IsSameStreamConfiguration(payload.Format) == true;
+
+        if (!reannouncesRunningFormat)
         {
+            while (_earlyChunkQueue.TryDequeue(out _))
+            {
+            }
         }
 
         // Smart sync burst: only trigger if clock isn't already synced
@@ -4322,25 +4399,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         try
         {
             var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
+            if (message is null)
+            {
+                return;
+            }
 
             // As in HandleStreamStartCoreAsync: the serializer does not enforce the
-            // model's non-nullable Payload, and the Reason accessor below dereferences
-            // it, so a null payload must be reported as the JsonException this catch
-            // handles before that dereference throws NullReferenceException past it.
-            if (message is { Payload: null })
+            // model's non-nullable Payload, and the role gate below dereferences it, so
+            // a null payload must be reported as the JsonException this catch handles
+            // before that dereference throws NullReferenceException past it.
+            if (message.Payload is null)
             {
                 throw new System.Text.Json.JsonException("stream/end payload is null");
             }
 
-            _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
+            var payload = message.Payload;
+            _logger.LogInformation(
+                "Stream ended for roles: {Roles}",
+                payload.Roles is null ? "all" : string.Join(", ", payload.Roles));
+
+            StreamEndReceived?.Invoke(this, payload);
+
+            // Media held for a display time that belongs to the stream just ended must not
+            // surface after it.
+            FlushDisplayRoles(payload.Roles);
+
+            if (!ReachesPlayerRole(payload.Roles))
+            {
+                return;
+            }
 
             while (_earlyChunkQueue.TryDequeue(out _))
             {
             }
-
-            // Media held for a display time that belongs to the stream just ended must not
-            // surface after it.
-            _displayScheduler.Flush();
 
             if (_audioPipeline != null)
             {
@@ -4369,13 +4460,74 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void HandleStreamClear(string json)
     {
         var message = MessageSerializer.Deserialize<StreamClearMessage>(json);
-        _logger.LogDebug("Stream clear (seek)");
+        if (message is null)
+        {
+            return;
+        }
 
-        _audioPipeline?.Clear();
+        var payload = message.Payload;
+        _logger.LogDebug(
+            "Stream clear (seek) for roles: {Roles}",
+            payload.Roles is null ? "all" : string.Join(", ", payload.Roles));
+
+        StreamClearReceived?.Invoke(this, payload);
 
         // "Clients should clear all buffered visualization data and continue with data received
         // after this message" — the same boundary applies to artwork still held for display.
-        _displayScheduler.Flush();
+        FlushDisplayRoles(payload.Roles);
+
+        if (ReachesPlayerRole(payload.Roles))
+        {
+            _audioPipeline?.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Whether a stream/end or stream/clear reaches the <c>player</c> role, and so the audio
+    /// pipeline. An omitted <c>roles</c> means every active stream, which is the case that
+    /// makes an absent array and an empty one behave differently.
+    /// </summary>
+    /// <remarks>
+    /// Role-targeted teardown is routine, not exotic: whenever a <c>server/activate</c> drops a
+    /// stream role, the server ends that role's output first, so a <c>stream/end</c> naming
+    /// <c>artwork</c> arrives mid-playback and must not touch audio (#193). Other names —
+    /// <c>artwork</c>, <c>visualizer</c>, and the application-specific roles starting with
+    /// <c>_</c> — are simply not <c>player</c>; the two media roles are torn down separately by
+    /// <see cref="FlushDisplayRoles"/>, and the rest reach subscribers through
+    /// <see cref="StreamEndReceived"/> / <see cref="StreamClearReceived"/> rather than being
+    /// validated here, since only the consumer of a role knows its names.
+    /// </remarks>
+    private static bool ReachesPlayerRole(List<string>? roles) => roles is null || roles.Contains("player");
+
+    /// <summary>
+    /// Discards the media a <c>stream/end</c> or <c>stream/clear</c> ends the display of: the
+    /// roles it names, or both media roles when it names none.
+    /// </summary>
+    /// <remarks>
+    /// Runs outside <see cref="ReachesPlayerRole"/>'s gate, because the roles holding data here
+    /// are exactly the ones that gate turns away — a <c>stream/end</c> for <c>visualizer</c>
+    /// alone must still drop the frames waiting for their display moment. <c>artwork</c> is in
+    /// <c>stream/end</c>'s role vocabulary but not <c>stream/clear</c>'s; it is honoured in both
+    /// anyway, as the C++ reference client switches on the same three names for either message.
+    /// A present-but-empty array names no role and so ends nothing, as everywhere else.
+    /// </remarks>
+    private void FlushDisplayRoles(List<string>? roles)
+    {
+        if (roles is null)
+        {
+            _displayScheduler.Flush();
+            return;
+        }
+
+        if (roles.Contains("visualizer"))
+        {
+            _displayScheduler.FlushVisualizer();
+        }
+
+        if (roles.Contains("artwork"))
+        {
+            _displayScheduler.FlushArtwork();
+        }
     }
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
@@ -4403,6 +4555,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         switch (category)
         {
             case BinaryMessageCategory.PlayerAudio:
+                if (type != BinaryMessageTypes.PlayerAudio0)
+                {
+                    // player@v1 defines one audio slot; 5-7 are allocated to the role but carry no
+                    // defined payload. Feeding them to the pipeline would interleave unknown bytes
+                    // with the real stream, so they are dropped as the C++ reference client does.
+                    WarnOnceOnUndefinedPlayerAudioType(type);
+                    break;
+                }
+
                 var audioChunk = BinaryMessageParser.ParseAudioChunk(data.Span);
                 if (audioChunk != null)
                 {
@@ -4460,6 +4621,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// Logs the first chunk seen on each undefined player-audio type, so a server emitting them at
+    /// chunk rate produces one line per type rather than one per chunk.
+    /// </summary>
+    private void WarnOnceOnUndefinedPlayerAudioType(byte type)
+    {
+        int bit = 1 << (type - BinaryMessageTypes.PlayerAudio0);
+        if ((_warnedUndefinedPlayerAudioTypes & bit) != 0)
+        {
+            return;
+        }
+
+        _warnedUndefinedPlayerAudioTypes |= bit;
+        _logger.LogWarning(
+            "Dropping binary type {Type}: player@v1 defines only audio type {DefinedType}",
+            type,
+            BinaryMessageTypes.PlayerAudio0);
     }
 
     /// <summary>
@@ -4609,9 +4789,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         SendspinClientOptions options,
         ConnectionOptions? connectionOptions = null)
     {
+        // Assigned below, before anything can dial and so before the resolver can be asked
+        // anything. The closure is how the resolver reaches this connection's live pairing
+        // config, which only exists once the client does; until then the configured value is
+        // the same one the client will start from.
+        SendspinClientService? client = null;
+
         var framing = new NoiseWireFraming(
             options.Identity,
-            options.PairingRecordStore is null ? null : new RecordPskResolver(options.PairingRecordStore),
+            options.PairingRecordStore is null
+                ? null
+                : new RecordPskResolver(
+                    options.PairingRecordStore,
+                    () => client?.IsPairingPskEnabled ?? options.Capabilities.PairingPskEnabled),
             options.Suite);
 
         var connection = new SendspinConnection(
@@ -4619,10 +4809,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             connectionOptions,
             framing);
 
-        return new SendspinClientService(
+        client = new SendspinClientService(
             loggerFactory.CreateLogger<SendspinClientService>(),
             connection,
             framing,
             options);
+
+        return client;
     }
 }

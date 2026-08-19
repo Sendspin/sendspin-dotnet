@@ -106,9 +106,20 @@ internal static class PeerMessageValidation
                 Require(m.Payload, "server/command", "payload");
                 break;
 
+            case ServerStateMessage m:
+                // Payload only. The three role objects are Optional<T>, where both absent and
+                // present-null are meaningful protocol states ("no change" and "clear all of
+                // this role's state"), so neither may be rejected here — only the payload
+                // itself, which the model declares non-nullable and HandleServerState
+                // dereferences immediately (#206).
+                Require(m.Payload, "server/state", "payload");
+                break;
+
             default:
-                // Client-authored messages reach this only from tests round-tripping their own
-                // output, where the SDK built every member and there is nothing to police.
+                // Only client-authored messages reach this: from tests round-tripping their own
+                // output, and from a caller routing one through Deserialize(string), which since
+                // #207 models them too. Neither is peer input on this client's receive path —
+                // the SDK built every member — so there is nothing to police.
                 break;
         }
     }

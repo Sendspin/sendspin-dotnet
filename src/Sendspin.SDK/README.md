@@ -601,7 +601,7 @@ Updates are deltas: a color absent from an update is left unchanged, an explicit
 
 ## Visualizer
 
-Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Six feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, **`peak`** (energy onsets), and **`pitch`**. The role is **opt-in** — set `VisualizerSupport` *and* add `visualizer@v1` to `Roles`:
+Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Five feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, and **`peak`** (energy onsets). The role is **opt-in** — set `VisualizerSupport` *and* add `visualizer@v1` to `Roles`:
 
 ```csharp
 var capabilities = new ClientCapabilities
@@ -626,13 +626,31 @@ client.VisualizationReceived += (_, frame) =>
     if (frame.Loudness is { } loud)      meter.Level = loud / 65535.0;
     if (frame.Spectrum is { } bins)      bars.Update(bins);          // NDispBins values
     if (frame.IsDownbeat is { } down)    pulse.Beat(strong: down);
-    if (frame.PitchMidi is { } note)     label.Text = $"MIDI {note:F1}"; // pitch is Q8.8 → fractional MIDI
+    if (frame.PeakStrength is { } onset) flash.Pulse(onset / 255.0);      // 0-255 energy onset
 };
 ```
 
 `Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Renegotiate at runtime with `RequestVisualizerFormatAsync(...)`.
 
 > **Note:** `visualizer@v1` follows the [aiosendspin](https://github.com/Sendspin/aiosendspin) reference implementation, which is ahead of the formal protocol spec. The wire format may still evolve. The role degrades gracefully while it matures: it is **opt-in** (off by default), frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
+
+## Stream teardown
+
+`stream/end` ends a stream and `stream/clear` flushes its buffers (a seek or track jump). Both may target specific roles, and the SDK drives the audio pipeline only when the message reaches the `player` role — an end or clear aimed at `artwork` or `visualizer` leaves playback untouched. Role-targeted teardown is routine: dropping a stream role from `active_roles` makes the server end that role's output first.
+
+Roles the SDK does not own are reported so the surface that owns them can react:
+
+```csharp
+client.StreamEndReceived += (_, payload) =>
+{
+    // payload.Roles == null means every active stream ended.
+    if (payload.Roles is null || payload.Roles.Contains("artwork")) displays.ClearAll();
+};
+
+client.StreamClearReceived += (_, payload) => { /* same shape; a seek or track jump */ };
+```
+
+Application-specific roles (names starting with `_`) are passed through untouched. Both events are also forwarded by `SendspinHostService`.
 
 ## Source role (line-in)
 

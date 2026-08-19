@@ -54,7 +54,10 @@ public class MediaDisplaySchedulingTests
     /// display time and the arithmetic in each test stays readable.
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, FakePrecisionTimer Timer)
-        SchedulingClient(long now = Now, int bufferCapacity = 65_536)
+        SchedulingClient(
+            long now = Now,
+            int bufferCapacity = 65_536,
+            FakeAudioPipeline? audioPipeline = null)
     {
         var timer = new FakePrecisionTimer { CurrentTime = now };
         var (client, connection, _) = TestClient.Create(configure: options =>
@@ -62,6 +65,7 @@ public class MediaDisplaySchedulingTests
             {
                 PrecisionTimer = timer,
                 ClockSynchronizer = new ConvergedClockSynchronizer(),
+                AudioPipeline = audioPipeline,
                 Capabilities = new ClientCapabilities
                 {
                     Roles = new List<string> { "visualizer@v1", "artwork@v1" },
@@ -333,7 +337,7 @@ public class MediaDisplaySchedulingTests
     }
 
     [Fact]
-    public async Task StreamClear_DiscardsMediaStillPending()
+    public async Task StreamClear_WithNoRoles_DiscardsMediaStillPending()
     {
         var (client, connection, timer) = SchedulingClient();
         using var _c = client;
@@ -355,7 +359,7 @@ public class MediaDisplaySchedulingTests
     }
 
     [Fact]
-    public async Task StreamEnd_DiscardsMediaStillPending()
+    public async Task StreamEnd_WithNoRoles_DiscardsMediaStillPending()
     {
         var (client, connection, timer) = SchedulingClient();
         using var _c = client;
@@ -371,6 +375,94 @@ public class MediaDisplaySchedulingTests
         await Task.Delay(200);
 
         Assert.Empty(await SurvivorsOfClockAdvanceAsync(timer, frames));
+    }
+
+    /// <summary>
+    /// A teardown naming <c>player</c> ends the audio and nothing else: buffered visualization
+    /// and artwork already sent belong to roles it did not name, and the C++ reference client
+    /// keeps both.
+    /// </summary>
+    [Fact]
+    public async Task StreamClear_NamingOnlyThePlayer_KeepsMediaPending()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var artwork = new List<ArtworkReceivedEventArgs>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+        client.ArtworkReceived += (_, e) => artwork.Add(e);
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["player"]}}""");
+
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(
+            () => frames.Count == 1 && artwork.Count == 1, "the media the clear did not name");
+    }
+
+    /// <summary>
+    /// The mirror case, and the one the player gate makes easy to get wrong: <c>visualizer</c>
+    /// is exactly the role that gate turns away, so a flush placed behind it would never run for
+    /// the message whose data this scheduler is holding.
+    /// </summary>
+    [Fact]
+    public async Task StreamEnd_NamingOnlyTheVisualizer_DropsItsFramesAndKeepsTheRest()
+    {
+        var pipe = new FakeAudioPipeline();
+        var (client, connection, timer) = SchedulingClient(audioPipeline: pipe);
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var artwork = new List<ArtworkReceivedEventArgs>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+        client.ArtworkReceived += (_, e) => artwork.Add(e);
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["visualizer"]}}""");
+        await Task.Delay(200);
+
+        // Artwork is dispatched after any frame due in the same pass, so its arrival is the
+        // point at which a surviving frame would have surfaced too.
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(() => artwork.Count == 1, "the artwork the end did not name");
+        Assert.Empty(frames);
+        Assert.Equal(0, pipe.StopCount);
+    }
+
+    /// <summary>
+    /// An omitted <c>roles</c> means every stream; a present but empty one names no role at all,
+    /// and so ends nothing — for the media held here as much as for the audio pipeline.
+    /// </summary>
+    [Fact]
+    public async Task StreamTeardown_WithAnEmptyRoleArray_KeepsMediaPending()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var artwork = new List<ArtworkReceivedEventArgs>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+        client.ArtworkReceived += (_, e) => artwork.Add(e);
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":[]}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":2,"roles":[]}}""");
+        await Task.Delay(200);
+
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(
+            () => frames.Count == 1 && artwork.Count == 1, "the media neither message named");
     }
 
     [Fact]

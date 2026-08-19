@@ -222,8 +222,9 @@ internal sealed class MediaDisplayScheduler : IDisposable
     }
 
     /// <summary>
-    /// Discards everything still pending. Called wherever buffered media must not survive:
-    /// <c>stream/clear</c>, <c>stream/end</c>, and loss of the connection.
+    /// Discards everything still pending, for both roles. Called where buffered media must not
+    /// survive whatever the message named: loss of the connection, and a <c>stream/clear</c> or
+    /// <c>stream/end</c> that omits <c>roles</c> and so ends every stream.
     /// </summary>
     internal void Flush()
     {
@@ -233,11 +234,42 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
     }
 
+    /// <summary>
+    /// Discards pending visualizer frames, leaving artwork held. For a <c>stream/clear</c> or
+    /// <c>stream/end</c> that names the <c>visualizer</c> role.
+    /// </summary>
+    internal void FlushVisualizer()
+    {
+        lock (_lock)
+        {
+            ClearPendingFramesLocked();
+        }
+    }
+
+    /// <summary>
+    /// Discards pending artwork, leaving visualizer frames held. For a <c>stream/end</c> that
+    /// names the <c>artwork</c> role — including the routine case of a server dropping that role
+    /// alone, where artwork already sent for a coming track must not surface but the visualizer
+    /// stream plays on.
+    /// </summary>
+    internal void FlushArtwork()
+    {
+        lock (_lock)
+        {
+            Array.Clear(_artwork);
+        }
+    }
+
     private void ClearPendingLocked()
+    {
+        ClearPendingFramesLocked();
+        Array.Clear(_artwork);
+    }
+
+    private void ClearPendingFramesLocked()
     {
         _frames.Clear();
         _pendingFrameBytes = 0;
-        Array.Clear(_artwork);
     }
 
     private bool HasPendingArtworkLocked()

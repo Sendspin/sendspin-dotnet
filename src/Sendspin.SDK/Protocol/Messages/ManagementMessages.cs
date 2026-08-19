@@ -16,6 +16,26 @@ public sealed class ManagementResultMessage : IMessageWithPayload<ManagementResu
     public ManagementResultPayload Payload { get; set; } = new();
 }
 
+/// <summary>
+/// A paired server dropping its own pairing record from the client. Valid at any time regardless
+/// of the connection's current activities; carries no payload fields, so the client's handler
+/// reads nothing off it. Modelled so <see cref="MessageSerializer.Deserialize(string)"/> can name
+/// the type rather than returning null for a message every client must act on (#207).
+/// </summary>
+public sealed class ServerUnpairMessage : IMessageWithPayload<ServerUnpairPayload>
+{
+    [JsonPropertyName("type")]
+    public string Type => MessageTypes.ServerUnpair;
+
+    [JsonPropertyName("payload")]
+    public ServerUnpairPayload Payload { get; set; } = new();
+}
+
+/// <summary>Payload of <c>server/unpair</c> (empty).</summary>
+public sealed class ServerUnpairPayload
+{
+}
+
 /// <summary>Payload of <c>management/result</c>.</summary>
 public sealed class ManagementResultPayload
 {

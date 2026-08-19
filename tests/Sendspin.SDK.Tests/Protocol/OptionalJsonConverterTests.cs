@@ -25,8 +25,8 @@ public class OptionalJsonConverterTests
 
         var msg = MessageSerializer.Deserialize<ServerStateMessage>(json);
         Assert.NotNull(msg);
-        Assert.NotNull(msg.Payload.Metadata);
-        Assert.True(msg.Payload.Metadata.Progress.IsAbsent);
+        Assert.NotNull(msg.Payload.Metadata.Value);
+        Assert.True(msg.Payload.Metadata.Value.Progress.IsAbsent);
     }
 
     [Fact]
@@ -47,9 +47,9 @@ public class OptionalJsonConverterTests
 
         var msg = MessageSerializer.Deserialize<ServerStateMessage>(json);
         Assert.NotNull(msg);
-        Assert.NotNull(msg.Payload.Metadata);
-        Assert.True(msg.Payload.Metadata.Progress.IsPresent);
-        Assert.Null(msg.Payload.Metadata.Progress.Value);
+        Assert.NotNull(msg.Payload.Metadata.Value);
+        Assert.True(msg.Payload.Metadata.Value.Progress.IsPresent);
+        Assert.Null(msg.Payload.Metadata.Value.Progress.Value);
     }
 
     [Fact]
@@ -74,12 +74,13 @@ public class OptionalJsonConverterTests
 
         var msg = MessageSerializer.Deserialize<ServerStateMessage>(json);
         Assert.NotNull(msg);
-        Assert.NotNull(msg.Payload.Metadata);
-        Assert.True(msg.Payload.Metadata.Progress.IsPresent);
-        Assert.NotNull(msg.Payload.Metadata.Progress.Value);
-        Assert.Equal(30000, msg.Payload.Metadata.Progress.Value!.TrackProgress);
-        Assert.Equal(180000, msg.Payload.Metadata.Progress.Value.TrackDuration);
-        Assert.Equal(1000, msg.Payload.Metadata.Progress.Value.PlaybackSpeed);
+        var meta = msg.Payload.Metadata.Value;
+        Assert.NotNull(meta);
+        Assert.True(meta.Progress.IsPresent);
+        Assert.NotNull(meta.Progress.Value);
+        Assert.Equal(30000, meta.Progress.Value!.TrackProgress);
+        Assert.Equal(180000, meta.Progress.Value.TrackDuration);
+        Assert.Equal(1000, meta.Progress.Value.PlaybackSpeed);
     }
 
     // --- Serialization round-trip ---
@@ -91,7 +92,7 @@ public class OptionalJsonConverterTests
         {
             Payload = new ServerStatePayload
             {
-                Metadata = new ServerMetadata
+                Metadata = Optional<ServerMetadata?>.Present(new ServerMetadata
                 {
                     Title = Optional<string?>.Present("Round Trip"),
                     Progress = Optional<PlaybackProgress?>.Present(new PlaybackProgress
@@ -100,7 +101,7 @@ public class OptionalJsonConverterTests
                         TrackDuration = 120000,
                         PlaybackSpeed = 1000,
                     }),
-                }
+                }),
             }
         };
 
@@ -108,8 +109,8 @@ public class OptionalJsonConverterTests
         var deserialized = MessageSerializer.Deserialize<ServerStateMessage>(json);
 
         Assert.NotNull(deserialized);
-        Assert.True(deserialized.Payload.Metadata!.Progress.IsPresent);
-        Assert.Equal(5000, deserialized.Payload.Metadata.Progress.Value!.TrackProgress);
+        Assert.True(deserialized.Payload.Metadata.Value!.Progress.IsPresent);
+        Assert.Equal(5000, deserialized.Payload.Metadata.Value.Progress.Value!.TrackProgress);
     }
 
     [Fact]
@@ -119,11 +120,11 @@ public class OptionalJsonConverterTests
         {
             Payload = new ServerStatePayload
             {
-                Metadata = new ServerMetadata
+                Metadata = Optional<ServerMetadata?>.Present(new ServerMetadata
                 {
                     Title = Optional<string?>.Present("Null Progress"),
                     Progress = Optional<PlaybackProgress?>.Present(null),
-                }
+                }),
             }
         };
 
@@ -132,8 +133,8 @@ public class OptionalJsonConverterTests
 
         var deserialized = MessageSerializer.Deserialize<ServerStateMessage>(json);
         Assert.NotNull(deserialized);
-        Assert.True(deserialized.Payload.Metadata!.Progress.IsPresent);
-        Assert.Null(deserialized.Payload.Metadata.Progress.Value);
+        Assert.True(deserialized.Payload.Metadata.Value!.Progress.IsPresent);
+        Assert.Null(deserialized.Payload.Metadata.Value.Progress.Value);
     }
 
     [Fact]
@@ -143,11 +144,11 @@ public class OptionalJsonConverterTests
         {
             Payload = new ServerStatePayload
             {
-                Metadata = new ServerMetadata
+                Metadata = Optional<ServerMetadata?>.Present(new ServerMetadata
                 {
                     Title = Optional<string?>.Present("No Progress"),
                     Progress = Optional<PlaybackProgress?>.Absent(),
-                }
+                }),
             }
         };
 
@@ -156,7 +157,47 @@ public class OptionalJsonConverterTests
 
         var deserialized = MessageSerializer.Deserialize<ServerStateMessage>(json);
         Assert.NotNull(deserialized);
-        Assert.True(deserialized.Payload.Metadata!.Progress.IsAbsent);
+        Assert.True(deserialized.Payload.Metadata.Value!.Progress.IsAbsent);
+    }
+
+    // --- Role objects: the same three states one level up (#196) ---
+
+    [Theory]
+    [InlineData("""{"type":"server/state","payload":{}}""", false, false, false)]
+    [InlineData("""{"type":"server/state","payload":{"metadata":null}}""", true, false, false)]
+    [InlineData("""{"type":"server/state","payload":{"controller":null}}""", false, true, false)]
+    [InlineData("""{"type":"server/state","payload":{"color":null}}""", false, false, true)]
+    public void RoleObject_ExplicitNull_IsDistinguishableFromAbsent(
+        string json, bool metadata, bool controller, bool color)
+    {
+        // The distinction the whole issue turns on: plain nullables made these four documents
+        // deserialize identically, so the spec's "clear this whole role" signal was a no-op.
+        var msg = MessageSerializer.Deserialize<ServerStateMessage>(json);
+        var payload = msg!.Payload;
+
+        Assert.Equal(metadata, payload.Metadata.IsPresent);
+        Assert.Equal(controller, payload.Controller.IsPresent);
+        Assert.Equal(color, payload.Color.IsPresent);
+    }
+
+    [Fact]
+    public void RoleObject_RoundTrips_AbsentOmitsAndPresentNullWritesNull()
+    {
+        var absent = MessageSerializer.Serialize(new ServerStateMessage
+        {
+            Payload = new ServerStatePayload(),
+        });
+        Assert.DoesNotContain("metadata", absent);
+
+        var cleared = MessageSerializer.Serialize(new ServerStateMessage
+        {
+            Payload = new ServerStatePayload { Metadata = Optional<ServerMetadata?>.Present(null) },
+        });
+        Assert.Contains("\"metadata\":null", cleared);
+
+        var reparsed = MessageSerializer.Deserialize<ServerStateMessage>(cleared);
+        Assert.True(reparsed!.Payload.Metadata.IsPresent);
+        Assert.Null(reparsed.Payload.Metadata.Value);
     }
 
     // --- Unregistered type safety (AOT guardrail) ---

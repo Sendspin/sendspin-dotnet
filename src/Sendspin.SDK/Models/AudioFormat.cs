@@ -44,6 +44,36 @@ public sealed class AudioFormat
     [JsonPropertyName("codec_header")]
     public string? CodecHeader { get; set; }
 
+    /// <summary>
+    /// Determines whether <paramref name="other"/> announces the same stream configuration as this
+    /// format — whether audio described by it can be decoded and played by the components already
+    /// built for this one.
+    /// </summary>
+    /// <param name="other">The newly announced format.</param>
+    /// <returns>True when nothing a decoder or an audio output is configured from has changed.</returns>
+    /// <remarks>
+    /// <para>
+    /// Compares every field the decoders read: <see cref="Codec"/> (case-insensitively, matching
+    /// how the decoder factory selects on it), <see cref="SampleRate"/>, <see cref="Channels"/>,
+    /// <see cref="BitDepth"/> and <see cref="CodecHeader"/>. The header is compared as the Base64
+    /// text the server sent: the FLAC decoder prepends its decoded bytes to every frame and
+    /// calibrates its sample scaling from the bit depth inside it, so a changed header is a
+    /// changed decoder. Two headers that differ as text but decode to the same bytes therefore
+    /// compare as different, which errs toward rebuilding rather than toward decoding with a
+    /// stale header.
+    /// </para>
+    /// <para>
+    /// <see cref="Bitrate"/> is deliberately excluded: it describes the server's encoder, is not
+    /// part of the spec's <c>stream/start</c> player object, and no decoder or output reads it.
+    /// </para>
+    /// </remarks>
+    internal bool IsSameStreamConfiguration(AudioFormat other) =>
+        string.Equals(Codec, other.Codec, StringComparison.OrdinalIgnoreCase)
+        && SampleRate == other.SampleRate
+        && Channels == other.Channels
+        && BitDepth == other.BitDepth
+        && string.Equals(CodecHeader, other.CodecHeader, StringComparison.Ordinal);
+
     public override string ToString()
     {
         var bitInfo = Bitrate.HasValue ? $" @ {Bitrate}kbps" : BitDepth.HasValue ? $" {BitDepth}bit" : "";

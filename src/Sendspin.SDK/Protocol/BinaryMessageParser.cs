@@ -44,7 +44,9 @@ public static class BinaryMessageParser
     }
 
     /// <summary>
-    /// Parses a binary audio message.
+    /// Parses a binary audio message. Only <see cref="BinaryMessageTypes.PlayerAudio0"/> is an
+    /// audio chunk: <c>player@v1</c> defines a single slot, so types 5-7 — allocated to the role
+    /// but undefined — return null rather than a chunk claiming to be playable.
     /// </summary>
     public static AudioChunk? ParseAudioChunk(ReadOnlySpan<byte> data)
     {
@@ -53,14 +55,13 @@ public static class BinaryMessageParser
             return null;
         }
 
-        if (!BinaryMessageTypes.IsPlayerAudio(type))
+        if (type != BinaryMessageTypes.PlayerAudio0)
         {
             return null;
         }
 
         return new AudioChunk
         {
-            Slot = (byte)(type - BinaryMessageTypes.PlayerAudio0),
             ServerTimestamp = timestamp,
             EncodedData = payload.ToArray()
         };
@@ -145,16 +146,6 @@ public static class BinaryMessageParser
                     ? new Sendspin.SDK.Models.VisualizerFrame { Timestamp = timestamp, PeakStrength = payload[0] }
                     : null;
 
-            case BinaryMessageTypes.VisualizerPitch:
-                return payload.Length == 3
-                    ? new Sendspin.SDK.Models.VisualizerFrame
-                    {
-                        Timestamp = timestamp,
-                        PitchMidiQ88 = BinaryPrimitives.ReadUInt16BigEndian(payload),
-                        PitchConfidence = payload[2]
-                    }
-                    : null;
-
             default:
                 return null;
         }
@@ -195,11 +186,6 @@ public enum BinaryMessageCategory
 /// </summary>
 public sealed class AudioChunk
 {
-    /// <summary>
-    /// Audio slot (0-3, for multi-stream).
-    /// </summary>
-    public byte Slot { get; init; }
-
     /// <summary>
     /// Server timestamp when this audio should be played (microseconds).
     /// </summary>

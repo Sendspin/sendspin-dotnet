@@ -8,7 +8,8 @@ namespace Sendspin.SDK.Tests.Client;
 /// (management &gt; playback &gt; pairing &gt; empty), pairing attempts not displaced
 /// by playback/pairing, empty-vs-empty ties gated on the last-playback server, a
 /// displaced holder told 'another_server', and a rejected incoming told
-/// 'concurrent_attempt'.
+/// 'concurrent_attempt' — except that a loser which is a pairing handshake is told
+/// pair/abort 'concurrent_attempt' instead of either (#203).
 /// </summary>
 public class ServerArbitrationTests
 {
@@ -17,7 +18,7 @@ public class ServerArbitrationTests
     {
         var r = ServerArbitration.Decide("srv-new", ConnectionPriority.Empty, null, ConnectionPriority.Empty, null);
         Assert.True(r.AcceptNew);
-        Assert.Null(r.LoserGoodbyeReason);
+        Assert.Null(r.LoserReason);
     }
 
     [Fact]
@@ -25,33 +26,50 @@ public class ServerArbitrationTests
     {
         var r = ServerArbitration.Decide("srv-1", ConnectionPriority.Empty, "srv-1", ConnectionPriority.Empty, null);
         Assert.True(r.AcceptNew);
-        Assert.Equal("user_request", r.LoserGoodbyeReason);
+        Assert.Equal("user_request", r.LoserReason);
+        Assert.Equal(ArbitrationFarewell.Goodbye, r.LoserFarewell);
+    }
+
+    [Fact]
+    public void SameServerReconnect_DisplacingAPairingHandshake_UsesPairAbort()
+    {
+        // user_request exists to avoid telling the SAME server 'another_server', a distinction
+        // only client/goodbye draws. pair/abort has no such reason, and the stale socket is a
+        // displaced pairing handshake however the successor identifies itself.
+        var r = ServerArbitration.Decide("srv-1", ConnectionPriority.Empty, "srv-1", ConnectionPriority.Pairing, null);
+        Assert.True(r.AcceptNew);
+        Assert.Equal("concurrent_attempt", r.LoserReason);
+        Assert.Equal(ArbitrationFarewell.PairAbort, r.LoserFarewell);
     }
 
     [Theory]
 
-    // newId, newPrio, existingId, existingPrio, lastPlayed, expectAccept, expectLoserReason
+    // newId, newPrio, existingId, existingPrio, lastPlayed, expectAccept, expectLoserReason, expectPairAbort
+    // (a bool rather than the ArbitrationFarewell itself: that enum is internal, and an xUnit
+    // theory parameter has to be at least as accessible as the public test method.)
     // Higher priority displaces:
-    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Empty, null, true, "another_server")]
-    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Playback, null, true, "another_server")]
+    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Empty, null, true, "another_server", false)]
+    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Playback, null, true, "another_server", false)]
     // Lower priority rejected with concurrent_attempt:
-    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Playback, null, false, "concurrent_attempt")]
-    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Management, null, false, "concurrent_attempt")]
+    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Playback, null, false, "concurrent_attempt", false)]
+    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Management, null, false, "concurrent_attempt", false)]
     // Equal non-empty priority: incoming accepted (spec: "higher or equal is accepted"):
-    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Playback, null, true, "another_server")]
-    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Playback, "a", true, "another_server")]
-    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Management, null, true, "another_server")]
+    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Playback, null, true, "another_server", false)]
+    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Playback, "a", true, "another_server", false)]
+    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Management, null, true, "another_server", false)]
     // Empty-vs-empty tie: incoming admitted only when it is the last-playback server:
-    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, "b", true, "another_server")]
-    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, "a", false, "concurrent_attempt")]
-    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, null, false, "concurrent_attempt")]
-    // Pairing attempt is not displaced by incoming playback or pairing:
-    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Pairing, null, false, "concurrent_attempt")]
-    [InlineData("b", ConnectionPriority.Pairing, "a", ConnectionPriority.Pairing, null, false, "concurrent_attempt")]
-    // ...but management may displace a pairing attempt:
-    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Pairing, null, true, "another_server")]
+    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, "b", true, "another_server", false)]
+    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, "a", false, "concurrent_attempt", false)]
+    [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, null, false, "concurrent_attempt", false)]
+    // Pairing attempt is not displaced by incoming playback or pairing. In the second case the
+    // rejected incoming is itself a pairing handshake, so that loss goes out as pair/abort:
+    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Pairing, null, false, "concurrent_attempt", false)]
+    [InlineData("b", ConnectionPriority.Pairing, "a", ConnectionPriority.Pairing, null, false, "concurrent_attempt", true)]
+    // ...but management may displace a pairing attempt, and that displaced pairing handshake
+    // is told pair/abort concurrent_attempt rather than goodbye another_server:
+    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Pairing, null, true, "concurrent_attempt", true)]
     // Pairing loses to a playback holder:
-    [InlineData("b", ConnectionPriority.Pairing, "a", ConnectionPriority.Playback, null, false, "concurrent_attempt")]
+    [InlineData("b", ConnectionPriority.Pairing, "a", ConnectionPriority.Playback, null, false, "concurrent_attempt", true)]
     public void DecisionTable(
         string newId,
         ConnectionPriority newPriority,
@@ -59,11 +77,15 @@ public class ServerArbitrationTests
         ConnectionPriority existingPriority,
         string? lastPlayed,
         bool expectAccept,
-        string expectLoserReason)
+        string expectLoserReason,
+        bool expectPairAbort)
     {
         var r = ServerArbitration.Decide(newId, newPriority, existingId, existingPriority, lastPlayed);
         Assert.Equal(expectAccept, r.AcceptNew);
-        Assert.Equal(expectLoserReason, r.LoserGoodbyeReason);
+        Assert.Equal(expectLoserReason, r.LoserReason);
+        Assert.Equal(
+            expectPairAbort ? ArbitrationFarewell.PairAbort : ArbitrationFarewell.Goodbye,
+            r.LoserFarewell);
     }
 
     [Theory]

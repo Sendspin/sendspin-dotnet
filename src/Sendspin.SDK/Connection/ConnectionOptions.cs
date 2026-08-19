@@ -53,7 +53,7 @@ public sealed class ConnectionOptions
     /// Set to 0 to turn off PONG-timeout detection: keep-alive pings still run on
     /// <see cref="KeepAliveIntervalMs"/>, but a dead peer is then only detected by the
     /// (much longer) OS TCP timeout.
-    /// Requires .NET 9+ on the client WebSocket; on net8.0 this is ignored and
+    /// Requires .NET 9+ on both the dial and the accept path; on net8.0 this is ignored and
     /// detection always falls back to the OS TCP timeout.
     /// </summary>
     public int KeepAliveTimeoutMs { get; set; } = 15000;

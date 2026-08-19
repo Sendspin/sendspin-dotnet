@@ -51,12 +51,21 @@ public static class MessageSerializer
     }
 
     /// <summary>
-    /// Deserializes a JSON message, returning the appropriate message type.
+    /// Deserializes a JSON message into the SDK's model for its <c>type</c>.
     /// </summary>
+    /// <returns>
+    /// The message, or <see langword="null"/> when the SDK models no message for that
+    /// <c>type</c> — a well-formed message the caller may ignore. Every type in
+    /// <see cref="MessageTypes"/> maps to a model here except the six <c>management/*</c>
+    /// requests, whose payloads differ per operation and which the client reads as raw JSON
+    /// rather than through a message class. Before #207 the switch also dropped
+    /// <c>server/state</c>, <c>server/unpair</c> and every client-authored type, so a consumer
+    /// dispatching on this entry point silently lost them with nothing to distinguish that from
+    /// a genuinely unknown message.
+    /// </returns>
     /// <exception cref="JsonException">
     /// The document is not a JSON object, or has no string <c>type</c> member. Both are
-    /// malformed input rather than an unrecognised message: an unknown-but-well-formed
-    /// type returns <see langword="null"/> for the caller to ignore.
+    /// malformed input rather than an unrecognised message.
     /// </exception>
     public static IMessage? Deserialize(string json)
     {
@@ -69,25 +78,67 @@ public static class MessageSerializer
         return message;
     }
 
+    /// <summary>
+    /// Routes a message to its model by <c>type</c>, without the null-member validation
+    /// <see cref="Deserialize(string)"/> layers on top.
+    /// </summary>
+    /// <remarks>
+    /// Grouped and ordered to match <see cref="MessageTypes"/>, so "is a type missing an arm?"
+    /// is a side-by-side read of the two files rather than a search. The six
+    /// <c>management/*</c> requests are the only deliberate omission — see
+    /// <see cref="Deserialize(string)"/>.
+    /// </remarks>
     private static IMessage? DeserializeCore(string json)
     {
         var messageType = GetMessageType(json);
         return messageType switch
         {
+            // Handshake
+            MessageTypes.ClientHello => JsonSerializer.Deserialize(json, s_context.ClientHelloMessage),
             MessageTypes.ServerHello => JsonSerializer.Deserialize(json, s_context.ServerHelloMessage),
             MessageTypes.ServerActivate => JsonSerializer.Deserialize(json, s_context.ServerActivateMessage),
+            MessageTypes.ClientGoodbye => JsonSerializer.Deserialize(json, s_context.ClientGoodbyeMessage),
+
+            // Pairing
+            MessageTypes.ClientPairFinalize => JsonSerializer.Deserialize(json, s_context.ClientPairFinalizeMessage),
             MessageTypes.ServerPairFinalize => JsonSerializer.Deserialize(json, s_context.ServerPairFinalizeMessage),
             MessageTypes.PairAbort => JsonSerializer.Deserialize(json, s_context.PairAbortMessage),
+            MessageTypes.ClientPairPending => JsonSerializer.Deserialize(json, s_context.ClientPairPendingMessage),
+            MessageTypes.ClientPairInit => JsonSerializer.Deserialize(json, s_context.ClientPairInitMessage),
             MessageTypes.ServerPairInit => JsonSerializer.Deserialize(json, s_context.ServerPairInitMessage),
             MessageTypes.ServerPairAuth => JsonSerializer.Deserialize(json, s_context.ServerPairAuthMessage),
+            MessageTypes.ClientPairAuth => JsonSerializer.Deserialize(json, s_context.ClientPairAuthMessage),
             MessageTypes.ServerPairConfirm => JsonSerializer.Deserialize(json, s_context.ServerPairConfirmMessage),
+            MessageTypes.ClientPairConfirm => JsonSerializer.Deserialize(json, s_context.ClientPairConfirmMessage),
+
+            // Management (the management/* requests themselves are read as raw JSON, not modelled)
+            MessageTypes.ManagementResult => JsonSerializer.Deserialize(json, s_context.ManagementResultMessage),
+            MessageTypes.ServerUnpair => JsonSerializer.Deserialize(json, s_context.ServerUnpairMessage),
+
+            // Clock synchronization
+            MessageTypes.ClientTime => JsonSerializer.Deserialize(json, s_context.ClientTimeMessage),
             MessageTypes.ServerTime => JsonSerializer.Deserialize(json, s_context.ServerTimeMessage),
+
+            // Stream lifecycle
             MessageTypes.StreamStart => JsonSerializer.Deserialize(json, s_context.StreamStartMessage),
             MessageTypes.StreamEnd => JsonSerializer.Deserialize(json, s_context.StreamEndMessage),
             MessageTypes.StreamClear => JsonSerializer.Deserialize(json, s_context.StreamClearMessage),
+            MessageTypes.StreamRequestFormat => JsonSerializer.Deserialize(json, s_context.StreamRequestFormatMessage),
+
+            // Group state
             MessageTypes.GroupUpdate => JsonSerializer.Deserialize(json, s_context.GroupUpdateMessage),
+
+            // Player commands and state
+            MessageTypes.ClientCommand => JsonSerializer.Deserialize(json, s_context.ClientCommandMessage),
             MessageTypes.ServerCommand => JsonSerializer.Deserialize(json, s_context.ServerCommandMessage),
-            _ => null // Unknown message type
+            MessageTypes.ClientState => JsonSerializer.Deserialize(json, s_context.ClientStateMessage),
+            MessageTypes.ServerState => JsonSerializer.Deserialize(json, s_context.ServerStateMessage),
+
+            // Source role
+            MessageTypes.ClientStreamStart => JsonSerializer.Deserialize(json, s_context.ClientStreamStartMessage),
+            MessageTypes.ClientStreamEnd => JsonSerializer.Deserialize(json, s_context.ClientStreamEndMessage),
+
+            _ => null // No model for this type
         };
     }
 
