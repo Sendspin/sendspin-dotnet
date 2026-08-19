@@ -122,7 +122,13 @@ public interface ISendspinClient : IAsyncDisposable
     Task DisconnectAsync(string reason = "restart");
 
     /// <summary>
-    /// Sends a playback command.
+    /// Sends a playback command. Recognised parameter keys are <c>volume</c>, <c>mute</c> (or
+    /// legacy <c>muted</c>), <c>position_ms</c> and <c>offset_ms</c>; anything else is ignored.
+    /// The two millisecond values accept <see cref="int"/>, <see cref="long"/> or
+    /// <see cref="double"/>. A <c>seek</c> or <c>seek_relative</c> whose millisecond parameter is
+    /// missing or unusable is logged and dropped rather than sent, since the spec requires those
+    /// commands to carry it — prefer the typed <see cref="SeekAsync"/> and
+    /// <see cref="SeekRelativeAsync"/>, which cannot get this wrong.
     /// </summary>
     Task SendCommandAsync(string command, Dictionary<string, object>? parameters = null);
 
@@ -185,7 +191,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// role). Omitted parameters keep their prior value. The server responds with a
     /// <c>stream/start</c> carrying the new visualizer config.
     /// </summary>
-    /// <param name="types">Requested feature types (subset of loudness/f_peak/spectrum/beat/peak/pitch), or null to leave unchanged.</param>
+    /// <param name="types">Requested feature types (subset of loudness/f_peak/spectrum/beat/peak), or null to leave unchanged.</param>
     /// <param name="rateMax">Requested maximum frame rate, or null to leave unchanged.</param>
     /// <param name="spectrum">Requested spectrum configuration, or null to leave unchanged.</param>
     /// <remarks>
@@ -361,7 +367,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Event raised for each decoded visualizer feature frame (the <c>visualizer@v1</c> role). Each
     /// <see cref="VisualizerFrame"/> carries one feature type (loudness, f_peak, spectrum, beat,
-    /// peak, or pitch). Malformed frames are dropped and do not raise the event.
+    /// or peak). Malformed frames are dropped and do not raise the event.
     /// </summary>
     event EventHandler<VisualizerFrame>? VisualizationReceived;
 
@@ -400,6 +406,27 @@ public interface ISendspinClient : IAsyncDisposable
     /// The payload is the same object cached on <see cref="LastStreamStart"/>.
     /// </summary>
     event EventHandler<StreamStartPayload>? StreamStartReceived;
+
+    /// <summary>
+    /// Raised when a <c>stream/end</c> message is received and parsed.
+    /// <see cref="StreamEndPayload.Roles"/> names the roles whose output is ending; null means
+    /// every active stream. The SDK stops the audio pipeline only when the message reaches the
+    /// <c>player</c> role, so an <c>artwork</c>- or <c>visualizer</c>-targeted end leaves
+    /// playback running and is reported here for the consumer of that role to act on — stop its
+    /// output and clear its buffers. Roles the SDK does not implement, including the
+    /// application-specific ones (names starting with <c>_</c>), are passed through untouched.
+    /// </summary>
+    event EventHandler<StreamEndPayload>? StreamEndReceived;
+
+    /// <summary>
+    /// Raised when a <c>stream/clear</c> message is received and parsed — a seek or a track
+    /// jump, which clears buffers without ending the stream.
+    /// <see cref="StreamClearPayload.Roles"/> names the roles to clear; null means both stream
+    /// roles. As with <see cref="StreamEndReceived"/>, the SDK clears the audio pipeline only
+    /// when the message reaches the <c>player</c> role, and every role it does not implement is
+    /// passed through for the consumer to clear itself.
+    /// </summary>
+    event EventHandler<StreamClearPayload>? StreamClearReceived;
 
     /// <summary>
     /// Raised when a server changes this client's pairing configuration via

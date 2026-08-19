@@ -862,15 +862,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 mute = m;
             }
 
-            if (parameters.TryGetValue("position_ms", out var posObj) && posObj is int pos)
+            if (parameters.TryGetValue("position_ms", out var posObj))
             {
-                positionMs = pos;
+                positionMs = AsMilliseconds(posObj);
             }
 
-            if (parameters.TryGetValue("offset_ms", out var offObj) && offObj is int off)
+            if (parameters.TryGetValue("offset_ms", out var offObj))
             {
-                offsetMs = off;
+                offsetMs = AsMilliseconds(offObj);
             }
+        }
+
+        // The spec makes position_ms/offset_ms mandatory on their commands (controller/v1.md:34),
+        // so a seek whose parameter is missing or unreadable has no valid wire form — sending it
+        // bare would put a forbidden shape on the socket. Drop it with a warning instead, the same
+        // way the rest of this class handles input it cannot use; the typed SeekAsync /
+        // SeekRelativeAsync are the way to seek without this failure mode.
+        if (command == Commands.Seek && positionMs is null)
+        {
+            _logger.LogWarning("Dropping 'seek': no usable position_ms parameter");
+            return;
+        }
+
+        if (command == Commands.SeekRelative && offsetMs is null)
+        {
+            _logger.LogWarning("Dropping 'seek_relative': no usable offset_ms parameter");
+            return;
         }
 
         var message = ClientCommandMessage.Create(command, volume, mute, positionMs, offsetMs);
@@ -878,6 +895,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _logger.LogDebug("Sending command: {Command}", command);
         await SendAsync(message);
     }
+
+    /// <summary>
+    /// Reads a millisecond count out of <see cref="SendCommandAsync"/>'s loosely-typed parameter
+    /// dictionary. Callers pass whatever their arithmetic produced — <see cref="TimeSpan"/>'s
+    /// TotalMilliseconds is a double, a JSON round-trip lands on long — so all three numeric
+    /// widths are accepted, fractional milliseconds rounded. Null when the value is not a number
+    /// or does not fit an <see cref="int"/> (NaN and the infinities fail both comparisons).
+    /// </summary>
+    private static int? AsMilliseconds(object? value) => value switch
+    {
+        int i => i,
+        long l when l is >= int.MinValue and <= int.MaxValue => (int)l,
+        double d when d is >= int.MinValue and <= int.MaxValue => (int)Math.Round(d),
+        _ => null
+    };
 
     public async Task SetVolumeAsync(int volume)
     {

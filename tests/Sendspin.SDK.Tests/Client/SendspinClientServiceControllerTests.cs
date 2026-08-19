@@ -223,4 +223,61 @@ public class SendspinClientServiceControllerTests
         Assert.Null(client.CurrentGroup.SeekMaxMs);
         Assert.Equal(new[] { "play" }, client.CurrentGroup.SupportedCommands);
     }
+
+    [Theory]
+    [InlineData(42_000L)]
+    [InlineData(42_000d)]
+    public async Task SendCommandAsync_AcceptsWiderNumericPositionMs(object positionMs)
+    {
+        // A caller reaching for the untyped overload has whatever its arithmetic produced —
+        // TimeSpan.TotalMilliseconds is a double, a JSON round-trip lands on long.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.Seek, new Dictionary<string, object> { ["position_ms"] = positionMs });
+
+        Assert.Equal(42_000, LastControllerCommand(connection).PositionMs);
+    }
+
+    [Fact]
+    public async Task SendCommandAsync_SeekRelative_AcceptsWiderNumericOffsetMs()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.SeekRelative, new Dictionary<string, object> { ["offset_ms"] = -15_000d });
+
+        Assert.Equal(-15_000, LastControllerCommand(connection).OffsetMs);
+    }
+
+    [Theory]
+    [InlineData(null)] // no parameters at all
+    [InlineData("42000")] // a string, not a number
+    [InlineData(long.MaxValue)] // numeric, but nowhere near an int
+    public async Task SendCommandAsync_SeekWithoutUsablePosition_SendsNothing(object? positionMs)
+    {
+        // position_ms is mandatory on 'seek', so a bare {"controller":{"command":"seek"}} is a
+        // shape the spec forbids. Dropping it keeps the malformed command off the wire.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(
+            Commands.Seek,
+            positionMs is null ? null : new Dictionary<string, object> { ["position_ms"] = positionMs });
+
+        Assert.Empty(connection.SentMessages);
+    }
+
+    [Fact]
+    public async Task SendCommandAsync_SeekRelativeWithoutUsableOffset_SendsNothing()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        await client.SendCommandAsync(Commands.SeekRelative);
+
+        Assert.Empty(connection.SentMessages);
+    }
 }
