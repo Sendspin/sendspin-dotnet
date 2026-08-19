@@ -148,6 +148,18 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
     /// <summary>
+    /// Raised when any connected client receives a <c>stream/end</c>. Carries the roles whose
+    /// output is ending — see <see cref="ISendspinClient.StreamEndReceived"/>.
+    /// </summary>
+    public event EventHandler<StreamEndPayload>? StreamEndReceived;
+
+    /// <summary>
+    /// Raised when any connected client receives a <c>stream/clear</c>. Carries the roles whose
+    /// buffers are to be cleared — see <see cref="ISendspinClient.StreamClearReceived"/>.
+    /// </summary>
+    public event EventHandler<StreamClearPayload>? StreamClearReceived;
+
+    /// <summary>
     /// Raised when the last-played server ID changes.
     /// Consumers should persist this value so it survives app restarts.
     /// </summary>
@@ -548,6 +560,8 @@ public sealed class SendspinHostService : IAsyncDisposable
             client.VisualizationReceived += (s, e) => VisualizationReceived?.Invoke(this, e);
             client.ServerHelloReceived += (s, payload) => ServerHelloReceived?.Invoke(this, payload);
             client.StreamStartReceived += (s, payload) => StreamStartReceived?.Invoke(this, payload);
+            client.StreamEndReceived += (s, payload) => StreamEndReceived?.Invoke(this, payload);
+            client.StreamClearReceived += (s, payload) => StreamClearReceived?.Invoke(this, payload);
 
             await connection.StartAsync();
 

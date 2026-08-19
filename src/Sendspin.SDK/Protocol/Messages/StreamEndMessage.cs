@@ -20,12 +20,9 @@ public sealed class StreamEndMessage : IMessageWithPayload<StreamEndPayload>
     [JsonPropertyName("payload")]
     public StreamEndPayload Payload { get; set; } = new();
 
-    // Convenience accessors
+    // Convenience accessor
     [JsonIgnore]
-    public string? Reason => Payload.Reason;
-
-    [JsonIgnore]
-    public string? StreamId => Payload.StreamId;
+    public List<string>? Roles => Payload.Roles;
 }
 
 /// <summary>
@@ -34,14 +31,17 @@ public sealed class StreamEndMessage : IMessageWithPayload<StreamEndPayload>
 public sealed class StreamEndPayload
 {
     /// <summary>
-    /// Gets or sets the reason for stream ending.
+    /// Gets or sets the server's monotonic clock timestamp, in microseconds, at which it
+    /// transmitted this message.
     /// </summary>
-    [JsonPropertyName("reason")]
-    public string? Reason { get; set; }
+    [JsonPropertyName("server_transmitted")]
+    public long ServerTransmitted { get; set; }
 
     /// <summary>
-    /// Gets or sets the stream identifier.
+    /// Gets or sets the roles whose streams are ending — <c>player</c>, <c>artwork</c>,
+    /// <c>visualizer</c>, or an application-specific role (a name starting with <c>_</c>).
+    /// Null when the server omitted the member, which ends every active stream.
     /// </summary>
-    [JsonPropertyName("stream_id")]
-    public string? StreamId { get; set; }
+    [JsonPropertyName("roles")]
+    public List<string>? Roles { get; set; }
 }
