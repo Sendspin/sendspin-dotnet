@@ -57,6 +57,7 @@ public class MediaDisplaySchedulingTests
         SchedulingClient(
             long now = Now,
             int bufferCapacity = 65_536,
+            IClockSynchronizer? clockSynchronizer = null,
             FakeAudioPipeline? audioPipeline = null)
     {
         var timer = new FakePrecisionTimer { CurrentTime = now };
@@ -64,7 +65,7 @@ public class MediaDisplaySchedulingTests
             options with
             {
                 PrecisionTimer = timer,
-                ClockSynchronizer = new ConvergedClockSynchronizer(),
+                ClockSynchronizer = clockSynchronizer ?? new ConvergedClockSynchronizer(),
                 AudioPipeline = audioPipeline,
                 Capabilities = new ClientCapabilities
                 {
@@ -334,6 +335,46 @@ public class MediaDisplaySchedulingTests
         await WaitUntilAsync(() => cleared.Count == 1, "the scheduled clear");
 
         Assert.Equal(2, cleared[0].Channel);
+    }
+
+    /// <summary>
+    /// <c>static_delay_ms</c> compensates for hardware beyond the audio port, and the spec
+    /// applies it to the player role alone: the visualizer and artwork roles translate their
+    /// display timestamps with the clock offset only. Applying it here too would show every
+    /// visual ahead of the sound it belongs to by the whole delay — up to the 5 s the setting
+    /// allows — and ahead of what the C++ reference client shows.
+    /// </summary>
+    /// <remarks>
+    /// Runs against a real <see cref="KalmanClockSynchronizer"/>, not a fake: the distinction
+    /// under test is one only the real synchronizer draws, since it is the thing that subtracts
+    /// the delay in the conversion the audio path uses.
+    /// </remarks>
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(5_000.0)]
+    public async Task MediaDisplayTimes_AreNotShiftedByStaticDelay(double staticDelayMs)
+    {
+        var clock = new KalmanClockSynchronizer { StaticDelayMs = staticDelayMs };
+        var (client, connection, timer) = SchedulingClient(clockSynchronizer: clock);
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var artwork = new List<ArtworkReceivedEventArgs>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+        client.ArtworkReceived += (_, e) => artwork.Add(e);
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 9 }));
+
+        // Had the delay been folded in, both would have looked 5 s overdue on arrival: the
+        // frame dropped as stale, the artwork displayed at once.
+        Assert.Empty(frames);
+        Assert.Empty(artwork);
+
+        // Due at the timestamp itself, wherever the speakers are.
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(
+            () => frames.Count == 1 && artwork.Count == 1, "both items at their display time");
     }
 
     [Fact]

@@ -512,6 +512,8 @@ public class InitialClientStateGatingTests
 
         public long ServerToClientTime(long serverTime) => serverTime;
 
+        public long ServerToClientTimeUncompensated(long serverTime) => serverTime;
+
         public long ClientToServerTime(long clientTime) => clientTime;
 
         public ClockSyncStatus GetStatus() => new() { IsConverged = IsConverged };

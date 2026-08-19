@@ -100,6 +100,7 @@ public class SendspinClientServiceTimeSyncTests
 
         public long ClientToServerTime(long clientTime) => clientTime;
         public long ServerToClientTime(long serverTime) => serverTime;
+        public long ServerToClientTimeUncompensated(long serverTime) => serverTime;
         public void Reset() { }
         public Sendspin.SDK.Synchronization.ClockSyncStatus GetStatus() => new();
     }

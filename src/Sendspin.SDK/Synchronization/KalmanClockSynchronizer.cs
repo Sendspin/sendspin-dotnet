@@ -413,22 +413,55 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// Subtracts <see cref="StaticDelayMs"/> from the converted client time per the Sendspin
     /// protocol spec (positive value compensates for hardware delay; audio is scheduled earlier
     /// from the digital pipeline so it emerges from external speakers/amplifiers on time).
+    /// Timestamps that schedule something other than sound leaving the speakers want
+    /// <see cref="ServerToClientTimeUncompensated"/> instead.
     /// </para>
     /// </remarks>
     public long ServerToClientTime(long serverTime)
     {
         lock (_lock)
         {
-            if (_lastUpdateTime > 0)
-            {
-                // t_client = t_last + (t_server − t_last − offset) / (1 + drift/1e6).
-                double clientRelative = (serverTime - _lastUpdateTime - _offset)
-                                        / (1.0 + _drift / 1_000_000.0);
-                return _lastUpdateTime + (long)Math.Round(clientRelative) - _staticDelayMicroseconds;
-            }
-
-            return serverTime - (long)_offset - _staticDelayMicroseconds;
+            return ConvertToClientTimeUnsafe(serverTime) - _staticDelayMicroseconds;
         }
+    }
+
+    /// <summary>
+    /// Converts a server timestamp to client time using the synchronized clock alone, without
+    /// <see cref="StaticDelayMs"/>.
+    /// </summary>
+    /// <param name="serverTime">Server time in microseconds.</param>
+    /// <returns>Estimated client time in microseconds.</returns>
+    /// <remarks>
+    /// The conversion the spec asks for wherever a server timestamp schedules something that is
+    /// not audio leaving the speakers: the visualizer and artwork roles translate their display
+    /// timestamps with "the offset computed from clock synchronization", and only the player
+    /// role goes on to subtract <c>static_delay_ms</c>. A visual scheduled by
+    /// <see cref="ServerToClientTime"/> would be shown early by exactly the hardware delay the
+    /// audio is compensating for, so it would run ahead of the sound it belongs to.
+    /// </remarks>
+    public long ServerToClientTimeUncompensated(long serverTime)
+    {
+        lock (_lock)
+        {
+            return ConvertToClientTimeUnsafe(serverTime);
+        }
+    }
+
+    /// <summary>
+    /// The server→client conversion both public methods share, before any static delay.
+    /// Caller must hold <see cref="_lock"/>.
+    /// </summary>
+    private long ConvertToClientTimeUnsafe(long serverTime)
+    {
+        if (_lastUpdateTime > 0)
+        {
+            // t_client = t_last + (t_server − t_last − offset) / (1 + drift/1e6).
+            double clientRelative = (serverTime - _lastUpdateTime - _offset)
+                                    / (1.0 + _drift / 1_000_000.0);
+            return _lastUpdateTime + (long)Math.Round(clientRelative);
+        }
+
+        return serverTime - (long)_offset;
     }
 
     /// <summary>
@@ -488,9 +521,18 @@ public interface IClockSynchronizer
     long ClientToServerTime(long clientTime);
 
     /// <summary>
-    /// Converts server time to client time.
+    /// Converts server time to client time, with <see cref="StaticDelayMs"/> subtracted. Use
+    /// this for anything scheduling audio out of the speakers.
     /// </summary>
     long ServerToClientTime(long serverTime);
+
+    /// <summary>
+    /// Converts server time to client time using the synchronized clock alone, without
+    /// <see cref="StaticDelayMs"/>. Use this for server timestamps the spec translates with the
+    /// clock offset only — the visualizer and artwork roles' display times, which must not move
+    /// when the user changes a hardware delay that applies to sound.
+    /// </summary>
+    long ServerToClientTimeUncompensated(long serverTime);
 
     /// <summary>
     /// Whether the synchronizer has converged to a stable estimate.

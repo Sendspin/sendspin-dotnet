@@ -19,6 +19,13 @@ namespace Sendspin.SDK.Client;
 /// immediately and is never dropped for lateness.
 /// </para>
 /// <para>
+/// The translation is <see cref="IClockSynchronizer.ServerToClientTimeUncompensated"/>, the clock
+/// offset alone: both role specs say to translate "using the offset computed from clock
+/// synchronization", and only the player role goes on to subtract <c>static_delay_ms</c>. That
+/// delay compensates for hardware past the audio port, so applying it here would show every
+/// visual ahead of the sound it belongs to by up to the 5 s the setting allows.
+/// </para>
+/// <para>
 /// Data that is already due on arrival is raised inline, on the caller's thread, so the common
 /// case keeps the receive loop's existing threading contract (including a throwing subscriber
 /// escaping into the receive loop). Only data with a future display time is deferred to this
@@ -151,7 +158,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
             }
 
             long now = _timer.GetCurrentTimeMicroseconds();
-            long displayTime = _clockSynchronizer.ServerToClientTime(frame.Timestamp);
+            long displayTime = _clockSynchronizer.ServerToClientTimeUncompensated(frame.Timestamp);
 
             if (now - displayTime > StaleThresholdMicroseconds)
             {
@@ -196,7 +203,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
             }
 
             long now = _timer.GetCurrentTimeMicroseconds();
-            long displayTime = _clockSynchronizer.ServerToClientTime(chunk.Timestamp);
+            long displayTime = _clockSynchronizer.ServerToClientTimeUncompensated(chunk.Timestamp);
             var pending = new PendingArtwork(displayTime, chunk);
 
             // Supersede unconditionally, even by an item that is about to be raised inline:

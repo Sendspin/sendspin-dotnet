@@ -156,6 +156,8 @@ public class PlayerStateDelayReportingTests
 
         public long ServerToClientTime(long serverTime) => serverTime;
 
+        public long ServerToClientTimeUncompensated(long serverTime) => serverTime;
+
         public ClockSyncStatus GetStatus() => new() { IsConverged = true };
     }
 }
