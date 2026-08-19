@@ -405,7 +405,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// Use when switching to a client-initiated connection to ensure
     /// only one connection is using the audio pipeline at a time.
     /// </summary>
-    public async Task DisconnectAllAsync(string reason = "switching_connection_mode")
+    /// <param name="reason">
+    /// The <c>client/goodbye</c> reason to send, from <see cref="GoodbyeReasons"/>. Defaults to
+    /// <see cref="GoodbyeReasons.AnotherServer"/>: the documented use is leaving these servers
+    /// for a connection this client is about to dial, and the spec makes that reason mandatory
+    /// for a client that leaves one server for another (messaging.md:426). Pass
+    /// <see cref="GoodbyeReasons.UserRequest"/> instead when the user asked to go offline rather
+    /// than to move.
+    /// </param>
+    public async Task DisconnectAllAsync(string reason = GoodbyeReasons.AnotherServer)
     {
         List<ActiveServerConnection> connectionsToClose;
         lock (_connectionsLock)

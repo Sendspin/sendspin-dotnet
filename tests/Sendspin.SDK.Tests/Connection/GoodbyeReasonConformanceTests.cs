@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
+using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -34,6 +35,43 @@ public class GoodbyeReasonConformanceTests : IAsyncDisposable
         Assert.Equal(
             SpecReasons.OrderBy(r => r, StringComparer.Ordinal),
             GoodbyeReasons.All.OrderBy(r => r, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void EveryGoodbyeIsBuiltThroughTheSink_WhichSubstitutesRestartForAnUndefinedReason()
+    {
+        // The guard is at the sink, not at each call site: three callers in a row reached the
+        // wire with a string the spec does not define, so validating where the message is built
+        // is the only place a fourth cannot slip past. 'restart' because that is already what a
+        // server assumes for a reason it cannot parse (messaging.md:442) — the substitution
+        // makes the frame conformant without changing the server's reaction to it.
+        Assert.Equal(
+            GoodbyeReasons.Restart,
+            ClientGoodbyeMessage.Create("switching_connection_mode").Payload.Reason);
+
+        // ...and the guard does not swallow the reasons the spec does define.
+        foreach (string reason in SpecReasons)
+        {
+            Assert.Equal(reason, ClientGoodbyeMessage.Create(reason).Payload.Reason);
+        }
+    }
+
+    [Fact]
+    public void DisconnectAllAsync_DefaultsToAReasonTheSpecDefines()
+    {
+        // The default reaches the wire verbatim, so it is part of the protocol surface. It was
+        // "switching_connection_mode" — undefined, hence a silent drop the server reads as a
+        // crash and auto-reconnects from, colliding with the client's own dial. 'another_server'
+        // is the reason the spec makes mandatory for a client leaving one server for another,
+        // and the one whose documented server reaction is: do not auto-reconnect, but keep
+        // showing the client as available (messaging.md:426).
+        var disconnectAll = typeof(SendspinHostService)
+            .GetMethod(nameof(SendspinHostService.DisconnectAllAsync));
+        Assert.NotNull(disconnectAll);
+
+        Assert.Equal(
+            GoodbyeReasons.AnotherServer,
+            disconnectAll.GetParameters()[0].DefaultValue as string);
     }
 
     [Fact]
