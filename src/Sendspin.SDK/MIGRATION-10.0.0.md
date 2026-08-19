@@ -344,13 +344,15 @@ This matters most during startup. Two measurements bootstrap drift from a finite
 | Per-probe timeout | 2 s | 10 s (the reference's `DEFAULT_RESPONSE_TIMEOUT_MS`) |
 | On a probe timeout | abandon the rest of the burst | advance to the next probe |
 | Between bursts, converged | 1–10 s, by uncertainty | 10 s (the reference's `DEFAULT_BURST_INTERVAL_MS`) |
-| Between bursts, converging | 500 ms for the first 3 measurements | 500 ms until the filter converges |
+| Between bursts, converging | 500 ms for the first 3 measurements | 500 ms until the filter converges, for at most 60 bursts |
 
 A burst exists to collect candidates so the cleanest can be chosen, so a single slow reply is the worst moment to stop collecting; it used to yield a one-sample burst. The one deliberate departure from the reference is the converging-window interval — see below.
 
 ### A player announces itself in about two seconds
 
 The old adaptive interval switched to 10 s pacing after three measurements while convergence needs five, so on a *good* network — where uncertainty drops below a millisecond by the third burst — measurements four and five each arrived 10 s late. A player was invisible to the server (no initial `client/state`, no `available: true`) for over twenty seconds after every connect, and perversely appeared faster on a poor network. Keeping the fast tier until the filter actually converges brings that to roughly two seconds, in line with the C++ and JS clients. The spec's gate is unchanged: nothing is announced before the filter has converged.
+
+The fast tier is a budget of 60 bursts, not a mode that lasts until convergence. On a link noisy enough that the sub-millisecond convergence gate is out of reach — offset uncertainty falls as the square root of the sample count, so a 100 ms round trip puts the gate thousands of measurements away — an unbounded tier would sustain 5-6 probes a second indefinitely from the client least able to afford the traffic. After the budget the interval widens to 10 s and one warning names the uncertainty it gave up at; the client keeps probing at that cadence and still reports `available` if the gate is eventually met. A reconnect, or a return from a pairing window, starts a fresh converging window.
 
 ### T1 and T4 are stamped at the transport boundary
 
