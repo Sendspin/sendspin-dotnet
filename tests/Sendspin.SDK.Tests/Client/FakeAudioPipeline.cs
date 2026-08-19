@@ -11,6 +11,9 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 internal sealed class FakeAudioPipeline : IAudioPipeline
 {
+    /// <summary>Chunks handed to <see cref="ProcessAudioChunk"/>, in arrival order.</summary>
+    public List<AudioChunk> Chunks { get; } = new();
+
     public AudioPipelineState State { get; private set; } = AudioPipelineState.Idle;
 
     /// <summary>
@@ -28,12 +31,11 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     /// <summary>Formats the client started the pipeline with, in order.</summary>
     public List<AudioFormat> StartCalls { get; } = new List<AudioFormat>();
 
-    public int StopCalls { get; private set; }
+    /// <summary>Calls to <see cref="StopAsync"/>, for tests asserting a role-targeted stream/end left playback alone.</summary>
+    public int StopCount { get; private set; }
 
-    public int ClearCalls { get; private set; }
-
-    /// <summary>Chunks the client handed to the pipeline, in order.</summary>
-    public List<AudioChunk> ProcessedChunks { get; } = new List<AudioChunk>();
+    /// <summary>Calls to <see cref="Clear"/>, for tests asserting a role-targeted stream/clear left the buffers alone.</summary>
+    public int ClearCount { get; private set; }
 
     public event EventHandler<AudioPipelineState>? StateChanged;
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
@@ -54,14 +56,14 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
 
     public Task StopAsync()
     {
-        StopCalls++;
+        StopCount++;
         return Task.CompletedTask;
     }
 
     public void NotifyReconnect() { }
-    public void Clear(long? newTargetTimestamp = null) => ClearCalls++;
+    public void Clear(long? newTargetTimestamp = null) => ClearCount++;
     public void ReanchorTiming() { }
-    public void ProcessAudioChunk(AudioChunk chunk) => ProcessedChunks.Add(chunk);
+    public void ProcessAudioChunk(AudioChunk chunk) => Chunks.Add(chunk);
     public void SetVolume(int volume) { }
     public void SetMuted(bool muted) { }
     public Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default) => Task.CompletedTask;

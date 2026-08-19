@@ -84,7 +84,7 @@ public class AudioPipelineStreamStartTests
         Assert.Equal(AudioPipelineState.Playing, harness.Pipeline.State);
         Assert.Empty(harness.States);
         Assert.Equal(1, harness.Player.PlayCalls);
-        Assert.Equal(0, harness.Player.StopCalls);
+        Assert.Equal(0, harness.Player.StopCount);
         Assert.Equal(buffered, harness.Buffer.BufferedMilliseconds);
     }
 
@@ -309,7 +309,7 @@ public class AudioPipelineStreamStartTests
 
         public int PlayCalls { get; private set; }
 
-        public int StopCalls { get; private set; }
+        public int StopCount { get; private set; }
 
         public bool Disposed { get; private set; }
 
@@ -334,7 +334,7 @@ public class AudioPipelineStreamStartTests
 
         public void Stop()
         {
-            StopCalls++;
+            StopCount++;
             State = AudioPlayerState.Stopped;
         }
 

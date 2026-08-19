@@ -68,12 +68,12 @@ public class SendspinClientServiceStreamStartTests
         using var _c = client;
 
         connection.RaiseBinaryMessageReceived(AudioFrame(1_000, new byte[] { 1, 2, 3, 4 }));
-        Assert.Empty(pipeline.ProcessedChunks);
+        Assert.Empty(pipeline.Chunks);
 
         pipeline.IsReady = true;
         connection.RaiseTextMessageReceived(StreamStartJson(RunningSampleRate));
 
-        var chunk = Assert.Single(pipeline.ProcessedChunks);
+        var chunk = Assert.Single(pipeline.Chunks);
         Assert.Equal(1_000, chunk.ServerTimestamp);
         Assert.Equal(new byte[] { 1, 2, 3, 4 }, chunk.EncodedData);
     }
@@ -88,8 +88,8 @@ public class SendspinClientServiceStreamStartTests
 
         // The pipeline applies the update in place (see IAudioPipeline.StartAsync); nothing here
         // may tear it down or dump its buffer.
-        Assert.Equal(0, pipeline.StopCalls);
-        Assert.Equal(0, pipeline.ClearCalls);
+        Assert.Equal(0, pipeline.StopCount);
+        Assert.Equal(0, pipeline.ClearCount);
         Assert.Equal(RunningSampleRate, Assert.Single(pipeline.StartCalls).SampleRate);
     }
 
@@ -125,7 +125,7 @@ public class SendspinClientServiceStreamStartTests
 
         // A rate change rebuilds the decode chain, so the queued chunk is in a format the new
         // decoder cannot read.
-        Assert.Empty(pipeline.ProcessedChunks);
+        Assert.Empty(pipeline.Chunks);
         Assert.Equal(44_100, Assert.Single(pipeline.StartCalls).SampleRate);
     }
 
@@ -141,7 +141,7 @@ public class SendspinClientServiceStreamStartTests
         pipeline.IsReady = true;
         connection.RaiseTextMessageReceived(StreamStartJson(RunningSampleRate));
 
-        Assert.Empty(pipeline.ProcessedChunks);
+        Assert.Empty(pipeline.Chunks);
         Assert.Single(pipeline.StartCalls);
     }
 }

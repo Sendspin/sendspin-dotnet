@@ -253,9 +253,22 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
 internal sealed class RecordPskResolver : INoisePskResolver
 {
     private readonly IPairingRecordStore _store;
+    private readonly Func<bool> _isPairingPskEnabled;
 
     /// <summary>Creates a resolver over the given record store.</summary>
-    public RecordPskResolver(IPairingRecordStore store) => _store = store;
+    /// <param name="store">The records to resolve psk_ids against.</param>
+    /// <param name="isPairingPskEnabled">
+    /// Reports whether the <c>pairing_psk</c> method is currently enabled in the client's
+    /// pairing config. Called on every resolve rather than snapshotted, because
+    /// <c>management/set-pairing-config</c> can flip it mid-session and the very next
+    /// handshake has to see the new value. Defaults to always-enabled for callers with no
+    /// pairing config of their own.
+    /// </param>
+    public RecordPskResolver(IPairingRecordStore store, Func<bool>? isPairingPskEnabled = null)
+    {
+        _store = store;
+        _isPairingPskEnabled = isPairingPskEnabled ?? (static () => true);
+    }
 
     /// <inheritdoc/>
     /// <remarks>
@@ -268,7 +281,7 @@ internal sealed class RecordPskResolver : INoisePskResolver
     {
         foreach (var record in _store.List())
         {
-            if (record.PskId == pskId)
+            if (record.PskId == pskId && IsCandidate(record))
             {
                 return new NoisePsk(record.Psk, record.Category, record.ServerId);
             }
@@ -276,4 +289,18 @@ internal sealed class RecordPskResolver : INoisePskResolver
 
         return SentinelPskResolver.Instance.Resolve(pskId);
     }
+
+    /// <summary>
+    /// Whether the record belongs in the handshake's candidate set. Per connection.md, a PSK
+    /// for a disabled pairing method is excluded, so a handshake referencing it misses
+    /// outright instead of authenticating a channel that would only be refused later, at the
+    /// pairing activation (#202).
+    /// </summary>
+    /// <remarks>
+    /// Only the <c>pairing_psk</c> method's own bootstrap secret is affected. A long-term
+    /// record from a completed pairing is not a pairing-method PSK — it is the credential that
+    /// pairing produced — so it keeps resolving however the method is configured.
+    /// </remarks>
+    private bool IsCandidate(PairingRecord record) =>
+        record.Category != PskCategory.Pairing || _isPairingPskEnabled();
 }

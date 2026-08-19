@@ -148,6 +148,18 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
 
     /// <summary>
+    /// Raised when any connected client receives a <c>stream/end</c>. Carries the roles whose
+    /// output is ending — see <see cref="ISendspinClient.StreamEndReceived"/>.
+    /// </summary>
+    public event EventHandler<StreamEndPayload>? StreamEndReceived;
+
+    /// <summary>
+    /// Raised when any connected client receives a <c>stream/clear</c>. Carries the roles whose
+    /// buffers are to be cleared — see <see cref="ISendspinClient.StreamClearReceived"/>.
+    /// </summary>
+    public event EventHandler<StreamClearPayload>? StreamClearReceived;
+
+    /// <summary>
     /// Raised when the last-played server ID changes.
     /// Consumers should persist this value so it survives app restarts.
     /// </summary>
@@ -251,7 +263,8 @@ public sealed class SendspinHostService : IAsyncDisposable
         ListenerOptions? listenerOptions = null,
         AdvertiserOptions? advertiserOptions = null,
         string? lastPlayedServerId = null,
-        ILastPlayedServerStore? lastPlayedServerStore = null)
+        ILastPlayedServerStore? lastPlayedServerStore = null,
+        ConnectionOptions? connectionOptions = null)
     {
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
@@ -272,7 +285,8 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         _listener = new SendspinListener(
             loggerFactory.CreateLogger<SendspinListener>(),
-            listenOpts);
+            listenOpts,
+            connectionOptions);
 
         _advertiserOptions = advertiseOpts;
         _advertiser = new MdnsServiceAdvertiser(
@@ -500,11 +514,16 @@ public sealed class SendspinHostService : IAsyncDisposable
             // Each incoming connection gets its own Noise framing — the per-connection
             // crypto state cannot be shared. The server (dialer) is the Noise initiator
             // per spec; our side responds.
+            // The resolver reads this connection's live pairing config through `client`, which
+            // is assigned a few lines down — before StartAsync, so before any handshake can
+            // consult it. Until then the configured value is the one the client starts from.
             var framing = new Connection.Noise.NoiseWireFraming(
                 _options.Identity,
                 _options.PairingRecordStore is null
                     ? null
-                    : new Connection.Noise.RecordPskResolver(_options.PairingRecordStore),
+                    : new Connection.Noise.RecordPskResolver(
+                        _options.PairingRecordStore,
+                        () => client?.IsPairingPskEnabled ?? _options.Capabilities.PairingPskEnabled),
                 _options.Suite);
 
             var connection = new IncomingConnection(
@@ -541,6 +560,8 @@ public sealed class SendspinHostService : IAsyncDisposable
             client.VisualizationReceived += (s, e) => VisualizationReceived?.Invoke(this, e);
             client.ServerHelloReceived += (s, payload) => ServerHelloReceived?.Invoke(this, payload);
             client.StreamStartReceived += (s, payload) => StreamStartReceived?.Invoke(this, payload);
+            client.StreamEndReceived += (s, payload) => StreamEndReceived?.Invoke(this, payload);
+            client.StreamClearReceived += (s, payload) => StreamClearReceived?.Invoke(this, payload);
 
             await connection.StartAsync();
 
@@ -622,11 +643,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// Waits for the handshake to complete with timeout.
     /// </summary>
     /// <param name="client">The client service to monitor.</param>
-    /// <param name="connection">The connection to disconnect on timeout.</param>
+    /// <param name="connection">The connection to drop on timeout.</param>
     /// <param name="connectionId">Connection ID for logging.</param>
     /// <param name="timeoutSeconds">Handshake timeout in seconds (default: 10).</param>
     /// <returns>True if handshake completed successfully, false otherwise.</returns>
-    private async Task<bool> WaitForHandshakeAsync(
+    internal async Task<bool> WaitForHandshakeAsync(
         SendspinClientService client,
         IncomingConnection connection,
         string connectionId,
@@ -663,7 +684,13 @@ public sealed class SendspinHostService : IAsyncDisposable
         catch (OperationCanceledException)
         {
             _logger.LogWarning("Handshake timeout for connection {ConnectionId}", connectionId);
-            await connection.DisconnectAsync("handshake_timeout");
+
+            // The spec says a provisional connection that has not activated within the window
+            // "is dropped" (connection.md:40) and names no goodbye reason for it, so drop it
+            // silently. The "handshake_timeout" this used to send is outside client/goodbye's
+            // closed set (messaging.md:426), which a server reads as no goodbye at all — the
+            // signal that invites it to reconnect immediately and loop.
+            await connection.CloseWithoutGoodbyeAsync("handshake_timeout");
             return false;
         }
         finally
@@ -719,18 +746,26 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             if (existingConnection is not null)
             {
-                // LoserGoodbyeReason is non-null whenever there is an existing connection to drop.
-                await DisconnectExistingAsync(existingConnection, result.LoserGoodbyeReason!);
+                // LoserReason is non-null whenever there is an existing connection to drop.
+                await DisconnectExistingAsync(existingConnection, result.LoserReason!, result.LoserFarewell);
             }
 
             return true;
         }
 
         // New server rejected (an existing connection always exists on this path).
-        _logger.LogInformation("Arbitration: Rejecting {NewServerId}, sending goodbye", newServerId);
+        _logger.LogInformation(
+            "Arbitration: Rejecting {NewServerId}, sending {Farewell} {Reason}",
+            newServerId,
+            result.LoserFarewell,
+            result.LoserReason);
         try
         {
-            await newConnection.DisconnectAsync(result.LoserGoodbyeReason!);
+            // A rejected incoming pairing handshake is told pair/abort rather than
+            // client/goodbye (connection.md); either way the connection closes behind it.
+            await (result.LoserFarewell == ArbitrationFarewell.PairAbort
+                ? newConnection.DisconnectWithPairAbortAsync(result.LoserReason!)
+                : newConnection.DisconnectAsync(result.LoserReason!));
         }
         catch (Exception ex)
         {
@@ -750,11 +785,13 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     /// <summary>
     /// Disconnects an existing active server connection during arbitration.
-    /// Removes the connection from the tracking dictionary and sends a goodbye message.
+    /// Removes the connection from the tracking dictionary and sends its farewell message.
     /// </summary>
     /// <param name="existing">The existing connection to disconnect.</param>
-    /// <param name="reason">The goodbye reason to send.</param>
-    private async Task DisconnectExistingAsync(ActiveServerConnection existing, string reason)
+    /// <param name="reason">The reason to send.</param>
+    /// <param name="farewell">Which message carries it.</param>
+    private async Task DisconnectExistingAsync(
+        ActiveServerConnection existing, string reason, ArbitrationFarewell farewell)
     {
         lock (_connectionsLock)
         {
@@ -776,7 +813,19 @@ public sealed class SendspinHostService : IAsyncDisposable
             // happens on every server reconnect, so widening this to also tear down the audio/
             // source pipelines (as Client.DisposeAsync would) is a separate change, not asked for
             // here.
-            await existing.Client.DisconnectAsync(reason);
+            //
+            // A pairing farewell goes out on the connection rather than through the client: the
+            // client's only farewell is client/goodbye. Its per-disconnect bookkeeping still
+            // runs, off the state change either path raises.
+            if (farewell == ArbitrationFarewell.PairAbort)
+            {
+                await existing.Connection.DisconnectWithPairAbortAsync(reason);
+            }
+            else
+            {
+                await existing.Client.DisconnectAsync(reason);
+            }
+
             await existing.Connection.DisposeAsync();
         }
         catch (Exception ex)
@@ -851,9 +900,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// </summary>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
-    /// <param name="staticDelayMs">Static delay in milliseconds for group sync calibration.</param>
+    /// <param name="staticDelayMs">
+    /// A new static delay in milliseconds to apply, persist, and report, or null (the default)
+    /// to leave the current delay untouched and simply report it. Same semantics as
+    /// <see cref="ISendspinClient.SendPlayerStateAsync"/>: a supplied value is written to the
+    /// clock synchronizer and to <see cref="SendspinClientOptions.StaticDelayStore"/>, so omit
+    /// it for an ordinary volume or mute change.
+    /// </param>
     /// <param name="serverId">Target server ID, or null for all servers.</param>
-    public async Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0, string? serverId = null)
+    public async Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null, string? serverId = null)
     {
         List<SendspinClientService> clients;
         lock (_connectionsLock)

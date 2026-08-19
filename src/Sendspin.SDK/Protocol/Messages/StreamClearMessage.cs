@@ -20,12 +20,9 @@ public sealed class StreamClearMessage : IMessageWithPayload<StreamClearPayload>
     [JsonPropertyName("payload")]
     public StreamClearPayload Payload { get; set; } = new();
 
-    // Convenience accessors
+    // Convenience accessor
     [JsonIgnore]
-    public string? StreamId => Payload.StreamId;
-
-    [JsonIgnore]
-    public long? TargetTimestamp => Payload.TargetTimestamp;
+    public List<string>? Roles => Payload.Roles;
 }
 
 /// <summary>
@@ -34,14 +31,17 @@ public sealed class StreamClearMessage : IMessageWithPayload<StreamClearPayload>
 public sealed class StreamClearPayload
 {
     /// <summary>
-    /// Gets or sets the stream identifier.
+    /// Gets or sets the server's monotonic clock timestamp, in microseconds, at which it
+    /// transmitted this message.
     /// </summary>
-    [JsonPropertyName("stream_id")]
-    public string? StreamId { get; set; }
+    [JsonPropertyName("server_transmitted")]
+    public long ServerTransmitted { get; set; }
 
     /// <summary>
-    /// Gets or sets the new target timestamp after clear (if seeking).
+    /// Gets or sets the roles whose buffers are to be cleared — <c>player</c>,
+    /// <c>visualizer</c>, or an application-specific role (a name starting with <c>_</c>).
+    /// Null when the server omitted the member, which clears both stream roles.
     /// </summary>
-    [JsonPropertyName("target_timestamp")]
-    public long? TargetTimestamp { get; set; }
+    [JsonPropertyName("roles")]
+    public List<string>? Roles { get; set; }
 }

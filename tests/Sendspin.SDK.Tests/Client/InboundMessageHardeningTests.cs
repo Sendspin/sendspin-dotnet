@@ -91,6 +91,37 @@ public class InboundMessageHardeningTests
     }
 
     [Fact]
+    public void NullServerStatePayload_ClosesTheConnection()
+    {
+        // server/state is the highest-traffic peer-supplied type and had no PeerMessageValidation
+        // arm (#206), so "payload": null reached HandleServerState and died dereferencing it. A
+        // NullReferenceException is not in the dispatch catch filter, so the connection tore down
+        // as an internal bug instead of via the deliberate malformed-peer close.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"server/state","payload":null}""");
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void NullServerStateRoleObjects_AreAccepted()
+    {
+        // Positive control for the arm above: null role objects are the spec's "clear this
+        // role" signal, so the arm must reject a null payload without rejecting these.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/state","payload":{"metadata":null,"controller":null,"color":null}}""");
+
+        Assert.Equal(ConnectionState.Connected, connection.State);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void NullCodecInStreamStartPlayer_ClosesTheConnection()
     {
         // The same annotation hole one level down: "player" is present, so the

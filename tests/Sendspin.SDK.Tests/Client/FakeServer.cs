@@ -2,6 +2,7 @@ using System.Buffers.Text;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading.Channels;
 using Noise;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Protocol;
@@ -26,6 +27,11 @@ internal class FakeServer : IAsyncDisposable
     private readonly KeyPair _keys;
     private readonly TaskCompletionSource<string> _goodbye =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // A queue rather than a TaskCompletionSource: unlike client/goodbye, more than one
+    // pair/abort can arrive on one connection — a pairing activate this double cannot satisfy
+    // draws method_not_supported before arbitration's own abort ever lands.
+    private readonly Channel<string> _pairAborts = Channel.CreateUnbounded<string>();
     private TestNoiseServer? _noise;
     private Task? _receiveLoop;
 
@@ -60,6 +66,35 @@ internal class FakeServer : IAsyncDisposable
     {
         var completed = await Task.WhenAny(_goodbye.Task, Task.Delay(timeout));
         return completed == _goodbye.Task ? await _goodbye.Task : null;
+    }
+
+    /// <summary>
+    /// Whether a <c>pair/abort</c> carrying <paramref name="reason"/> arrives before the
+    /// timeout. Aborts with other reasons are consumed and skipped, so a test can name the one
+    /// it is about without also having to enumerate whatever preceded it.
+    /// </summary>
+    internal async Task<bool> WaitForPairAbortAsync(string reason, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            while (await _pairAborts.Reader.WaitToReadAsync(cts.Token))
+            {
+                while (_pairAborts.Reader.TryRead(out var received))
+                {
+                    if (received == reason)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Timed out: report the absence rather than throwing, matching WaitForGoodbyeAsync.
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -204,10 +239,21 @@ internal class FakeServer : IAsyncDisposable
         }
 
         string json = Encoding.UTF8.GetString(plaintext, 1, plaintext.Length - 1);
-        if (MessageSerializer.GetMessageType(json) == MessageTypes.ClientGoodbye)
+        switch (MessageSerializer.GetMessageType(json))
         {
-            var goodbye = MessageSerializer.Deserialize<ClientGoodbyeMessage>(json);
-            _goodbye.TrySetResult(goodbye?.Payload.Reason ?? string.Empty);
+            case MessageTypes.ClientGoodbye:
+            {
+                var goodbye = MessageSerializer.Deserialize<ClientGoodbyeMessage>(json);
+                _goodbye.TrySetResult(goodbye?.Payload.Reason ?? string.Empty);
+                break;
+            }
+
+            case MessageTypes.PairAbort:
+            {
+                var abort = MessageSerializer.Deserialize<PairAbortMessage>(json);
+                _pairAborts.Writer.TryWrite(abort?.Payload.Reason ?? string.Empty);
+                break;
+            }
         }
     }
 
