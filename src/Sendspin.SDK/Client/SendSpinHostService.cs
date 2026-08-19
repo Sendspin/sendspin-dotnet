@@ -629,11 +629,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// Waits for the handshake to complete with timeout.
     /// </summary>
     /// <param name="client">The client service to monitor.</param>
-    /// <param name="connection">The connection to disconnect on timeout.</param>
+    /// <param name="connection">The connection to drop on timeout.</param>
     /// <param name="connectionId">Connection ID for logging.</param>
     /// <param name="timeoutSeconds">Handshake timeout in seconds (default: 10).</param>
     /// <returns>True if handshake completed successfully, false otherwise.</returns>
-    private async Task<bool> WaitForHandshakeAsync(
+    internal async Task<bool> WaitForHandshakeAsync(
         SendspinClientService client,
         IncomingConnection connection,
         string connectionId,
@@ -670,7 +670,13 @@ public sealed class SendspinHostService : IAsyncDisposable
         catch (OperationCanceledException)
         {
             _logger.LogWarning("Handshake timeout for connection {ConnectionId}", connectionId);
-            await connection.DisconnectAsync("handshake_timeout");
+
+            // The spec says a provisional connection that has not activated within the window
+            // "is dropped" (connection.md:40) and names no goodbye reason for it, so drop it
+            // silently. The "handshake_timeout" this used to send is outside client/goodbye's
+            // closed set (messaging.md:426), which a server reads as no goodbye at all — the
+            // signal that invites it to reconnect immediately and loop.
+            await connection.CloseWithoutGoodbyeAsync("handshake_timeout");
             return false;
         }
         finally

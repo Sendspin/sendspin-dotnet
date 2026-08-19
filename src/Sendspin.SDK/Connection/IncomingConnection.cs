@@ -89,6 +89,32 @@ public sealed class IncomingConnection : ISendspinConnection
     public Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default)
         => CloseAfterSendingAsync(ClientGoodbyeMessage.Create(reason), reason, cancellationToken);
 
+    /// <summary>
+    /// Closes the connection without sending <c>client/goodbye</c> — the spec's literal
+    /// "dropped".
+    /// </summary>
+    /// <remarks>
+    /// For the ends the spec defines no goodbye reason for, such as a provisional connection
+    /// that never activates (connection.md:40). <c>client/goodbye.reason</c> is a closed set
+    /// (messaging.md:426), so inventing a reason is worse than silence: a server cannot parse
+    /// it, reads it as no goodbye at all, and may immediately reconnect — while the invented
+    /// string still tells an unauthenticated peer exactly why it was dropped. Mirrors how a
+    /// framing failure already closes here, with no application-level message.
+    /// </remarks>
+    /// <param name="reason">Local reason, for the state change and the log only. Never sent.</param>
+    public async Task CloseWithoutGoodbyeAsync(string reason)
+    {
+        if (_state == ConnectionState.Disconnected || !_isOpen)
+            return;
+
+        // State before the close, as the framing-failure path does: the socket close can bring
+        // the peer's own Close frame back through OnClose, and a state still reading
+        // Handshaking there would be misclassified as the legacy-server signature (#97).
+        _isOpen = false;
+        SetState(ConnectionState.Disconnected, reason);
+        await CloseSocketSafeAsync();
+    }
+
     public async Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default) where T : IMessage
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
