@@ -24,7 +24,10 @@ internal sealed class FakeClockSynchronizer : IClockSynchronizer
     public double StaticDelayMs { get; set; }
 
     public long ServerToClientTime(long serverTime) =>
-        serverTime - OffsetMicroseconds - (long)(StaticDelayMs * 1000);
+        ServerToClientTimeUncompensated(serverTime) - (long)(StaticDelayMs * 1000);
+
+    public long ServerToClientTimeUncompensated(long serverTime) =>
+        serverTime - OffsetMicroseconds;
 
     public long ClientToServerTime(long clientTime) =>
         clientTime + OffsetMicroseconds;

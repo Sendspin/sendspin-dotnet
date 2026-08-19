@@ -66,6 +66,36 @@ public class SendspinClientServiceStreamTeardownTests
         Assert.Equal(PlaybackState.Idle, client.CurrentGroup?.PlaybackState);
     }
 
+    /// <summary>
+    /// The boundary an omitted array is defined against: <c>roles</c> present but empty names no
+    /// role, so it ends nothing. Sending it is pointless, which is exactly why a handler that
+    /// treated "no names" as "all names" would go unnoticed until a server did.
+    /// </summary>
+    [Fact]
+    public void StreamEnd_WithAnEmptyRoleArray_EndsNothing()
+    {
+        var (client, connection, pipe) = PlayingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":[]}}""");
+
+        Assert.Equal(0, pipe.StopCount);
+        Assert.Equal(PlaybackState.Playing, client.CurrentGroup?.PlaybackState);
+    }
+
+    [Fact]
+    public void StreamClear_WithAnEmptyRoleArray_ClearsNothing()
+    {
+        var (client, connection, pipe) = PlayingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":2,"roles":[]}}""");
+
+        Assert.Equal(0, pipe.ClearCount);
+    }
+
     [Fact]
     public void StreamEnd_NamingPlayerAmongOtherRoles_StopsAudio()
     {

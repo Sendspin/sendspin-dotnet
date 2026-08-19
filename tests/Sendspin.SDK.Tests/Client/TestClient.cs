@@ -193,8 +193,11 @@ internal sealed class ConvergedClockSynchronizer : IClockSynchronizer
     // Deliberately does NOT apply StaticDelayMs, unlike FakeClockSynchronizer. Existing users
     // of this fake schedule playback through it, and folding the static delay in here shifts
     // every scheduled start — enough to hang tests waiting on audio that now arrives at a
-    // different time. The offset alone is what this fake needed to become useful.
+    // different time. The offset alone is what this fake needed to become useful — which also
+    // leaves the uncompensated conversion identical to it, there being no delay to leave out.
     public long ServerToClientTime(long serverTime) => serverTime - OffsetMicroseconds;
+
+    public long ServerToClientTimeUncompensated(long serverTime) => serverTime - OffsetMicroseconds;
 
     public long ClientToServerTime(long clientTime) => clientTime + OffsetMicroseconds;
 

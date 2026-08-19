@@ -30,11 +30,20 @@ public class SendspinClientServiceVisualizerTests
         return b;
     }
 
+    /// <summary>
+    /// Frozen local clock for the harness below. Every frame in this file is stamped a few
+    /// hundred microseconds before it, so each is due on arrival and well inside the staleness
+    /// threshold — keeping these tests about decoding and dispatch rather than about scheduling,
+    /// which <see cref="MediaDisplaySchedulingTests"/> covers.
+    /// </summary>
+    private const long FrozenNow = 1_000;
+
     private static (SendspinClientService Client, FakeSendspinConnection Connection) VisualizerClient()
     {
         var (client, connection, _) = TestClient.Create(configure: options =>
             options with
             {
+                PrecisionTimer = new FakePrecisionTimer { CurrentTime = FrozenNow },
                 Capabilities = new ClientCapabilities
                 {
                     Roles = new List<string> { "visualizer@v1" },

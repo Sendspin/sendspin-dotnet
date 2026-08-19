@@ -22,6 +22,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly ISendspinConnection _connection;
     private readonly ClientCapabilities _capabilities;
     private readonly IClockSynchronizer _clockSynchronizer;
+
+    // Holds visualizer frames and artwork until their display timestamps (#198, #199).
+    private readonly MediaDisplayScheduler _displayScheduler;
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IStaticDelayStore? _staticDelayStore;
     private readonly INoiseSessionInfo _session;
@@ -335,6 +338,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _captureDevice = options.CaptureDevice;
         _sourceEncoderFactory = options.SourceEncoderFactory;
         _clockSynchronizer = options.ClockSynchronizer ?? new KalmanClockSynchronizer();
+
+        _displayScheduler = new MediaDisplayScheduler(
+            _clockSynchronizer,
+            options.PrecisionTimer ?? HighPrecisionTimer.Shared,
+            _capabilities.VisualizerSupport?.BufferCapacity ?? 0,
+            _logger,
+            frame => VisualizationReceived?.Invoke(this, frame),
+            args => ArtworkReceived?.Invoke(this, args),
+            args => ArtworkCleared?.Invoke(this, args));
 
         if (_captureDevice is not null)
         {
@@ -1462,6 +1474,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // must not survive into the next one, so tear capture down now, without a
             // client_stream/end — the stream it would end died with the connection.
             _sourcePipeline?.ResetForConnectionLossAsync().SafeFireAndForget(_logger);
+
+            // Same reason, and additionally: the clock synchronizer resets on re-handshake,
+            // so a pending item's display time was computed against an offset that no longer
+            // holds and cannot be honoured on the new connection.
+            _displayScheduler.Flush();
         }
 
         // Clean up client state on full disconnection
@@ -4472,6 +4489,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             StreamEndReceived?.Invoke(this, payload);
 
+            // Media held for a display time that belongs to the stream just ended must not
+            // surface after it.
+            FlushDisplayRoles(payload.Roles);
+
             if (!ReachesPlayerRole(payload.Roles))
             {
                 return;
@@ -4520,6 +4541,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         StreamClearReceived?.Invoke(this, payload);
 
+        // "Clients should clear all buffered visualization data and continue with data received
+        // after this message" — the same boundary applies to artwork still held for display.
+        FlushDisplayRoles(payload.Roles);
+
         if (ReachesPlayerRole(payload.Roles))
         {
             _audioPipeline?.Clear();
@@ -4534,13 +4559,45 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// Role-targeted teardown is routine, not exotic: whenever a <c>server/activate</c> drops a
     /// stream role, the server ends that role's output first, so a <c>stream/end</c> naming
-    /// <c>artwork</c> arrives mid-playback and must not touch audio (#193). Names this client
-    /// does not implement — <c>artwork</c>, <c>visualizer</c>, and the application-specific
-    /// roles starting with <c>_</c> — are simply not <c>player</c>; they reach subscribers
-    /// through <see cref="StreamEndReceived"/> / <see cref="StreamClearReceived"/> rather than
-    /// being validated here, since only the consumer of a role knows its names.
+    /// <c>artwork</c> arrives mid-playback and must not touch audio (#193). Other names —
+    /// <c>artwork</c>, <c>visualizer</c>, and the application-specific roles starting with
+    /// <c>_</c> — are simply not <c>player</c>; the two media roles are torn down separately by
+    /// <see cref="FlushDisplayRoles"/>, and the rest reach subscribers through
+    /// <see cref="StreamEndReceived"/> / <see cref="StreamClearReceived"/> rather than being
+    /// validated here, since only the consumer of a role knows its names.
     /// </remarks>
     private static bool ReachesPlayerRole(List<string>? roles) => roles is null || roles.Contains("player");
+
+    /// <summary>
+    /// Discards the media a <c>stream/end</c> or <c>stream/clear</c> ends the display of: the
+    /// roles it names, or both media roles when it names none.
+    /// </summary>
+    /// <remarks>
+    /// Runs outside <see cref="ReachesPlayerRole"/>'s gate, because the roles holding data here
+    /// are exactly the ones that gate turns away — a <c>stream/end</c> for <c>visualizer</c>
+    /// alone must still drop the frames waiting for their display moment. <c>artwork</c> is in
+    /// <c>stream/end</c>'s role vocabulary but not <c>stream/clear</c>'s; it is honoured in both
+    /// anyway, as the C++ reference client switches on the same three names for either message.
+    /// A present-but-empty array names no role and so ends nothing, as everywhere else.
+    /// </remarks>
+    private void FlushDisplayRoles(List<string>? roles)
+    {
+        if (roles is null)
+        {
+            _displayScheduler.Flush();
+            return;
+        }
+
+        if (roles.Contains("visualizer"))
+        {
+            _displayScheduler.FlushVisualizer();
+        }
+
+        if (roles.Contains("artwork"))
+        {
+            _displayScheduler.FlushArtwork();
+        }
+    }
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
     {
@@ -4601,17 +4658,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 var artwork = BinaryMessageParser.ParseArtworkChunk(data.Span);
                 if (artwork is not null)
                 {
-                    if (artwork.ImageData.Length == 0)
-                    {
-                        _logger.LogDebug("Artwork cleared on channel {Channel}", artwork.Channel);
-                        ArtworkCleared?.Invoke(this, new ArtworkClearedEventArgs(artwork.Channel, artwork.Timestamp));
-                    }
-                    else
-                    {
-                        _logger.LogDebug("Artwork received on channel {Channel}: {Length} bytes",
-                            artwork.Channel, artwork.ImageData.Length);
-                        ArtworkReceived?.Invoke(this, new ArtworkReceivedEventArgs(artwork.Channel, artwork.Timestamp, artwork.ImageData));
-                    }
+                    _logger.LogDebug("Artwork on channel {Channel}: {Length} bytes @ {Timestamp}",
+                        artwork.Channel, artwork.ImageData.Length, artwork.Timestamp);
+
+                    // Held until the timestamp's local equivalent, or raised now if that has
+                    // already passed — artwork is never dropped for lateness (#199).
+                    _displayScheduler.SubmitArtwork(artwork);
                 }
                 break;
 
@@ -4623,7 +4675,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (frame is not null)
                 {
                     _logger.LogTrace("Visualizer frame: type {Type} @ {Timestamp}", type, timestamp);
-                    VisualizationReceived?.Invoke(this, frame);
+
+                    // Held until the timestamp's local equivalent, and dropped outright if it
+                    // is already too far past to render (#198).
+                    _displayScheduler.SubmitVisualizerFrame(frame, data.Length);
                 }
                 else
                 {
@@ -4676,6 +4731,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         StopTimeSyncLoop();
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
+        _displayScheduler.Dispose();
     }
 
     public async ValueTask DisposeAsync()
@@ -4686,6 +4742,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         StopTimeSyncLoop();
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
+        _displayScheduler.Dispose();
 
         // NOTE: We do NOT dispose _audioPipeline here - it's a shared singleton
         // managed by the DI container. We only stop playback if active.

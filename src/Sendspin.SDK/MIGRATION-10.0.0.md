@@ -26,6 +26,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 | Static delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
+| Clock sync | `IClockSynchronizer` gains `ServerToClientTimeUncompensated` | Low — compiler error, one-line fix, and only for a custom synchronizer |
 | `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
 | Stream teardown | `stream/end` and `stream/clear` honour `roles`; their payloads lost `Reason`, `StreamId` and `TargetTimestamp` | Low — compiler error, and the removed members never carried a value |
 | Undefined wire surface | `VisualizerTypes.Pitch` (and binary type 21), `PlayerStatePayload.BufferLevel`/`.Error`, and `AudioChunk.Slot` removed | Low — compiler error; none were spec-defined and nothing in the SDK populated them |
@@ -249,6 +250,19 @@ Both facades carry the same signature and the same semantics.
 **Supplying a value is now a real update, not just a report.** It is written to `IClockSynchronizer.StaticDelayMs` *and* persisted through `IStaticDelayStore`, which is what the spec requires of a client-initiated change ("clients must persist `static_delay_ms` locally across reboots and server reconnections"). Previously the value was reported and nothing else: playback kept using the old delay, nothing was persisted, and the next reconnect silently reverted to it.
 
 If you were calling the three-argument form purely to report a delay you had already applied yourself, it now also persists it — which is almost certainly what you wanted.
+
+### A custom `IClockSynchronizer` needs a one-line update
+
+The interface gains `ServerToClientTimeUncompensated(long)`, so a 9.x implementation fails with a compiler error (CS0535). It is `ServerToClientTime` without the static delay, and for most implementations that is the conversion they already had before subtracting it:
+
+```csharp
+public long ServerToClientTimeUncompensated(long serverTime) => serverTime - Offset;
+
+public long ServerToClientTime(long serverTime) =>
+    ServerToClientTimeUncompensated(serverTime) - (long)(StaticDelayMs * 1000);
+```
+
+Both exist because `static_delay_ms` belongs to the player role alone: it compensates for hardware past the audio port, so it applies to scheduling sound and not to the visualizer and artwork roles' display timestamps, which the spec translates with the clock offset alone. The SDK calls the uncompensated conversion for those, which is what keeps visuals with the audio on a device that has a delay configured.
 
 ---
 
