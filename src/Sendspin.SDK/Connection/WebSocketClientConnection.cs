@@ -154,6 +154,18 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(8192);
+
+        // Every exit from this loop owes the subscriber exactly one terminal callback, so track
+        // whether one has gone out rather than inferring it from the socket state. The state
+        // could not tell the two Aborted cases apart: an abort that surfaced as an exception
+        // (already reported below) and an abort that landed while control was inside an
+        // OnText/OnBinary handler instead of ReceiveAsync — that one ends the loop through the
+        // while condition with no exception at all, and the state check then read Aborted and
+        // stayed silent. Neither OnError nor OnClose fired, so IncomingConnection never left
+        // Connected and the connection kept its arbitration slot (#208) — reachable on the
+        // accept path since it gained a keep-alive timeout (#217). The flag keeps the
+        // no-double-fire property the state check was there for.
+        bool reported = false;
         try
         {
             while (!cancellationToken.IsCancellationRequested &&
@@ -187,6 +199,7 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
                         }
 
                         // The only site with a status to report: the peer sent a Close frame.
+                        reported = true;
                         OnClose?.Invoke(result.CloseStatus);
                         return;
                     }
@@ -219,21 +232,23 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
 
             // Abnormal: the socket aborted rather than closing, so no Close frame and no
             // status ever arrived.
+            reported = true;
             OnClose?.Invoke(null);
         }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "WebSocket receive error");
+            reported = true;
             OnError?.Invoke(ex);
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
-            if (_webSocket.State != WebSocketState.Closed &&
-                _webSocket.State != WebSocketState.Aborted)
+            if (!reported)
             {
-                // The loop left without the peer closing — cancellation, or a local close that
-                // moved the socket out of Open. No peer status exists to report.
+                // The loop left without the peer closing and without an error — cancellation, a
+                // local close that moved the socket out of Open, or an abort that landed while a
+                // message handler had control. No peer status exists to report.
                 OnClose?.Invoke(null);
             }
         }
