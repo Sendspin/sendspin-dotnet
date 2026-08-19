@@ -349,9 +349,10 @@ public sealed class IncomingConnection : ISendspinConnection
         // replying. That produces no framing fatal, so this close handler is the only place
         // the condition is visible. One inbound frame proves the peer speaks the encrypted
         // protocol, so a close after that is ambiguous (restarting server, draining proxy).
-        // The Handshaking guard keeps a local disconnect (e.g. the host's handshake timeout,
-        // which routes through DisconnectAsync and so is Disconnecting by now) from being
-        // reported as a legacy server.
+        // The Handshaking guard keeps a local teardown from being reported as a legacy server:
+        // every one of them leaves this state before its close can come back through here —
+        // DisconnectAsync sets Disconnecting, and CloseWithoutGoodbyeAsync, which the host's
+        // provisional-handshake timeout now takes (#220), sets Disconnected ahead of the close.
         if (_state == ConnectionState.Handshaking
             && !_framing.IsTransportReady
             && _inboundFramesSinceReset == 0)

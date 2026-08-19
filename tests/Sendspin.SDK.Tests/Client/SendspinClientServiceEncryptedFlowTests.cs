@@ -136,7 +136,7 @@ public class SendspinClientServiceEncryptedFlowTests
 
         // The caller's token is linked into the handshake wait, so cancelling it surfaces as
         // OperationCanceledException - distinct from the TimeoutException the 30 s handshake
-        // timeout raises, and without that path's client/goodbye 'handshake_timeout' close.
+        // timeout raises, and without that path's client/goodbye 'restart' close.
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => connectTask.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Null(connection.LastDisconnectReason);
