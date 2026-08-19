@@ -54,4 +54,9 @@ public static class GoodbyeReasons
         AnotherServer, Shutdown, Restart, UserRequest,
         Unauthorized, PairingRequired, ConcurrentAttempt, Unpaired,
     ];
+
+    /// <summary>Whether the spec defines a reason.</summary>
+    /// <param name="reason">The reason to check.</param>
+    /// <returns><see langword="true"/> if <paramref name="reason"/> is in <see cref="All"/>.</returns>
+    public static bool IsDefined(string reason) => All.Contains(reason, StringComparer.Ordinal);
 }
