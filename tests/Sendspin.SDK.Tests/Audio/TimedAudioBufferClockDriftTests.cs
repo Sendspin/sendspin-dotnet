@@ -112,16 +112,23 @@ public class TimedAudioBufferClockDriftTests
     }
 
     [Fact]
-    public void OffsetSlew_SurfacesInSyncError_OnRawPath()
+    public void OffsetSlew_SurfacesAndIsClosed_OnRawPath()
     {
-        // ReadRaw applies no corrections itself (external correctors do), so the
-        // error must accumulate to roughly the slewed amount.
+        // Issue #63's point is that post-anchor offset movement must reach the corrector at
+        // all. It now also gets closed on this path: ReadRaw still applies no CONTINUOUS
+        // correction (that is the external corrector's job), but the one-shot snap is a
+        // buffer-timeline operation the buffer owns on both paths — an external corrector
+        // cannot skip buffered content it was never handed. So instead of the error piling up
+        // to the full slew, the drift shows up in the drift term and the snaps chase it.
         using var session = new Session(options: null, useRawReads: true);
         session.Steps(300); // 3s: anchor + startup grace + baseline capture settle
 
         session.SlewOffset(totalUs: 200_000, steps: 600); // +200ms over 6s
 
-        Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, 150_000, 250_000);
+        var stats = session.Buffer.GetStats();
+        Assert.InRange(stats.ClockDriftMs, 150, 250);          // seen
+        Assert.True(stats.HardSyncCount > 0, "drift should drive one-shot corrections");
+        Assert.InRange(session.TrueMisalignmentUs(), -20_000, 20_000); // and closed
     }
 
     [Fact]
@@ -169,7 +176,11 @@ public class TimedAudioBufferClockDriftTests
         session.ClockSync.IsConverged = false;
         session.SlewOffset(totalUs: 100_000, steps: 200);
 
-        Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, 30_000, 70_000);
+        // Asserted on the drift term rather than the sync error: the error is now driven back
+        // to ~0 by one-shot snaps, so it can no longer stand in for "how much drift was
+        // observed". The term itself is what must stay frozen at the converged 50ms — the
+        // further 100ms of unconverged movement must not enter it.
+        Assert.InRange(session.Buffer.GetStats().ClockDriftMs, 30, 70);
     }
 
     [Fact]

@@ -32,6 +32,12 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
 | Stream teardown | `stream/end` and `stream/clear` honour `roles`; their payloads lost `Reason`, `StreamId` and `TargetTimestamp` | Low — compiler error, and the removed members never carried a value |
 | Undefined wire surface | `VisualizerTypes.Pitch` (and binary type 21), `PlayerStatePayload.BufferLevel`/`.Error`, and `AudioChunk.Slot` removed | Low — compiler error; none were spec-defined and nothing in the SDK populated them |
+| Sync correction | `MaxSpeedCorrection` defaults to `0.005`; a larger configured value is **clamped** to it, with a warning | Medium — no compiler error, but correction is slower than you configured |
+| Sync correction | `DeadbandMicroseconds` defaults to `100` µs, down from 1 ms | Medium — behavioural, no compiler error |
+| Sync correction | New one-shot hard-sync tier above 5 ms, applied by the buffer on **both** read paths | Medium — behavioural, no compiler error |
+| Sync correction | `Read` applies the sub-5 ms correction itself and holds `TargetPlaybackRate` at 1.0 | Medium — double-corrects if you also drive a resampler from that rate |
+| Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
+| Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |
 
 ---
 
@@ -373,7 +379,132 @@ connection.TextMessageReceived += (_, e) => Handle(e.Json);
 
 ---
 
-## 12. Checklist
+---
+
+## 12. Sync correction now follows the spec's caps and the reference's strategy
+
+Nothing here is a compiler error, and nothing here throws. All of it changes what you hear.
+
+### The speed cap is enforced, not suggested
+
+`SyncCorrectionOptions.MaxSpeedCorrection` defaulted to `0.02`, and `CliDefaults` to `0.04`. The
+spec makes ±0.5% a MUST for continuous correction, measured as a sliding average over 150 ms
+(`roles/player/v1.md:134`). The default is now `0.005` and `CliDefaults` matches it.
+
+A larger configured value is **clamped where correction is applied**, not rejected — every
+correction path uses `EffectiveMaxSpeedCorrection`, so an out-of-spec speed cannot be produced
+whatever the configuration says. The SDK logs one warning per corrector when it sees one:
+
+```csharp
+// Still constructs, still plays. Corrects at 0.5%, and says so in the log.
+var options = new SyncCorrectionOptions { MaxSpeedCorrection = 0.02 };
+Console.WriteLine(options.MaxSpeedCorrection);          // 0.02  — what you asked for
+Console.WriteLine(options.EffectiveMaxSpeedCorrection); // 0.005 — what is applied
+Console.WriteLine(options.ExceedsSpecSpeedCap);         // true
+```
+
+If you read this from configuration — a `MaxSpeedCorrectionPercent` setting, say — clamp it at
+the point of reading or drop the setting, so the log stops complaining and the value on screen
+matches the behaviour. `Validate()` still rejects genuinely nonsensical values (zero, negative,
+above 1.0).
+
+The reasoning the old doc comment gave (pitch perception starts around 3%, so 2-4% is
+inaudible) is not the reason the cap exists. Every player in a group must recover from the same
+disturbance at the same bounded rate, or they audibly diverge while converging even though each
+one sounds fine alone.
+
+### Errors above 5 ms snap instead of grinding
+
+Previously every error below the 500 ms re-anchor threshold was corrected continuously. At the
+new cap a 400 ms error would take 80 seconds to close, during which the player trails the group.
+There is now a one-shot tier — `HardSyncThresholdMicroseconds`, default 5 ms, matching
+`HARD_SYNC_THRESHOLD_US` in the C++ reference — that skips or inserts the exact excess in a
+single discontinuity. The spec both describes this (`roles/player/v1.md:178`) and exempts it
+from the speed cap, on the condition that it stays rare; `AudioBufferStats.HardSyncCount`
+reports how rare it is in practice.
+
+The snap is applied by `TimedAudioBuffer` on **both** read paths, including `ReadRaw`. Skipping
+buffered content or manufacturing silence is a buffer-timeline operation an external corrector
+cannot perform on samples it has already been handed, so it cannot be delegated. A
+`SyncCorrectionCalculator` fed an error in that band reports
+`SyncCorrectionMode.HardSync` with a neutral rate, meaning *stand down* — if you wrote your own
+`ISyncCorrectionProvider`, treat that mode the same way rather than adding a correction on top.
+
+### `Read` corrects; `ReadRaw` reports
+
+The two read paths now have a clean split, and which one you use decides who corrects.
+
+`Read` corrects end to end: nothing below the dead band, whole-frame drop/duplicate at a
+capped interval between the dead band and 5 ms, and a snap above that. It holds
+`TargetPlaybackRate` at 1.0 throughout, because it is not asking anyone for anything. It
+previously *advised* a rate in that middle band which nothing applied — the SDK has no
+resampler on that path — so ordinary clock drift accumulated unopposed until the hard-sync tier
+spliced it, roughly every hundred seconds at a realistic 50 ppm. If you drive a resampler from
+`TargetPlaybackRateChanged` **and** call `Read`, stop doing one of the two: that is now a double
+correction.
+
+`ReadRaw` is unchanged in intent — you apply the continuous correction from an
+`ISyncCorrectionProvider` — except that the buffer still performs the one-shot snap itself, as
+described above.
+
+### The dead band moved to 100 µs
+
+`DeadbandMicroseconds` sat at 1 ms — exactly the spec's MUST floor, which left no margin under
+it and made the ±0.5 ms SHOULD target unreachable by construction. It is now 100 µs, the spec's
+suggested band and the reference's `SOFT_SYNC_THRESHOLD_US`. If your platform's timing jitter
+genuinely needs a wider band, raise it deliberately and record the measurement that justifies
+it.
+
+### Content holes are detected
+
+Chunk timestamps are now re-validated at every segment boundary during playback, not only
+before it starts. A lost chunk or a mid-play discard used to shift every later sample earlier in
+absolute time while the pace-based sync error read zero, so nothing corrected it. The step is
+now folded into the sync error and closed. Chunks whose content the read cursor has already
+passed are dropped on arrival, as `roles/player/v1.md:145` asks. Both are counted in
+`AudioBufferStats.ContentHolesDetected` and `.LateChunksDropped`.
+
+### Playback anchors to the schedule
+
+`TimedAudioBuffer` now anchors its sync-error reference to the first segment's *scheduled* time
+rather than to the callback that happened to start playback, and snaps the sub-callback residual
+so the first sample lands on time. It also gates readiness on `MinBufferMilliseconds` (new,
+default 150 ms — keep it equal to `ClientCapabilities.MinBufferMs`) rather than on 80% of the
+target depth, because a live stream is scheduled only `min_buffer_ms` ahead and the larger gate
+guaranteed a late start on exactly those streams.
+
+---
+
+## 13. `buffer_capacity` is derived from the buffer you actually have
+
+`ClientCapabilities.BufferCapacity` defaulted to a flat 32 MB with no relationship to the audio
+buffer. The spec makes it a hard per-player byte limit that servers fill toward
+(`roles/player/v1.md:34-35`), so that was a promise the client could not keep: a server behaving
+exactly as allowed could send minutes of Opus to a client holding a fraction of a second of it,
+and everything past the buffer was discarded before it played.
+
+There is now one number to set:
+
+```csharp
+var capabilities = new ClientCapabilities { AudioBufferCapacityMs = 60_000 };
+
+// The same number goes to the buffer. Both default to
+// PlayerBufferCapacity.DefaultDecodedBufferMilliseconds (30 s), so leaving both alone is safe.
+var buffer = new TimedAudioBuffer(format, clockSync, capabilities.AudioBufferCapacityMs);
+```
+
+`BufferCapacity` is derived from that duration and your advertised codecs, taking the byte rate
+of the *most compressed* one (a megabyte of Opus is minutes; a megabyte of PCM is seconds) and
+advertising four fifths of it, as the C++ reference does. Setting `BufferCapacity` explicitly
+still works and still overrides the derivation — but it makes the promise yours to keep;
+`PlayerBufferCapacity.HoldableMilliseconds` will tell you whether it holds.
+
+Expect the server to send less ahead than it used to. That is the fix, not a regression: raise
+`AudioBufferCapacityMs` on both sides if you want a deeper queue.
+
+---
+
+## 14. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
@@ -385,6 +516,11 @@ connection.TextMessageReceived += (_, e) => Handle(e.Json);
 - [ ] `UnpairedAccessEnabled` is a deliberate decision, not a default you inherited
 - [ ] `PairingConfigChanged` is persisted and reapplied at startup
 - [ ] Identity and PSK files are in a user-scoped location
+- [ ] No `MaxSpeedCorrection` above `SyncCorrectionOptions.SpecMaxSpeedCorrection` reaches the SDK — including from configuration; check the log for the clamp warning
+- [ ] Nothing drives a resampler from `TargetPlaybackRate` while also calling `Read`
+- [ ] `ClientCapabilities.AudioBufferCapacityMs` and `TimedAudioBuffer`'s `bufferCapacityMs` are the same number
+- [ ] `TimedAudioBuffer.MinBufferMilliseconds` matches `ClientCapabilities.MinBufferMs`
+- [ ] A custom `ISyncCorrectionProvider` treats `SyncCorrectionMode.HardSync` as "stand down"
 
 ---
 

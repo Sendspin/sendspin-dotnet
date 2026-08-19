@@ -16,6 +16,88 @@ public class SyncCorrectionOptionsTests
     }
 
     [Fact]
+    public void Default_DeadbandMatchesTheReferenceSoftSyncThreshold()
+    {
+        // Issue #235: the dead band used to sit at 1 ms, exactly the spec's MUST floor, which
+        // makes the ±0.5 ms SHOULD target unreachable by construction. 100 µs is the spec's
+        // suggested band (roles/player/v1.md:172) and the reference's SOFT_SYNC_THRESHOLD_US.
+        Assert.Equal(100, SyncCorrectionOptions.Default.DeadbandMicroseconds);
+    }
+
+    [Fact]
+    public void Default_MaxSpeedCorrectionIsTheSpecCap()
+    {
+        // Issue #228: the default was 2% and the CLI preset 4%, both far past the spec's
+        // ±0.5% MUST (roles/player/v1.md:134).
+        Assert.Equal(0.005, SyncCorrectionOptions.SpecMaxSpeedCorrection);
+        Assert.Equal(
+            SyncCorrectionOptions.SpecMaxSpeedCorrection,
+            SyncCorrectionOptions.Default.MaxSpeedCorrection);
+    }
+
+    [Fact]
+    public void CliDefaults_AreWithinTheSpecCap()
+    {
+        var cli = SyncCorrectionOptions.CliDefaults;
+
+        Assert.True(cli.MaxSpeedCorrection <= SyncCorrectionOptions.SpecMaxSpeedCorrection);
+        Assert.Equal(100, cli.DeadbandMicroseconds);
+        cli.Validate();
+    }
+
+    [Fact]
+    public void SpeedCorrectionAboveTheSpecCap_IsClampedNotRejected()
+    {
+        // Rejecting would stop a client whose configuration predates the cap from starting at
+        // all — a worse outcome than playing it in conformance. The configured value is left
+        // visible so the app can see what it asked for; only what is applied is clamped.
+        var options = new SyncCorrectionOptions { MaxSpeedCorrection = 0.02 };
+
+        options.Validate();
+
+        Assert.Equal(0.02, options.MaxSpeedCorrection);
+        Assert.True(options.ExceedsSpecSpeedCap);
+        Assert.Equal(SyncCorrectionOptions.SpecMaxSpeedCorrection, options.EffectiveMaxSpeedCorrection);
+        Assert.Equal(1.0 + SyncCorrectionOptions.SpecMaxSpeedCorrection, options.MaxRate);
+        Assert.Equal(1.0 - SyncCorrectionOptions.SpecMaxSpeedCorrection, options.MinRate);
+    }
+
+    [Fact]
+    public void Validate_StillRejectsNonsensicalSpeedCorrection()
+    {
+        Assert.Throws<ArgumentException>(
+            new SyncCorrectionOptions { MaxSpeedCorrection = 0 }.Validate);
+        Assert.Throws<ArgumentException>(
+            new SyncCorrectionOptions { MaxSpeedCorrection = 1.5 }.Validate);
+    }
+
+    [Fact]
+    public void Default_HardSyncTierSitsBetweenRateCorrectionAndReanchor()
+    {
+        var options = SyncCorrectionOptions.Default;
+
+        // Issue #232: 5 ms, matching HARD_SYNC_THRESHOLD_US in the reference.
+        Assert.Equal(5_000, options.HardSyncThresholdMicroseconds);
+        Assert.True(options.HardSyncThresholdMicroseconds < options.ReanchorThresholdMicroseconds);
+    }
+
+    [Fact]
+    public void Validate_RejectsHardSyncThresholdAtOrAboveReanchor()
+    {
+        var options = new SyncCorrectionOptions { HardSyncThresholdMicroseconds = 500_000 };
+
+        Assert.Throws<ArgumentException>(options.Validate);
+    }
+
+    [Fact]
+    public void Clone_CopiesHardSyncThreshold()
+    {
+        var options = new SyncCorrectionOptions { HardSyncThresholdMicroseconds = 7_000 };
+
+        Assert.Equal(7_000, options.Clone().HardSyncThresholdMicroseconds);
+    }
+
+    [Fact]
     public void Default_StillValidates()
     {
         var options = new SyncCorrectionOptions();

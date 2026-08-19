@@ -22,8 +22,9 @@ public class AudioPipelineStreamStartTests
     // 48 kHz stereo: 96 interleaved samples per millisecond.
     private const int ChunkSamples = ChunkMs * SampleRate / 1000 * Channels;
 
-    // TimedAudioBuffer reports ready at 80% of its 250ms target, so 10 chunks start playback.
-    private const int ChunksToPlayback = 10;
+    // TimedAudioBuffer reports ready at the lesser of 80% of its 250ms target and its 150ms
+    // negotiated minimum buffer (#233), so 8 chunks (160ms) start playback.
+    private const int ChunksToPlayback = 8;
 
     private static AudioFormat Pcm(int bitDepth = 16, int sampleRate = SampleRate, int channels = Channels) =>
         new AudioFormat { Codec = "pcm", SampleRate = sampleRate, Channels = channels, BitDepth = bitDepth };
