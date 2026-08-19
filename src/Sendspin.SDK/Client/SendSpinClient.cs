@@ -217,10 +217,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <c>client/state</c> — until its filter has five measurements and sub-millisecond
     /// uncertainty, which at a 10 s cadence would leave a player invisible to the server for
     /// the better part of a minute after every connect. Pacing the converging window at 500 ms
-    /// instead reaches that gate in about two seconds, like the reference clients, and the
-    /// interval reverts to <see cref="SyncedTimeSyncIntervalMs"/> the moment it is met (#226).
+    /// instead reaches that gate in about two seconds, like the reference clients (#226).
+    /// <para>
+    /// It is a budget, not a mode: see <see cref="MaxConvergingBursts"/>. On a link where the
+    /// convergence gate is simply out of reach the tier would otherwise never end, and "not
+    /// converged yet" is exactly when a client can least afford to be the loudest thing on the
+    /// network.
+    /// </para>
     /// </remarks>
     private const int ConvergingTimeSyncIntervalMs = 500;
+
+    /// <summary>
+    /// Bursts the converging tier may spend before the interval widens to
+    /// <see cref="SyncedTimeSyncIntervalMs"/> whether the clock has converged or not.
+    /// </summary>
+    /// <remarks>
+    /// About 30 seconds of fast pacing, which is far more than the five bursts a healthy link
+    /// needs and still enough for a slow one — at 20 ms RTT the offset uncertainty crosses the
+    /// millisecond gate in roughly 25 measurements. Past that the pacing is not buying
+    /// convergence, it is buying packets: measurement uncertainty falls as the square root of
+    /// the sample count, so a link whose per-sample noise is tens of milliseconds needs
+    /// hundreds to thousands of samples, and 8 probes every 500 ms would sustain 5-6 probes a
+    /// second for the best part of an hour to get there. The reference client does not converge
+    /// on such a link either — it never leaves its fixed 10 s cadence — so widening loses
+    /// nothing real and stops a struggling client from making its own network worse. The client
+    /// keeps probing at the steady cadence and still reports <c>available</c> the moment the
+    /// gate is finally met.
+    /// </remarks>
+    private const int MaxConvergingBursts = 60;
+
+    // Converging-tier budget, refilled by StartTimeSyncLoop. Touched only from the time-sync
+    // loop, which is single-threaded across its own lifetime.
+    private int _convergingBurstsSpent;
+    private bool _convergingBudgetExhausted;
 
     /// <summary>
     /// Cancelled when this connection ends, and only then.
@@ -3678,6 +3707,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void StartTimeSyncLoop()
     {
         StopTimeSyncLoop();
+
+        // A fresh converging window for the new loop: this runs on (re)connect and on the
+        // return from a pairing window, both of which are moments where reaching the
+        // convergence gate promptly is worth the extra probes again.
+        _convergingBurstsSpent = 0;
+        _convergingBudgetExhausted = false;
+
         _timeSyncCts = new CancellationTokenSource();
         TimeSyncLoopAsync(_timeSyncCts.Token).SafeFireAndForget(_logger);
         _logger.LogDebug("Time sync loop started (adaptive intervals)");
@@ -3729,11 +3765,50 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// arrived 10 s late and the player took over twenty seconds to appear on the server,
     /// slower on a good network than on a poor one (#226). Keying the tier on convergence
     /// itself, rather than on a proxy for it, is what makes that impossible to reintroduce.
+    /// <para>
+    /// The fast tier is a per-loop budget of <see cref="MaxConvergingBursts"/> bursts, not a
+    /// mode that lasts until convergence: a link that cannot reach the gate would otherwise
+    /// hold the loop at 500 ms indefinitely. Spending the budget is not fatal — the client
+    /// keeps probing at the steady cadence and reports <c>available</c> whenever the gate is
+    /// finally met — and the budget is refilled by <see cref="StartTimeSyncLoop"/>, so a
+    /// reconnect or a return from a pairing window gets a fresh converging window.
+    /// </para>
+    /// <para>
+    /// Marked <c>internal</c> so the cadence tiers can be asserted directly; the only
+    /// production caller is <see cref="TimeSyncLoopAsync"/>.
+    /// </para>
     /// </remarks>
-    private int GetAdaptiveTimeSyncIntervalMs()
-        => _clockSynchronizer.GetStatus().IsConverged
-            ? SyncedTimeSyncIntervalMs
-            : ConvergingTimeSyncIntervalMs;
+    internal int GetAdaptiveTimeSyncIntervalMs()
+    {
+        var status = _clockSynchronizer.GetStatus();
+
+        if (status.IsConverged)
+        {
+            return SyncedTimeSyncIntervalMs;
+        }
+
+        if (_convergingBurstsSpent < MaxConvergingBursts)
+        {
+            _convergingBurstsSpent++;
+            return ConvergingTimeSyncIntervalMs;
+        }
+
+        if (!_convergingBudgetExhausted)
+        {
+            _convergingBudgetExhausted = true;
+            _logger.LogWarning(
+                "Clock sync has not converged after {Bursts} bursts (offset uncertainty " +
+                "{Uncertainty:F0}μs over {Count} measurements); falling back to the {Interval}ms " +
+                "steady-state cadence. Probing faster than this cannot fix a link this noisy, and " +
+                "this client will not report available until the filter converges.",
+                MaxConvergingBursts,
+                status.OffsetUncertaintyMicroseconds,
+                status.MeasurementCount,
+                SyncedTimeSyncIntervalMs);
+        }
+
+        return SyncedTimeSyncIntervalMs;
+    }
 
     private async Task TimeSyncLoopAsync(CancellationToken cancellationToken)
     {

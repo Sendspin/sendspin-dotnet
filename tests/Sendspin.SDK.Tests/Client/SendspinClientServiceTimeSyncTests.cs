@@ -243,6 +243,42 @@ public class SendspinClientServiceTimeSyncTests
     }
 
     [Fact]
+    public void ConvergingCadence_IsABudget_AndWidensOnALinkThatNeverConverges()
+    {
+        // 500 ms is the right answer for the couple of seconds a healthy link needs to converge
+        // and the wrong one for a link whose noise puts the gate out of reach: uncertainty falls
+        // as the square root of the sample count, so at a 100 ms round trip the gate is
+        // thousands of measurements away, and an unbounded tier would sustain 5-6 probes a
+        // second for the best part of an hour. The reference client does not converge there
+        // either — it never leaves its fixed 10 s cadence — so the fast tier is a budget, after
+        // which the interval widens whether the clock converged or not.
+        var clockSync = new RecordingClockSynchronizer(); // never converges, in status or in fact
+        var (client, _, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = clockSync });
+        using var _c = client;
+
+        var intervals = Enumerable.Range(0, 62).Select(_ => client.GetAdaptiveTimeSyncIntervalMs()).ToList();
+
+        Assert.All(intervals.Take(60), interval => Assert.Equal(500, interval));
+        Assert.Equal(10000, intervals[60]);
+        Assert.Equal(10000, intervals[61]);
+    }
+
+    [Fact]
+    public void ConvergingCadence_EndsImmediatelyOnConvergence_NotOnlyWhenTheBudgetRunsOut()
+    {
+        // The budget must not become the only thing that ends the fast tier — reaching the
+        // convergence gate still ends it at once, which is the whole point of the tier (#226).
+        var clockSync = new RecordingClockSynchronizer();
+        var (client, _, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = clockSync });
+        using var _c = client;
+
+        Assert.Equal(500, client.GetAdaptiveTimeSyncIntervalMs());
+
+        clockSync.StatusIsConverged = true;
+        Assert.Equal(10000, client.GetAdaptiveTimeSyncIntervalMs());
+    }
+
+    [Fact]
     public async Task StreamStartRescueBurst_IsCancelledByDisconnect_ReleasingTheSingleBurstGuard()
     {
         // The rescue burst runs on the connection's lifetime rather than the time-sync loop's,
