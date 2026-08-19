@@ -137,6 +137,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     // snapshot and still get corrected. See CaptureSyncErrorBaseline.
     private double _syncErrorBaselineMicroseconds;
     private bool _syncErrorBaselineCaptured;
+    private bool _baselineDeferredLogged;
 
     // Post-anchor clock-drift tracking (SyncCorrectionOptions.TrackClockDrift):
     // the Kalman offset captured when the sync-error reference was (re)established,
@@ -392,11 +393,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         }
 
         // Still further behind than the catastrophic threshold, which happens when every
-        // buffered segment is stale and SkipStaleAudio has to keep the last one. Starting here
-        // would hand the startup baseline a residual it absorbs at the end of the grace window
-        // — the error zeroed and the lateness permanent, which is exactly the failure this
-        // path exists to prevent. Re-anchor instead. If the cooldown refuses, start anyway
-        // rather than emit silence forever; the corrector then has a visible error to work on.
+        // buffered segment is stale and SkipStaleAudio has to keep the last one. Re-anchor
+        // rather than start here.
+        //
+        // If the cooldown refuses — only reachable within a few seconds of a previous
+        // re-anchor — start anyway rather than emit silence indefinitely. That is safe because
+        // CaptureSyncErrorBaseline declines to absorb an error past this same threshold: the
+        // lateness stays visible through the grace window and the re-anchor check takes it as
+        // soon as the cooldown expires, instead of being zeroed and made permanent.
         var latenessMicroseconds = -timeUntilStart;
         if (latenessMicroseconds > _syncOptions.ReanchorThresholdMicroseconds
             && RequestReanchor(currentLocalTime))
@@ -877,6 +881,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _smoothedSyncErrorMicroseconds = 0;
             _syncErrorBaselineMicroseconds = 0;
             _syncErrorBaselineCaptured = false;
+            _baselineDeferredLogged = false;
             _clockOffsetCaptured = false;
             _clockDriftUs = 0;
 
@@ -943,6 +948,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _smoothedSyncErrorMicroseconds = 0;
             _syncErrorBaselineMicroseconds = 0;
             _syncErrorBaselineCaptured = false;
+            _baselineDeferredLogged = false;
             _clockOffsetCaptured = false;
             _clockDriftUs = 0;
 
@@ -1561,6 +1567,31 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <param name="reason">Window that just ended, for diagnostics.</param>
     private void CaptureSyncErrorBaseline(string reason)
     {
+        // What this absorbs is a constant plumbing offset — an output backend's prefill, engine
+        // overhead, resampler priming — and those are bounded. An error past the re-anchor
+        // threshold is not one of them; it is misalignment the re-anchor tier owns. Absorbing
+        // it here is how a catastrophically late start became permanent at a reported error of
+        // zero: the startup grace suppresses the re-anchor check, and this then erased the
+        // evidence before that check ever ran. Leave it visible and retry on a later callback —
+        // _syncErrorBaselineCaptured stays false, so a genuine plumbing offset is still picked
+        // up once the outsized error resolves (via the re-anchor, which clears and restarts).
+        if (Math.Abs(_smoothedSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
+        {
+            if (!_baselineDeferredLogged)
+            {
+                _baselineDeferredLogged = true;
+                _logger.LogWarning(
+                    "[Correction] Deferring the {Reason} sync-error baseline: {ErrorMs:F0}ms is past " +
+                    "the {ThresholdMs:F0}ms re-anchor threshold, so it is misalignment rather than a " +
+                    "constant offset — leaving it visible for the re-anchor tier",
+                    reason,
+                    _smoothedSyncErrorMicroseconds / 1000.0,
+                    _syncOptions.ReanchorThresholdMicroseconds / 1000.0);
+            }
+
+            return;
+        }
+
         // Remove the drift contribution before snapshotting: post-anchor clock
         // movement is handled by re-referencing the offset (below), not by folding
         // it into the pace baseline - otherwise the same microseconds would be

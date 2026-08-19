@@ -670,20 +670,63 @@ public class TimedAudioBufferCorrectionTests
     [Fact]
     public void RawErrorFarBeyondSmoothed_DoesNotSpliceMoreThanTheReanchorThreshold()
     {
-        // A clock step lands the raw error at 600 ms while the EMA is still at 60 ms — inside
-        // the hard-sync band, so the tier fires, but sizing from the raw error would splice
-        // 600 ms in one go: past the ceiling the policy documents, and past the point where
-        // clearing the buffer is the honest response.
+        // A clock step lands the raw error past the re-anchor ceiling while the EMA is still
+        // inside the hard-sync band, so the tier fires but the raw figure is far too large to
+        // splice: doing it in one go performs exactly the surgery the policy reserves for
+        // clearing the buffer.
+        //
+        // Getting there needs the EMA primed first. From a settled buffer the smoothed error
+        // is exactly zero, and CalculateSyncError's reseed branch then jumps it straight to
+        // the raw value — past the band entirely, so the tier never fires and the guard is
+        // never reached. A small stall first puts the EMA at a nonzero in-band value, so the
+        // big stall moves raw past the ceiling while smoothed lags inside the band.
         using var player = new Player().Settled();
+
+        player.Stall(3_000);
+        player.Step(); // EMA reseeds to ~3 ms — below the hard-sync threshold, so no snap
+
         var droppedBefore = player.Buffer.GetStats().SamplesDroppedForSync;
+        var reanchorsBefore = player.Buffer.GetStats().ReanchorCount;
 
         player.Stall(600_000);
         player.Steps(30); // let any scheduled snap drain fully
 
-        var spliced = Ms(player.Buffer.GetStats().SamplesDroppedForSync - droppedBefore);
+        var stats = player.Buffer.GetStats();
+        var spliced = Ms(stats.SamplesDroppedForSync - droppedBefore);
+
         Assert.True(
             spliced <= 500,
             $"spliced {spliced:F1}ms for one snap, above the 500ms re-anchor ceiling");
+
+        // ...and the error goes where it belongs instead.
+        Assert.True(
+            stats.ReanchorCount > reanchorsBefore,
+            "an error past the ceiling belongs to the re-anchor tier");
+    }
+
+    [Fact]
+    public void ErrorPastTheReanchorThreshold_IsNotAbsorbedByTheStartupBaseline()
+    {
+        // The startup baseline exists to swallow a constant plumbing offset — an output
+        // backend's prefill. It used to swallow anything, including misalignment far past the
+        // re-anchor threshold, and it runs at the end of the grace window, before the
+        // re-anchor check is allowed to look. So a start that was catastrophically late (or,
+        // as here, a stall inside the grace window) came out the other side reporting zero
+        // error while being most of a second out, with nothing left to trigger a recovery.
+        using var player = new Player();
+
+        player.Steps(20);          // inside the 500 ms startup grace
+        player.Stall(700_000);
+        player.Steps(60);          // past grace end, where the baseline is captured
+
+        var stats = player.Buffer.GetStats();
+
+        Assert.True(
+            Math.Abs(stats.SyncErrorMs) > 400,
+            $"a {700}ms error must survive the baseline capture, but reads {stats.SyncErrorMs:F1}ms");
+        Assert.True(
+            stats.ReanchorCount > 0,
+            "and must reach the re-anchor tier that owns it");
     }
 
     [Fact]
