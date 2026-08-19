@@ -150,12 +150,15 @@ public class DecoderChunkSizeTests
         var logger = new CapturingLogger<FlacDecoder>();
         using var decoder = new FlacDecoder(FlacFormat(96000, 2), logger);
 
-        var (chunk, _) = BuildFlacChunk(channels: 2, blockSize: 3200, frameCount: 6);
+        var (chunk, expected) = BuildFlacChunk(channels: 2, blockSize: 3200, frameCount: 6);
         var decoded = new float[decoder.MaxSamplesPerFrame];
 
         var written = decoder.Decode(chunk, decoded);
 
-        Assert.True(written < 6 * 3200 * 2, "the over-long chunk should not fit");
+        // The whole frames that fit — four of six at 6400 samples each — must survive intact;
+        // only the frames past the buffer are dropped.
+        Assert.Equal(4 * 3200 * 2, written);
+        Assert.Equal(ToFloats(expected[..written]), decoded.AsSpan(0, written).ToArray());
         Assert.Single(logger.MessagesAt(LogLevel.Error));
     }
 
