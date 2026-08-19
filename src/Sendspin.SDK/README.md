@@ -338,24 +338,42 @@ public int Read(float[] buffer, int offset, int count)
 
 ### Configuring Sync Behavior
 
+The correction ladder follows the spec: nothing below a ~100 µs dead band, a playback-rate
+adjustment capped at ±0.5% above it, and a single one-shot snap above ~5 ms — which the spec
+exempts from the speed cap, and which the buffer applies itself on both read paths.
+`Validate()` rejects a `MaxSpeedCorrection` above the cap.
+
 ```csharp
-// Use default settings (conservative: 2% max, 3s target)
+// Spec-conformant defaults (0.5% cap, 100µs dead band, 3s target)
 var options = SyncCorrectionOptions.Default;
 
-// Use CLI-compatible settings (aggressive: 4% max, 2s target)
+// CLI-compatible settings (same caps, faster convergence: 2s target, 15ms resampling band)
 var options = SyncCorrectionOptions.CliDefaults;
 
 // Custom options
 var options = new SyncCorrectionOptions
 {
-    MaxSpeedCorrection = 0.04,                    // 4% max rate adjustment
     CorrectionTargetSeconds = 2.0,                // Time to eliminate drift
+    HardSyncThresholdMicroseconds = 5_000,        // One-shot snap above this
     ResamplingThresholdMicroseconds = 15_000,     // Resampling vs drop/insert
     ReanchorThresholdMicroseconds = 500_000,      // Clear buffer threshold
     StartupGracePeriodMicroseconds = 500_000,     // No correction during startup
 };
 
 var calculator = new SyncCorrectionCalculator(options, sampleRate, channels);
+```
+
+### Buffer capacity
+
+`buffer_capacity` in `client/hello` is a hard byte limit the server may fill toward, so it must
+be a figure your audio buffer can actually hold. Set the duration once and let the SDK derive
+the advertisement from it and your advertised codecs:
+
+```csharp
+var capabilities = new ClientCapabilities { AudioBufferCapacityMs = 60_000 };
+
+// ...and give TimedAudioBuffer the same number.
+var buffer = new TimedAudioBuffer(format, clockSync, capabilities.AudioBufferCapacityMs);
 ```
 
 ## Platform-Specific Audio
