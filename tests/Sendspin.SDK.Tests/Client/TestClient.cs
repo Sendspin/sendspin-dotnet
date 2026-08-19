@@ -43,6 +43,7 @@ internal sealed class FakeNoiseSession : INoiseSessionInfo
     public string? ServerId { get; set; } = FakeServerId;
     public NoisePsk? MatchedPsk { get; set; }
     public ReadOnlyMemory<byte>? HandshakeHash { get; set; } = new byte[32];
+    public NoiseCipherSuite Suite { get; set; } = NoiseCipherSuite.ChaChaPoly;
 }
 
 /// <summary>
