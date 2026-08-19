@@ -113,11 +113,15 @@ public interface ITimedAudioBuffer : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Values: 1.0 = normal speed, &gt;1.0 = speed up (behind), &lt;1.0 = slow down (ahead).
+    /// Values: 1.0 = normal speed, &gt;1.0 = speed up (behind), &lt;1.0 = slow down (ahead),
+    /// bounded by <see cref="SyncCorrectionOptions.EffectiveMaxSpeedCorrection"/> — the spec's
+    /// ±0.5%.
     /// </para>
     /// <para>
-    /// Range is typically 0.96-1.04 (±4%), but most corrections use 0.98-1.02 (±2%).
-    /// This is imperceptible to human ears unlike discrete sample dropping.
+    /// <b>Meaningful only alongside <see cref="ReadRaw"/>.</b> A rate is a request to a
+    /// resampler, and the <see cref="Read"/> path has none: it corrects by stepping frames
+    /// itself and holds this at 1.0 throughout. It used to advise a rate there that nothing
+    /// applied, which let ordinary drift accumulate until the one-shot tier spliced it.
     /// </para>
     /// </remarks>
     [Obsolete("Use SyncErrorMicroseconds with external ISyncCorrectionProvider instead. SDK no longer calculates correction rate.")]
@@ -127,6 +131,10 @@ public interface ITimedAudioBuffer : IDisposable
     /// Event raised when target playback rate changes.
     /// Subscribers should update their resampler ratio accordingly.
     /// </summary>
+    /// <remarks>
+    /// Fires only for callers driving <see cref="ReadRaw"/>; see
+    /// <see cref="TargetPlaybackRate"/> for why the <see cref="Read"/> path stays at 1.0.
+    /// </remarks>
     [Obsolete("Use SyncErrorMicroseconds with external ISyncCorrectionProvider instead. SDK no longer calculates correction rate.")]
     event Action<double>? TargetPlaybackRateChanged;
 
@@ -146,8 +154,19 @@ public interface ITimedAudioBuffer : IDisposable
     /// <param name="currentLocalTime">Current local time in microseconds.</param>
     /// <returns>Number of samples written.</returns>
     /// <remarks>
-    /// This method applies internal sync correction. For external correction control,
-    /// use <see cref="ReadRaw"/> instead and apply correction in the caller.
+    /// <para>
+    /// This path corrects end to end and needs nothing from the caller: below the dead band it
+    /// leaves the audio alone, between the dead band and
+    /// <see cref="SyncCorrectionOptions.HardSyncThresholdMicroseconds"/> it drops or duplicates
+    /// whole frames at an interval bounded by the spec's ±0.5% cap (the strategy
+    /// roles/player/v1.md:169-176 suggests, and what the C++ reference does per chunk), and
+    /// above that threshold it snaps in one discontinuity.
+    /// </para>
+    /// <para>
+    /// Because it applies the correction itself, <see cref="TargetPlaybackRate"/> stays at 1.0
+    /// here — do not also drive a resampler from it, or the same error is corrected twice. For
+    /// external correction control use <see cref="ReadRaw"/> instead.
+    /// </para>
     /// </remarks>
     [Obsolete("Use ReadRaw() with external ISyncCorrectionProvider for correction control. This method applies internal correction.")]
     int Read(Span<float> buffer, long currentLocalTime);

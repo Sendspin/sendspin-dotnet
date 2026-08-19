@@ -2,6 +2,8 @@
 // Licensed under the MIT License. See LICENSE file in the project root.
 // </copyright>
 
+using Microsoft.Extensions.Logging;
+
 namespace Sendspin.SDK.Audio;
 
 /// <summary>
@@ -36,6 +38,35 @@ namespace Sendspin.SDK.Audio;
 internal static class SyncCorrectionPolicy
 {
     /// <summary>
+    /// Logs once, at construction, when the configured speed cap exceeds the spec's and is
+    /// therefore being clamped.
+    /// </summary>
+    /// <param name="options">The options a corrector was constructed with.</param>
+    /// <param name="logger">Logger to warn through.</param>
+    /// <remarks>
+    /// Loud but not fatal. A value like 2% is a real misconfiguration — most often a
+    /// configuration default written before the cap was enforced — and the client should be
+    /// told; but refusing to construct would stop playback that works today, which is the worse
+    /// of the two failures. Correction is applied at
+    /// <see cref="SyncCorrectionOptions.EffectiveMaxSpeedCorrection"/> either way.
+    /// </remarks>
+    internal static void WarnIfSpeedCapExceeded(SyncCorrectionOptions options, ILogger logger)
+    {
+        if (!options.ExceedsSpecSpeedCap)
+        {
+            return;
+        }
+
+        logger.LogWarning(
+            "[Correction] MaxSpeedCorrection is {Configured:P2}, above the spec's MUST cap " +
+            "(roles/player/v1.md:134); correction will be applied at {Cap:P2} instead. Lower " +
+            "the configured value — errors too large for the cap are handled by the one-shot " +
+            "hard-sync tier, which the spec exempts.",
+            options.MaxSpeedCorrection,
+            SyncCorrectionOptions.SpecMaxSpeedCorrection);
+    }
+
+    /// <summary>
     /// Chooses the correction for a smoothed sync error.
     /// </summary>
     /// <param name="smoothedMicroseconds">
@@ -45,12 +76,20 @@ internal static class SyncCorrectionPolicy
     /// <param name="options">Correction options (thresholds and the speed cap).</param>
     /// <param name="sampleRate">Sample rate in Hz.</param>
     /// <param name="channels">Channel count.</param>
+    /// <param name="selfApplied">
+    /// True for a corrector that has no resampler and must realize the continuous tier itself,
+    /// which is the case for <see cref="TimedAudioBuffer.Read"/>. Such a caller gets the same
+    /// speed change expressed as frame stepping — the spec's own suggested strategy
+    /// (roles/player/v1.md:169-176) and what the C++ reference does per chunk — instead of a
+    /// rate it has nothing to apply to. False for a caller that drives a resampler.
+    /// </param>
     /// <returns>The correction to apply.</returns>
     internal static SyncCorrectionDecision Decide(
         double smoothedMicroseconds,
         SyncCorrectionOptions options,
         int sampleRate,
-        int channels)
+        int channels,
+        bool selfApplied = false)
     {
         var absError = Math.Abs(smoothedMicroseconds);
 
@@ -68,13 +107,17 @@ internal static class SyncCorrectionPolicy
             return SyncCorrectionDecision.HardSync;
         }
 
-        if (absError < options.ResamplingThresholdMicroseconds)
+        // A rate is only a correction to someone who can resample. The buffer's own read path
+        // cannot, so for it the continuous tier is expressed as frame stepping of the same
+        // magnitude; handing it an advisory rate instead left the error to walk up to the
+        // hard-sync threshold and splice, which is not what "rare" means.
+        if (!selfApplied && absError < options.ResamplingThresholdMicroseconds)
         {
             // Rate = 1 + error / (targetSeconds × 1e6), clamped to the spec's speed cap.
             var correctionFactor = Math.Clamp(
                 smoothedMicroseconds / options.CorrectionTargetSeconds / 1_000_000.0,
-                -options.MaxSpeedCorrection,
-                options.MaxSpeedCorrection);
+                -options.EffectiveMaxSpeedCorrection,
+                options.EffectiveMaxSpeedCorrection);
 
             return new SyncCorrectionDecision(
                 SyncCorrectionMode.Resampling,
@@ -109,7 +152,7 @@ internal static class SyncCorrectionPolicy
         var framesError = absError * sampleRate / 1_000_000.0;
         var desiredCorrectionsPerSec = framesError / options.CorrectionTargetSeconds;
         var framesPerSecond = (double)sampleRate;
-        var maxCorrectionsPerSec = framesPerSecond * options.MaxSpeedCorrection;
+        var maxCorrectionsPerSec = framesPerSecond * options.EffectiveMaxSpeedCorrection;
         var actualCorrectionsPerSec = Math.Min(desiredCorrectionsPerSec, maxCorrectionsPerSec);
 
         var interval = actualCorrectionsPerSec > 0
@@ -117,7 +160,7 @@ internal static class SyncCorrectionPolicy
             : 0;
 
         // The speed cap, as a hard floor on the interval.
-        interval = Math.Max(interval, (int)Math.Ceiling(1.0 / options.MaxSpeedCorrection));
+        interval = Math.Max(interval, (int)Math.Ceiling(1.0 / options.EffectiveMaxSpeedCorrection));
 
         // Floor to channels × 10 frames so corrections don't run faster than ~440Hz at 48kHz stereo.
         return Math.Max(interval, channels * 10);

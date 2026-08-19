@@ -46,12 +46,29 @@ public class SyncCorrectionOptionsTests
     }
 
     [Fact]
-    public void Validate_RejectsSpeedCorrectionAboveTheSpecCap()
+    public void SpeedCorrectionAboveTheSpecCap_IsClampedNotRejected()
     {
+        // Rejecting would stop a client whose configuration predates the cap from starting at
+        // all — a worse outcome than playing it in conformance. The configured value is left
+        // visible so the app can see what it asked for; only what is applied is clamped.
         var options = new SyncCorrectionOptions { MaxSpeedCorrection = 0.02 };
 
-        var ex = Assert.Throws<ArgumentException>(options.Validate);
-        Assert.Contains("MaxSpeedCorrection", ex.Message, StringComparison.Ordinal);
+        options.Validate();
+
+        Assert.Equal(0.02, options.MaxSpeedCorrection);
+        Assert.True(options.ExceedsSpecSpeedCap);
+        Assert.Equal(SyncCorrectionOptions.SpecMaxSpeedCorrection, options.EffectiveMaxSpeedCorrection);
+        Assert.Equal(1.0 + SyncCorrectionOptions.SpecMaxSpeedCorrection, options.MaxRate);
+        Assert.Equal(1.0 - SyncCorrectionOptions.SpecMaxSpeedCorrection, options.MinRate);
+    }
+
+    [Fact]
+    public void Validate_StillRejectsNonsensicalSpeedCorrection()
+    {
+        Assert.Throws<ArgumentException>(
+            new SyncCorrectionOptions { MaxSpeedCorrection = 0 }.Validate);
+        Assert.Throws<ArgumentException>(
+            new SyncCorrectionOptions { MaxSpeedCorrection = 1.5 }.Validate);
     }
 
     [Fact]

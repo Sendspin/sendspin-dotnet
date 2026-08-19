@@ -2,6 +2,9 @@
 // Licensed under the MIT License. See LICENSE file in the project root.
 // </copyright>
 
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace Sendspin.SDK.Audio;
 
 /// <summary>
@@ -69,10 +72,18 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
     /// <param name="options">Sync correction options. Uses <see cref="SyncCorrectionOptions.Default"/> if null.</param>
     /// <param name="sampleRate">Audio sample rate in Hz (e.g., 48000). Must be greater than zero.</param>
     /// <param name="channels">Number of audio channels (e.g., 2 for stereo). Must be greater than zero.</param>
+    /// <param name="logger">
+    /// Optional logger, used only to warn when <see cref="SyncCorrectionOptions.MaxSpeedCorrection"/>
+    /// exceeds the spec's cap and is therefore being clamped. Without one the clamp is silent.
+    /// </param>
     /// <exception cref="ArgumentOutOfRangeException">
     /// Thrown when <paramref name="sampleRate"/> or <paramref name="channels"/> is less than or equal to zero.
     /// </exception>
-    public SyncCorrectionCalculator(SyncCorrectionOptions? options, int sampleRate, int channels)
+    public SyncCorrectionCalculator(
+        SyncCorrectionOptions? options,
+        int sampleRate,
+        int channels,
+        ILogger? logger = null)
     {
         if (sampleRate <= 0)
         {
@@ -88,6 +99,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
 
         _options = options?.Clone() ?? SyncCorrectionOptions.Default;
         _options.Validate();
+        SyncCorrectionPolicy.WarnIfSpeedCapExceeded(_options, logger ?? NullLogger.Instance);
         _sampleRate = sampleRate;
         _channels = channels;
     }

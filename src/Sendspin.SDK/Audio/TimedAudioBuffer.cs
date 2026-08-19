@@ -119,7 +119,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     // on every pre-start poll (includes any static delay from IClockSynchronizer).
     // We wait until this time arrives before outputting audio.
     private long _scheduledStartLocalTime;      // Target local time when playback should start (μs)
-    private bool _waitingForScheduledStart;     // True while waiting for scheduled start time
 
     // Sync error tracking (CLI-style: track samples READ, not samples OUTPUT)
     // Key insight: We must track samples READ from buffer, not samples OUTPUT.
@@ -303,6 +302,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _clockSync = clockSync;
         _syncOptions = syncOptions?.Clone() ?? SyncCorrectionOptions.Default;
         _syncOptions.Validate();
+        SyncCorrectionPolicy.WarnIfSpeedCapExceeded(_syncOptions, _logger);
         _sampleRate = format.SampleRate;
         _channels = format.Channels;
         _samplesPerMs = (_sampleRate * _channels) / 1000;
@@ -363,9 +363,13 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             return true;
         }
 
-        var firstSegment = _segments.Peek();
-        _scheduledStartLocalTime = ScheduledLocalTimeFor(firstSegment.ServerTimestamp);
-        _waitingForScheduledStart = true;
+        // Schedule from the read CURSOR, not from the head segment's start. After a mid-stream
+        // ResetSyncTracking — every output-device switch and static-delay change takes that
+        // path — the head segment is partly consumed, and anchoring to its start puts the
+        // schedule one consumed prefix too early. The startup alignment then "corrects" a
+        // discrepancy that does not exist, shifting the audio permanently while the reported
+        // error settles back to a contented zero.
+        _scheduledStartLocalTime = ScheduledLocalTimeFor(HeadCursorServerTimestamp());
 
         var timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
         if (timeUntilStart > _syncOptions.ScheduledStartGraceWindowMicroseconds)
@@ -378,7 +382,29 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         if (timeUntilStart < -_syncOptions.ScheduledStartGraceWindowMicroseconds)
         {
             SkipStaleAudio(currentLocalTime);
+            if (_segments.Count == 0)
+            {
+                return false; // Nothing left that is still due; wait for the next chunk.
+            }
+
+            _scheduledStartLocalTime = ScheduledLocalTimeFor(HeadCursorServerTimestamp());
             timeUntilStart = _scheduledStartLocalTime - currentLocalTime;
+        }
+
+        // Still further behind than the catastrophic threshold, which happens when every
+        // buffered segment is stale and SkipStaleAudio has to keep the last one. Starting here
+        // would hand the startup baseline a residual it absorbs at the end of the grace window
+        // — the error zeroed and the lateness permanent, which is exactly the failure this
+        // path exists to prevent. Re-anchor instead. If the cooldown refuses, start anyway
+        // rather than emit silence forever; the corrector then has a visible error to work on.
+        var latenessMicroseconds = -timeUntilStart;
+        if (latenessMicroseconds > _syncOptions.ReanchorThresholdMicroseconds
+            && RequestReanchor(currentLocalTime))
+        {
+            _logger.LogWarning(
+                "[Buffer] Start is {LateMs:F0}ms late, beyond the re-anchor threshold — re-anchoring",
+                latenessMicroseconds / 1000.0);
+            return false;
         }
 
         _logger.LogInformation(
@@ -388,7 +414,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _segments.Count, _scheduledStartLocalTime);
 
         _playbackStarted = true;
-        _waitingForScheduledStart = false;
 
         // Initialize sync error tracking (CLI-style: track samples READ)
         //
@@ -406,22 +431,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _samplesReadSinceStart = 0;
         _samplesOutputSinceStart = 0;
 
-        // The content cursor restarts from the sample we are about to emit — re-read from the
-        // queue, because SkipStaleAudio above may have discarded the segment we peeked at.
-        // Holes are only meaningful relative to a running timeline, so anything discarded
-        // before the anchor is not one.
-        if (_segments.Count > 0)
-        {
-            var startSegment = _segments.Peek();
-            _readCursorServerTimestamp =
-                startSegment.ServerTimestamp + SamplesToMicroseconds(_headConsumedSamples);
-            _readCursorValid = true;
-        }
-
+        // The content cursor restarts from the sample we are about to emit. Holes are only
+        // meaningful relative to a running timeline, so anything discarded before the anchor
+        // is not one.
+        _readCursorServerTimestamp = HeadCursorServerTimestamp();
+        _readCursorValid = true;
         _segmentGapMicroseconds = 0;
 
         CaptureClockOffsetReference();
-        ScheduleStartupAlignment(-timeUntilStart);
+        ScheduleStartupAlignment(latenessMicroseconds);
         return true;
     }
 
@@ -534,6 +552,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         lock (_lock)
         {
+            // Re-anchor first: EnsurePlaybackStarted can request one for a start too late to
+            // salvage, and it returns without starting, so a check placed after the start gate
+            // would never deliver it.
+            if (RaiseReanchorIfPending(buffer))
+            {
+                return 0;
+            }
+
             // If buffer is empty, output silence
             if (_count == 0)
             {
@@ -551,43 +577,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             if (!EnsurePlaybackStarted(currentLocalTime, "Read"))
             {
                 buffer.Fill(0f);
-                return 0;
-            }
-
-            // Check for re-anchor condition before reading
-            if (_needsReanchor)
-            {
-                _needsReanchor = false;
-                buffer.Fill(0f);
-
-                // Raise event outside of lock to prevent deadlocks.
-                // Use Interlocked to ensure only one event can be pending at a time,
-                // preventing duplicate events from queuing up if Read() is called rapidly.
-                if (Interlocked.CompareExchange(ref _reanchorEventPending, 1, 0) == 0)
-                {
-                    try
-                    {
-                        Task.Run(() =>
-                        {
-                            try
-                            {
-                                ReanchorRequired?.Invoke(this, EventArgs.Empty);
-                            }
-                            finally
-                            {
-                                Interlocked.Exchange(ref _reanchorEventPending, 0);
-                            }
-                        });
-                    }
-                    catch
-                    {
-                        // Task.Run can throw (e.g., ThreadPool exhaustion, OutOfMemoryException).
-                        // Reset the pending flag so future re-anchor events are not blocked.
-                        Interlocked.Exchange(ref _reanchorEventPending, 0);
-                        throw;
-                    }
-                }
-
                 return 0;
             }
 
@@ -627,19 +616,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
                 {
-                    if (currentLocalTime - _lastReanchorTimeMicroseconds >= _syncOptions.ReanchorCooldownMicroseconds)
-                    {
-                        _lastReanchorTimeMicroseconds = currentLocalTime;
-                        _needsReanchor = true;
-                        _reanchorCount++;
-                    }
-                    else if (currentLocalTime - _lastReanchorCooldownLogTime >= UnderrunLogIntervalMicroseconds)
-                    {
-                        _lastReanchorCooldownLogTime = currentLocalTime;
-                        _logger.LogWarning(
-                            "[Correction] Reanchor suppressed by cooldown ({CooldownMs}ms remaining)",
-                            (_syncOptions.ReanchorCooldownMicroseconds - (currentLocalTime - _lastReanchorTimeMicroseconds)) / 1000);
-                    }
+                    RequestReanchor(currentLocalTime);
                 }
             }
 
@@ -660,6 +637,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         lock (_lock)
         {
+            // Re-anchor first: EnsurePlaybackStarted can request one for a start too late to
+            // salvage, and it returns without starting, so a check placed after the start gate
+            // would never deliver it.
+            if (RaiseReanchorIfPending(buffer))
+            {
+                return 0;
+            }
+
             // If buffer is empty, output silence
             if (_count == 0)
             {
@@ -677,40 +662,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             if (!EnsurePlaybackStarted(currentLocalTime, "ReadRaw"))
             {
                 buffer.Fill(0f);
-                return 0;
-            }
-
-            // Check for re-anchor condition
-            if (_needsReanchor)
-            {
-                _needsReanchor = false;
-                buffer.Fill(0f);
-
-                if (Interlocked.CompareExchange(ref _reanchorEventPending, 1, 0) == 0)
-                {
-                    try
-                    {
-                        Task.Run(() =>
-                        {
-                            try
-                            {
-                                ReanchorRequired?.Invoke(this, EventArgs.Empty);
-                            }
-                            finally
-                            {
-                                Interlocked.Exchange(ref _reanchorEventPending, 0);
-                            }
-                        });
-                    }
-                    catch
-                    {
-                        // Task.Run can throw (e.g., ThreadPool exhaustion, OutOfMemoryException).
-                        // Reset the pending flag so future re-anchor events are not blocked.
-                        Interlocked.Exchange(ref _reanchorEventPending, 0);
-                        throw;
-                    }
-                }
-
                 return 0;
             }
 
@@ -788,19 +739,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
                 {
-                    if (currentLocalTime - _lastReanchorTimeMicroseconds >= _syncOptions.ReanchorCooldownMicroseconds)
-                    {
-                        _lastReanchorTimeMicroseconds = currentLocalTime;
-                        _needsReanchor = true;
-                        _reanchorCount++;
-                    }
-                    else if (currentLocalTime - _lastReanchorCooldownLogTime >= UnderrunLogIntervalMicroseconds)
-                    {
-                        _lastReanchorCooldownLogTime = currentLocalTime;
-                        _logger.LogWarning(
-                            "[Correction] Reanchor suppressed by cooldown ({CooldownMs}ms remaining)",
-                            (_syncOptions.ReanchorCooldownMicroseconds - (currentLocalTime - _lastReanchorTimeMicroseconds)) / 1000);
-                    }
+                    RequestReanchor(currentLocalTime);
                 }
             }
 
@@ -927,7 +866,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
             // Reset scheduled start state
             _scheduledStartLocalTime = 0;
-            _waitingForScheduledStart = false;
 
             // Reset sync error tracking (CLI-style: reset EVERYTHING on clear)
             // This matches Python CLI's clear() behavior for track changes
@@ -987,7 +925,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
             // Reset scheduled start state (will re-capture from next segment)
             _scheduledStartLocalTime = 0;
-            _waitingForScheduledStart = false;
 
             // The next start re-derives the content cursor from the segment it begins on, and
             // a snap scheduled against the old anchor would be measured from nothing.
@@ -1227,23 +1164,44 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // stream primed to just under the target — leaving the player anchored on audio that
         // was already due (issue #233). Retained audio that is stale is not a reserve; playing
         // it is the bug.
-        while (_segments.Count > 1)
+        var dueBy = currentLocalTime - _syncOptions.ScheduledStartGraceWindowMicroseconds;
+
+        while (_segments.Count > 0 && _count > 0)
         {
-            var segment = _segments.Peek();
+            // How far past due the NEXT SAMPLE is — measured from the cursor, not from the
+            // segment's start. Playback time comes from the raw server timestamp using the
+            // CURRENT sync state (never a conversion cached before sync converged) and through
+            // the same ScheduledLocalTimeFor the real schedule uses, so the output-latency
+            // pre-roll is included here too. Comparing against the un-pre-rolled conversion
+            // under-skipped by exactly the output latency.
+            var staleMicroseconds = dueBy - ScheduledLocalTimeFor(HeadCursorServerTimestamp());
+            if (staleMicroseconds <= 0)
+            {
+                break; // The next sample is still due — stop.
+            }
 
-            // Stop skipping once we reach audio that's near-current or in the future.
-            // Use the grace window as tolerance (default 10ms). Playback time is
-            // derived from the raw server timestamp using the CURRENT sync state —
-            // never a conversion cached before sync converged — and through the same
-            // ScheduledLocalTimeFor the actual schedule uses, so the output latency
-            // pre-roll is included here as well. Comparing against the un-pre-rolled
-            // conversion under-skipped by exactly the output latency.
-            var segmentPlaybackTime = ScheduledLocalTimeFor(segment.ServerTimestamp);
-            if (segmentPlaybackTime >= currentLocalTime - _syncOptions.ScheduledStartGraceWindowMicroseconds)
+            // Trim only the part that is actually past. A chunk whose first sample is stale
+            // still has a tail that has not played yet; discarding the whole chunk throws that
+            // away and leaves a hole the corrector then has to close.
+            var remainingInHead = _segments.Peek().SampleCount - _headConsumedSamples;
+            var staleSamples = (int)Math.Min(
+                (long)(staleMicroseconds / _microsecondsPerSample),
+                remainingInHead);
+            staleSamples -= staleSamples % _channels;
+
+            if (staleSamples <= 0)
+            {
+                break; // Less than a frame past due; nothing useful to trim.
+            }
+
+            // Keep the last segment even when all of it is stale, so there is something to
+            // start from. EnsurePlaybackStarted re-anchors when that residual is catastrophic.
+            if (staleSamples >= remainingInHead && _segments.Count == 1)
+            {
                 break;
+            }
 
-            // This segment is stale — skip it
-            var toSkip = Math.Min(segment.SampleCount - _headConsumedSamples, _count);
+            var toSkip = Math.Min(staleSamples, _count);
             _readPos = (_readPos + toSkip) % _buffer.Length;
             _count -= toSkip;
             _droppedSamples += toSkip;
@@ -1253,20 +1211,92 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         if (totalSkipped > 0)
         {
-            var skippedMs = totalSkipped / (double)_samplesPerMs;
             _logger.LogInformation(
                 "[Buffer] Skipped {SkippedMs:F0}ms of stale audio on playback start (buffer had audio from the past)",
-                skippedMs);
-
-            // Re-anchor scheduled start to the new first segment
-            if (_segments.Count > 0)
-            {
-                var newFirst = _segments.Peek();
-                _scheduledStartLocalTime = ScheduledLocalTimeFor(newFirst.ServerTimestamp);
-                    }
+                totalSkipped / (double)_samplesPerMs);
         }
 
         return totalSkipped;
+    }
+
+    /// <summary>
+    /// Emits silence and fires <see cref="ReanchorRequired"/> when a re-anchor is pending.
+    /// Must be called under lock.
+    /// </summary>
+    /// <param name="buffer">Output buffer, filled with silence when a re-anchor is pending.</param>
+    /// <returns>True when a re-anchor was pending and the caller should return immediately.</returns>
+    private bool RaiseReanchorIfPending(Span<float> buffer)
+    {
+        if (!_needsReanchor)
+        {
+            return false;
+        }
+
+        _needsReanchor = false;
+        buffer.Fill(0f);
+
+        // Raise the event outside the lock to prevent deadlocks. Interlocked keeps at most one
+        // event in flight, so rapid reads cannot queue duplicates.
+        if (Interlocked.CompareExchange(ref _reanchorEventPending, 1, 0) == 0)
+        {
+            try
+            {
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        ReanchorRequired?.Invoke(this, EventArgs.Empty);
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _reanchorEventPending, 0);
+                    }
+                });
+            }
+            catch
+            {
+                // Task.Run can throw (e.g. ThreadPool exhaustion, OutOfMemoryException).
+                // Reset the pending flag so future re-anchor events are not blocked.
+                Interlocked.Exchange(ref _reanchorEventPending, 0);
+                throw;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Server timestamp of the next sample that would be emitted: the head segment's start
+    /// plus the prefix of it already consumed. Must be called under lock, with a non-empty
+    /// segment queue.
+    /// </summary>
+    private long HeadCursorServerTimestamp()
+        => _segments.Peek().ServerTimestamp + SamplesToMicroseconds(_headConsumedSamples);
+
+    /// <summary>
+    /// Requests a re-anchor, honouring the cooldown. Must be called under lock.
+    /// </summary>
+    /// <param name="currentLocalTime">Current local time in microseconds.</param>
+    /// <returns>True when the re-anchor was accepted; false when the cooldown suppressed it.</returns>
+    private bool RequestReanchor(long currentLocalTime)
+    {
+        if (currentLocalTime - _lastReanchorTimeMicroseconds < _syncOptions.ReanchorCooldownMicroseconds)
+        {
+            if (currentLocalTime - _lastReanchorCooldownLogTime >= UnderrunLogIntervalMicroseconds)
+            {
+                _lastReanchorCooldownLogTime = currentLocalTime;
+                _logger.LogWarning(
+                    "[Correction] Reanchor suppressed by cooldown ({CooldownMs}ms remaining)",
+                    (_syncOptions.ReanchorCooldownMicroseconds - (currentLocalTime - _lastReanchorTimeMicroseconds)) / 1000);
+            }
+
+            return false;
+        }
+
+        _lastReanchorTimeMicroseconds = currentLocalTime;
+        _needsReanchor = true;
+        _reanchorCount++;
+        return true;
     }
 
     /// <summary>
@@ -1640,9 +1670,12 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             }
         }
 
-        // One decision ladder for the whole SDK — see SyncCorrectionPolicy.
+        // One decision ladder for the whole SDK — see SyncCorrectionPolicy. selfApplied: this
+        // path owns the correction end to end, so the continuous tier comes back as frame
+        // stepping the read loop actually performs rather than as a rate only a resampler
+        // could honour.
         var decision = SyncCorrectionPolicy.Decide(
-            _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels);
+            _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels, selfApplied: true);
 
         EvaluateHardSync(decision);
 
@@ -1686,6 +1719,15 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         }
 
         if (Math.Sign(_currentSyncErrorMicroseconds) != Math.Sign(_smoothedSyncErrorMicroseconds))
+        {
+            return;
+        }
+
+        // The tier gates on the smoothed error but sizes from the raw one, so after a clock
+        // step the two can be an order of magnitude apart — smoothed inside the band, raw far
+        // past the re-anchor ceiling. Splicing the raw figure then performs in one go exactly
+        // the surgery the policy reserves for clearing the buffer. Leave it to that tier.
+        if (Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
         {
             return;
         }

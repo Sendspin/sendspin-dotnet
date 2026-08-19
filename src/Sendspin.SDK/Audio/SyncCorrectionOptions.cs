@@ -13,8 +13,8 @@ public sealed class SyncCorrectionOptions
     /// <summary>
     /// The spec's hard ceiling on continuous playback-speed deviation: the effective
     /// speed MUST stay within ±0.5% of normal, measured as a sliding average over
-    /// 150 ms (spec roles/player/v1.md:134). <see cref="Validate"/> rejects a
-    /// <see cref="MaxSpeedCorrection"/> above this.
+    /// 150 ms (spec roles/player/v1.md:134). A larger <see cref="MaxSpeedCorrection"/> is
+    /// clamped to this rather than applied — see <see cref="EffectiveMaxSpeedCorrection"/>.
     /// </summary>
     /// <remarks>
     /// The cap bounds <em>steady-state</em> correction only. A one-shot
@@ -42,14 +42,36 @@ public sealed class SyncCorrectionOptions
     /// spec's MUST cap — see <see cref="SpecMaxSpeedCorrection"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// This is not a comfort setting to be traded against correction speed. The cap is
     /// a fleet-homogeneity contract: every player in a group recovers from the same
     /// disturbance at the same bounded rate, so they stay audibly together while
     /// converging. Errors too large to close inside the cap are handled by the one-shot
     /// hard-sync tier (<see cref="HardSyncThresholdMicroseconds"/>), which the spec
     /// exempts from it — not by exceeding it.
+    /// </para>
+    /// <para>
+    /// Setting this above <see cref="SpecMaxSpeedCorrection"/> does not raise the cap: the
+    /// value is clamped where correction is applied, and the SDK logs a warning once when it
+    /// sees one. Rejecting it outright would take a client that plays today and stop it from
+    /// starting, which is a worse answer than playing it in conformance.
+    /// </para>
     /// </remarks>
     public double MaxSpeedCorrection { get; set; } = SpecMaxSpeedCorrection;
+
+    /// <summary>
+    /// Gets the speed cap that is actually applied: <see cref="MaxSpeedCorrection"/> limited to
+    /// <see cref="SpecMaxSpeedCorrection"/>. Every correction path uses this, so an
+    /// over-permissive configured value can never produce an out-of-spec speed.
+    /// </summary>
+    public double EffectiveMaxSpeedCorrection =>
+        Math.Min(MaxSpeedCorrection, SpecMaxSpeedCorrection);
+
+    /// <summary>
+    /// Gets whether <see cref="MaxSpeedCorrection"/> is set above the spec's cap and is
+    /// therefore being clamped.
+    /// </summary>
+    public bool ExceedsSpecSpeedCap => MaxSpeedCorrection > SpecMaxSpeedCorrection;
 
     /// <summary>
     /// Target time, in seconds, over which sync error should be corrected.
@@ -149,12 +171,12 @@ public sealed class SyncCorrectionOptions
     /// <summary>
     /// Gets the minimum playback rate (1.0 - MaxSpeedCorrection).
     /// </summary>
-    public double MinRate => 1.0 - MaxSpeedCorrection;
+    public double MinRate => 1.0 - EffectiveMaxSpeedCorrection;
 
     /// <summary>
     /// Gets the maximum playback rate (1.0 + MaxSpeedCorrection).
     /// </summary>
-    public double MaxRate => 1.0 + MaxSpeedCorrection;
+    public double MaxRate => 1.0 + EffectiveMaxSpeedCorrection;
 
     /// <summary>
     /// Validates the options and throws if invalid.
@@ -169,20 +191,14 @@ public sealed class SyncCorrectionOptions
                 nameof(DeadbandMicroseconds));
         }
 
-        if (MaxSpeedCorrection <= 0)
+        // Only nonsensical values are rejected. A value above the spec cap is a real
+        // misconfiguration, but it is one the SDK can honour safely by clamping — see
+        // EffectiveMaxSpeedCorrection — and throwing would stop a client that plays today
+        // from starting at all.
+        if (MaxSpeedCorrection is <= 0 or > 1.0)
         {
             throw new ArgumentException(
-                "MaxSpeedCorrection must be greater than zero.",
-                nameof(MaxSpeedCorrection));
-        }
-
-        if (MaxSpeedCorrection > SpecMaxSpeedCorrection)
-        {
-            throw new ArgumentException(
-                $"MaxSpeedCorrection must not exceed {SpecMaxSpeedCorrection} (±0.5%). The Sendspin " +
-                "player spec makes this a MUST for continuous correction (roles/player/v1.md:134); " +
-                "larger errors belong to the one-shot HardSyncThresholdMicroseconds tier, which the " +
-                "spec exempts from the cap.",
+                "MaxSpeedCorrection must be between 0 (exclusive) and 1.0 (inclusive).",
                 nameof(MaxSpeedCorrection));
         }
 

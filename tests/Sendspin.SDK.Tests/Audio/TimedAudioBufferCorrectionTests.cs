@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
 
@@ -48,10 +49,13 @@ public class TimedAudioBufferCorrectionTests
         /// <summary>Server lead maintained by the producer, in microseconds.</summary>
         public long LeadMicroseconds { get; set; } = 500_000;
 
-        public Player(SyncCorrectionOptions? options = null, bool rawReads = false)
+        public Player(
+            SyncCorrectionOptions? options = null,
+            bool rawReads = false,
+            ILogger<TimedAudioBuffer>? logger = null)
         {
             _rawReads = rawReads;
-            Buffer = new TimedAudioBuffer(Format, ClockSync, bufferCapacityMs: 5_000, options);
+            Buffer = new TimedAudioBuffer(Format, ClockSync, bufferCapacityMs: 5_000, options, logger);
             Array.Fill(_chunk, 0.25f);
 
             // Converged clock scheduling the first chunk exactly now, so playback starts on
@@ -125,10 +129,85 @@ public class TimedAudioBufferCorrectionTests
             return this;
         }
 
+        /// <summary>
+        /// True misalignment of the read cursor against the schedule, in microseconds
+        /// (positive = playing late). Derived from the producer's write head and the buffer
+        /// depth, so it is independent of whatever the buffer believes its error to be — which
+        /// is the point: the failures this guards against are the ones where the reported error
+        /// reads zero while the audio is demonstrably shifted.
+        /// </summary>
+        public long TrueMisalignmentUs()
+        {
+            var cursorServerPos = WriteServerTs - (long)(Buffer.BufferedMilliseconds * 1000);
+            return WallNow - ClockSync.ServerToClientTime(cursorServerPos);
+        }
+
         public void Dispose() => Buffer.Dispose();
     }
 
     private static double Ms(long samples) => samples / (double)SamplesPerMs;
+
+    /// <summary>
+    /// Asserts that over every sliding 150 ms window — the window the spec measures over — the
+    /// speed implied by the corrections applied stays within the spec's cap.
+    /// </summary>
+    /// <param name="samples">Per-callback (net corrected samples, total output samples).</param>
+    private static void AssertSpeedCapRespectedOverEveryWindow(List<(long Net, long Output)> samples)
+    {
+        var windowSamples = 150 * SamplesPerMs;
+        var checkedWindows = 0;
+
+        for (var end = 0; end < samples.Count; end++)
+        {
+            var start = end;
+            while (start > 0 && samples[end].Output - samples[start].Output < windowSamples)
+            {
+                start--;
+            }
+
+            var outputDelta = samples[end].Output - samples[start].Output;
+            if (outputDelta < windowSamples)
+            {
+                continue;
+            }
+
+            var netDelta = Math.Abs(samples[end].Net - samples[start].Net);
+            var speedDeviation = netDelta / (double)outputDelta;
+
+            // One correction may straddle a window edge; that granularity is not a speed.
+            var tolerance = SyncCorrectionOptions.SpecMaxSpeedCorrection + (Channels / (double)outputDelta);
+            Assert.True(
+                speedDeviation <= tolerance,
+                $"window ending at sample {samples[end].Output} deviated {speedDeviation:P3}, cap is {tolerance:P3}");
+            checkedWindows++;
+        }
+
+        Assert.True(checkedWindows > 100, $"expected many windows to check, got {checkedWindows}");
+    }
+
+    /// <summary>Captures warnings so a test can assert the SDK said something.</summary>
+    private sealed class CapturingLogger : ILogger<TimedAudioBuffer>
+    {
+        public List<string> Warnings { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
+    }
 
     [Fact]
     public void ErrorBelowDeadband_ProducesNoCorrectionAtAll()
@@ -148,23 +227,30 @@ public class TimedAudioBufferCorrectionTests
     }
 
     [Fact]
-    public void ErrorAboveDeadbandBelowHardSync_CorrectsByRateWithinSpecCap()
+    public void ErrorAboveDeadbandBelowHardSync_CorrectsBySteppingWithinSpecCap()
     {
         using var player = new Player().Settled();
 
         // 3 ms: past the dead band, inside the hard-sync threshold.
         player.Stall(3_000);
-        player.Steps(10);
+        player.Steps(200);
 
         var stats = player.Buffer.GetStats();
-        Assert.Equal(SyncCorrectionMode.Resampling, stats.CurrentCorrectionMode);
-        Assert.True(stats.TargetPlaybackRate > 1.0, $"expected speed-up, got {stats.TargetPlaybackRate}");
-        Assert.InRange(
-            Math.Abs(stats.TargetPlaybackRate - 1.0),
-            0,
-            SyncCorrectionOptions.SpecMaxSpeedCorrection);
+
+        // This test used to assert a Resampling decision and a rate above 1.0. On the plain
+        // Read path nothing applies a rate — the buffer has no resampler — so that correction
+        // was advisory and the error simply accumulated until the hard-sync tier spliced it.
+        // The band is now realized as frame stepping, the spec's own suggested strategy, and
+        // the rate stays at 1.0 because nobody is being asked to resample.
+        Assert.Equal(SyncCorrectionMode.Dropping, stats.CurrentCorrectionMode);
+        Assert.Equal(1.0, stats.TargetPlaybackRate, 6);
         Assert.Equal(0, stats.HardSyncCount);
-        Assert.Equal(0, stats.SamplesDroppedForSync);
+
+        // It actually corrects, and stays inside the cap while doing so.
+        Assert.True(stats.SamplesDroppedForSync > 0, "the band must self-correct, not just advise");
+        var impliedSpeed = stats.SamplesDroppedForSync / (double)stats.SamplesOutputSinceStart;
+        Assert.InRange(impliedSpeed, 0, SyncCorrectionOptions.SpecMaxSpeedCorrection);
+        Assert.InRange(Math.Abs(stats.SyncErrorMs), 0, 3);
     }
 
     [Fact]
@@ -239,34 +325,40 @@ public class TimedAudioBufferCorrectionTests
             samples[^1].Net > 0,
             "the episode must actually correct, or the cap assertion proves nothing");
 
-        var windowSamples = 150 * SamplesPerMs;
-        var checkedWindows = 0;
-        for (var end = 0; end < samples.Count; end++)
+        AssertSpeedCapRespectedOverEveryWindow(samples);
+    }
+
+    [Fact]
+    public void OverPermissiveSpeedCap_IsClampedWhereItIsApplied_AndWarnedAboutOnce()
+    {
+        // windowsSpin's shipped configuration default is 2%, written before the cap was
+        // enforced. Such a client must still start — and must still correct at 0.5%.
+        var logger = new CapturingLogger();
+        var options = new SyncCorrectionOptions
         {
-            var start = end;
-            while (start > 0 && samples[end].Output - samples[start].Output < windowSamples)
-            {
-                start--;
-            }
+            MaxSpeedCorrection = 0.02,
+            ResamplingThresholdMicroseconds = 1_000,
+            HardSyncThresholdMicroseconds = 300_000,
+        };
 
-            var outputDelta = samples[end].Output - samples[start].Output;
-            if (outputDelta < windowSamples)
-            {
-                continue;
-            }
+        using var player = new Player(options, logger: logger).Settled();
 
-            var netDelta = Math.Abs(samples[end].Net - samples[start].Net);
-            var speedDeviation = netDelta / (double)outputDelta;
+        Assert.Single(logger.Warnings.Where(w => w.Contains("MaxSpeedCorrection", StringComparison.Ordinal)));
 
-            // One correction may straddle a window edge; that granularity is not a speed.
-            var tolerance = SyncCorrectionOptions.SpecMaxSpeedCorrection + (Channels / (double)outputDelta);
-            Assert.True(
-                speedDeviation <= tolerance,
-                $"window ending at sample {samples[end].Output} deviated {speedDeviation:P3}, cap is {tolerance:P3}");
-            checkedWindows++;
+        player.Stall(100_000);
+
+        var samples = new List<(long Net, long Output)>();
+        for (var i = 0; i < 500; i++)
+        {
+            player.Step();
+            var stats = player.Buffer.GetStats();
+            samples.Add((
+                stats.SamplesDroppedForSync - stats.SamplesInsertedForSync,
+                stats.SamplesOutputSinceStart));
         }
 
-        Assert.True(checkedWindows > 100, $"expected many windows to check, got {checkedWindows}");
+        Assert.True(samples[^1].Net > 0, "the episode must actually correct");
+        AssertSpeedCapRespectedOverEveryWindow(samples);
     }
 
     [Fact]
@@ -414,8 +506,10 @@ public class TimedAudioBufferCorrectionTests
         // the 5 ms trigger.
         using var player = new Player().Settled();
 
-        // 50 ppm = 50 µs per second = 0.5 µs per 10 ms callback.
-        for (var i = 0; i < 2_000; i++) // 20 s
+        // 50 ppm = 50 µs per second = 0.5 µs per 10 ms callback. Run two minutes: long enough
+        // that a correction the buffer merely ADVISES — rather than applies — would have let
+        // the error walk up to the 5 ms trigger and splice.
+        for (var i = 0; i < 12_000; i++) // 120 s
         {
             player.ClockSync.OffsetMicroseconds += (i % 2 == 0) ? 1 : 0;
             player.Step();
@@ -423,11 +517,9 @@ public class TimedAudioBufferCorrectionTests
 
         var stats = player.Buffer.GetStats();
         Assert.Equal(0, stats.HardSyncCount);
-        Assert.InRange(Math.Abs(stats.SmoothedSyncErrorMs), 0, 1_000);
-        Assert.InRange(
-            Math.Abs(stats.TargetPlaybackRate - 1.0),
-            0,
-            SyncCorrectionOptions.SpecMaxSpeedCorrection);
+
+        // SmoothedSyncErrorMs is milliseconds; the spec's steady-state MUST is ±1 ms.
+        Assert.InRange(Math.Abs(stats.SmoothedSyncErrorMs), 0, 1.0);
     }
 
     [Fact]
@@ -495,6 +587,106 @@ public class TimedAudioBufferCorrectionTests
     }
 
     [Fact]
+    public void MidSegmentResetSyncTracking_PreservesAlignment()
+    {
+        // Every output-device switch and static-delay change goes through ResetSyncTracking,
+        // which keeps the buffered audio and re-anchors on the next callback. When the head
+        // segment is only half consumed, anchoring to the segment's START rather than to the
+        // read cursor makes the schedule look one prefix too early, and the startup alignment
+        // "corrects" a discrepancy that does not exist — shifting the audio permanently while
+        // the reported error settles back to zero.
+        using var player = new Player().Settled();
+
+        // 101 callbacks of 10 ms against 20 ms chunks leaves the head half consumed.
+        var alignmentBefore = player.TrueMisalignmentUs();
+        var droppedBefore = player.Buffer.GetStats().SamplesDroppedForSync;
+
+        player.Buffer.ResetSyncTracking();
+        player.Steps(50);
+
+        var stats = player.Buffer.GetStats();
+        Assert.Equal(droppedBefore, stats.SamplesDroppedForSync);
+        Assert.InRange(player.TrueMisalignmentUs() - alignmentBefore, -2_000, 2_000);
+    }
+
+    [Fact]
+    public void SkipStaleAudio_TrimsOnlyTheStalePrefixOfTheHeadSegment()
+    {
+        var clockSync = new FakeClockSynchronizer
+        {
+            OffsetMicroseconds = ServerT0 - LocalT0,
+            IsConverged = true,
+            HasMinimalSync = true,
+        };
+        using var buffer = new TimedAudioBuffer(Format, clockSync, bufferCapacityMs: 5_000);
+
+        var chunk = new float[ChunkMs * SamplesPerMs];
+        for (var i = 0; i < 10; i++)
+        {
+            buffer.Write(chunk, ServerT0 + (i * ChunkMs * 1000L));
+        }
+
+        // Start 15 ms late: the head chunk's first 15 ms are past, but its last 5 ms are still
+        // due. Discarding the whole chunk throws away audio that had not played yet.
+        var output = new float[StepMs * SamplesPerMs];
+        buffer.Read(output, LocalT0 + 15_000);
+
+        var discardedMs = Ms(buffer.GetStats().DroppedSamples + buffer.GetStats().SamplesDroppedForSync);
+        Assert.InRange(discardedMs, 13, 17);
+    }
+
+    [Fact]
+    public void CatastrophicallyLateStart_ReanchorsInsteadOfPlayingLate()
+    {
+        var clockSync = new FakeClockSynchronizer
+        {
+            OffsetMicroseconds = ServerT0 - LocalT0,
+            IsConverged = true,
+            HasMinimalSync = true,
+        };
+        using var buffer = new TimedAudioBuffer(Format, clockSync, bufferCapacityMs: 5_000);
+
+        // Every buffered chunk is more than the re-anchor threshold stale, so SkipStaleAudio
+        // runs out of segments to discard and the residual stays catastrophic. Deferring to
+        // "the re-anchor tier" is only a fix if something actually re-anchors: the startup
+        // baseline used to zero the error before the re-anchor check ever ran.
+        var chunk = new float[ChunkMs * SamplesPerMs];
+        for (var i = 0; i < 5; i++)
+        {
+            buffer.Write(chunk, ServerT0 + (i * ChunkMs * 1000L));
+        }
+
+        var reanchored = 0;
+        buffer.ReanchorRequired += (_, _) => Interlocked.Increment(ref reanchored);
+
+        var output = new float[StepMs * SamplesPerMs];
+        buffer.Read(output, LocalT0 + 700_000); // 700 ms past the first chunk's schedule
+
+        Assert.True(
+            buffer.GetStats().ReanchorCount > 0,
+            "a start further late than the re-anchor threshold must re-anchor, not play late");
+    }
+
+    [Fact]
+    public void RawErrorFarBeyondSmoothed_DoesNotSpliceMoreThanTheReanchorThreshold()
+    {
+        // A clock step lands the raw error at 600 ms while the EMA is still at 60 ms — inside
+        // the hard-sync band, so the tier fires, but sizing from the raw error would splice
+        // 600 ms in one go: past the ceiling the policy documents, and past the point where
+        // clearing the buffer is the honest response.
+        using var player = new Player().Settled();
+        var droppedBefore = player.Buffer.GetStats().SamplesDroppedForSync;
+
+        player.Stall(600_000);
+        player.Steps(30); // let any scheduled snap drain fully
+
+        var spliced = Ms(player.Buffer.GetStats().SamplesDroppedForSync - droppedBefore);
+        Assert.True(
+            spliced <= 500,
+            $"spliced {spliced:F1}ms for one snap, above the 500ms re-anchor ceiling");
+    }
+
+    [Fact]
     public void InternalAndExternalCorrectors_AgreeOnTheSameError()
     {
         // AUD-9: the decision ladder lived in two places and drifted. Both now route through
@@ -507,23 +699,45 @@ public class TimedAudioBufferCorrectionTests
 
         player.Stall(3_000);
 
+        var options = SyncCorrectionOptions.Default;
+
         for (var i = 0; i < 20; i++)
         {
             player.Step();
 
-            var stats = player.Buffer.GetStats();
-            calculator.UpdateFromSyncError(
-                player.Buffer.SyncErrorMicroseconds,
-                player.Buffer.SmoothedSyncErrorMicroseconds);
+            var smoothed = player.Buffer.SmoothedSyncErrorMicroseconds;
+            calculator.UpdateFromSyncError(player.Buffer.SyncErrorMicroseconds, smoothed);
 
-            Assert.Equal(stats.CurrentCorrectionMode, calculator.CurrentMode);
+            var selfApplied = SyncCorrectionPolicy.Decide(
+                smoothed, options, SampleRate, Channels, selfApplied: true);
+            var external = SyncCorrectionPolicy.Decide(smoothed, options, SampleRate, Channels);
 
-            // The buffer only re-applies a rate once it moves by more than 0.0001, so its
-            // stored value can trail the decision by that much; the decision itself is the
-            // same function call.
-            Assert.True(
-                Math.Abs(stats.TargetPlaybackRate - calculator.TargetPlaybackRate) <= 0.0001,
-                $"step {i}: buffer {stats.TargetPlaybackRate} vs calculator {calculator.TargetPlaybackRate}");
+            // Each side realizes the decision the policy gives it, and nothing else.
+            Assert.Equal(selfApplied.Mode, player.Buffer.GetStats().CurrentCorrectionMode);
+            Assert.Equal(external.Mode, calculator.CurrentMode);
+
+            // The two realizations differ — stepping versus a rate — but they must agree on
+            // which tier the error is in...
+            Assert.Equal(
+                external.Mode == SyncCorrectionMode.None,
+                selfApplied.Mode == SyncCorrectionMode.None);
+            Assert.Equal(
+                external.Mode == SyncCorrectionMode.HardSync,
+                selfApplied.Mode == SyncCorrectionMode.HardSync);
+
+            // ...and on how fast to converge, or a group of mixed players would drift apart
+            // during recovery, which is precisely what the speed cap exists to prevent.
+            if (selfApplied.Mode is SyncCorrectionMode.Dropping or SyncCorrectionMode.Inserting)
+            {
+                var steps = selfApplied.DropEveryNFrames + selfApplied.InsertEveryNFrames;
+                var impliedByStepping = 1.0 / steps;
+                var impliedByRate = Math.Abs(external.TargetPlaybackRate - 1.0);
+
+                Assert.True(
+                    Math.Abs(impliedByStepping - impliedByRate) <= 1e-4,
+                    $"step {i}: stepping implies {impliedByStepping:E3}, rate implies {impliedByRate:E3}");
+                Assert.True(impliedByStepping <= SyncCorrectionOptions.SpecMaxSpeedCorrection);
+            }
         }
     }
 }
