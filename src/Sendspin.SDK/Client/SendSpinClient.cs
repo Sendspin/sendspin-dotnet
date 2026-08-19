@@ -3911,25 +3911,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var payload = message.Payload;
         _currentGroup ??= new GroupState();
 
-        // Update metadata from server/state (merge with existing to preserve data across partial updates)
-        if (payload.Metadata is not null)
-        {
-            var meta = payload.Metadata;
-            var existing = _currentGroup.Metadata ?? new TrackMetadata();
+        // Each role object is itself Optional: absent = no change, present-null = clear all of
+        // that role's state (sent when the role leaves active_roles, and on pairing quiesce),
+        // present-with-value = merge the delta. Clearing one role leaves the others alone.
+        // Every branch below is announced by the GroupStateChanged at the end of this method,
+        // which is how a UI learns to drop the deactivated role's data (#196).
 
-            // All fields use Optional<T>: absent = keep existing, present-null = clear, present-with-value = update.
-            _currentGroup.Metadata = new TrackMetadata
+        // Update metadata from server/state (merge with existing to preserve data across partial updates)
+        if (payload.Metadata.IsPresent)
+        {
+            if (payload.Metadata.Value is not { } meta)
             {
-                Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
-                Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
-                Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
-                AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
-                Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
-                ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
-                Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
-                Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
-                Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
-            };
+                // Dropping the merge base too, not just the exposed object: a later partial
+                // update must start from empty rather than resurrect pre-clear fields.
+                _currentGroup.Metadata = null;
+            }
+            else
+            {
+                var existing = _currentGroup.Metadata ?? new TrackMetadata();
+
+                // All fields use Optional<T>: absent = keep existing, present-null = clear, present-with-value = update.
+                _currentGroup.Metadata = new TrackMetadata
+                {
+                    Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
+                    Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
+                    Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
+                    AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
+                    Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
+                    ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
+                    Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
+                    Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
+                    Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
+                };
+            }
         }
 
         // Update controller state for UI display only.
@@ -3937,37 +3951,65 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The server sends server/command with player-specific volume when it wants
         // to change THIS player's output.
         // Per the Sendspin spec, repeat/shuffle live in the controller object (not metadata).
-        if (payload.Controller is not null)
+        if (payload.Controller.IsPresent)
         {
-            if (payload.Controller.Volume.HasValue)
-                _currentGroup.Volume = payload.Controller.Volume.Value;
-            if (payload.Controller.Muted.HasValue)
-                _currentGroup.Muted = payload.Controller.Muted.Value;
-            if (payload.Controller.Repeat is not null)
-                _currentGroup.Repeat = payload.Controller.Repeat;
-            if (payload.Controller.Shuffle.HasValue)
-                _currentGroup.Shuffle = payload.Controller.Shuffle.Value;
-            if (payload.Controller.SupportedCommands is not null)
-                _currentGroup.SupportedCommands = payload.Controller.SupportedCommands;
+            if (payload.Controller.Value is not { } controller)
+            {
+                // HandleServerState is the only writer of these five, so the controller role
+                // owns them outright and clearing it returns each to the value a group carries
+                // before the server has reported any of them. Read off a fresh GroupState
+                // rather than repeating its literals, so the two cannot drift.
+                var unreported = new GroupState();
+                _currentGroup.Volume = unreported.Volume;
+                _currentGroup.Muted = unreported.Muted;
+                _currentGroup.Repeat = unreported.Repeat;
+                _currentGroup.Shuffle = unreported.Shuffle;
+                _currentGroup.SupportedCommands = unreported.SupportedCommands;
+            }
+            else
+            {
+                if (controller.Volume.HasValue)
+                    _currentGroup.Volume = controller.Volume.Value;
+                if (controller.Muted.HasValue)
+                    _currentGroup.Muted = controller.Muted.Value;
+                if (controller.Repeat is not null)
+                    _currentGroup.Repeat = controller.Repeat;
+                if (controller.Shuffle.HasValue)
+                    _currentGroup.Shuffle = controller.Shuffle.Value;
+                if (controller.SupportedCommands is not null)
+                    _currentGroup.SupportedCommands = controller.SupportedCommands;
+            }
         }
 
         // Merge color deltas (color role). Each field is Optional: absent keeps the existing color,
         // present-null clears it, present-with-value updates it.
-        var colorChanged = false;
-        if (payload.Color is not null)
+        var colorChanged = payload.Color.IsPresent;
+        if (colorChanged)
         {
-            var c = payload.Color;
+            // Mutated in place rather than replaced, so a consumer holding the ColorPalette it
+            // was handed by an earlier ColorChanged sees the update — including a clear.
             var colors = _currentGroup.Colors;
 
-            colors.Timestamp = c.Timestamp ?? colors.Timestamp;
-            if (c.BackgroundDark.IsPresent) colors.BackgroundDark = c.BackgroundDark.Value;
-            if (c.BackgroundLight.IsPresent) colors.BackgroundLight = c.BackgroundLight.Value;
-            if (c.Primary.IsPresent) colors.Primary = c.Primary.Value;
-            if (c.Accent.IsPresent) colors.Accent = c.Accent.Value;
-            if (c.OnDark.IsPresent) colors.OnDark = c.OnDark.Value;
-            if (c.OnLight.IsPresent) colors.OnLight = c.OnLight.Value;
-
-            colorChanged = true;
+            if (payload.Color.Value is not { } c)
+            {
+                colors.Timestamp = null;
+                colors.BackgroundDark = null;
+                colors.BackgroundLight = null;
+                colors.Primary = null;
+                colors.Accent = null;
+                colors.OnDark = null;
+                colors.OnLight = null;
+            }
+            else
+            {
+                colors.Timestamp = c.Timestamp ?? colors.Timestamp;
+                if (c.BackgroundDark.IsPresent) colors.BackgroundDark = c.BackgroundDark.Value;
+                if (c.BackgroundLight.IsPresent) colors.BackgroundLight = c.BackgroundLight.Value;
+                if (c.Primary.IsPresent) colors.Primary = c.Primary.Value;
+                if (c.Accent.IsPresent) colors.Accent = c.Accent.Value;
+                if (c.OnDark.IsPresent) colors.OnDark = c.OnDark.Value;
+                if (c.OnLight.IsPresent) colors.OnLight = c.OnLight.Value;
+            }
         }
 
         _logger.LogDebug("server/state [{Player}]: Volume={Volume}, Muted={Muted}, Track={Track} by {Artist}",

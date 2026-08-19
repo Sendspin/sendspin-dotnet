@@ -59,6 +59,44 @@ public class SendspinClientServiceColorTests
     }
 
     [Fact]
+    public void ColorRoleObject_ExplicitNull_ClearsThePaletteAndRaisesColorChanged()
+    {
+        // messaging.md: a whole role object set to null clears all of that role's state — sent
+        // when color leaves active_roles. Cleared in place, so a consumer holding the palette
+        // it was handed earlier sees the clear rather than a detached stale copy.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": { "color": {
+                    "timestamp": 42, "background_dark": [10, 20, 30], "background_light": [40, 50, 60],
+                    "primary": [1, 1, 1], "accent": [2, 2, 2], "on_dark": [3, 3, 3], "on_light": [4, 4, 4]
+                } }
+            }
+            """);
+
+        var palette = client.CurrentGroup!.Colors;
+
+        ColorPalette? raised = null;
+        client.ColorChanged += (_, p) => raised = p;
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/state", "payload": { "color": null } }
+            """);
+
+        Assert.Same(palette, raised);
+        Assert.Null(palette.Timestamp);
+        Assert.Null(palette.BackgroundDark);
+        Assert.Null(palette.BackgroundLight);
+        Assert.Null(palette.Primary);
+        Assert.Null(palette.Accent);
+        Assert.Null(palette.OnDark);
+        Assert.Null(palette.OnLight);
+    }
+
+    [Fact]
     public void MalformedColor_DoesNotDropSiblingControllerUpdate()
     {
         var (client, connection, _) = TestClient.Create();
