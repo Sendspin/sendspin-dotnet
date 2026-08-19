@@ -2589,8 +2589,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
         _pendingPairingPsk = psk;
-        var suite = NoiseCipherSuite.ChaChaPoly;
-        byte[] wrapped = PairingCodes.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
+
+        // The AEAD of the connection's *negotiated* suite, not a fixed one: the server unwraps
+        // with whatever client/init announced, so hardcoding ChaCha20-Poly1305 broke every
+        // code-based pairing on an AES-GCM session — including the automatic fallback on a
+        // platform without ChaCha20-Poly1305 (#192).
+        byte[] wrapped = PairingCodes.WrapPsk(state.Sid!, cpace.Isk, psk, _session.Suite);
         SendAsync(new ClientPairFinalizeMessage
         {
             Payload = new ClientPairFinalizePayload { WrappedPsk = Base64UrlText.Encode(wrapped) },

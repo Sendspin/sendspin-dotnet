@@ -21,7 +21,10 @@ public class SendspinClientServicePinPairingTests
     private static string B64(byte[] b) => Convert.ToBase64String(b).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static (SendspinClientService, FakeSendspinConnection, InMemoryPairingCodeLockoutStore, InMemoryPairingRecordStore)
-        CreateClient(ClientCapabilities caps, Func<PairingCodePresentation, CancellationToken, ValueTask>? presentPairingCode = null)
+        CreateClient(
+            ClientCapabilities caps,
+            Func<PairingCodePresentation, CancellationToken, ValueTask>? presentPairingCode = null,
+            NoiseCipherSuite suite = NoiseCipherSuite.ChaChaPoly)
     {
         var lockout = new InMemoryPairingCodeLockoutStore();
         var records = new InMemoryPairingRecordStore();
@@ -39,11 +42,17 @@ public class SendspinClientServicePinPairingTests
                 PairingCodeLockoutStore = lockout,
                 PresentPairingCodeAsync = presentPairingCode,
                 PairingWindow = window,
+                Suite = suite,
             });
 
         // The CPace exchange is bound to the Noise handshake hash, which the test's server
         // counterpart derives from the same constant.
         session.HandshakeHash = HandshakeHash;
+
+        // Production wires one NoiseWireFraming in as both the framing and the session, so the
+        // suite the options select and the suite the session reports are the same value; the
+        // fake session has to be told separately.
+        session.Suite = suite;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         return (client, connection, lockout, records);
@@ -193,6 +202,60 @@ public class SendspinClientServicePinPairingTests
         Assert.True(server.Verify(B64(confirm.Payload.ClientKc)));
         Assert.Null(confirm.Payload.NonceB); // no reveal in static pairing code
         Assert.NotNull(Last<ClientPairFinalizeMessage>(conn).Payload.WrappedPsk);
+    }
+
+    [Theory]
+    [InlineData(NoiseCipherSuite.ChaChaPoly)]
+    [InlineData(NoiseCipherSuite.AesGcm)]
+    public void WrappedPsk_IsSealedWithTheNegotiatedSuite(NoiseCipherSuite suite)
+    {
+        // pairing.md seals wrapped_psk with "the AEAD of the connection's negotiated cipher
+        // suite". The call site hardcoded ChaCha20-Poly1305, so on an AES-GCM session -- chosen
+        // explicitly, or by the automatic fallback on a platform without ChaCha20-Poly1305 --
+        // the server's unwrap failed at the last step of every code-based pairing (#192).
+        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "12345678" };
+        var (client, conn, _, _) = CreateClient(caps, suite: suite);
+        using var _c = client;
+
+        conn.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
+
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("12345678"), sid, ad: PairingCodes.AdServer);
+        conn.RaiseTextMessageReceived(
+            ServerPairAuth(B64(server.PublicShare)));
+        server.Derive(B64(Last<ClientPairAuthMessage>(conn).Payload.PakeMsg2), PairingCodes.AdClient);
+        conn.RaiseTextMessageReceived(
+            ServerPairConfirm(B64(server.Tag())));
+
+        byte[] wrapped = B64(Last<ClientPairFinalizeMessage>(conn).Payload.WrappedPsk!);
+        byte[] kWrap = System.Security.Cryptography.SHA256.HashData(
+            [.. "sendspin-pair-psk-wrap-v1"u8.ToArray(), .. sid, .. server.Isk]);
+
+        // Unwraps under the negotiated suite, and only under it: without the second assertion a
+        // suite-blind wrap still passes the ChaChaPoly case.
+        Unwrap(suite, kWrap, wrapped);
+        Assert.Throws<System.Security.Cryptography.AuthenticationTagMismatchException>(
+            () => Unwrap(
+                suite == NoiseCipherSuite.ChaChaPoly ? NoiseCipherSuite.AesGcm : NoiseCipherSuite.ChaChaPoly,
+                kWrap,
+                wrapped));
+    }
+
+    /// <summary>The server side of <c>PairingCodes.WrapPsk</c>: throws if the tag does not verify.</summary>
+    private static void Unwrap(NoiseCipherSuite suite, byte[] kWrap, byte[] wrapped)
+    {
+        byte[] psk = new byte[32];
+        if (suite == NoiseCipherSuite.AesGcm)
+        {
+            using var aes = new System.Security.Cryptography.AesGcm(kWrap, 16);
+            aes.Decrypt(new byte[12], wrapped[..32], wrapped[32..], psk);
+        }
+        else
+        {
+            using var chacha = new System.Security.Cryptography.ChaCha20Poly1305(kWrap);
+            chacha.Decrypt(new byte[12], wrapped[..32], wrapped[32..], psk);
+        }
     }
 
     [Fact]
