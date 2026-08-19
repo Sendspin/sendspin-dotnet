@@ -11,6 +11,7 @@ public sealed class SendspinListener : IAsyncDisposable
 {
     private readonly ILogger<SendspinListener> _logger;
     private readonly ListenerOptions _options;
+    private readonly ConnectionOptions? _connectionOptions;
     private SimpleWebSocketServer? _server;
     private bool _disposed;
     private volatile bool _isListening;
@@ -36,10 +37,20 @@ public sealed class SendspinListener : IAsyncDisposable
     /// </summary>
     public int BoundPort => _server?.Port ?? _options.Port;
 
-    public SendspinListener(ILogger<SendspinListener> logger, ListenerOptions? options = null)
+    /// <param name="logger">Logger.</param>
+    /// <param name="options">Listener options (port, path).</param>
+    /// <param name="connectionOptions">
+    /// Supplies the keep-alive settings applied to every accepted connection, matching the
+    /// dial path. Defaults to <see cref="ConnectionOptions"/>'s own defaults.
+    /// </param>
+    public SendspinListener(
+        ILogger<SendspinListener> logger,
+        ListenerOptions? options = null,
+        ConnectionOptions? connectionOptions = null)
     {
         _logger = logger;
         _options = options ?? new ListenerOptions();
+        _connectionOptions = connectionOptions;
     }
 
     /// <summary>
@@ -55,7 +66,7 @@ public sealed class SendspinListener : IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        _server = new SimpleWebSocketServer(_logger);
+        _server = new SimpleWebSocketServer(_logger, _connectionOptions);
         _server.ClientConnected += OnClientConnected;
         _server.Start(_options.Port);
 
