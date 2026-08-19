@@ -23,6 +23,18 @@ public enum ConnectionPriority
 }
 
 /// <summary>
+/// How an arbitration loss is delivered to the losing connection.
+/// </summary>
+internal enum ArbitrationFarewell
+{
+    /// <summary>client/goodbye carrying the result's reason.</summary>
+    Goodbye,
+
+    /// <summary>pair/abort, for a losing connection that is a pairing handshake.</summary>
+    PairAbort,
+}
+
+/// <summary>
 /// Pure, side-effect-free multi-server arbitration decision used by
 /// <see cref="SendspinHostService"/>. Implements the spec's decision table:
 /// the incoming connection is accepted when its priority is higher than or equal to
@@ -30,7 +42,8 @@ public enum ConnectionPriority
 /// incoming playback or pairing, and an empty-vs-empty tie admits the incoming
 /// connection only when it is the persisted last-playback server. A displaced holder
 /// receives goodbye 'another_server'; a rejected incoming receives
-/// 'concurrent_attempt'.
+/// 'concurrent_attempt'; a loser that is a pairing handshake receives pair/abort
+/// 'concurrent_attempt' instead of either.
 /// </summary>
 internal static class ServerArbitration
 {
@@ -74,6 +87,38 @@ internal static class ServerArbitration
     /// <param name="existingPriority">The current holder's priority class.</param>
     /// <param name="lastPlayedServerId">Persisted last-playback server_id, or null.</param>
     internal static ArbitrationResult Decide(
+        string newServerId,
+        ConnectionPriority newPriority,
+        string? existingServerId,
+        ConnectionPriority existingPriority,
+        string? lastPlayedServerId)
+    {
+        var result = Rank(newServerId, newPriority, existingServerId, existingPriority, lastPlayedServerId);
+
+        // connection.md: a displaced or rejected connection that is a pairing handshake is told
+        // pair/abort 'concurrent_attempt' rather than client/goodbye. A goodbye is not something
+        // a pairing state machine processes as an attempt teardown, and pairing.md gives this
+        // reason the close-after-send semantics arbitration needs (#203). The ranking above is
+        // untouched: only how the loss is delivered, and under which reason, changes here.
+        //
+        // This covers the same-server-reconnect branch too, where the stale socket is displaced
+        // under 'user_request'. That reason exists to avoid telling the SAME server
+        // 'another_server', a distinction only client/goodbye draws — pair/abort has no such
+        // reason, and a displaced pairing handshake is a displaced pairing handshake however the
+        // successor identifies itself.
+        bool loserIsPairing = result.LoserReason is not null
+            && (result.AcceptNew ? existingPriority : newPriority) == ConnectionPriority.Pairing;
+
+        return loserIsPairing
+            ? result with { LoserReason = ConcurrentAttempt, LoserFarewell = ArbitrationFarewell.PairAbort }
+            : result;
+    }
+
+    /// <summary>
+    /// The priority ranking itself: the spec's decision table and its two exceptions, in
+    /// client/goodbye terms. <see cref="Decide"/> re-routes a pairing loser afterwards.
+    /// </summary>
+    private static ArbitrationResult Rank(
         string newServerId,
         ConnectionPriority newPriority,
         string? existingServerId,
@@ -130,9 +175,14 @@ internal static class ServerArbitration
 /// Outcome of <see cref="ServerArbitration.Decide"/>.
 /// </summary>
 /// <param name="AcceptNew">True to accept the new server; false to reject it.</param>
-/// <param name="LoserGoodbyeReason">
-/// client/goodbye reason for the losing connection (the existing one when <paramref name="AcceptNew"/>
-/// is true and one exists; the new one when false), or null when there is no loser.
+/// <param name="LoserReason">
+/// Reason for the losing connection (the existing one when <paramref name="AcceptNew"/>
+/// is true and one exists; the new one when false), or null when there is no loser. Carried
+/// by whichever message <see cref="ArbitrationResult.LoserFarewell"/> names.
 /// </param>
 /// <param name="Rationale">Human-readable decision summary for logging.</param>
-internal readonly record struct ArbitrationResult(bool AcceptNew, string? LoserGoodbyeReason, string Rationale);
+internal readonly record struct ArbitrationResult(bool AcceptNew, string? LoserReason, string Rationale)
+{
+    /// <summary>Which message delivers the loss; client/goodbye unless set otherwise.</summary>
+    internal ArbitrationFarewell LoserFarewell { get; init; }
+}

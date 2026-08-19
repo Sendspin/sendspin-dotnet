@@ -719,18 +719,26 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             if (existingConnection is not null)
             {
-                // LoserGoodbyeReason is non-null whenever there is an existing connection to drop.
-                await DisconnectExistingAsync(existingConnection, result.LoserGoodbyeReason!);
+                // LoserReason is non-null whenever there is an existing connection to drop.
+                await DisconnectExistingAsync(existingConnection, result.LoserReason!, result.LoserFarewell);
             }
 
             return true;
         }
 
         // New server rejected (an existing connection always exists on this path).
-        _logger.LogInformation("Arbitration: Rejecting {NewServerId}, sending goodbye", newServerId);
+        _logger.LogInformation(
+            "Arbitration: Rejecting {NewServerId}, sending {Farewell} {Reason}",
+            newServerId,
+            result.LoserFarewell,
+            result.LoserReason);
         try
         {
-            await newConnection.DisconnectAsync(result.LoserGoodbyeReason!);
+            // A rejected incoming pairing handshake is told pair/abort rather than
+            // client/goodbye (connection.md); either way the connection closes behind it.
+            await (result.LoserFarewell == ArbitrationFarewell.PairAbort
+                ? newConnection.DisconnectWithPairAbortAsync(result.LoserReason!)
+                : newConnection.DisconnectAsync(result.LoserReason!));
         }
         catch (Exception ex)
         {
@@ -750,11 +758,13 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     /// <summary>
     /// Disconnects an existing active server connection during arbitration.
-    /// Removes the connection from the tracking dictionary and sends a goodbye message.
+    /// Removes the connection from the tracking dictionary and sends its farewell message.
     /// </summary>
     /// <param name="existing">The existing connection to disconnect.</param>
-    /// <param name="reason">The goodbye reason to send.</param>
-    private async Task DisconnectExistingAsync(ActiveServerConnection existing, string reason)
+    /// <param name="reason">The reason to send.</param>
+    /// <param name="farewell">Which message carries it.</param>
+    private async Task DisconnectExistingAsync(
+        ActiveServerConnection existing, string reason, ArbitrationFarewell farewell)
     {
         lock (_connectionsLock)
         {
@@ -776,7 +786,19 @@ public sealed class SendspinHostService : IAsyncDisposable
             // happens on every server reconnect, so widening this to also tear down the audio/
             // source pipelines (as Client.DisposeAsync would) is a separate change, not asked for
             // here.
-            await existing.Client.DisconnectAsync(reason);
+            //
+            // A pairing farewell goes out on the connection rather than through the client: the
+            // client's only farewell is client/goodbye. Its per-disconnect bookkeeping still
+            // runs, off the state change either path raises.
+            if (farewell == ArbitrationFarewell.PairAbort)
+            {
+                await existing.Connection.DisconnectWithPairAbortAsync(reason);
+            }
+            else
+            {
+                await existing.Client.DisconnectAsync(reason);
+            }
+
             await existing.Connection.DisposeAsync();
         }
         catch (Exception ex)
