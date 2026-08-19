@@ -30,9 +30,10 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
 | Stream teardown | `stream/end` and `stream/clear` honour `roles`; their payloads lost `Reason`, `StreamId` and `TargetTimestamp` | Low — compiler error, and the removed members never carried a value |
 | Undefined wire surface | `VisualizerTypes.Pitch` (and binary type 21), `PlayerStatePayload.BufferLevel`/`.Error`, and `AudioChunk.Slot` removed | Low — compiler error; none were spec-defined and nothing in the SDK populated them |
-| Sync correction | `MaxSpeedCorrection` defaults to `0.005`, and `Validate()` now **throws** above it | **High** if you set it — an existing 2% or 4% value throws at buffer construction |
+| Sync correction | `MaxSpeedCorrection` defaults to `0.005`; a larger configured value is **clamped** to it, with a warning | Medium — no compiler error, but correction is slower than you configured |
 | Sync correction | `DeadbandMicroseconds` defaults to `100` µs, down from 1 ms | Medium — behavioural, no compiler error |
 | Sync correction | New one-shot hard-sync tier above 5 ms, applied by the buffer on **both** read paths | Medium — behavioural, no compiler error |
+| Sync correction | `Read` applies the sub-5 ms correction itself and holds `TargetPlaybackRate` at 1.0 | Medium — double-corrects if you also drive a resampler from that rate |
 | Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
 | Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |
 
@@ -318,26 +319,30 @@ Both events are also forwarded by `SendspinHostService`. Playback-only apps need
 
 ## 11. Sync correction now follows the spec's caps and the reference's strategy
 
-This is the one section with a **runtime throw** in it. Everything else here is behavioural.
+Nothing here is a compiler error, and nothing here throws. All of it changes what you hear.
 
 ### The speed cap is enforced, not suggested
 
 `SyncCorrectionOptions.MaxSpeedCorrection` defaulted to `0.02`, and `CliDefaults` to `0.04`. The
 spec makes ±0.5% a MUST for continuous correction, measured as a sliding average over 150 ms
-(`roles/player/v1.md:134`). The default is now `0.005`, `CliDefaults` matches it, and
-`Validate()` — which runs in the `TimedAudioBuffer` and `SyncCorrectionCalculator` constructors
-— **throws** above it.
+(`roles/player/v1.md:134`). The default is now `0.005` and `CliDefaults` matches it.
+
+A larger configured value is **clamped where correction is applied**, not rejected — every
+correction path uses `EffectiveMaxSpeedCorrection`, so an out-of-spec speed cannot be produced
+whatever the configuration says. The SDK logs one warning per corrector when it sees one:
 
 ```csharp
-// ❌ Throws at buffer construction from 10.0.0 onward.
+// Still constructs, still plays. Corrects at 0.5%, and says so in the log.
 var options = new SyncCorrectionOptions { MaxSpeedCorrection = 0.02 };
-
-// ✅ Leave it alone. The cap is a fleet contract, not a comfort setting.
-var options = SyncCorrectionOptions.Default;
+Console.WriteLine(options.MaxSpeedCorrection);          // 0.02  — what you asked for
+Console.WriteLine(options.EffectiveMaxSpeedCorrection); // 0.005 — what is applied
+Console.WriteLine(options.ExceedsSpecSpeedCap);         // true
 ```
 
-If you read this from configuration — a `MaxSpeedCorrectionPercent` setting, say — clamp it to
-`SyncCorrectionOptions.SpecMaxSpeedCorrection` at the point of reading, or drop the setting.
+If you read this from configuration — a `MaxSpeedCorrectionPercent` setting, say — clamp it at
+the point of reading or drop the setting, so the log stops complaining and the value on screen
+matches the behaviour. `Validate()` still rejects genuinely nonsensical values (zero, negative,
+above 1.0).
 
 The reasoning the old doc comment gave (pitch perception starts around 3%, so 2-4% is
 inaudible) is not the reason the cap exists. Every player in a group must recover from the same
@@ -360,6 +365,23 @@ cannot perform on samples it has already been handed, so it cannot be delegated.
 `SyncCorrectionCalculator` fed an error in that band reports
 `SyncCorrectionMode.HardSync` with a neutral rate, meaning *stand down* — if you wrote your own
 `ISyncCorrectionProvider`, treat that mode the same way rather than adding a correction on top.
+
+### `Read` corrects; `ReadRaw` reports
+
+The two read paths now have a clean split, and which one you use decides who corrects.
+
+`Read` corrects end to end: nothing below the dead band, whole-frame drop/duplicate at a
+capped interval between the dead band and 5 ms, and a snap above that. It holds
+`TargetPlaybackRate` at 1.0 throughout, because it is not asking anyone for anything. It
+previously *advised* a rate in that middle band which nothing applied — the SDK has no
+resampler on that path — so ordinary clock drift accumulated unopposed until the hard-sync tier
+spliced it, roughly every hundred seconds at a realistic 50 ppm. If you drive a resampler from
+`TargetPlaybackRateChanged` **and** call `Read`, stop doing one of the two: that is now a double
+correction.
+
+`ReadRaw` is unchanged in intent — you apply the continuous correction from an
+`ISyncCorrectionProvider` — except that the buffer still performs the one-shot snap itself, as
+described above.
 
 ### The dead band moved to 100 µs
 
@@ -430,7 +452,8 @@ Expect the server to send less ahead than it used to. That is the fix, not a reg
 - [ ] `UnpairedAccessEnabled` is a deliberate decision, not a default you inherited
 - [ ] `PairingConfigChanged` is persisted and reapplied at startup
 - [ ] Identity and PSK files are in a user-scoped location
-- [ ] No `MaxSpeedCorrection` above `SyncCorrectionOptions.SpecMaxSpeedCorrection` reaches the SDK — including from configuration
+- [ ] No `MaxSpeedCorrection` above `SyncCorrectionOptions.SpecMaxSpeedCorrection` reaches the SDK — including from configuration; check the log for the clamp warning
+- [ ] Nothing drives a resampler from `TargetPlaybackRate` while also calling `Read`
 - [ ] `ClientCapabilities.AudioBufferCapacityMs` and `TimedAudioBuffer`'s `bufferCapacityMs` are the same number
 - [ ] `TimedAudioBuffer.MinBufferMilliseconds` matches `ClientCapabilities.MinBufferMs`
 - [ ] A custom `ISyncCorrectionProvider` treats `SyncCorrectionMode.HardSync` as "stand down"

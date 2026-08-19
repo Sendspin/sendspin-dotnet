@@ -338,10 +338,17 @@ public int Read(float[] buffer, int offset, int count)
 
 ### Configuring Sync Behavior
 
-The correction ladder follows the spec: nothing below a ~100 µs dead band, a playback-rate
-adjustment capped at ±0.5% above it, and a single one-shot snap above ~5 ms — which the spec
-exempts from the speed cap, and which the buffer applies itself on both read paths.
-`Validate()` rejects a `MaxSpeedCorrection` above the cap.
+The correction ladder follows the spec: nothing below a ~100 µs dead band, a continuous
+correction capped at ±0.5% above it, and a single one-shot snap above ~5 ms — which the spec
+exempts from the speed cap, and which the buffer applies itself on both read paths. A
+`MaxSpeedCorrection` above the cap is clamped where it is applied, with a warning, rather than
+rejected.
+
+Which read path you use decides who corrects. `Read` corrects end to end, realizing the
+continuous tier as capped frame drop/duplicate and holding `TargetPlaybackRate` at 1.0 — do not
+also drive a resampler from that rate. `ReadRaw` hands you the error to correct through an
+`ISyncCorrectionProvider`; the buffer still performs the one-shot snap itself, because skipping
+buffered content is something only it can do.
 
 ```csharp
 // Spec-conformant defaults (0.5% cap, 100µs dead band, 3s target)
