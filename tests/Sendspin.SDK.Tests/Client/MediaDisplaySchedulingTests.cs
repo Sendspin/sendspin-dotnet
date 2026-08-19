@@ -478,6 +478,38 @@ public class MediaDisplaySchedulingTests
     }
 
     /// <summary>
+    /// The stream/clear twin of the visualizer-named end: the player gate turns the message
+    /// away before the pipeline clear, so a flush placed behind the gate would never run for
+    /// the role the clear names.
+    /// </summary>
+    [Fact]
+    public async Task StreamClear_NamingOnlyTheVisualizer_DropsItsFramesAndKeepsTheRest()
+    {
+        var pipe = new FakeAudioPipeline();
+        var (client, connection, timer) = SchedulingClient(audioPipeline: pipe);
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var artwork = new List<ArtworkReceivedEventArgs>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+        client.ArtworkReceived += (_, e) => artwork.Add(e);
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["visualizer"]}}""");
+        await Task.Delay(200);
+
+        // Artwork is dispatched after any frame due in the same pass, so its arrival is the
+        // point at which a surviving frame would have surfaced too.
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(() => artwork.Count == 1, "the artwork the clear did not name");
+        Assert.Empty(frames);
+        Assert.Equal(0, pipe.ClearCount);
+    }
+
+    /// <summary>
     /// An omitted <c>roles</c> means every stream; a present but empty one names no role at all,
     /// and so ends nothing — for the media held here as much as for the audio pipeline.
     /// </summary>
