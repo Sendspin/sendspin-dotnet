@@ -61,11 +61,10 @@ public class ControllerSeekSerializationTests
 
         var msg = MessageSerializer.Deserialize<ServerStateMessage>(Json);
 
-        Assert.NotNull(msg?.Payload.Controller);
-        Assert.Equal(245_000, msg.Payload.Controller.SeekMaxMs);
-        Assert.Equal(
-            new[] { "play", "seek", "seek_relative" },
-            msg.Payload.Controller.SupportedCommands);
+        var controller = msg?.Payload.Controller.Value;
+        Assert.NotNull(controller);
+        Assert.Equal(245_000, controller.SeekMaxMs);
+        Assert.Equal(new[] { "play", "seek", "seek_relative" }, controller.SupportedCommands);
     }
 
     [Fact]
@@ -84,7 +83,8 @@ public class ControllerSeekSerializationTests
 
         var msg = MessageSerializer.Deserialize<ServerStateMessage>(Json);
 
-        Assert.NotNull(msg?.Payload.Controller);
-        Assert.Null(msg.Payload.Controller.SeekMaxMs);
+        var controller = msg?.Payload.Controller.Value;
+        Assert.NotNull(controller);
+        Assert.Null(controller.SeekMaxMs);
     }
 }

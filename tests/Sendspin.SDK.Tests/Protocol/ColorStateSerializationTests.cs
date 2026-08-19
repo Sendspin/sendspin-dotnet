@@ -29,7 +29,7 @@ public class ColorStateSerializationTests
         var msg = MessageSerializer.Deserialize<ServerStateMessage>(json);
 
         Assert.NotNull(msg);
-        var color = msg.Payload.Color;
+        var color = msg.Payload.Color.Value;
         Assert.NotNull(color);
         Assert.Equal(1234567, color.Timestamp);
 
@@ -53,7 +53,7 @@ public class ColorStateSerializationTests
             }
             """;
 
-        var color = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color!;
+        var color = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color.Value!;
 
         // present-with-value
         Assert.True(color.Primary.IsPresent);
@@ -77,7 +77,7 @@ public class ColorStateSerializationTests
             { "type": "server/state", "payload": { "color": { "primary": {{array}} } } }
             """;
 
-        var color = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color!;
+        var color = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color.Value!;
 
         Assert.Equal(new RgbColor(r, g, b), color.Primary.Value);
     }
@@ -96,7 +96,7 @@ public class ColorStateSerializationTests
             }
             """;
 
-        var c = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color!;
+        var c = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color.Value!;
 
         Assert.Equal(new RgbColor(1, 1, 1), c.BackgroundDark.Value);
         Assert.Equal(new RgbColor(2, 2, 2), c.BackgroundLight.Value);
@@ -120,7 +120,7 @@ public class ColorStateSerializationTests
             { "type": "server/state", "payload": { "color": { "primary": {{malformedPrimary}}, "accent": [9, 9, 9] } } }
             """;
 
-        var color = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color!;
+        var color = MessageSerializer.Deserialize<ServerStateMessage>(json)!.Payload.Color.Value!;
 
         Assert.True(color.Primary.IsAbsent);                     // malformed -> no change
         Assert.Equal(new RgbColor(9, 9, 9), color.Accent.Value); // sibling still parsed

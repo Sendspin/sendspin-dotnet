@@ -193,41 +193,97 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public async Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
-        if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
+        // A stream/start for a stream that is already running is an in-place configuration update,
+        // not a restart: the spec has it update the configuration "without clearing buffers", and
+        // the player role adds that such an update continues the existing timeline and does not
+        // re-apply the startup lead. Buffered audio dropped here is audio the server never resends,
+        // so against a server that transmits far ahead a teardown costs its whole transmit-ahead
+        // window in silence (#201). Only Buffering and Playing count as running: the components
+        // exist and the timeline is anchored. Idle/Starting/Stopping/Error all take the full path.
+        var running = State is AudioPipelineState.Buffering or AudioPipelineState.Playing
+            ? _currentFormat
+            : null;
+
+        if (running is not null && running.IsSameStreamConfiguration(format))
         {
-            await StopAsync();
+            // Nothing to reconfigure. The decoder, the buffered audio, the sync anchor, the
+            // readiness gate and the pipeline state are all left exactly as they are; only the
+            // reported format is swapped for the instance the server just sent, so CurrentFormat
+            // reflects the latest announcement (bitrate is outside the comparison).
+            _currentFormat = format;
+            _logger.LogInformation(
+                "[Playback] stream/start re-announced the running format ({Format}); pipeline and buffered audio kept",
+                format);
+            return;
         }
 
-        SetState(AudioPipelineState.Starting);
+        // Sample rate and channel count are what the buffer and the output device are built from,
+        // so when only the decode side changes (codec, bit depth or codec header) the decoder alone
+        // is rebuilt and the audio already decoded ahead of it keeps playing — the .NET shape of
+        // the C++ client injecting a new codec-header chunk into its running pipeline.
+        //
+        // A sample-rate or channel-count change deliberately falls through to the restart below,
+        // which does clear the buffer: the deviation the spec allows ("does not clear buffers
+        // unless its implementation requires it, and may document its specific behavior"). This
+        // pipeline decodes on arrival, so what is buffered is float PCM, and TimedAudioBuffer's
+        // ring, timestamps and schedule are all fixed to one rate and channel count at
+        // construction — carrying that audio across such a change would mean resampling it into a
+        // second buffer while the output device is re-initialized for the new format.
+        var decoderOnlyChange = running is not null
+            && running.SampleRate == format.SampleRate
+            && running.Channels == format.Channels;
 
-        // Reset chunk timing state for the new session (monotonic counters are kept)
-        lock (_chunkStatsLock)
+        if (!decoderOnlyChange)
         {
-            _lastChunkArrivalMs = 0;
-            _avgInterArrivalMs = 0;
-            _chunkJitterMs = 0;
-            _recentGaps.Clear();
-            _maxChunkGapMs = 0;
-        }
+            if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
+            {
+                await StopAsync();
+            }
 
-        // Without this, a 30 s pause leaves MonotonicTimer 30 s behind real time
-        // (forward-jump clamping eats the gap), causing a 30 s delay on resume.
-        if (_precisionTimer is MonotonicTimer mt)
-        {
-            mt.Reset();
+            SetState(AudioPipelineState.Starting);
+
+            // Reset chunk timing state for the new session (monotonic counters are kept)
+            lock (_chunkStatsLock)
+            {
+                _lastChunkArrivalMs = 0;
+                _avgInterArrivalMs = 0;
+                _chunkJitterMs = 0;
+                _recentGaps.Clear();
+                _maxChunkGapMs = 0;
+            }
+
+            // Without this, a 30 s pause leaves MonotonicTimer 30 s behind real time
+            // (forward-jump clamping eats the gap), causing a 30 s delay on resume.
+            if (_precisionTimer is MonotonicTimer mt)
+            {
+                mt.Reset();
+            }
         }
 
         try
         {
             _currentFormat = format;
 
+            // On a decoder-only update the running decoder is replaced, and only once its
+            // replacement exists: a factory failure then leaves it in place for the catch below
+            // to dispose, instead of leaving the pipeline decoderless.
+            var replacedDecoder = decoderOnlyChange ? _decoder : null;
             _decoder = _decoderFactory.Create(format);
+            replacedDecoder?.Dispose();
             _decodeBuffer = new float[_decoder.MaxSamplesPerFrame];
 
             _logger.LogDebug(
                 "Decoder created for {Codec}, max frame size: {MaxSamples} samples",
                 format.Codec,
                 _decoder.MaxSamplesPerFrame);
+
+            if (decoderOnlyChange)
+            {
+                _logger.LogInformation(
+                    "[Playback] In-place stream/start: decoder rebuilt for {Format}, buffered audio and timeline kept",
+                    format);
+                return;
+            }
 
             _buffer = _bufferFactory(format, _clockSync);
 

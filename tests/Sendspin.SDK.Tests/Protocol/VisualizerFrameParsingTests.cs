@@ -5,7 +5,7 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Protocol;
 
 /// <summary>
-/// Binary decode coverage for the six visualizer feature frames (types 16-21), mirroring the
+/// Binary decode coverage for the five visualizer feature frames (types 16-20), mirroring the
 /// aiosendspin v1 wire. Each test builds [type][BE int64 ts][data] and asserts the parsed frame;
 /// malformed lengths must return null (dropped, not thrown).
 /// </summary>
@@ -71,16 +71,15 @@ public class VisualizerFrameParsingTests
         Assert.Equal(0xC8, frame.PeakStrength);
     }
 
-    [Fact]
-    public void Pitch_ParsesQ88AndConfidence()
+    [Theory]
+    [InlineData((byte)21)]
+    [InlineData((byte)22)]
+    [InlineData((byte)23)]
+    public void ReservedType_ReturnsNull(byte type)
     {
-        // A4 = MIDI 69 -> 0x4500 in Q8.8. Confidence 200.
-        var data = U16(0x4500).Concat(new byte[] { 200 }).ToArray();
-        var frame = BinaryMessageParser.ParseVisualizerFrame(Frame(BinaryMessageTypes.VisualizerPitch, 1, data), null);
-        Assert.NotNull(frame);
-        Assert.Equal(0x4500, frame.PitchMidiQ88);
-        Assert.Equal(200, frame.PitchConfidence);
-        Assert.Equal(69.0, frame.PitchMidi);
+        // The spec reserves 21-23 within the role's 16-23 allocation and forbids implementations
+        // from using them, so a frame carrying one is dropped whatever its payload looks like.
+        Assert.Null(BinaryMessageParser.ParseVisualizerFrame(Frame(type, 1, new byte[] { 0x45, 0x00, 200 }), spectrumBinCount: 8));
     }
 
     [Theory]
@@ -96,7 +95,7 @@ public class VisualizerFrameParsingTests
     [Theory]
     [InlineData(BinaryMessageTypes.VisualizerLoudness, 1)]  // needs 2
     [InlineData(BinaryMessageTypes.VisualizerFPeak, 2)]     // needs 4
-    [InlineData(BinaryMessageTypes.VisualizerPitch, 2)]     // needs 3
+    [InlineData(BinaryMessageTypes.VisualizerPeak, 2)]      // needs 1
     [InlineData(BinaryMessageTypes.VisualizerBeat, 0)]      // needs 1
     public void Malformed_WrongLength_ReturnsNull(byte type, int dataLen)
     {

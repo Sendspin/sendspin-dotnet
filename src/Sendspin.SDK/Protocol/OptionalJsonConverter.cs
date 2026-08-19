@@ -40,6 +40,23 @@ public sealed class OptionalJsonConverterFactory : JsonConverterFactory
             return new OptionalRgbColorJsonConverter();
         }
 
+        // The three server/state role objects, whose explicit null means "clear this whole role"
+        // (#196). Reference types, so typeof(X?) == typeof(X) at runtime, as for string below.
+        if (valueType == typeof(ServerMetadata))
+        {
+            return new OptionalJsonConverter<ServerMetadata?>();
+        }
+
+        if (valueType == typeof(ControllerState))
+        {
+            return new OptionalJsonConverter<ControllerState?>();
+        }
+
+        if (valueType == typeof(ColorState))
+        {
+            return new OptionalJsonConverter<ColorState?>();
+        }
+
         // ServerMetadata fields: string? (reference type — typeof(string?) == typeof(string) at runtime),
         // int? and long? (value types — each is a distinct Nullable<T> at runtime).
         if (valueType == typeof(string))
