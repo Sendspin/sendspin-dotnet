@@ -222,6 +222,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </remarks>
     private const int ConvergingTimeSyncIntervalMs = 500;
 
+    /// <summary>
+    /// Cancelled when this connection ends, and only then.
+    /// </summary>
+    /// <remarks>
+    /// The stream-start rescue burst runs on it. That burst has to outlive
+    /// <see cref="StopTimeSyncLoop"/> — a pairing activation stops the loop, and the burst is
+    /// gated against pairing at its own source instead — but it must not outlive the
+    /// connection. On <see cref="CancellationToken.None"/> it did: against a server that
+    /// accepts <c>client/time</c> and never answers, the orphan ran the whole burst (8 probes,
+    /// each waiting the full per-probe timeout) while holding the single-burst guard, so the
+    /// loop restarted by a fast reconnect had its own bursts skipped until it finished.
+    /// </remarks>
+    private CancellationTokenSource? _connectionLifetimeCts;
+
     // Sequential burst tracking: at most one probe is in flight at any time.
     // _burstInFlight is the awaiter for that probe's reply; _burstInFlightT1
     // is the T1 used to match the incoming server/time response.
@@ -876,6 +890,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _logger.LogInformation("Disconnecting: {Reason}", reason);
 
         StopTimeSyncLoop();
+        EndConnectionLifetime();
 
         await _connection.DisconnectAsync(reason);
 
@@ -1497,6 +1512,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (e.NewState is ConnectionState.Disconnected or ConnectionState.Reconnecting)
         {
             StopTimeSyncLoop();
+
+            // The loop's own token does not reach the stream-start rescue burst, which runs on
+            // the connection's lifetime precisely so a pairing activation cannot stop it. This
+            // is the disconnect that must.
+            EndConnectionLifetime();
 
             // A pairing attempt cannot survive the session (the CPace counter and handshake
             // hash reset with it), so release a presenter still showing the pairing code.
@@ -3551,6 +3571,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
 
+        // Connection-scoped work started from here on belongs to this connection and dies with
+        // it — see the field's remarks for the orphan this replaced.
+        BeginConnectionLifetime();
+
         // When the connection's first activate is the pairing one, the send-or-defer
         // decision is withheld wholesale: a non-sync role's initial client/state would
         // otherwise go out right here, into a server that admits nothing but pairing
@@ -3668,6 +3692,33 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
+    /// Arms a fresh <see cref="_connectionLifetimeCts"/> for a connection that has just
+    /// completed its handshake, cancelling any left over from the previous one.
+    /// </summary>
+    private void BeginConnectionLifetime()
+        => CancelConnectionLifetime(Interlocked.Exchange(ref _connectionLifetimeCts, new CancellationTokenSource()));
+
+    /// <summary>
+    /// Cancels connection-scoped work — currently the stream-start rescue burst — because the
+    /// connection has ended.
+    /// </summary>
+    private void EndConnectionLifetime()
+        => CancelConnectionLifetime(Interlocked.Exchange(ref _connectionLifetimeCts, null));
+
+    private static void CancelConnectionLifetime(CancellationTokenSource? cts)
+    {
+        if (cts is null)
+        {
+            return;
+        }
+
+        // Cancel before Dispose, and Cancel runs its registrations synchronously, so anything
+        // awaiting this token has already been released by the time the source goes away.
+        cts.Cancel();
+        cts.Dispose();
+    }
+
+    /// <summary>
     /// Interval to wait before the next time-sync burst: fast while the clock is still
     /// converging, the reference's steady-state cadence once it has.
     /// </summary>
@@ -3720,6 +3771,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogWarning(ex, "Time sync loop ended unexpectedly");
         }
     }
+
+    /// <summary>
+    /// The stream-start rescue burst: a one-off burst on the connection's lifetime rather than
+    /// on the time-sync loop's, for a stream starting before the clock has minimal sync.
+    /// </summary>
+    /// <remarks>
+    /// The token is the whole point — see <see cref="_connectionLifetimeCts"/>. It has to
+    /// survive <see cref="StopTimeSyncLoop"/>, because a pairing activation stops the loop and
+    /// this burst answers to a pairing gate of its own, but it has to die with the connection.
+    /// A null source means the connection ended (or never finished its handshake), so there is
+    /// nothing to rescue.
+    /// </remarks>
+    private Task SendRescueSyncBurstAsync()
+        => Volatile.Read(ref _connectionLifetimeCts) is { } lifetime
+            ? SendTimeSyncBurstAsync(lifetime.Token)
+            : Task.CompletedTask;
 
     /// <summary>
     /// Sends a burst of NTP-style time-sync probes sequentially and feeds the lowest-RTT
@@ -4487,8 +4554,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // Same rule as the time-sync loop's gate in HandleServerActivate: no
             // client/time may leave the client while a pairing activation is in effect —
             // the reference server would read the probe where it requires the next pairing
-            // message and abort the attempt. This burst is not the loop (its token is
-            // CancellationToken.None, so StopTimeSyncLoop cannot reach it) and it fires
+            // message and abort the attempt. This burst is not the loop (it runs on the
+            // connection's lifetime, so StopTimeSyncLoop cannot reach it) and it fires
             // without app action, so it is gated at the source: a stream/start crossing a
             // mid-session pairing activate on a clock without minimal sync must stay
             // silent. The loop's restart on the next non-pairing activate covers the
@@ -4498,7 +4565,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         else if (!_clockSynchronizer.HasMinimalSync)
         {
             _logger.LogDebug("Clock not synced, triggering re-sync burst (fire-and-forget)");
-            _ = SendTimeSyncBurstAsync(CancellationToken.None);
+            SendRescueSyncBurstAsync().SafeFireAndForget(_logger);
         }
         else
         {
@@ -4802,6 +4869,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        EndConnectionLifetime();
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
         _displayScheduler.Dispose();
@@ -4813,6 +4881,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _disposed = true;
 
         StopTimeSyncLoop();
+        EndConnectionLifetime();
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
         _displayScheduler.Dispose();

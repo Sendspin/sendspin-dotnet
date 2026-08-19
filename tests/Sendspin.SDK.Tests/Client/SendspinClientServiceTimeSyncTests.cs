@@ -242,6 +242,49 @@ public class SendspinClientServiceTimeSyncTests
             "clients manage a couple of seconds and the pre-fix ladder took over twenty.");
     }
 
+    [Fact]
+    public async Task StreamStartRescueBurst_IsCancelledByDisconnect_ReleasingTheSingleBurstGuard()
+    {
+        // The rescue burst runs on the connection's lifetime rather than the time-sync loop's,
+        // because a pairing activation stops the loop and this burst is gated against pairing
+        // at its own source. On CancellationToken.None it also survived the disconnect: against
+        // a server that never answers client/time it kept probing for the whole burst — eight
+        // probes at the 10 s per-probe timeout — holding the single-burst guard, so a loop
+        // restarted by a fast reconnect had its own bursts silently skipped.
+        var clockSync = new RecordingClockSynchronizer { StatusIsConverged = true };
+        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = clockSync });
+        using var _c = client;
+        connection.RespondToTimeSync = true;
+
+        // The loop's own burst completes and it settles into the steady interval, so every
+        // later probe is attributable to the rescue burst alone. Measurements are recorded
+        // after the guard is released, so this also proves the loop's burst is done.
+        TestClient.CompleteHandshake(connection, "player@v1");
+        await WaitForAsync(() => clockSync.Measurements.Count > 0, TimeSpan.FromSeconds(5));
+        int probesAfterLoopBurst = Probes(connection);
+
+        // The server stops answering, then a stream starts on a clock without minimal sync.
+        connection.RespondToTimeSync = false;
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/start","payload":{"player":{"codec":"pcm","channels":2,"sample_rate":48000,"bit_depth":16}}}""");
+        await WaitForAsync(() => Probes(connection) == probesAfterLoopBurst + 1, TimeSpan.FromSeconds(5));
+
+        // The connection drops with that probe still in flight.
+        await connection.DisconnectAsync("network_drop");
+        await Task.Delay(200);
+
+        // The guard is free again well inside the timeout the orphan would have sat out.
+        await connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin"));
+        connection.RespondToTimeSync = true;
+        int probesBeforeNewBurst = Probes(connection);
+        await client.SendTimeSyncBurstAsync(CancellationToken.None);
+
+        Assert.Equal(probesBeforeNewBurst + 8, Probes(connection));
+    }
+
+    private static int Probes(FakeSendspinConnection connection)
+        => connection.SnapshotSentMessages().OfType<ClientTimeMessage>().Count();
+
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;
@@ -267,6 +310,14 @@ public class SendspinClientServiceTimeSyncTests
         public bool HasMinimalSync => false;
         public double StaticDelayMs { get; set; }
 
+        /// <summary>
+        /// Convergence as reported through <see cref="GetStatus"/>, which is what the
+        /// time-sync loop paces on — scripted separately from <see cref="IsConverged"/> and
+        /// <see cref="HasMinimalSync"/>, so a test can park the loop at the steady interval
+        /// while the clock still looks rescue-eligible to a starting stream.
+        /// </summary>
+        public bool StatusIsConverged { get; set; }
+
         public void ProcessMeasurement(long t1, long t2, long t3, long t4)
         {
             ProcessMeasurementCallCount++;
@@ -280,6 +331,7 @@ public class SendspinClientServiceTimeSyncTests
         public long ServerToClientTime(long serverTime) => serverTime;
         public long ServerToClientTimeUncompensated(long serverTime) => serverTime;
         public void Reset() { }
-        public Sendspin.SDK.Synchronization.ClockSyncStatus GetStatus() => new();
+        public Sendspin.SDK.Synchronization.ClockSyncStatus GetStatus()
+            => new() { IsConverged = StatusIsConverged };
     }
 }
