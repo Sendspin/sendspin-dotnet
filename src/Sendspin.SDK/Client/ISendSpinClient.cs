@@ -383,6 +383,27 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<StreamStartPayload>? StreamStartReceived;
 
     /// <summary>
+    /// Raised when a <c>stream/end</c> message is received and parsed.
+    /// <see cref="StreamEndPayload.Roles"/> names the roles whose output is ending; null means
+    /// every active stream. The SDK stops the audio pipeline only when the message reaches the
+    /// <c>player</c> role, so an <c>artwork</c>- or <c>visualizer</c>-targeted end leaves
+    /// playback running and is reported here for the consumer of that role to act on — stop its
+    /// output and clear its buffers. Roles the SDK does not implement, including the
+    /// application-specific ones (names starting with <c>_</c>), are passed through untouched.
+    /// </summary>
+    event EventHandler<StreamEndPayload>? StreamEndReceived;
+
+    /// <summary>
+    /// Raised when a <c>stream/clear</c> message is received and parsed — a seek or a track
+    /// jump, which clears buffers without ending the stream.
+    /// <see cref="StreamClearPayload.Roles"/> names the roles to clear; null means both stream
+    /// roles. As with <see cref="StreamEndReceived"/>, the SDK clears the audio pipeline only
+    /// when the message reaches the <c>player</c> role, and every role it does not implement is
+    /// passed through for the consumer to clear itself.
+    /// </summary>
+    event EventHandler<StreamClearPayload>? StreamClearReceived;
+
+    /// <summary>
     /// Raised when a server changes this client's pairing configuration via
     /// <c>management/set-pairing-config</c> — any pairing method enabled, disabled, or
     /// reconfigured (min pairing code length, static pairing code, record-mode fallback), unpaired access

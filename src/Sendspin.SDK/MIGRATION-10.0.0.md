@@ -27,6 +27,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 | Static delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
 | `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
+| Stream teardown | `stream/end` and `stream/clear` honour `roles`; their payloads lost `Reason`, `StreamId` and `TargetTimestamp` | Low — compiler error, and the removed members never carried a value |
 | Undefined wire surface | `VisualizerTypes.Pitch` (and binary type 21), `PlayerStatePayload.BufferLevel`/`.Error`, and `AudioChunk.Slot` removed | Low — compiler error; none were spec-defined and nothing in the SDK populated them |
 
 ---
@@ -234,8 +235,14 @@ Three things changed, all on what goes out on the wire:
 ### `SendPlayerStateAsync`'s delay parameter is now nullable, and applies
 
 ```csharp
+// ISendspinClient (dial path)
 Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null);   // was double = 0.0
+
+// SendspinHostService (listen path)
+Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null, string? serverId = null);
 ```
+
+Both facades carry the same signature and the same semantics.
 
 **Omit it for volume and mute changes.** The old `0.0` default reported `static_delay_ms: 0` on every such call, and the spec requires the server to *merge* each `client/state`, "retaining the last value of any field that is absent" — so a present value overwrites. One volume change after the server set a 250 ms delay wiped it back to 0. The reported delay is now always the one actually applied, regardless of what you pass.
 
@@ -265,7 +272,32 @@ Only relevant if you construct these messages yourself; both parameters default 
 
 ---
 
-## 10. Checklist
+## 10. Stream teardown is per-role
+
+`stream/end` and `stream/clear` carry an optional `roles` array, and the SDK now honours it.
+
+Both payloads were modelled on fields the spec does not define — `StreamEndPayload.Reason`, `StreamEndPayload.StreamId`, `StreamClearPayload.StreamId`, `StreamClearPayload.TargetTimestamp` — so no server ever populated them. They are replaced by the two members the spec does define, `ServerTransmitted` and `Roles`.
+
+**The behavioural half matters more than the compiler error.** A role-targeted `stream/end` is routine: whenever a `server/activate` drops a stream role from `active_roles`, the server ends that role's output first. Previously *any* `stream/end` stopped the audio pipeline and flipped the group to Idle, so deactivating the artwork role stopped playback on this client while every other client in the group kept going; likewise a `stream/clear` for the visualizer flushed buffered audio. Now the pipeline is touched only when `roles` is absent (meaning all streams) or names `player`.
+
+Roles the SDK does not implement itself — `artwork`, `visualizer`, and the application-specific ones whose names start with `_` — are surfaced instead:
+
+```csharp
+client.StreamEndReceived += (_, payload) =>
+{
+    // payload.Roles == null means every active stream.
+    if (payload.Roles is null || payload.Roles.Contains("artwork"))
+        ClearArtwork();
+};
+
+client.StreamClearReceived += (_, payload) => { /* same shape */ };
+```
+
+Both events are also forwarded by `SendspinHostService`. Playback-only apps need no change: the audio pipeline is still driven by the SDK.
+
+---
+
+## 11. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt

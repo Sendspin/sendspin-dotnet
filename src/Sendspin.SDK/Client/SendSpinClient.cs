@@ -211,6 +211,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     internal INoiseSessionInfo Session => _session;
 
     /// <summary>
+    /// The <c>pairing_psk</c> method's effective enablement, as set by
+    /// <c>management/set-pairing-config</c>. Read live by this connection's
+    /// <see cref="RecordPskResolver"/>, which excludes Pairing-category records from the
+    /// handshake candidate set while the method is off (#202).
+    /// </summary>
+    internal bool IsPairingPskEnabled => _pairingPskEnabled;
+
+    /// <summary>
     /// The connection this client was constructed with (test-only introspection). Named to
     /// avoid shadowing the <c>Sendspin.SDK.Connection</c> namespace used elsewhere in this
     /// file (e.g. <c>Connection.Noise.SendspinIdentity</c>).
@@ -281,6 +289,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<string>? PairingCompleted;
 
     public event EventHandler<StreamStartPayload>? StreamStartReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<StreamEndPayload>? StreamEndReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<StreamClearPayload>? StreamClearReceived;
 
     /// <inheritdoc />
     public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
@@ -2593,8 +2607,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         byte[] psk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
         _pendingPairingPsk = psk;
-        var suite = NoiseCipherSuite.ChaChaPoly;
-        byte[] wrapped = PairingCodes.WrapPsk(state.Sid!, cpace.Isk, psk, suite);
+
+        // The AEAD of the connection's *negotiated* suite, not a fixed one: the server unwraps
+        // with whatever client/init announced, so hardcoding ChaCha20-Poly1305 broke every
+        // code-based pairing on an AES-GCM session — including the automatic fallback on a
+        // platform without ChaCha20-Poly1305 (#192).
+        byte[] wrapped = PairingCodes.WrapPsk(state.Sid!, cpace.Isk, psk, _session.Suite);
         SendAsync(new ClientPairFinalizeMessage
         {
             Payload = new ClientPairFinalizePayload { WrappedPsk = Base64UrlText.Encode(wrapped) },
@@ -4309,17 +4327,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         try
         {
             var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
+            if (message is null)
+            {
+                return;
+            }
 
             // As in HandleStreamStartCoreAsync: the serializer does not enforce the
-            // model's non-nullable Payload, and the Reason accessor below dereferences
-            // it, so a null payload must be reported as the JsonException this catch
-            // handles before that dereference throws NullReferenceException past it.
-            if (message is { Payload: null })
+            // model's non-nullable Payload, and the role gate below dereferences it, so
+            // a null payload must be reported as the JsonException this catch handles
+            // before that dereference throws NullReferenceException past it.
+            if (message.Payload is null)
             {
                 throw new System.Text.Json.JsonException("stream/end payload is null");
             }
 
-            _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
+            var payload = message.Payload;
+            _logger.LogInformation(
+                "Stream ended for roles: {Roles}",
+                payload.Roles is null ? "all" : string.Join(", ", payload.Roles));
+
+            StreamEndReceived?.Invoke(this, payload);
+
+            if (!ReachesPlayerRole(payload.Roles))
+            {
+                return;
+            }
 
             while (_earlyChunkQueue.TryDequeue(out _))
             {
@@ -4352,10 +4384,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void HandleStreamClear(string json)
     {
         var message = MessageSerializer.Deserialize<StreamClearMessage>(json);
-        _logger.LogDebug("Stream clear (seek)");
+        if (message is null)
+        {
+            return;
+        }
 
-        _audioPipeline?.Clear();
+        var payload = message.Payload;
+        _logger.LogDebug(
+            "Stream clear (seek) for roles: {Roles}",
+            payload.Roles is null ? "all" : string.Join(", ", payload.Roles));
+
+        StreamClearReceived?.Invoke(this, payload);
+
+        if (ReachesPlayerRole(payload.Roles))
+        {
+            _audioPipeline?.Clear();
+        }
     }
+
+    /// <summary>
+    /// Whether a stream/end or stream/clear reaches the <c>player</c> role, and so the audio
+    /// pipeline. An omitted <c>roles</c> means every active stream, which is the case that
+    /// makes an absent array and an empty one behave differently.
+    /// </summary>
+    /// <remarks>
+    /// Role-targeted teardown is routine, not exotic: whenever a <c>server/activate</c> drops a
+    /// stream role, the server ends that role's output first, so a <c>stream/end</c> naming
+    /// <c>artwork</c> arrives mid-playback and must not touch audio (#193). Names this client
+    /// does not implement — <c>artwork</c>, <c>visualizer</c>, and the application-specific
+    /// roles starting with <c>_</c> — are simply not <c>player</c>; they reach subscribers
+    /// through <see cref="StreamEndReceived"/> / <see cref="StreamClearReceived"/> rather than
+    /// being validated here, since only the consumer of a role knows its names.
+    /// </remarks>
+    private static bool ReachesPlayerRole(List<string>? roles) => roles is null || roles.Contains("player");
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
     {
@@ -4616,9 +4677,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         SendspinClientOptions options,
         ConnectionOptions? connectionOptions = null)
     {
+        // Assigned below, before anything can dial and so before the resolver can be asked
+        // anything. The closure is how the resolver reaches this connection's live pairing
+        // config, which only exists once the client does; until then the configured value is
+        // the same one the client will start from.
+        SendspinClientService? client = null;
+
         var framing = new NoiseWireFraming(
             options.Identity,
-            options.PairingRecordStore is null ? null : new RecordPskResolver(options.PairingRecordStore),
+            options.PairingRecordStore is null
+                ? null
+                : new RecordPskResolver(
+                    options.PairingRecordStore,
+                    () => client?.IsPairingPskEnabled ?? options.Capabilities.PairingPskEnabled),
             options.Suite);
 
         var connection = new SendspinConnection(
@@ -4626,10 +4697,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             connectionOptions,
             framing);
 
-        return new SendspinClientService(
+        client = new SendspinClientService(
             loggerFactory.CreateLogger<SendspinClientService>(),
             connection,
             framing,
             options);
+
+        return client;
     }
 }

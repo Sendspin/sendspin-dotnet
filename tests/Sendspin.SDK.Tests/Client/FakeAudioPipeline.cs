@@ -19,6 +19,12 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     public AudioFormat? CurrentFormat => null;
     public int DetectedOutputLatencyMs => 0;
 
+    /// <summary>Calls to <see cref="StopAsync"/>, for tests asserting a role-targeted stream/end left playback alone.</summary>
+    public int StopCount { get; private set; }
+
+    /// <summary>Calls to <see cref="Clear"/>, for tests asserting a role-targeted stream/clear left the buffers alone.</summary>
+    public int ClearCount { get; private set; }
+
     public event EventHandler<AudioPipelineState>? StateChanged;
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
 
@@ -31,9 +37,14 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     }
 
     public Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default) => Task.CompletedTask;
-    public Task StopAsync() => Task.CompletedTask;
+    public Task StopAsync()
+    {
+        StopCount++;
+        return Task.CompletedTask;
+    }
+
     public void NotifyReconnect() { }
-    public void Clear(long? newTargetTimestamp = null) { }
+    public void Clear(long? newTargetTimestamp = null) => ClearCount++;
     public void ReanchorTiming() { }
     public void ProcessAudioChunk(AudioChunk chunk) => Chunks.Add(chunk);
     public void SetVolume(int volume) { }

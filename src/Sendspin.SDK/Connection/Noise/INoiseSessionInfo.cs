@@ -15,4 +15,11 @@ internal interface INoiseSessionInfo
 
     /// <summary>The Noise handshake hash h, once the handshake completes (pairing code binds to it).</summary>
     ReadOnlyMemory<byte>? HandshakeHash { get; }
+
+    /// <summary>
+    /// The session's negotiated cipher suite. The pairing flow seals <c>wrapped_psk</c> with
+    /// this suite's AEAD, which is only the same thing as the SDK's default on a platform that
+    /// has ChaCha20-Poly1305 (#192).
+    /// </summary>
+    NoiseCipherSuite Suite { get; }
 }
