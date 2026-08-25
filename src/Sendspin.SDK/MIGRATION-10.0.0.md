@@ -479,6 +479,37 @@ correction.
 `ISyncCorrectionProvider` — except that the buffer still performs the one-shot snap itself, as
 described above.
 
+### New (additive): `SyncCorrectedSampleSource` for smooth correction
+
+Nothing to migrate — this is a component you may now opt into. It applies the same spec-fixed
+ladder as `Read`, but realizes the continuous tier by trimming playback speed through a resampler
+the SDK now carries (a vendored copy of NAudio's `WdlResampler`; see `THIRD-PARTY-NOTICES.md`)
+rather than by dropping and duplicating whole frames. A ±0.5% speed change is inaudible where
+frame stepping is faintly granular, so on any device with the cycles for it this is the better
+mechanism.
+
+```csharp
+// In place of your own IAudioSampleSource:
+sourceFactory: (buffer, nowMicroseconds) => new SyncCorrectedSampleSource(buffer, nowMicroseconds)
+```
+
+It drives `ReadRaw` internally and owns the whole external-correction protocol — provider updates,
+`NotifyExternalCorrection`, `ReportExternalPlaybackRate`, standing down during a hard sync — so
+there is no correction code left on your side. If your host must not carry a resampler in its
+output chain, set the new `SyncCorrectionOptions.Mechanism` to
+`SyncCorrectionMechanism.FrameStepping` and the same class splices frames instead, constructing no
+resampler at all. The default is `SmoothResampling`. `Mechanism` is the only addition to
+`SyncCorrectionOptions`, and it changes nothing for `TimedAudioBuffer.Read`, which always steps
+frames.
+
+If you have already hand-rolled this composition against `ReadRaw`, read the new class before
+keeping yours: it carries fixes for two artefacts the obvious implementation has (windowsSpin
+issue #63). Bypassing the resampler when the rate returns to exactly 1.0 strands the input and
+fractional read position it is holding, and re-entry clicks — reproduced here at nearly full scale
+on a 0.5-amplitude sine. Padding a mid-callback shortfall with silence puts a bit-exact zero into
+continuous audio, which is a broadband click rather than a gap; holding the last frame keeps the
+waveform continuous, and only a callback that produced nothing at all should be silent.
+
 ### The dead band moved to 100 µs
 
 `DeadbandMicroseconds` sat at 1 ms — exactly the spec's MUST floor, which left no margin under

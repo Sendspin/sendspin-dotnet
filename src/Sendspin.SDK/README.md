@@ -139,10 +139,28 @@ one-shot snap above that, a re-anchor above 500 ms — and it always fills the s
 padding with silence on an underrun, so the audio thread is never handed a short block. The
 return value is how many of those samples were real audio.
 
-Reach for `ReadRaw` only if your platform owns a *smoother* correction mechanism than stepping
-whole frames — ALSA hardware rate adjust, a browser's `playbackRate`, a resampler already in your
-output chain. The thresholds and the ±0.5 % cap are spec constants either way, so there is no
-policy to win back; see [Sync Correction System](#sync-correction-system) for that seam.
+On a desktop-class device, swap that source for `SyncCorrectedSampleSource` and you get the same
+correction more smoothly. Instead of dropping and duplicating whole frames it trims playback speed
+continuously through a built-in resampler, which is inaudible where frame stepping is faintly
+granular. Nothing about the policy changes — the same dead band, the same ±0.5% cap, the same
+one-shot snap, all still applied by the buffer — so it is a drop-in swap with no correction code
+on your side, and it costs a few hundred microseconds of CPU per callback plus one small buffer:
+
+```csharp
+// Replaces MySampleSource entirely; the same (buffer, nowMicroseconds) the factory hands you.
+sourceFactory: (buffer, nowMicroseconds) => new SyncCorrectedSampleSource(buffer, nowMicroseconds)
+```
+
+It fills every block, holding the last frame over a brief shortfall rather than punching a silent
+hole in continuous audio, and reports its applied rate into `GetStats()` for you. If your host
+cannot carry a resampler in its output chain, set
+`SyncCorrectionOptions.Mechanism = SyncCorrectionMechanism.FrameStepping` and the same class
+corrects by splicing frames instead, with no resampler constructed.
+
+Reach for `ReadRaw` directly only if your platform owns a rate-control mechanism of its own that
+the SDK cannot drive — ALSA hardware rate adjust, a browser's `playbackRate`, a resampler already
+in your output chain. The thresholds and the ±0.5 % cap are spec constants either way, so there is
+no policy to win back; see [Sync Correction System](#sync-correction-system) for that seam.
 
 ### Handling handshake failures
 
@@ -363,7 +381,7 @@ Both read paths follow the same ladder — they differ only in who applies the c
 | Sync Error | Correction | Applied by |
 |------------|------------|------------|
 | < 100 µs | None (dead band) | — |
-| 100 µs – 5 ms | Continuous, bounded by the ±0.5% cap | `Read`: whole-frame drop/duplicate. `ReadRaw`: your mechanism, from `ISyncCorrectionProvider` |
+| 100 µs – 5 ms | Continuous, bounded by the ±0.5% cap | `Read`: whole-frame drop/duplicate. `SyncCorrectedSampleSource`: a resampler trimming playback speed. `ReadRaw`: your own mechanism, from `ISyncCorrectionProvider` |
 | 5 ms – 500 ms | One-shot hard sync (single discontinuity) | `TimedAudioBuffer`, on **both** paths |
 | > 500 ms | Re-anchor (clear buffer, restart sync) | `TimedAudioBuffer`, on **both** paths |
 
@@ -376,6 +394,13 @@ reached — it applies only if you lower the hard-sync threshold or disable that
 Only for platforms with their own rate-control mechanism. The buffer still performs the one-shot
 snap itself, because skipping buffered content is something only it can do — when the provider
 reports `SyncCorrectionMode.HardSync` it is telling you to stand down, not to correct.
+
+If what you want is smooth resampling rather than a mechanism peculiar to your platform, use
+`SyncCorrectedSampleSource` (see [Playing audio](#playing-audio)) instead of writing the loop
+below. It is this composition, already assembled and tested, and it carries the fixes for two
+artefacts that are easy to reintroduce: bypassing the resampler when the rate returns to 1.0
+(which strands the resampler's buffered input and clicks on re-entry), and padding a mid-callback
+shortfall with silence (a bit-exact zero in continuous audio is a broadband click, not a gap).
 
 ```csharp
 using Sendspin.SDK.Audio;
@@ -453,6 +478,12 @@ var options = new SyncCorrectionOptions
     ResamplingThresholdMicroseconds = 15_000,     // Resampling vs drop/insert
     ReanchorThresholdMicroseconds = 500_000,      // Clear buffer threshold
     StartupGracePeriodMicroseconds = 500_000,     // No correction during startup
+
+    // How an external corrector realizes the continuous tier. SmoothResampling (the default)
+    // trims playback speed; FrameStepping splices whole frames and constructs no resampler.
+    // Read by SyncCorrectedSampleSource and SyncCorrectionCalculator; TimedAudioBuffer.Read
+    // always steps frames regardless.
+    Mechanism = SyncCorrectionMechanism.SmoothResampling,
 };
 
 var calculator = new SyncCorrectionCalculator(options, sampleRate, channels);

@@ -143,7 +143,7 @@ await client.SendCommandAsync("play");
 await client.SetVolumeAsync(75);
 ```
 
-You provide the audio output by implementing `IAudioPlayer` for your platform (WASAPI, PulseAudio, CoreAudio, SDL2, etc.) and pulling samples through `TimedAudioBuffer.Read()`, which applies the spec's sync correction for you. See the [NuGet package README](src/Sendspin.SDK/README.md) for the player quickstart, the full API reference, the sync correction system, and migration guides.
+You provide the audio output by implementing `IAudioPlayer` for your platform (WASAPI, PulseAudio, CoreAudio, SDL2, etc.) and pulling samples through `TimedAudioBuffer.Read()`, which applies the spec's sync correction for you. On a desktop-class device, `SyncCorrectedSampleSource` applies the same correction by trimming playback speed through a built-in resampler instead of stepping whole frames — smoother, same policy, no correction code on your side. See the [NuGet package README](src/Sendspin.SDK/README.md) for the player quickstart, the full API reference, the sync correction system, and migration guides.
 
 ## Example Projects
 
