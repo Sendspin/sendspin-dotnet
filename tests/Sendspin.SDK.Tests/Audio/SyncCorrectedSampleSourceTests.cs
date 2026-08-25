@@ -8,8 +8,8 @@ namespace Sendspin.SDK.Tests.Audio;
 /// <see cref="ITimedAudioBuffer.ReadRaw"/> and <see cref="ISyncCorrectionProvider"/>. These cover
 /// the two artefacts the chain shipped with — the click at the rate-1.0 boundary and the silence
 /// gap on a mid-callback shortfall, both from windowsSpin issue #63 — plus the invariants that make
-/// the correction conformant: the ±0.5% cap, an exact passthrough inside the dead band, and
-/// neutrality while the buffer's one-shot snap is in flight.
+/// the correction conformant: the ±0.5% cap, a transparent dead band, and neutrality while the
+/// buffer's one-shot snap is in flight.
 /// </summary>
 public class SyncCorrectedSampleSourceTests
 {
@@ -114,9 +114,12 @@ public class SyncCorrectedSampleSourceTests
     /// second (861 events in 21 s were observed on the reporter's USB DAC).
     /// </para>
     /// <para>
-    /// The signal is DC, which a correct resampler passes through unchanged, so an exact-zero
-    /// output sample is the unambiguous signature of a leaked silence pad — nothing else in the
-    /// chain can produce one.
+    /// The signal is DC, which a correct resampler passes through unchanged whatever the ratio,
+    /// so every real output sample must come back bit-exact and anything else was manufactured.
+    /// A weaker "no exact zeros" assertion missed the real defect: a short region fed to WDL's
+    /// <c>ResampleOut</c> fires its zero-pad, and the pad-compensation trim's rounding leaks
+    /// exactly one contaminated frame — a dip of <c>fracpos × signal</c>, up to ~49% — which
+    /// concealment then holds for the rest of the callback.
     /// </para>
     /// </remarks>
     [Fact]
@@ -153,7 +156,12 @@ public class SyncCorrectedSampleSourceTests
             // The buffer is four frames short of what this callback needs — content that has not
             // arrived yet, not a stall. It is made good on the next callback.
             buffer.AvailableSamples = CallbackSamples - (4 * Channels);
-            source.Read(output, 0, CallbackSamples);
+            var real = source.Read(output, 0, CallbackSamples);
+
+            for (var i = 0; i < real; i++)
+            {
+                Assert.Equal(dc, output[i]);
+            }
 
             foreach (var sample in output)
             {
@@ -166,6 +174,44 @@ public class SyncCorrectedSampleSourceTests
 
         Assert.True(source.ConcealedFrameCount > 0, "the run never hit the shortfall path");
         Assert.Equal(0, silenceSamples);
+    }
+
+    /// <summary>
+    /// The frames of a region that came up short are held, not dropped.
+    /// </summary>
+    /// <remarks>
+    /// <c>ResamplePrepare</c> hands out a region without committing to it, so a partial region
+    /// abandoned mid-callback is silently overwritten by the next prepare — which converts the
+    /// pad-path dip into a real dropout, a worse artefact than the one being fixed. Everything the
+    /// buffer hands over must therefore end up in the output, bar the handful of frames the
+    /// resampler and the carry are holding at any instant.
+    /// </remarks>
+    [Fact]
+    public void Shortfall_HoldsThePartialRegion_RatherThanDroppingIt()
+    {
+        var buffer = SignalBuffer.Constant(0.5f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+        for (var i = 0; i < 5; i++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        var deliveredBefore = buffer.FramesDelivered;
+        long realFramesOut = 0;
+
+        for (var cb = 0; cb < 300; cb++)
+        {
+            buffer.AvailableSamples = CallbackSamples - (4 * Channels);
+            realFramesOut += source.Read(output, 0, CallbackSamples) / Channels;
+        }
+
+        var consumed = buffer.FramesDelivered - deliveredBefore;
+
+        // A chain that dropped its partial region would strand ~4 frames per callback.
+        Assert.InRange(consumed - realFramesOut, 0, 32);
     }
 
     /// <summary>
@@ -258,9 +304,10 @@ public class SyncCorrectedSampleSourceTests
 
     /// <summary>
     /// Inside the dead band the rate is exactly 1.0 and the chain must be transparent — not
-    /// "close enough", bit for bit. At an identity ratio WDL's linear interpolation reads every
-    /// output frame at fraction 0.0, so the samples come through untouched; anything else would
-    /// mean the chain is colouring audio that needs no correction at all.
+    /// "close enough", bit for bit. From a fresh start the fractional read position is 0 and stays
+    /// there while the ratio is unity, so WDL's linear interpolation reads every output frame at
+    /// fraction 0.0 and the samples come through untouched; anything else would mean the chain is
+    /// colouring audio that needs no correction at all.
     /// </summary>
     [Fact]
     public void DeadbandSteadyState_IsBitIdenticalPassthrough()
@@ -280,6 +327,74 @@ public class SyncCorrectedSampleSourceTests
 
             Assert.Equal(expectedOutput, actualOutput);
         }
+    }
+
+    /// <summary>
+    /// Re-entering the dead band <em>after</em> a correction, which is the case that actually
+    /// happens: bit-identity is not what to expect, and claiming it would be wrong.
+    /// </summary>
+    /// <remarks>
+    /// The fractional read position stops advancing at an identity ratio but does not reset — it
+    /// freezes wherever the correction left it — so the interpolation settles into a fixed
+    /// two-tap average of adjacent frames. That is a mild, unchanging FIR, not a re-colouring:
+    /// the amplitude is essentially intact and, crucially, nothing steps. A bypass at rate 1.0
+    /// would be the thing that steps, which is the whole point of not having one.
+    /// </remarks>
+    [Fact]
+    public void DeadbandAfterACorrection_StaysContinuous()
+    {
+        const double frequency = 997.0;
+        const double amplitude = 0.8;
+
+        var buffer = SignalBuffer.Sine(frequency, amplitude);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+
+        // A correction cycle first, so the read position lands somewhere other than 0...
+        provider.SetResampling(1.003);
+        for (var cb = 0; cb < 20; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        // ...then back inside the dead band, where the rate is exactly 1.0 again.
+        provider.SetResampling(1.0);
+
+        var previous = new float[Channels];
+        source.Read(output, 0, CallbackSamples);
+        for (var c = 0; c < Channels; c++)
+        {
+            previous[c] = output[CallbackSamples - Channels + c];
+        }
+
+        var slopeBound = amplitude * 2 * Math.PI * frequency / SampleRate;
+        var peak = 0.0f;
+
+        for (var cb = 0; cb < 50; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+
+            for (var c = 0; c < Channels; c++)
+            {
+                var prev = previous[c];
+                for (var i = c; i < CallbackSamples; i += Channels)
+                {
+                    Assert.True(
+                        Math.Abs(output[i] - prev) < 2 * slopeBound,
+                        $"the dead band stepped by {Math.Abs(output[i] - prev):F5} at sample {i}");
+                    prev = output[i];
+                    peak = Math.Max(peak, Math.Abs(output[i]));
+                }
+
+                previous[c] = output[CallbackSamples - Channels + c];
+            }
+        }
+
+        // A fixed two-tap average at 997 Hz costs well under 1% of amplitude; anything more would
+        // mean the chain is genuinely filtering audio that needs no correction.
+        Assert.InRange(peak, amplitude * 0.99, amplitude);
     }
 
     /// <summary>

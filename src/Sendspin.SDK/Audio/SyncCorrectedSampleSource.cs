@@ -67,6 +67,14 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// </summary>
     private readonly float[] _previousFrame;
 
+    /// <summary>
+    /// Input frames read for a resampler region that came up short, held to be prefixed to the
+    /// next one. Never handed to the resampler as a partial region — see <see cref="ReadResampled"/>.
+    /// </summary>
+    private float[] _carry = Array.Empty<float>();
+
+    private int _carryFrames;
+
     private double _playbackRate = 1.0;
 
     /// <summary>Last rate handed to the buffer, so an unchanged one costs no lock.</summary>
@@ -226,6 +234,7 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
         _correctionProvider.Reset();
         _resampler?.Reset();
         _framesSinceLastCorrection = 0;
+        _carryFrames = 0;
         Array.Clear(_previousFrame);
         Volatile.Write(ref _playbackRate, 1.0);
         _buffer.ReportExternalPlaybackRate(1.0);
@@ -248,6 +257,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _correctionProvider.NotifyReconnect();
+
+        // Held input belongs to the pre-disconnect timeline, and the buffer abandons its own
+        // in-flight snap for the same reason. Splicing it onto whatever arrives next would put a
+        // step in the waveform at the one moment the clock is least able to explain it.
+        _carryFrames = 0;
     }
 
     /// <inheritdoc/>
@@ -288,6 +302,15 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// the worst case folds content above 0.995 × Nyquist — 23.88 kHz at 48 kHz — which is not
     /// present in program material and is not audible if it were. A resampler doing genuine rate
     /// conversion would need the chain; this one does not.
+    /// </para>
+    /// <para>
+    /// <b>Do not raise <c>filtercnt</c> here.</b> Besides the click above, WDL's output-side IIR
+    /// pass — the one that runs while the ratio is below 1.0 — filters from index 0 of the output
+    /// array rather than from the offset it was asked to write at. This source writes at a
+    /// non-zero offset whenever the loop needs a second pass, so a non-zero <c>filtercnt</c> would
+    /// filter over frames already generated in this callback and leave the new ones unfiltered.
+    /// The fault is upstream and the vendored file is kept diffable against it (see its header),
+    /// so the guard lives here, at the only call site that could arm it.
     /// </para>
     /// </remarks>
     private WdlResampler CreateResampler()
@@ -402,52 +425,159 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// concealed on the output side and counted.
     /// </para>
     /// <para>
+    /// <b>A partial region is never fed to the resampler.</b> WDL treats an input region shorter
+    /// than the one it asked for as end-of-stream: it zero-pads to that length, resamples across
+    /// the pad, and then trims the output back by a rounded estimate of the padded frames. The
+    /// rounding leaks exactly one contaminated frame — a dip of <c>fracpos × signal</c>, up to
+    /// ~49% — which concealment then holds for the rest of the callback. Bailing before
+    /// <c>ResampleOut</c> is not an alternative either: <c>ResamplePrepare</c> does not commit, so
+    /// the next call's prepare overwrites the region and the dip becomes a dropout instead. The
+    /// short read is therefore carried in <see cref="_carry"/> and prefixed to the next callback's
+    /// region, which is the only way the content survives intact.
+    /// </para>
+    /// <para>
     /// There is deliberately no bypass at rate 1.0. The resampler holds buffered input and a
     /// fractional read position across calls; stepping around it strands that content and re-entry
     /// resumes from a position the stream has moved past — an audible discontinuity every time the
-    /// error crosses the dead band, which is many times a minute. At an identity ratio the linear
-    /// interpolation is an exact passthrough anyway (each output frame reads at fraction 0.0), so
-    /// the bypass would buy nothing but the click. See
-    /// <c>DeadbandSteadyState_IsBitIdenticalPassthrough</c>.
+    /// error crosses the dead band, which is many times a minute. At an identity ratio the read
+    /// position stops advancing, so the linear interpolation settles into a fixed two-tap
+    /// average: from a fresh start that fraction is 0 and the samples come through bit for bit,
+    /// and after a correction it is whatever the rate left behind, which is a fixed, gentle FIR
+    /// rather than anything that moves. Either way the bypass would buy nothing but the click.
+    /// See <c>DeadbandSteadyState_IsBitIdenticalPassthrough</c> and
+    /// <c>DeadbandAfterACorrection_StaysContinuous</c>.
     /// </para>
     /// </remarks>
     private int ReadResampled(float[] output, int offset, int outputFrames, long now, in CallbackCorrection correction)
     {
         var resampler = _resampler!;
         var totalFramesGenerated = 0;
+        var framesWanted = outputFrames;
+        var bufferDry = false;
 
-        while (totalFramesGenerated < outputFrames)
+        while (totalFramesGenerated < outputFrames && framesWanted > 0)
         {
-            var framesWanted = outputFrames - totalFramesGenerated;
             var framesNeeded = resampler.ResamplePrepare(
                 framesWanted, _channels, out var inBuffer, out var inBufferOffset);
 
             // Zero means the resampler already holds enough input to make more output without
-            // reading; only a non-zero request that comes back empty is a genuine stall.
-            var framesRead = framesNeeded > 0
-                ? ReadCorrectedFrames(
-                    inBuffer.AsSpan(inBufferOffset, framesNeeded * _channels), framesNeeded, now, correction)
-                : 0;
-
-            if (framesNeeded > 0 && framesRead == 0)
+            // reading; only a non-zero request that comes back short is a genuine stall.
+            if (framesNeeded > 0)
             {
-                break;
+                var framesRead = FillRegion(inBuffer, inBufferOffset, framesNeeded, now, correction, bufferDry);
+
+                if (framesRead < framesNeeded)
+                {
+                    // Hold what arrived and ask for less output instead: a short region makes WDL
+                    // pad, and simply abandoning the region loses the frames, because
+                    // ResamplePrepare does not commit and the next prepare overwrites them. One
+                    // output frame less per input frame missing always shrinks the request enough
+                    // in one or two passes, the ratio being within ±0.5% of 1, and it strictly
+                    // decreases, so the loop terminates.
+                    StoreCarry(inBuffer, inBufferOffset, framesRead);
+                    framesWanted -= framesNeeded - framesRead;
+                    bufferDry = true;
+                    continue;
+                }
             }
 
             var framesGenerated = resampler.ResampleOut(
-                output, offset + (totalFramesGenerated * _channels), framesRead, framesWanted, _channels);
+                output, offset + (totalFramesGenerated * _channels), framesNeeded, framesWanted, _channels);
 
             if (framesGenerated == 0)
             {
-                // No forward progress despite the read: the filter still wants lookahead it does
-                // not have. Bail rather than spin; the residual is concealed by the caller.
+                // No forward progress despite a full region: the filter still wants lookahead it
+                // does not have. Bail rather than spin; the residual is concealed by the caller.
                 break;
             }
 
             totalFramesGenerated += framesGenerated;
+            framesWanted = outputFrames - totalFramesGenerated;
         }
 
         return totalFramesGenerated;
+    }
+
+    /// <summary>
+    /// Fills a resampler region: whatever was carried over from a short read first, then fresh
+    /// content from the buffer for the remainder.
+    /// </summary>
+    /// <param name="region">The resampler's input region.</param>
+    /// <param name="regionOffset">Where in <paramref name="region"/> the input starts.</param>
+    /// <param name="frames">Frames the resampler asked for.</param>
+    /// <param name="now">Current local time, for the buffer's error calculation.</param>
+    /// <param name="correction">What this callback is doing about the sync error.</param>
+    /// <param name="bufferDry">
+    /// True once the buffer has already under-delivered in this callback, so a retry at a smaller
+    /// output size fills from the carry alone. Asking a dry buffer again would count a second
+    /// underrun for one stall.
+    /// </param>
+    /// <returns>Frames in the region; fewer than <paramref name="frames"/> when the buffer is dry.</returns>
+    private int FillRegion(
+        float[] region,
+        int regionOffset,
+        int frames,
+        long now,
+        in CallbackCorrection correction,
+        bool bufferDry)
+    {
+        var carried = Math.Min(_carryFrames, frames);
+        if (carried > 0)
+        {
+            _carry.AsSpan(0, carried * _channels)
+                .CopyTo(region.AsSpan(regionOffset, carried * _channels));
+
+            // A later region can be smaller than the one the carry was taken from (a shorter
+            // callback, or a rate that lowered the demand), so keep any surplus rather than
+            // dropping it on the floor.
+            var surplus = _carryFrames - carried;
+            if (surplus > 0)
+            {
+                _carry.AsSpan(carried * _channels, surplus * _channels).CopyTo(_carry);
+            }
+
+            _carryFrames = surplus;
+        }
+
+        if (carried == frames || bufferDry)
+        {
+            return carried;
+        }
+
+        var fresh = ReadCorrectedFrames(
+            region.AsSpan(regionOffset + (carried * _channels), (frames - carried) * _channels),
+            frames - carried,
+            now,
+            correction);
+
+        return carried + fresh;
+    }
+
+    /// <summary>
+    /// Holds an under-filled region for the next callback to complete.
+    /// </summary>
+    /// <remarks>
+    /// The frames already carried in sit at the head of the region, so copying the whole prefix
+    /// back is idempotent: a callback that adds nothing leaves the carry exactly as it was.
+    /// </remarks>
+    private void StoreCarry(float[] region, int regionOffset, int frames)
+    {
+        if (frames <= 0)
+        {
+            _carryFrames = 0;
+            return;
+        }
+
+        var samples = frames * _channels;
+        if (_carry.Length < samples)
+        {
+            // Off the audio thread's steady state: the region only grows when the callback size or
+            // the rate does, and it settles after the first shortfall at that size.
+            _carry = new float[samples];
+        }
+
+        region.AsSpan(regionOffset, samples).CopyTo(_carry);
+        _carryFrames = frames;
     }
 
     /// <summary>
