@@ -241,6 +241,46 @@ public class SyncCorrectedSampleSourceTests
         Assert.Equal(1, source.UnderrunCount);
     }
 
+    /// <summary>
+    /// Callbacks before playback has started are not underruns.
+    /// </summary>
+    /// <remarks>
+    /// The buffer hands back nothing at all until its scheduled start arrives, and the output
+    /// device is already running by then, so every stream start produces a run of empty callbacks
+    /// that are entirely expected. Counting them logged "starved" at Warning dozens of times on
+    /// every start, which buries the stalls the counter exists to surface.
+    /// <see cref="TimedAudioBuffer"/> gates its own underrun counter the same way.
+    /// </remarks>
+    [Fact]
+    public void PreStartCallbacks_AreNotCountedAsUnderruns()
+    {
+        var buffer = SignalBuffer.Constant(0.5f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+
+        buffer.AvailableSamples = 0;
+        for (var i = 0; i < 50; i++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        Assert.Equal(0, source.UnderrunCount);
+
+        // Once real audio has flowed, an empty callback is a genuine stall and still counts.
+        buffer.AvailableSamples = long.MaxValue;
+        for (var i = 0; i < 5; i++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        buffer.AvailableSamples = 0;
+        source.Read(output, 0, CallbackSamples);
+
+        Assert.Equal(1, source.UnderrunCount);
+    }
+
     // ── The ±0.5% cap ───────────────────────────────────────────────────────
 
     /// <summary>

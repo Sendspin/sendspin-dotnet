@@ -83,6 +83,12 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// <summary>Output frames since the last discrete drop/insert, when frame stepping.</summary>
     private int _framesSinceLastCorrection;
 
+    /// <summary>
+    /// Set by the first callback that produced real audio. Before it, an empty callback is the
+    /// buffer waiting for its scheduled start rather than starving.
+    /// </summary>
+    private bool _playbackStarted;
+
     private long _underrunCount;
     private long _concealedFrameCount;
     private long _totalSamplesDropped;
@@ -162,6 +168,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// Gets the number of callbacks that produced no buffered audio at all and were filled with
     /// silence. A count that keeps climbing during playback means the buffer is starving.
     /// </summary>
+    /// <remarks>
+    /// Counts only after playback has started. The empty callbacks between the output device
+    /// opening and the buffer's scheduled start are expected, not starvation, and counting them
+    /// made every stream start look like a stall.
+    /// </remarks>
     public long UnderrunCount => Interlocked.Read(ref _underrunCount);
 
     /// <summary>
@@ -235,6 +246,7 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
         _resampler?.Reset();
         _framesSinceLastCorrection = 0;
         _carryFrames = 0;
+        _playbackStarted = false;
         Array.Clear(_previousFrame);
         Volatile.Write(ref _playbackRate, 1.0);
         _buffer.ReportExternalPlaybackRate(1.0);
@@ -797,6 +809,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// </remarks>
     private int Conceal(float[] buffer, int offset, int count, int producedSamples)
     {
+        if (producedSamples > 0)
+        {
+            _playbackStarted = true;
+        }
+
         if (producedSamples >= count)
         {
             return count;
@@ -805,8 +822,18 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
         if (producedSamples == 0)
         {
             buffer.AsSpan(offset, count).Clear();
-            Interlocked.Increment(ref _underrunCount);
-            LogUnderrun();
+
+            // Only once playback has actually started. The buffer holds its content back until
+            // the scheduled start arrives while the output device is already calling, so every
+            // stream start produces a run of empty callbacks that are expected, not starvation —
+            // and logging them at Warning buried the stalls this counter exists to surface.
+            // TimedAudioBuffer gates its own underrun counter on the same thing.
+            if (_playbackStarted)
+            {
+                Interlocked.Increment(ref _underrunCount);
+                LogUnderrun();
+            }
+
             return 0;
         }
 
