@@ -8,8 +8,8 @@ A cross-platform .NET SDK for the Sendspin synchronized multi-room audio protoco
 ## Features
 
 - **Multi-room Audio Sync**: Microsecond-precision clock synchronization using Kalman filtering
-- **External Sync Correction** (v5.0+): SDK reports sync error, your app applies correction
-- **Platform Flexibility**: Use playback rate, drop/insert, or hardware rate adjustment
+- **Sync Correction Built In**: `TimedAudioBuffer.Read()` applies the spec's full correction strategy — a conformant player writes no correction code
+- **Platform Flexibility**: `ReadRaw()` hands the error out instead, for platforms with their own rate-control mechanism (hardware rate adjust, playback rate, an existing resampler)
 - **Fast Startup**: Audio plays within ~300ms of connection
 - **Protocol Support**: Full Sendspin WebSocket protocol implementation
 - **Server Discovery**: mDNS-based automatic server discovery
@@ -76,6 +76,73 @@ await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
 await client.SendCommandAsync("play");
 await client.SetVolumeAsync(75);
 ```
+
+### Playing audio
+
+A player is three pieces: a clock synchronizer, an `IAudioPipeline` built around
+`TimedAudioBuffer`, and an `IAudioPlayer` for your platform's output device (see
+[Platform-Specific Audio](#platform-specific-audio)). Hand the pipeline to the client and the SDK
+drives it from the protocol — `stream/start`, chunks, `stream/end`. Give the client and the
+pipeline the **same** `IClockSynchronizer`, or the buffer schedules against a clock nothing is
+updating.
+
+```csharp
+using Sendspin.SDK.Audio;
+using Sendspin.SDK.Models;
+using Sendspin.SDK.Synchronization;
+
+var clockSync = new KalmanClockSynchronizer();
+
+var pipeline = new AudioPipeline(
+    loggerFactory.CreateLogger<AudioPipeline>(),
+    new AudioDecoderFactory(loggerFactory),
+    clockSync,
+    bufferFactory: (format, sync) => new TimedAudioBuffer(format, sync),
+    playerFactory: () => new MyAudioPlayer(),
+    sourceFactory: (buffer, nowMicroseconds) => new MySampleSource(buffer, nowMicroseconds));
+
+await using var client = SendspinClientService.CreateForDial(
+    loggerFactory,
+    new SendspinClientOptions
+    {
+        Identity = identity,
+        ClockSynchronizer = clockSync,
+        AudioPipeline = pipeline,
+        Capabilities = new ClientCapabilities { ClientName = "My Player" },
+    });
+```
+
+The pull loop is the whole player. `sourceFactory` hands you the buffer and a `Func<long>`
+returning the current local time in microseconds; fill whatever block of floats your backend asks
+for, straight from `Read`:
+
+```csharp
+public sealed class MySampleSource : IAudioSampleSource
+{
+    private readonly ITimedAudioBuffer _buffer;
+    private readonly Func<long> _nowMicroseconds;
+
+    public MySampleSource(ITimedAudioBuffer buffer, Func<long> nowMicroseconds)
+        => (_buffer, _nowMicroseconds) = (buffer, nowMicroseconds);
+
+    public AudioFormat Format => _buffer.Format;
+
+    // Called on the audio thread — must not block or allocate.
+    public int Read(float[] buffer, int offset, int count)
+        => _buffer.Read(buffer.AsSpan(offset, count), _nowMicroseconds());
+}
+```
+
+That is the complete correction story for most players. `Read` applies the spec's ladder itself —
+nothing below a ~100 µs dead band, whole-frame drop/duplicate capped at ±0.5% up to 5 ms, a
+one-shot snap above that, a re-anchor above 500 ms — and it always fills the span you give it,
+padding with silence on an underrun, so the audio thread is never handed a short block. The
+return value is how many of those samples were real audio.
+
+Reach for `ReadRaw` only if your platform owns a *smoother* correction mechanism than stepping
+whole frames — ALSA hardware rate adjust, a browser's `playbackRate`, a resampler already in your
+output chain. The thresholds and the ±0.5 % cap are spec constants either way, so there is no
+policy to win back; see [Sync Correction System](#sync-correction-system) for that seam.
 
 ### Handling handshake failures
 
@@ -236,15 +303,15 @@ rotated secret, so persist the two together.
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Your Application                            │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  SyncCorrectionCalculator  │  Your Resampler/Drop Logic │   │
-│  │  (correction decisions)    │  (applies correction)      │   │
+│  │  IAudioSampleSource        │  Optional: your own        │   │
+│  │  (pull loop calls Read)    │  corrector via ReadRaw     │   │
 │  └─────────────────────────────────────────────────────────┘   │
 ├─────────────────────────────────────────────────────────────────┤
 │  SendspinClientService    │  AudioPipeline    │  IAudioPlayer   │
 │  (protocol handling)      │  (orchestration)  │  (your impl)    │
 ├─────────────────────────────────────────────────────────────────┤
 │  SendspinConnection  │  KalmanClockSync  │  TimedAudioBuffer    │
-│  (WebSocket)         │  (timing)         │  (reports error)     │
+│  (WebSocket)         │  (timing)         │  (corrects to spec)  │
 ├─────────────────────────────────────────────────────────────────┤
 │  OpusDecoder  │  FlacDecoder  │  PcmDecoder                     │
 └─────────────────────────────────────────────────────────────────┘
@@ -259,39 +326,56 @@ rotated secret, so persist the two together.
 - `Sendspin.SDK.Discovery` - mDNS server discovery
 - `Sendspin.SDK.Models` - Data models (GroupState, TrackMetadata)
 
-## Sync Correction System (v5.0+)
+## Sync Correction System
 
-Starting with v5.0.0, sync correction is **external** - the SDK reports sync error and your application decides how to correct it. This enables platform-specific correction strategies:
+Correction is built in: `TimedAudioBuffer.Read()` implements the spec's full suggested strategy,
+so the pull loop in [Playing audio](#playing-audio) is conformant on its own. Every threshold in
+that strategy is a spec constant, so there is no correction *policy* left for an application to
+choose — only the *mechanism*.
 
-- **Windows**: WDL resampler, SoundTouch, or drop/insert
-- **Browser**: Native `playbackRate` (WSOLA time-stretching)
+`ReadRaw()` is the seam for platforms whose mechanism is smoother than stepping whole frames:
+
 - **Linux**: ALSA hardware rate adjustment, PipeWire rate
+- **Browser**: Native `playbackRate` (WSOLA time-stretching)
+- **Windows**: a WDL or SoundTouch resampler already in the output chain
 - **Embedded**: Platform-specific DSP
 
 ### How It Works
 
 ```
-SDK (reports error only)              App (applies correction)
+Default: the SDK corrects              Advanced: you correct
 ────────────────────────────────────────────────────────────────
-TimedAudioBuffer                      SyncCorrectionCalculator
-├─ ReadRaw() - no correction          ├─ UpdateFromSyncError()
-├─ SyncErrorMicroseconds              ├─ DropEveryNFrames
-├─ SmoothedSyncErrorMicroseconds      ├─ InsertEveryNFrames
-└─ NotifyExternalCorrection()         └─ TargetPlaybackRate
+TimedAudioBuffer.Read()                TimedAudioBuffer.ReadRaw()
+├─ dead band → drop/insert → snap      ├─ SyncErrorMicroseconds
+├─ bounded by the ±0.5% cap            ├─ SmoothedSyncErrorMicroseconds
+└─ no correction code in your app      └─ NotifyExternalCorrection()
+                                           ↓
+                                       SyncCorrectionCalculator
+                                       ├─ UpdateFromSyncError()
+                                       ├─ DropEveryNFrames / InsertEveryNFrames
+                                       └─ TargetPlaybackRate
 ```
 
 ### Tiered Correction Strategy
 
-The `SyncCorrectionCalculator` implements the same tiered strategy as the reference CLI:
+Both read paths follow the same ladder — they differ only in who applies the continuous tier:
 
-| Sync Error | Correction Method | Description |
-|------------|-------------------|-------------|
-| < 1ms | None (deadband) | Error too small to matter |
-| 1-15ms | Playback rate adjustment | Smooth resampling (imperceptible) |
-| 15-500ms | Frame drop/insert | Faster correction for larger drift |
-| > 500ms | Re-anchor | Clear buffer and restart sync |
+| Sync Error | Correction | Applied by |
+|------------|------------|------------|
+| < 100 µs | None (dead band) | — |
+| 100 µs – 5 ms | Continuous, bounded by the ±0.5% cap | `Read`: whole-frame drop/duplicate. `ReadRaw`: your mechanism, from `ISyncCorrectionProvider` |
+| 5 ms – 500 ms | One-shot hard sync (single discontinuity) | `TimedAudioBuffer`, on **both** paths |
+| > 500 ms | Re-anchor (clear buffer, restart sync) | `TimedAudioBuffer`, on **both** paths |
 
-### Usage Example
+`ResamplingThresholdMicroseconds` (100 ms) splits the continuous tier into rate adjustment and
+discrete drop/insert, so with the default 5 ms hard-sync threshold below it that split is never
+reached — it applies only if you lower the hard-sync threshold or disable that tier.
+
+### Advanced: correcting externally with `ReadRaw`
+
+Only for platforms with their own rate-control mechanism. The buffer still performs the one-shot
+snap itself, because skipping buffered content is something only it can do — when the provider
+reports `SyncCorrectionMode.HardSync` it is telling you to stand down, not to correct.
 
 ```csharp
 using Sendspin.SDK.Audio;
@@ -316,25 +400,30 @@ correctionProvider.CorrectionChanged += provider =>
     }
 };
 
-// In your audio callback:
+// In your IAudioSampleSource, in place of the Read() call from "Playing audio":
 public int Read(float[] buffer, int offset, int count)
 {
-    // Read raw samples (no internal correction)
-    int read = timedAudioBuffer.ReadRaw(buffer, offset, count, currentTimeMicroseconds);
+    var span = buffer.AsSpan(offset, count);
+
+    // Read without the continuous correction
+    int read = _buffer.ReadRaw(span, _nowMicroseconds());
 
     // Update correction provider with current error
     correctionProvider.UpdateFromSyncError(
-        timedAudioBuffer.SyncErrorMicroseconds,
-        timedAudioBuffer.SmoothedSyncErrorMicroseconds
-    );
+        _buffer.SyncErrorMicroseconds,
+        _buffer.SmoothedSyncErrorMicroseconds);
 
-    // Apply your correction strategy...
-    // If dropping/inserting, notify the buffer:
-    timedAudioBuffer.NotifyExternalCorrection(samplesDropped, samplesInserted);
+    // Apply your correction strategy to `span`, then report what you did.
+    // Drop or insert, never both in the same cycle:
+    _buffer.NotifyExternalCorrection(samplesDropped, samplesInserted);
+    _buffer.ReportExternalPlaybackRate(correctionProvider.TargetPlaybackRate);
 
-    return outputCount;
+    return read;
 }
 ```
+
+`ReportExternalPlaybackRate` is what puts your applied rate into `GetStats()`; report every
+change, including the reset back to 1.0, or the stats latch on the last value you sent.
 
 ### Configuring Sync Behavior
 
@@ -344,11 +433,10 @@ exempts from the speed cap, and which the buffer applies itself on both read pat
 `MaxSpeedCorrection` above the cap is clamped where it is applied, with a warning, rather than
 rejected.
 
-Which read path you use decides who corrects. `Read` corrects end to end, realizing the
-continuous tier as capped frame drop/duplicate and holding `TargetPlaybackRate` at 1.0 — do not
-also drive a resampler from that rate. `ReadRaw` hands you the error to correct through an
-`ISyncCorrectionProvider`; the buffer still performs the one-shot snap itself, because skipping
-buffered content is something only it can do.
+Which read path you use decides who applies the continuous tier. `Read` — the default — corrects
+end to end, realizing that tier as capped frame drop/duplicate and holding `TargetPlaybackRate`
+at 1.0; do not also drive a resampler from that rate, or the same error is corrected twice.
+`ReadRaw` hands you the error instead, for correction through an `ISyncCorrectionProvider`.
 
 ```csharp
 // Spec-conformant defaults (0.5% cap, 100µs dead band, 3s target)
@@ -385,25 +473,26 @@ var buffer = new TimedAudioBuffer(format, clockSync, capabilities.AudioBufferCap
 
 ## Platform-Specific Audio
 
-The SDK handles decoding, buffering, and sync error reporting. You implement `IAudioPlayer` for audio output:
+The SDK handles decoding, buffering, and sync correction. You implement `IAudioPlayer` for audio output — it owns the device, not the audio data; the pull loop lives in your `IAudioSampleSource` (see [Playing audio](#playing-audio)):
 
 ```csharp
 public class MyAudioPlayer : IAudioPlayer
 {
-    public long OutputLatencyMicroseconds { get; private set; }
+    public int OutputLatencyMs { get; private set; }
 
-    public Task InitializeAsync(AudioFormat format, CancellationToken ct)
+    public Task InitializeAsync(AudioFormat format, CancellationToken ct = default)
     {
         // Initialize your audio backend (WASAPI, PulseAudio, CoreAudio, etc.)
     }
 
-    public int Read(float[] buffer, int offset, int count)
+    public void SetSampleSource(IAudioSampleSource source)
     {
-        // Called by audio thread - read from TimedAudioBuffer.ReadRaw()
-        // Apply sync correction externally
+        // Keep it; pull from it on the audio thread once Play() is called
     }
 
-    // ... other methods
+    public void Play() { /* start the device */ }
+
+    // ... State, Volume, IsMuted, Pause, Stop, SwitchDeviceAsync, StateChanged, ErrorOccurred
 }
 ```
 
@@ -766,6 +855,10 @@ No changes needed if you only use `SendspinHostService` or `SendspinClientServic
 
 **Breaking change**: Sync correction is now external. The SDK reports error; you apply correction.
 
+> **Superseded in v10.0.0.** `Read` is no longer deprecated — it applies the spec's full strategy
+> itself and is the default again. The external path below still works and is still supported; it
+> is now the advanced seam described in [Sync Correction System](#sync-correction-system).
+
 **Before (v4.x and earlier):**
 ```csharp
 // SDK applied correction internally
@@ -780,7 +873,7 @@ var correctionProvider = new SyncCorrectionCalculator(
     SyncCorrectionOptions.Default, sampleRate, channels);
 
 // Read raw samples (no internal correction)
-var read = buffer.ReadRaw(samples, offset, count, currentTime);
+var read = buffer.ReadRaw(samples.AsSpan(offset, count), currentTime);
 
 // Update and apply correction externally
 correctionProvider.UpdateFromSyncError(

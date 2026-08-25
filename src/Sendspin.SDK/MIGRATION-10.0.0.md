@@ -37,6 +37,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Sync correction | `DeadbandMicroseconds` defaults to `100` µs, down from 1 ms | Medium — behavioural, no compiler error |
 | Sync correction | New one-shot hard-sync tier above 5 ms, applied by the buffer on **both** read paths | Medium — behavioural, no compiler error |
 | Sync correction | `Read` applies the sub-5 ms correction itself and holds `TargetPlaybackRate` at 1.0 | Medium — double-corrects if you also drive a resampler from that rate |
+| Sync correction | `ITimedAudioBuffer.Read` is no longer `[Obsolete]` — it is the default path again | None — drop any `CS0618` suppression that existed to call it |
 | Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
 | Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |
 
@@ -456,7 +457,14 @@ cannot perform on samples it has already been handed, so it cannot be delegated.
 
 ### `Read` corrects; `ReadRaw` reports
 
-The two read paths now have a clean split, and which one you use decides who corrects.
+`Read` is **no longer `[Obsolete]`**. It implements the spec's full suggested strategy, so it is
+the default path again and the one to reach for in a new player; if you suppressed `CS0618` to
+call it, drop the suppression. `ReadRaw` is now documented as the advanced seam — for platforms
+that own a smooth-correction mechanism the buffer cannot drive from the inside — rather than as
+the path everyone must take. No behaviour changed with the attribute: both paths do exactly what
+they did before.
+
+The two read paths have a clean split, and which one you use decides who corrects.
 
 `Read` corrects end to end: nothing below the dead band, whole-frame drop/duplicate at a
 capped interval between the dead band and 5 ms, and a snap above that. It holds
