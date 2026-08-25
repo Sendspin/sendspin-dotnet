@@ -596,6 +596,39 @@ public class SyncCorrectedSampleSourceTests
             $"the source corrected on top of the snap at rate {player.RateWhileHardSyncing}");
     }
 
+    /// <summary>
+    /// The external path must credit consumption exactly once, as the internal one does.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ITimedAudioBuffer.ReadRaw"/> adds every sample it hands over to the read
+    /// cursor, and the read is deliberately sized to what the splice will consume, so the
+    /// correction is already accounted for before it is reported. Counting it again in
+    /// <see cref="ITimedAudioBuffer.NotifyExternalCorrection"/> made the error metric converge at
+    /// twice the physical correction: under steady drift the player leaves the group by about
+    /// half the drift while reporting a sync error near zero.
+    /// </remarks>
+    [Fact]
+    public void FrameStepping_AgainstTheRealBuffer_CreditsEachConsumedSampleOnce()
+    {
+        var provider = new ScriptedCorrectionProvider();
+        var player = new RealBufferPlayer(FrameSteppingOptions(), provider);
+        player.Run(callbacks: 100);
+
+        // Gentle enough that four seconds of it stays inside the one-shot band: the snap credits
+        // the cursor on its own terms and would blur what is being measured here.
+        provider.SetDropping(4_800);
+        player.Run(callbacks: 400);
+
+        var stats = player.Buffer.GetStats();
+
+        // Both counters are fed only by what actually left the ring buffer, and neither survives
+        // a snap or a re-anchor intact, so those are excluded rather than compensated for.
+        Assert.Equal(0, stats.HardSyncCount);
+        Assert.Equal(0, stats.ReanchorCount);
+        Assert.True(stats.SamplesDroppedForSync > 0, "the run never applied a correction");
+        Assert.Equal(stats.TotalSamplesRead, stats.SamplesReadSinceStart);
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     private static SyncCorrectionOptions FrameSteppingOptions()
@@ -858,9 +891,11 @@ public class SyncCorrectedSampleSourceTests
 
         private long _writeServerTs = ServerT0;
 
-        public RealBufferPlayer()
+        public RealBufferPlayer(
+            SyncCorrectionOptions? options = null,
+            ISyncCorrectionProvider? provider = null)
         {
-            Buffer = new TimedAudioBuffer(Format, _clockSync, bufferCapacityMs: 5_000);
+            Buffer = new TimedAudioBuffer(Format, _clockSync, bufferCapacityMs: 5_000, options);
 
             // A steady tone rather than DC, so a splice would be visible if one happened.
             for (var i = 0; i < _chunk.Length; i += Channels)
@@ -876,7 +911,7 @@ public class SyncCorrectedSampleSourceTests
             _clockSync.IsConverged = true;
             _clockSync.HasMinimalSync = true;
 
-            Source = new SyncCorrectedSampleSource(Buffer, () => WallNow);
+            Source = new SyncCorrectedSampleSource(Buffer, () => WallNow, provider);
 
             PumpProducer();
             Read();

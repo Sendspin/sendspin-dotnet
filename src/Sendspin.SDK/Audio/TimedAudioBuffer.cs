@@ -795,16 +795,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         lock (_lock)
         {
-            // When dropping: we read MORE samples than we output
-            // This advances the server cursor, making sync error smaller
-            _samplesReadSinceStart += samplesDropped;
+            // Stats only. The read cursor is already correct: ReadRaw credits every sample it
+            // hands over, and a corrector must size its read to the correction — dropping needs
+            // an extra frame per splice and inserting needs one fewer, and reading a fixed block
+            // instead either strands content or leaves the output short by exactly the
+            // corrections applied. Adjusting here as well counted the same frames twice, which
+            // made the error metric converge at twice the physical correction: the reported error
+            // settled near zero while the player stayed about half the drift out of the group.
             _samplesDroppedForSync += samplesDropped;
-
-            // When inserting: we output samples WITHOUT consuming from buffer
-            // ReadRaw already added the full read count to _samplesReadSinceStart,
-            // but inserted samples came from duplicating previous output, not from new input.
-            // So we need to SUBTRACT them to reflect actual consumption from buffer.
-            _samplesReadSinceStart -= samplesInserted;
             _samplesInsertedForSync += samplesInserted;
         }
     }

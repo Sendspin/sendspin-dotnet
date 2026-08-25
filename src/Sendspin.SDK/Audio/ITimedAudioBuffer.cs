@@ -226,12 +226,14 @@ public interface ITimedAudioBuffer : IDisposable
     /// <param name="samplesInserted">Number of samples inserted (output without consuming). Must be non-negative.</param>
     /// <remarks>
     /// <para>
-    /// This updates internal tracking so <see cref="SyncErrorMicroseconds"/> remains accurate.
-    /// </para>
-    /// <para>
-    /// When dropping: samplesRead cursor advances by droppedCount (we consumed more than output).
-    /// When inserting: samplesRead cursor is reduced by insertedCount because <see cref="ReadRaw"/>
-    /// already counted the full read, but inserted samples were duplicated output, not new consumption.
+    /// This feeds <see cref="AudioBufferStats.SamplesDroppedForSync"/> and
+    /// <see cref="AudioBufferStats.SamplesInsertedForSync"/>. It does <b>not</b> move the read
+    /// cursor <see cref="SyncErrorMicroseconds"/> is measured against, and callers must not
+    /// expect it to: <see cref="ReadRaw"/> already credits every sample it hands over, and a
+    /// corrector has to size its read to the correction — dropping consumes an extra frame per
+    /// splice, inserting one fewer — so the consumption is fully counted before this is called.
+    /// It used to adjust the cursor as well, which counted the same frames twice and made the
+    /// error converge at twice the physical correction.
     /// </para>
     /// <para>
     /// <b>Contract:</b> Either <paramref name="samplesDropped"/> OR <paramref name="samplesInserted"/>
