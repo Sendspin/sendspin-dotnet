@@ -16,56 +16,54 @@ namespace Sendspin.SDK.Audio;
 /// <see cref="ITimedAudioBuffer.Read"/>, which applies the same spec-fixed ladder itself.
 /// </para>
 /// <para>
-/// The interface abstracts the correction <em>mechanism</em>, not the policy: the thresholds and the
-/// ±0.5% cap are spec constants either way. The SDK provides
+/// The interface abstracts the correction <em>policy</em>, not the mechanism: the thresholds and
+/// the ±0.5% cap are spec constants, and how the correction is realized belongs to the caller,
+/// which is the only side that knows what it can apply. The SDK provides
 /// <see cref="SyncCorrectionCalculator"/> as a default implementation that mirrors the CLI's
 /// tiered correction approach.
 /// </para>
 /// <para>
+/// <b>The decision is always a playback rate.</b> That is the single currency: a speed change is
+/// the whole correction, and a caller with no resampler realizes it as whole-frame stepping of the
+/// same magnitude — one frame in N is a speed change of 1/N — which is what
+/// <see cref="SyncCorrectedSampleSource"/> does under
+/// <see cref="SyncCorrectionMechanism.FrameStepping"/>. A provider does not choose between the
+/// two; it cannot see which one the caller has.
+/// </para>
+/// <para>
 /// Usage pattern:
 /// 1. Call <see cref="UpdateFromSyncError"/> with error values from <see cref="ITimedAudioBuffer"/>
-/// 2. Read correction properties (<see cref="DropEveryNFrames"/>, <see cref="InsertEveryNFrames"/>, <see cref="TargetPlaybackRate"/>)
-/// 3. Apply corrections externally (drop/insert samples, adjust resampler rate)
-/// 4. Call <see cref="ITimedAudioBuffer.NotifyExternalCorrection"/> to report applied corrections
+/// 2. Read <see cref="TargetPlaybackRate"/> (and <see cref="CurrentMode"/> for diagnostics)
+/// 3. Apply that speed externally, by whatever mechanism you have
+/// 4. If you realized it by stepping frames, call
+///    <see cref="ITimedAudioBuffer.NotifyExternalCorrection"/> so the counts appear in the stats
 /// </para>
 /// </remarks>
 public interface ISyncCorrectionProvider
 {
     /// <summary>
-    /// Gets the current sync correction mode.
+    /// Gets the current sync correction tier.
     /// </summary>
+    /// <remarks>
+    /// Which band the error falls in, not which mechanism to use — the caller owns that. Callers
+    /// should treat <see cref="SyncCorrectionMode.Dropping"/> and
+    /// <see cref="SyncCorrectionMode.Inserting"/> as "too far out to be worth trimming smoothly",
+    /// and read the magnitude from <see cref="TargetPlaybackRate"/> like any other tier.
+    /// </remarks>
     SyncCorrectionMode CurrentMode { get; }
 
     /// <summary>
-    /// Gets the interval for dropping frames (when playing too slow).
-    /// Drop one frame every N frames. Zero means no dropping.
-    /// </summary>
-    /// <remarks>
-    /// Only applicable when <see cref="CurrentMode"/> is <see cref="SyncCorrectionMode.Dropping"/>.
-    /// A smaller value means more aggressive correction.
-    /// </remarks>
-    int DropEveryNFrames { get; }
-
-    /// <summary>
-    /// Gets the interval for inserting frames (when playing too fast).
-    /// Insert one frame every N frames. Zero means no inserting.
-    /// </summary>
-    /// <remarks>
-    /// Only applicable when <see cref="CurrentMode"/> is <see cref="SyncCorrectionMode.Inserting"/>.
-    /// A smaller value means more aggressive correction.
-    /// </remarks>
-    int InsertEveryNFrames { get; }
-
-    /// <summary>
-    /// Gets the target playback rate for resampling-based sync correction.
+    /// Gets the target playback rate: the correction, as a speed.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Values: 1.0 = normal speed, &gt;1.0 = speed up (behind), &lt;1.0 = slow down (ahead).
+    /// Values: 1.0 = normal speed, &gt;1.0 = speed up (behind), &lt;1.0 = slow down (ahead),
+    /// always within <see cref="SyncCorrectionOptions.MinRate"/>..<see cref="SyncCorrectionOptions.MaxRate"/>.
     /// </para>
     /// <para>
-    /// Only meaningful when <see cref="CurrentMode"/> is <see cref="SyncCorrectionMode.Resampling"/>.
-    /// The caller should apply this rate to a resampler (e.g., WDL, SoundTouch) for smooth correction.
+    /// Meaningful in every continuous tier, not only <see cref="SyncCorrectionMode.Resampling"/>.
+    /// Apply it to a resampler, to a hardware rate control, or — with no such mechanism — as one
+    /// dropped or inserted frame every <c>1 / |rate - 1|</c> frames.
     /// </para>
     /// </remarks>
     double TargetPlaybackRate { get; }

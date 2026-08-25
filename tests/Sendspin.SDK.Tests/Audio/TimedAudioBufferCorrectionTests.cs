@@ -751,30 +751,28 @@ public class TimedAudioBufferCorrectionTests
             var smoothed = player.Buffer.SmoothedSyncErrorMicroseconds;
             calculator.UpdateFromSyncError(player.Buffer.SyncErrorMicroseconds, smoothed);
 
-            var selfApplied = SyncCorrectionPolicy.Decide(
-                smoothed, options, SampleRate, Channels, selfApplied: true);
-            var external = SyncCorrectionPolicy.Decide(smoothed, options, SampleRate, Channels);
+            // One decision, one currency. The calculator reports it verbatim.
+            var decision = SyncCorrectionPolicy.Decide(smoothed, options);
+            Assert.Equal(decision.Mode, calculator.CurrentMode);
+            Assert.Equal(decision.TargetPlaybackRate, calculator.TargetPlaybackRate, 12);
 
-            // Each side realizes the decision the policy gives it, and nothing else.
-            Assert.Equal(selfApplied.Mode, player.Buffer.GetStats().CurrentCorrectionMode);
-            Assert.Equal(external.Mode, calculator.CurrentMode);
+            // The buffer's own read path has no resampler, so it spends that same rate as
+            // whole-frame stepping and reports the mechanism it used.
+            var (dropEveryN, insertEveryN) =
+                SyncCorrectionPolicy.SteppingIntervalFrames(decision.TargetPlaybackRate, options, Channels);
+            var expectedMode = dropEveryN > 0
+                ? SyncCorrectionMode.Dropping
+                : insertEveryN > 0 ? SyncCorrectionMode.Inserting : decision.Mode;
 
-            // The two realizations differ — stepping versus a rate — but they must agree on
-            // which tier the error is in...
-            Assert.Equal(
-                external.Mode == SyncCorrectionMode.None,
-                selfApplied.Mode == SyncCorrectionMode.None);
-            Assert.Equal(
-                external.Mode == SyncCorrectionMode.HardSync,
-                selfApplied.Mode == SyncCorrectionMode.HardSync);
+            Assert.Equal(expectedMode, player.Buffer.GetStats().CurrentCorrectionMode);
 
-            // ...and on how fast to converge, or a group of mixed players would drift apart
-            // during recovery, which is precisely what the speed cap exists to prevent.
-            if (selfApplied.Mode is SyncCorrectionMode.Dropping or SyncCorrectionMode.Inserting)
+            // ...and the two realizations must converge at the same speed, or a group of mixed
+            // players would drift apart during recovery, which is precisely what the speed cap
+            // exists to prevent.
+            if (dropEveryN + insertEveryN > 0)
             {
-                var steps = selfApplied.DropEveryNFrames + selfApplied.InsertEveryNFrames;
-                var impliedByStepping = 1.0 / steps;
-                var impliedByRate = Math.Abs(external.TargetPlaybackRate - 1.0);
+                var impliedByStepping = 1.0 / (dropEveryN + insertEveryN);
+                var impliedByRate = Math.Abs(decision.TargetPlaybackRate - 1.0);
 
                 Assert.True(
                     Math.Abs(impliedByStepping - impliedByRate) <= 1e-4,

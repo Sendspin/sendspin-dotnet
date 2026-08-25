@@ -274,6 +274,18 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         }
     }
 
+    /// <inheritdoc/>
+    public bool IsHardSyncPending
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _pendingHardSyncSamples != 0;
+            }
+        }
+    }
+
     /// <summary>
     /// Initializes a new instance of the <see cref="TimedAudioBuffer"/> class.
     /// </summary>
@@ -735,8 +747,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && !_inReconnectStabilization)
                 {
-                    EvaluateHardSync(SyncCorrectionPolicy.Decide(
-                        _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels));
+                    EvaluateHardSync(
+                        SyncCorrectionPolicy.Decide(_smoothedSyncErrorMicroseconds, _syncOptions));
                 }
 
                 // Check re-anchor threshold
@@ -765,10 +777,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// cycle is logically invalid - you either need to speed up (drop) or slow down (insert), not both.
     /// </para>
     /// <para>
-    /// The <see cref="SyncCorrectionCalculator"/> enforces this by design - it only sets either
-    /// <see cref="ISyncCorrectionProvider.DropEveryNFrames"/> or <see cref="ISyncCorrectionProvider.InsertEveryNFrames"/>
-    /// to a non-zero value, never both. However, if using a custom correction provider, ensure this
-    /// invariant is maintained.
+    /// A correction derived from a rate cannot violate this: a speed has one sign, so it resolves
+    /// to a drop interval or an insert interval, never both. If you splice by some other rule,
+    /// maintain the invariant yourself.
     /// </para>
     /// </remarks>
     public void NotifyExternalCorrection(int samplesDropped, int samplesInserted)
@@ -1699,20 +1710,31 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             }
         }
 
-        // One decision ladder for the whole SDK — see SyncCorrectionPolicy. selfApplied: this
-        // path owns the correction end to end, so the continuous tier comes back as frame
-        // stepping the read loop actually performs rather than as a rate only a resampler
-        // could honour.
-        var decision = SyncCorrectionPolicy.Decide(
-            _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels, selfApplied: true);
+        // One decision ladder for the whole SDK — see SyncCorrectionPolicy — and one currency,
+        // the rate.
+        var decision = SyncCorrectionPolicy.Decide(_smoothedSyncErrorMicroseconds, _syncOptions);
 
         EvaluateHardSync(decision);
 
-        LogCorrectionModeTransition(decision.Mode);
-        SetTargetPlaybackRate(decision.TargetPlaybackRate);
-        _correctionMode = decision.Mode;
-        _dropEveryNFrames = decision.DropEveryNFrames;
-        _insertEveryNFrames = decision.InsertEveryNFrames;
+        // This path has no resampler, so the speed the policy chose is realized as whole-frame
+        // stepping of the same magnitude: the spec's own suggested strategy (roles/player/v1.md:
+        // 169-176), and what the C++ reference does per chunk. Applying the rate to nothing is
+        // what once left ordinary drift to walk up to the hard-sync threshold and splice.
+        var (dropEveryN, insertEveryN) = SyncCorrectionPolicy.SteppingIntervalFrames(
+            decision.TargetPlaybackRate, _syncOptions, _channels);
+
+        var mode = dropEveryN > 0
+            ? SyncCorrectionMode.Dropping
+            : insertEveryN > 0 ? SyncCorrectionMode.Inserting : decision.Mode;
+
+        LogCorrectionModeTransition(mode);
+
+        // Stays neutral: TargetPlaybackRate is a request to a resampler, and this path is the
+        // one that has none. See ITimedAudioBuffer.TargetPlaybackRate.
+        SetTargetPlaybackRate(1.0);
+        _correctionMode = mode;
+        _dropEveryNFrames = dropEveryN;
+        _insertEveryNFrames = insertEveryN;
     }
 
     /// <summary>

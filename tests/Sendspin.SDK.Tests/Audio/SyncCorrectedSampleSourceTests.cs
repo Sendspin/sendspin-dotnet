@@ -283,27 +283,47 @@ public class SyncCorrectedSampleSourceTests
     }
 
     /// <summary>
-    /// While the buffer's one-shot snap is in flight the provider reports
-    /// <see cref="SyncCorrectionMode.HardSync"/>, and an external corrector must stand down: the
-    /// snap is a buffer-timeline operation, and correcting on top of it corrects the same error
-    /// twice. Enforced here rather than trusted, because a custom provider can report any rate
-    /// alongside the mode.
+    /// While the buffer's one-shot snap is actually in flight an external corrector must stand
+    /// down: the snap is a buffer-timeline operation, and correcting on top of it corrects the
+    /// same error twice. Gated on the buffer, not on the provider's prediction, and enforced
+    /// rather than trusted — a custom provider can report any rate it likes.
     /// </summary>
     [Fact]
-    public void HardSyncMode_HoldsTheRateAtUnity_AndSplicesNothing()
+    public void SnapInFlight_HoldsTheRateAtUnity_AndSplicesNothing()
     {
         var buffer = SignalBuffer.Constant(0.4f);
         var provider = new ScriptedCorrectionProvider();
         using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
 
-        // A provider misreporting a correction alongside the snap.
-        provider.SetHardSync(rate: 1.004, dropEveryN: 200, insertEveryN: 0);
+        buffer.IsHardSyncPending = true;
+        provider.SetResampling(1.004);
         source.Read(new float[CallbackSamples], 0, CallbackSamples);
 
         Assert.Equal(1.0, source.PlaybackRate);
         Assert.Equal(1.0, buffer.LastReportedRate);
         Assert.Equal(0, buffer.SamplesDroppedReported);
         Assert.Equal(0, buffer.SamplesInsertedReported);
+    }
+
+    /// <summary>
+    /// The other half of moving the gate to the actor: a provider <em>predicting</em>
+    /// <see cref="SyncCorrectionMode.HardSync"/> is not a reason to stand down. The buffer
+    /// declines to snap on a sign disagreement, past the re-anchor ceiling and inside its grace
+    /// windows, and while it is declining the drift is this source's to correct — standing
+    /// down on the forecast left it uncorrected with nobody acting at all.
+    /// </summary>
+    [Fact]
+    public void PredictedHardSync_WithNoSnapInFlight_StillCorrects()
+    {
+        var buffer = SignalBuffer.Constant(0.4f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        provider.SetHardSync(rate: 1.004);
+        source.Read(new float[CallbackSamples], 0, CallbackSamples);
+
+        Assert.Equal(1.004, source.PlaybackRate, 9);
+        Assert.Equal(1.004, buffer.LastReportedRate, 9);
     }
 
     // ── The correction actually lands ───────────────────────────────────────
@@ -438,27 +458,57 @@ public class SyncCorrectedSampleSourceTests
     }
 
     /// <summary>
-    /// The wiring behind the mechanism switch: the policy ladder is the same either way, but the
-    /// decision is reported in the currency the selected mechanism can actually spend. A caller
-    /// with no resampler gets an interval, not a rate it has nothing to apply to.
+    /// The provider emits a rate whatever mechanism the host runs, because it cannot see which
+    /// one the host has: the options it was built from are its own copy, not the buffer's. It
+    /// used to decide from that copy, so a mismatched pair produced a rate nothing applied.
     /// </summary>
-    [Fact]
-    public void Calculator_UnderFrameStepping_ReportsAnIntervalRatherThanARate()
+    [Theory]
+    [InlineData(SyncCorrectionMechanism.SmoothResampling)]
+    [InlineData(SyncCorrectionMechanism.FrameStepping)]
+    public void Calculator_ReportsARate_WhicheverMechanismTheHostRuns(SyncCorrectionMechanism mechanism)
     {
-        var options = FrameSteppingOptions();
+        var options = SyncCorrectionOptions.Default;
+        options.Mechanism = mechanism;
+
         var calculator = new SyncCorrectionCalculator(options, SampleRate, Channels);
         calculator.NotifySamplesProcessed(SampleRate * Channels);
 
         calculator.UpdateFromSyncError(2_000, 2_000);
 
-        Assert.Equal(SyncCorrectionMode.Dropping, calculator.CurrentMode);
-        Assert.True(calculator.DropEveryNFrames > 0);
-        Assert.Equal(1.0, calculator.TargetPlaybackRate);
+        Assert.Equal(SyncCorrectionMode.Resampling, calculator.CurrentMode);
+        Assert.InRange(calculator.TargetPlaybackRate, 1.0 + 1e-9, options.MaxRate);
+    }
 
-        // One frame in N is a speed change of 1/N, so the cap is a floor on N.
+    /// <summary>
+    /// And the host spends that rate as frame stepping when it has no resampler, at an interval
+    /// whose implied speed is the rate's — one frame in N is a speed change of 1/N — and
+    /// never short enough to exceed the spec's ±0.5% cap.
+    /// </summary>
+    [Fact]
+    public void FrameStepping_SpendsTheRateAtTheEquivalentInterval()
+    {
+        var options = FrameSteppingOptions();
+        var buffer = SignalBuffer.Sine(220.0, 0.5, options);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        // The cap itself: the tightest interval the ladder can ask for is one frame in 200.
+        provider.SetResampling(options.MaxRate);
+
+        var output = new float[CallbackSamples];
+        const int callbacks = 100;
+        for (var cb = 0; cb < callbacks; cb++)
+        {
+            Assert.Equal(CallbackSamples, source.Read(output, 0, CallbackSamples));
+        }
+
+        var outputFrames = (long)callbacks * (CallbackSamples / Channels);
+        var drops = buffer.SamplesDroppedReported / Channels;
+
+        Assert.Equal(outputFrames / (int)Math.Ceiling(1.0 / options.EffectiveMaxSpeedCorrection), drops);
         Assert.True(
-            calculator.DropEveryNFrames >= (int)Math.Ceiling(1.0 / options.EffectiveMaxSpeedCorrection),
-            "the drop interval is short enough to exceed the spec's ±0.5% cap");
+            drops / (double)outputFrames <= SyncCorrectionOptions.SpecMaxSpeedCorrection,
+            "the stepping interval implies a speed past the spec's cap");
     }
 
     /// <summary>
@@ -739,6 +789,9 @@ public class SyncCorrectedSampleSourceTests
 
         public double SmoothedSyncErrorMicroseconds => SyncError;
 
+        /// <summary>Whether the buffer is mid-snap, which is what the source stands down on.</summary>
+        public bool IsHardSyncPending { get; set; }
+
         public static SignalBuffer Sine(double frequencyHz, double amplitude, SyncCorrectionOptions? options = null)
         {
             var increment = 2 * Math.PI * frequencyHz / SampleRate;
@@ -821,10 +874,6 @@ public class SyncCorrectedSampleSourceTests
     {
         public SyncCorrectionMode CurrentMode { get; private set; } = SyncCorrectionMode.None;
 
-        public int DropEveryNFrames { get; private set; }
-
-        public int InsertEveryNFrames { get; private set; }
-
         public double TargetPlaybackRate { get; private set; } = 1.0;
 
         public event Action<ISyncCorrectionProvider>? CorrectionChanged;
@@ -833,43 +882,34 @@ public class SyncCorrectedSampleSourceTests
         {
             CurrentMode = Math.Abs(rate - 1.0) < 1e-12 ? SyncCorrectionMode.None : SyncCorrectionMode.Resampling;
             TargetPlaybackRate = rate;
-            DropEveryNFrames = 0;
-            InsertEveryNFrames = 0;
             CorrectionChanged?.Invoke(this);
         }
 
-        public void SetDropping(int everyNFrames)
-        {
-            CurrentMode = SyncCorrectionMode.Dropping;
-            TargetPlaybackRate = 1.0;
-            DropEveryNFrames = everyNFrames;
-            InsertEveryNFrames = 0;
-            CorrectionChanged?.Invoke(this);
-        }
+        /// <summary>
+        /// Asks for the speed that one dropped frame in <paramref name="everyNFrames"/> realizes.
+        /// A rate is the only currency a provider has; the interval is the source's translation
+        /// of it, which is what these tests are checking.
+        /// </summary>
+        public void SetDropping(int everyNFrames) =>
+            SetTier(SyncCorrectionMode.Dropping, 1.0 + (1.0 / everyNFrames));
 
-        public void SetInserting(int everyNFrames)
-        {
-            CurrentMode = SyncCorrectionMode.Inserting;
-            TargetPlaybackRate = 1.0;
-            DropEveryNFrames = 0;
-            InsertEveryNFrames = everyNFrames;
-            CorrectionChanged?.Invoke(this);
-        }
+        public void SetInserting(int everyNFrames) =>
+            SetTier(SyncCorrectionMode.Inserting, 1.0 - (1.0 / everyNFrames));
 
-        public void SetHardSync(double rate, int dropEveryN, int insertEveryN)
-        {
-            CurrentMode = SyncCorrectionMode.HardSync;
-            TargetPlaybackRate = rate;
-            DropEveryNFrames = dropEveryN;
-            InsertEveryNFrames = insertEveryN;
-            CorrectionChanged?.Invoke(this);
-        }
+        public void SetHardSync(double rate) => SetTier(SyncCorrectionMode.HardSync, rate);
 
         public void UpdateFromSyncError(long rawMicroseconds, double smoothedMicroseconds)
         {
         }
 
         public void Reset() => SetResampling(1.0);
+
+        private void SetTier(SyncCorrectionMode mode, double rate)
+        {
+            CurrentMode = mode;
+            TargetPlaybackRate = rate;
+            CorrectionChanged?.Invoke(this);
+        }
     }
 
     /// <summary>
@@ -951,9 +991,9 @@ public class SyncCorrectedSampleSourceTests
 
         private void Read()
         {
-            // Sampled before the read: the rate for a callback is settled from the mode standing
-            // when it starts, so that is the pairing the neutrality invariant is about.
-            var modeAtEntry = Source.CorrectionProvider.CurrentMode;
+            // Sampled before the read: the rate for a callback is settled from the snap state
+            // standing when it starts, so that is the pairing the neutrality invariant is about.
+            var snapInFlightAtEntry = Buffer.IsHardSyncPending;
 
             Source.Read(_callback, 0, _callback.Length);
 
@@ -961,7 +1001,7 @@ public class SyncCorrectedSampleSourceTests
             MaxRateSeen = Math.Max(MaxRateSeen, rate);
             MinRateSeen = Math.Min(MinRateSeen, rate);
 
-            if (modeAtEntry == SyncCorrectionMode.HardSync)
+            if (snapInFlightAtEntry)
             {
                 RateWhileHardSyncing = rate;
             }

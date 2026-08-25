@@ -109,6 +109,27 @@ public interface ITimedAudioBuffer : IDisposable
     double SmoothedSyncErrorMicroseconds { get; }
 
     /// <summary>
+    /// Gets whether a one-shot hard sync is in flight right now — the buffer is skipping
+    /// buffered content, or emitting silence, to close the error in a single discontinuity.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>An external corrector must stand down while this is true</b>: rate 1.0, no stepping.
+    /// The snap is exempt from the ±0.5% cap precisely because it is one discontinuity rather
+    /// than a speed change, and correcting on top of it corrects the same error twice.
+    /// </para>
+    /// <para>
+    /// Ask this rather than inferring it from
+    /// <see cref="ISyncCorrectionProvider.CurrentMode"/>. A provider predicts
+    /// <see cref="SyncCorrectionMode.HardSync"/> from the smoothed error alone, while the buffer
+    /// declines to snap when the raw and smoothed errors disagree in sign, when the raw error is
+    /// past the re-anchor ceiling, and inside its startup and reconnect windows — so the two
+    /// disagree in both directions. This is the actor; the mode is a forecast.
+    /// </para>
+    /// </remarks>
+    bool IsHardSyncPending { get; }
+
+    /// <summary>
     /// Gets the target playback rate for smooth sync correction via resampling.
     /// </summary>
     /// <remarks>

@@ -450,10 +450,12 @@ reports how rare it is in practice.
 
 The snap is applied by `TimedAudioBuffer` on **both** read paths, including `ReadRaw`. Skipping
 buffered content or manufacturing silence is a buffer-timeline operation an external corrector
-cannot perform on samples it has already been handed, so it cannot be delegated. A
-`SyncCorrectionCalculator` fed an error in that band reports
-`SyncCorrectionMode.HardSync` with a neutral rate, meaning *stand down* — if you wrote your own
-`ISyncCorrectionProvider`, treat that mode the same way rather than adding a correction on top.
+cannot perform on samples it has already been handed, so it cannot be delegated. **Stand down
+while `ITimedAudioBuffer.IsHardSyncPending` is true** — rate 1.0, no stepping. Do not infer it
+from `SyncCorrectionMode.HardSync`: that is a provider's forecast from the smoothed error, while
+the buffer declines to snap when the raw and smoothed errors disagree in sign, when the raw error
+is past the re-anchor ceiling, and inside its startup and reconnect windows. The two disagree in
+both directions, and only the flag is the actor.
 
 ### `Read` corrects; `ReadRaw` reports
 
@@ -567,6 +569,50 @@ Expect the server to send less ahead than it used to. That is the fix, not a reg
 
 ---
 
+### `ISyncCorrectionProvider` emits one currency: the rate
+
+`DropEveryNFrames` and `InsertEveryNFrames` are **removed** from the interface. A provider now
+reports its correction only as `TargetPlaybackRate`, in every continuous tier.
+
+They were a second currency for the same decision, and which one a provider chose was read from
+its *own* copy of `SyncCorrectionOptions.Mechanism` while the object that actually had (or did
+not have) a resampler read the *buffer's* copy. A caller that paired a `SmoothResampling`
+calculator with a `FrameStepping` host — or supplied any custom provider that emits a rate —
+got a correction nothing applied, while the stats reported `Resampling`.
+
+A provider cannot see the mechanism, so it no longer picks one. `SyncCorrectedSampleSource`
+translates the rate into a drop/insert interval itself when it has no resampler; the two are the
+same correction, because one frame in N is a speed change of 1/N.
+
+```csharp
+// Before
+if (provider.CurrentMode == SyncCorrectionMode.Dropping)
+{
+    dropEveryN = provider.DropEveryNFrames;
+}
+
+// After
+var deviation = provider.TargetPlaybackRate - 1.0;
+if (deviation != 0)
+{
+    var everyN = (int)Math.Ceiling(1.0 / Math.Abs(deviation));   // drop if > 0, insert if < 0
+}
+```
+
+`SyncCorrectionMode` is unchanged and still reports the tier; `Dropping` and `Inserting` now mean
+"too far out to be worth trimming smoothly", not "use this mechanism".
+
+Nothing to do if you use `SyncCorrectedSampleSource` or `TimedAudioBuffer.Read`.
+
+### `NotifyExternalCorrection` no longer moves the read cursor
+
+It records `SamplesDroppedForSync` / `SamplesInsertedForSync` and nothing else. `ReadRaw` already
+credits every sample it hands over, and a corrector has to size its read to the correction —
+dropping consumes an extra frame per splice, inserting one fewer — so the consumption was already
+counted. Adjusting again counted the same frames twice and made the sync error converge at twice
+the physical correction: it settled near zero while the player stayed about half the drift out of
+the group. Size your read to the correction and this needs no compensation.
+
 ## 14. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
@@ -583,7 +629,12 @@ Expect the server to send less ahead than it used to. That is the fix, not a reg
 - [ ] Nothing drives a resampler from `TargetPlaybackRate` while also calling `Read`
 - [ ] `ClientCapabilities.AudioBufferCapacityMs` and `TimedAudioBuffer`'s `bufferCapacityMs` are the same number
 - [ ] `TimedAudioBuffer.MinBufferMilliseconds` matches `ClientCapabilities.MinBufferMs`
-- [ ] A custom `ISyncCorrectionProvider` treats `SyncCorrectionMode.HardSync` as "stand down"
+- [ ] A custom `ISyncCorrectionProvider` emits its correction as `TargetPlaybackRate` — the
+      `DropEveryNFrames` / `InsertEveryNFrames` members are gone
+- [ ] An external corrector stands down on `ITimedAudioBuffer.IsHardSyncPending`, not on
+      `SyncCorrectionMode.HardSync`
+- [ ] Nothing expects `NotifyExternalCorrection` to move the read cursor — it feeds the stats,
+      and `ReadRaw` has already credited what it handed you
 
 ---
 
