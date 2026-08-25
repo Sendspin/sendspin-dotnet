@@ -152,10 +152,13 @@ sourceFactory: (buffer, nowMicroseconds) => new SyncCorrectedSampleSource(buffer
 ```
 
 It fills every block, holding the last frame over a brief shortfall rather than punching a silent
-hole in continuous audio, and reports its applied rate into `GetStats()` for you. If your host
-cannot carry a resampler in its output chain, set
-`SyncCorrectionOptions.Mechanism = SyncCorrectionMechanism.FrameStepping` and the same class
-corrects by splicing frames instead, with no resampler constructed.
+hole in continuous audio, and reports its applied rate into `GetStats()` for you. It also
+implements `IPlaybackLifecycleAware`, so the pipeline resets it on `stream/clear` and tells it to
+stand down while the clock re-converges after a reconnect. Implement that interface on your own
+source if it keeps correction state of its own; a source that only reads the buffer has nothing
+to invalidate and should leave it alone. If your host cannot carry a resampler in its output
+chain, set `SyncCorrectionOptions.Mechanism = SyncCorrectionMechanism.FrameStepping` and the
+same class corrects by splicing frames instead, with no resampler constructed.
 
 Reach for `ReadRaw` directly only if your platform owns a rate-control mechanism of its own that
 the SDK cannot drive — ALSA hardware rate adjust, a browser's `playbackRate`, a resampler already
@@ -584,7 +587,9 @@ var capabilities = new ClientCapabilities
     // The server schedules the first chunk at least this far ahead after a stream start/restart.
     RequiredLeadTimeMs = 200,   // default: 200 ms (conservative LAN starting point)
 
-    // Minimum ongoing buffer to absorb network jitter (primarily for live streams).
+    // Minimum ongoing buffer to absorb network jitter (primarily for live streams). The SDK
+    // forwards this to the pipeline, so the buffer's readiness gate waits for the same depth
+    // the server was asked to keep queued.
     MinBufferMs = 150,          // default: 150 ms
 
     // Whether to accept the server's set_static_delay command (advertised in client/state).
