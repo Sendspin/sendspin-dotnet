@@ -38,7 +38,7 @@ public class PlayerStateDelayReportingTests
             configure: options => options with
             {
                 ClockSynchronizer = clock,
-                StaticDelayStore = store,
+                OutputDelayStore = store,
             });
 
         TestClient.CompleteHandshake(connection, "player@v1");
@@ -60,7 +60,7 @@ public class PlayerStateDelayReportingTests
         await client.SendPlayerStateAsync(volume: 60, muted: false);
 
         Assert.Equal(250, ReportedDelay(connection));
-        Assert.Equal(250.0, clock.StaticDelayMs);
+        Assert.Equal(250.0, clock.OutputDelayMs);
     }
 
     [Fact]
@@ -72,10 +72,10 @@ public class PlayerStateDelayReportingTests
         var (client, connection, clock, store) = Connected();
         using var _c = client;
 
-        await client.SendPlayerStateAsync(volume: 50, muted: false, staticDelayMs: 400);
+        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: 400);
 
         Assert.Equal(400, ReportedDelay(connection));
-        Assert.Equal(400.0, clock.StaticDelayMs);
+        Assert.Equal(400.0, clock.OutputDelayMs);
         Assert.Equal(new[] { 400.0 }, store.Saved);
     }
 
@@ -88,11 +88,11 @@ public class PlayerStateDelayReportingTests
         var (client, connection, clock, store) = Connected();
         using var _c = client;
 
-        clock.StaticDelayMs = 120.0;
+        clock.OutputDelayMs = 120.0;
         await client.SendPlayerStateAsync(volume: 70, muted: true);
 
         Assert.Equal(120, ReportedDelay(connection));
-        Assert.Equal(120.0, clock.StaticDelayMs);
+        Assert.Equal(120.0, clock.OutputDelayMs);
         Assert.Empty(store.Saved);
     }
 
@@ -102,8 +102,8 @@ public class PlayerStateDelayReportingTests
         var (client, connection, _, store) = Connected();
         using var _c = client;
 
-        await client.SendPlayerStateAsync(volume: 50, muted: false, staticDelayMs: 400);
-        await client.SendPlayerStateAsync(volume: 51, muted: false, staticDelayMs: 400);
+        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: 400);
+        await client.SendPlayerStateAsync(volume: 51, muted: false, outputDelayMs: 400);
 
         Assert.Equal(new[] { 400.0 }, store.Saved);
         Assert.Equal(400, ReportedDelay(connection));
@@ -117,20 +117,20 @@ public class PlayerStateDelayReportingTests
         var (client, connection, clock, store) = Connected();
         using var _c = client;
 
-        await client.SendPlayerStateAsync(volume: 50, muted: false, staticDelayMs: -300);
+        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: -300);
 
         Assert.Equal(0, ReportedDelay(connection));
-        Assert.Equal(-300.0, clock.StaticDelayMs);
+        Assert.Equal(-300.0, clock.OutputDelayMs);
         Assert.Equal(new[] { -300.0 }, store.Saved);
     }
 
-    private sealed class RecordingDelayStore : IStaticDelayStore
+    private sealed class RecordingDelayStore : IOutputDelayStore
     {
         public List<double> Saved { get; } = new();
 
         public double? Load() => null;
 
-        public void Save(double staticDelayMs) => Saved.Add(staticDelayMs);
+        public void Save(double outputDelayMs) => Saved.Add(outputDelayMs);
     }
 
     /// <summary>
@@ -138,7 +138,7 @@ public class PlayerStateDelayReportingTests
     /// </summary>
     private sealed class ConvergedClock : IClockSynchronizer
     {
-        public double StaticDelayMs { get; set; }
+        public double OutputDelayMs { get; set; }
 
         public bool IsConverged => true;
 

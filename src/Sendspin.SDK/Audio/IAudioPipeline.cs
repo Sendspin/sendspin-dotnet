@@ -115,7 +115,7 @@ public interface IAudioPipeline : IAsyncDisposable
     /// <remarks>
     /// <para>
     /// Resets the sync-timing anchor so the next callback re-derives the scheduled start from the
-    /// current clock state — picking up a changed <see cref="Synchronization.IClockSynchronizer.StaticDelayMs"/> —
+    /// current clock state — picking up a changed <see cref="Synchronization.IClockSynchronizer.OutputDelayMs"/> —
     /// while keeping all buffered audio.
     /// </para>
     /// <para>

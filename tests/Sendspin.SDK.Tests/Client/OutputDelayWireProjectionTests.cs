@@ -7,7 +7,7 @@ using Sendspin.SDK.Synchronization;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// The scheduler's static delay is a double over -5000..5000 — fractional from calibration,
+/// The scheduler's output delay is a double over -5000..5000 — fractional from calibration,
 /// negative to schedule later. The spec's <c>static_delay_ms</c> is an integer 0-5000 and states
 /// negatives are not supported. Everything the client reports must be projected onto that.
 /// </summary>
@@ -16,7 +16,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// <c>ValueError("static_delay_ms must be in range 0-5000")</c> on parse, so a negative delay
 /// fails the connection rather than being tolerated.
 /// </remarks>
-public class StaticDelayWireProjectionTests
+public class OutputDelayWireProjectionTests
 {
     private static JsonElement PlayerObjectOfLastState(FakeSendspinConnection connection)
     {
@@ -28,12 +28,12 @@ public class StaticDelayWireProjectionTests
     }
 
     private static (SendspinClientService Client, FakeSendspinConnection Connection) Connected(
-        double staticDelayMs)
+        double outputDelayMs)
     {
         var (client, connection, _) = TestClient.Create(
             configure: options => options with
             {
-                ClockSynchronizer = new ConvergedClock { StaticDelayMs = staticDelayMs },
+                ClockSynchronizer = new ConvergedClock { OutputDelayMs = outputDelayMs },
             });
 
         TestClient.CompleteHandshake(connection, "player@v1");
@@ -47,7 +47,7 @@ public class StaticDelayWireProjectionTests
     /// </summary>
     private sealed class ConvergedClock : IClockSynchronizer
     {
-        public double StaticDelayMs { get; set; }
+        public double OutputDelayMs { get; set; }
 
         public bool IsConverged => true;
 
@@ -93,7 +93,7 @@ public class StaticDelayWireProjectionTests
     }
 
     [Fact]
-    public void ClientState_AlwaysCarriesStaticDelay_EvenAtZero()
+    public void ClientState_AlwaysCarriesOutputDelay_EvenAtZero()
     {
         // Positive control for the theory above: if the field were dropped at its default,
         // every zero-expecting case there would fail on the missing property rather than on a
@@ -111,7 +111,7 @@ public class StaticDelayWireProjectionTests
     {
         // The clamp must not write back. A negative delay still schedules audio later; only the
         // report is constrained, and conflating the two would silently change playback timing.
-        var sync = new ConvergedClock { StaticDelayMs = -200.0 };
+        var sync = new ConvergedClock { OutputDelayMs = -200.0 };
         var (client, connection, _) = TestClient.Create(
             configure: options => options with { ClockSynchronizer = sync });
         using var _c = client;
@@ -119,7 +119,7 @@ public class StaticDelayWireProjectionTests
         TestClient.CompleteHandshake(connection, "player@v1");
 
         Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
-        Assert.Equal(-200.0, sync.StaticDelayMs);
+        Assert.Equal(-200.0, sync.OutputDelayMs);
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public class StaticDelayWireProjectionTests
         var (client, connection) = Connected(0.0);
         using var _c = client;
 
-        await client.SendPlayerStateAsync(volume: 50, muted: false, staticDelayMs: -750.0);
+        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: -750.0);
 
         Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
     }

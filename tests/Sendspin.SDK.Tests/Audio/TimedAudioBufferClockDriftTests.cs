@@ -207,14 +207,14 @@ public class TimedAudioBufferClockDriftTests
     }
 
     [Fact]
-    public void StaticDelayChange_DoesNotEnterDriftTerm()
+    public void OutputDelayChange_DoesNotEnterDriftTerm()
     {
         using var session = new Session(options: null, useRawReads: true);
         session.Steps(300);
 
         // A 150ms static-delay change re-schedules via explicit re-anchor in real
         // clients; the drift term must not react to it (Kalman offset unchanged).
-        session.ClockSync.StaticDelayMs = 150;
+        session.ClockSync.OutputDelayMs = 150;
         session.Steps(200);
 
         Assert.InRange(session.Buffer.SmoothedSyncErrorMicroseconds, -5_000, 5_000);

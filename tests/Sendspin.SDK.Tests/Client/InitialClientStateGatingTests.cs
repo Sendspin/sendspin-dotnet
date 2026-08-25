@@ -500,7 +500,7 @@ public class InitialClientStateGatingTests
 
         public bool HasMinimalSync => IsConverged;
 
-        public double StaticDelayMs { get; set; }
+        public double OutputDelayMs { get; set; }
 
         public void ProcessMeasurement(long t1, long t2, long t3, long t4)
         {

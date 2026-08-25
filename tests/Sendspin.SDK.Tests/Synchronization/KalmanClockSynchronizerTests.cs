@@ -127,7 +127,7 @@ public class KalmanClockSynchronizerTests
     // was opposite to spec; see .localNotes/static-delay-research/FINDINGS.md.
 
     [Fact]
-    public void StaticDelay_PositiveValue_AdvancesPlaybackEarlier()
+    public void OutputDelay_PositiveValue_AdvancesPlaybackEarlier()
     {
         _sync.ProcessMeasurement(0, 5000, 5100, 10_000);
         _sync.ProcessMeasurement(100_000, 105_000, 105_100, 110_000);
@@ -135,7 +135,7 @@ public class KalmanClockSynchronizerTests
         long serverTime = 200_000L;
         long withoutDelay = _sync.ServerToClientTime(serverTime);
 
-        _sync.StaticDelayMs = 10.0; // 10 ms = 10000 µs of hardware compensation
+        _sync.OutputDelayMs = 10.0; // 10 ms = 10000 µs of hardware compensation
         long withDelay = _sync.ServerToClientTime(serverTime);
 
         // Positive static_delay subtracts from the converted client time,
@@ -144,7 +144,7 @@ public class KalmanClockSynchronizerTests
     }
 
     [Fact]
-    public void StaticDelay_NegativeValue_DelaysPlaybackLater()
+    public void OutputDelay_NegativeValue_DelaysPlaybackLater()
     {
         _sync.ProcessMeasurement(0, 5000, 5100, 10_000);
         _sync.ProcessMeasurement(100_000, 105_000, 105_100, 110_000);
@@ -152,14 +152,14 @@ public class KalmanClockSynchronizerTests
         long serverTime = 200_000L;
         long withoutDelay = _sync.ServerToClientTime(serverTime);
 
-        _sync.StaticDelayMs = -5.0; // negative compensation → schedule later
+        _sync.OutputDelayMs = -5.0; // negative compensation → schedule later
         long withDelay = _sync.ServerToClientTime(serverTime);
 
         Assert.Equal(5_000, withDelay - withoutDelay);
     }
 
     [Fact]
-    public void StaticDelay_ZeroValue_NoOp()
+    public void OutputDelay_ZeroValue_NoOp()
     {
         _sync.ProcessMeasurement(0, 5000, 5100, 10_000);
         _sync.ProcessMeasurement(100_000, 105_000, 105_100, 110_000);
@@ -167,7 +167,7 @@ public class KalmanClockSynchronizerTests
         long serverTime = 200_000L;
         long withoutDelay = _sync.ServerToClientTime(serverTime);
 
-        _sync.StaticDelayMs = 0.0;
+        _sync.OutputDelayMs = 0.0;
         long withDelay = _sync.ServerToClientTime(serverTime);
 
         Assert.Equal(0, withDelay - withoutDelay);

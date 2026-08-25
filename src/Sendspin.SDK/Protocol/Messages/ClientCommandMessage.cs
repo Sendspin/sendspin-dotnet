@@ -120,8 +120,13 @@ public static class Commands
     public const string SeekRelative = "seek_relative";
 
     /// <summary>
-    /// Player command: set the player's static delay (server/command player object).
+    /// Player command: set the player's output delay (server/command player object).
     /// </summary>
+    /// <remarks>
+    /// Pre-rename spelling, and still the one this SDK puts on the wire — see
+    /// <see cref="SetOutputDelay"/>. The constant keeps the name of its own wire literal so the
+    /// two spellings stay tellable apart at every call site.
+    /// </remarks>
     public const string SetStaticDelay = "set_static_delay";
 
     /// <summary>

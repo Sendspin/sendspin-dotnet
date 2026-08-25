@@ -194,7 +194,7 @@ public class PairingQuiescenceTests
 
     private sealed class ConvergedClock : IClockSynchronizer
     {
-        public double StaticDelayMs { get; set; }
+        public double OutputDelayMs { get; set; }
 
         public bool IsConverged => true;
 

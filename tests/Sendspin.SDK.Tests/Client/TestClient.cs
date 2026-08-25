@@ -179,7 +179,7 @@ internal sealed class ConvergedClockSynchronizer : IClockSynchronizer
 
     public bool HasMinimalSync => true;
 
-    public double StaticDelayMs { get; set; }
+    public double OutputDelayMs { get; set; }
 
     /// <summary>
     /// Offset applied in conversions, following KalmanClockSynchronizer's convention:
@@ -190,8 +190,8 @@ internal sealed class ConvergedClockSynchronizer : IClockSynchronizer
     /// </summary>
     public long OffsetMicroseconds { get; set; }
 
-    // Deliberately does NOT apply StaticDelayMs, unlike FakeClockSynchronizer. Existing users
-    // of this fake schedule playback through it, and folding the static delay in here shifts
+    // Deliberately does NOT apply OutputDelayMs, unlike FakeClockSynchronizer. Existing users
+    // of this fake schedule playback through it, and folding the output delay in here shifts
     // every scheduled start — enough to hang tests waiting on audio that now arrives at a
     // different time. The offset alone is what this fake needed to become useful — which also
     // leaves the uncompensated conversion identical to it, there being no delay to leave out.

@@ -37,7 +37,7 @@ public class ClientStateDeltaTests
     {
         // Player-state reports keep the full player object (the timing fields are always required).
         var msg = ClientStateMessage.CreatePlayerState(
-            volume: 50, muted: false, staticDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0);
+            volume: 50, muted: false, outputDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0);
 
         Assert.NotNull(msg.Payload.Player);
         var json = MessageSerializer.Serialize(msg);

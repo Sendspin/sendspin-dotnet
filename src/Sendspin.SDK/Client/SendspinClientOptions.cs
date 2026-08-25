@@ -58,8 +58,8 @@ public sealed record SendspinClientOptions
     /// <summary>Audio pipeline for the player role.</summary>
     public IAudioPipeline? AudioPipeline { get; init; }
 
-    /// <summary>Persistence for the player's static delay calibration.</summary>
-    public IStaticDelayStore? StaticDelayStore { get; init; }
+    /// <summary>Persistence for the player's output delay calibration.</summary>
+    public IOutputDelayStore? OutputDelayStore { get; init; }
 
     /// <summary>
     /// Failure counter persistence for the pairing code methods. <b>Required</b> if

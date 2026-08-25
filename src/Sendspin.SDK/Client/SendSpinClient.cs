@@ -26,7 +26,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // Holds visualizer frames and artwork until their display timestamps (#198, #199).
     private readonly MediaDisplayScheduler _displayScheduler;
     private readonly IAudioPipeline? _audioPipeline;
-    private readonly IStaticDelayStore? _staticDelayStore;
+    private readonly IOutputDelayStore? _outputDelayStore;
     private readonly INoiseSessionInfo _session;
     private bool _activateReceived;
 
@@ -150,14 +150,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // record, which for an SDK is the app's to provision.
     private string? _recordModePskId;
 
-    // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
+    // Bounds for any value written to the clock synchronizer's output delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
-    private const double MinStaticDelayMs = -5000.0;
-    private const double MaxStaticDelayMs = 5000.0;
+    private const double MinOutputDelayMs = -5000.0;
+    private const double MaxOutputDelayMs = 5000.0;
 
-    // Last scheduler-side value ToWireStaticDelayMs warned about, so a delay that does not
+    // Last scheduler-side value ToWireOutputDelayMs warned about, so a delay that does not
     // survive the projection is reported once rather than on every client/state.
-    private double? _lastWarnedStaticDelayMs;
+    private double? _lastWarnedOutputDelayMs;
 
     // Last line-sense signal the app reported, or null if it never has. Survives reconnects on
     // purpose: it describes the device's input, not the session (#114).
@@ -437,7 +437,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.SourceRoleSupport?.Codec);
         }
         _audioPipeline = options.AudioPipeline;
-        _staticDelayStore = options.StaticDelayStore;
+        _outputDelayStore = options.OutputDelayStore;
 
         _requiredLeadTimeMs = Math.Max(0, _capabilities.RequiredLeadTimeMs);
         _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
@@ -1088,7 +1088,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <inheritdoc/>
-    public async Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null)
+    public async Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null)
     {
         var clampedVolume = Math.Clamp(volume, 0, 100);
 
@@ -1099,10 +1099,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // report the caller's number while continuing to schedule with the old one, so the
         // server's group calibration and the client's playback disagreed, and a reconnect
         // silently reverted to the unpersisted value.
-        if (staticDelayMs is { } requested && requested != _clockSynchronizer.StaticDelayMs)
+        if (outputDelayMs is { } requested && requested != _clockSynchronizer.OutputDelayMs)
         {
-            _clockSynchronizer.StaticDelayMs = requested;
-            TrySaveStaticDelay(requested);
+            _clockSynchronizer.OutputDelayMs = requested;
+            TrySaveOutputDelay(requested);
         }
 
         // Persist the caller's values: SendInitialClientStateAsync reads _playerState, so
@@ -1145,12 +1145,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // update into existing state, so a field that is present overwrites -- reporting a
         // defaulted 0 here wiped a delay the server had set, on the next volume change.
         var stateMessage = ClientStateMessage.CreatePlayerState(
-            clampedVolume, muted, ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
+            clampedVolume, muted, ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
             _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
 
         _logger.LogDebug(
-            "Sending player state: Volume={Volume}, Muted={Muted}, StaticDelay={StaticDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
-            clampedVolume, muted, _clockSynchronizer.StaticDelayMs, _requiredLeadTimeMs, _minBufferMs);
+            "Sending player state: Volume={Volume}, Muted={Muted}, OutputDelay={OutputDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
+            clampedVolume, muted, _clockSynchronizer.OutputDelayMs, _requiredLeadTimeMs, _minBufferMs);
         await SendAsync(stateMessage);
     }
 
@@ -1171,7 +1171,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // _requiredLeadTimeMs/_minBufferMs live, so it carries the values applied above.
         if (_connection.State == ConnectionState.Connected && _initialClientStateSent)
         {
-            await SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.StaticDelayMs);
+            await SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.OutputDelayMs);
         }
     }
 
@@ -1436,41 +1436,41 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// none apply. Currently advertises 'set_static_delay' when the client accepts that command.
     /// </summary>
     private List<string>? GetPlayerSupportedCommands()
-        => _capabilities.SupportsSetStaticDelay ? new List<string> { Commands.SetStaticDelay } : null;
+        => _capabilities.SupportsSetOutputDelay ? new List<string> { Commands.SetStaticDelay } : null;
 
     /// <summary>
-    /// Projects a scheduler-side static delay onto the wire type: an integer millisecond value
+    /// Projects a scheduler-side output delay onto the wire type: an integer millisecond value
     /// in 0-5000. Every client/state goes through here, so the internal range stays wider than
     /// the wire's without the difference leaking onto it.
     /// </summary>
     /// <remarks>
-    /// The scheduler's value is a double in <see cref="MinStaticDelayMs"/>..<see cref="MaxStaticDelayMs"/> —
+    /// The scheduler's value is a double in <see cref="MinOutputDelayMs"/>..<see cref="MaxOutputDelayMs"/> —
     /// fractional from calibration, negative to schedule later. The spec's <c>static_delay_ms</c>
     /// is an integer 0-5000 and states negatives are not supported; a conformant server rejects
     /// one outright rather than tolerating it. Clamping is therefore not optional, and a clamp
     /// that moved the value is worth saying out loud: the server is being told a delay the
     /// client is not actually applying.
     /// </remarks>
-    private int ToWireStaticDelayMs(double staticDelayMs)
+    private int ToWireOutputDelayMs(double outputDelayMs)
     {
         // A public settable double can be NaN or infinity; Math.Clamp propagates NaN and the
         // cast would then produce a garbage int rather than throwing.
-        double bounded = double.IsFinite(staticDelayMs)
-            ? Math.Clamp(staticDelayMs, 0.0, MaxStaticDelayMs)
+        double bounded = double.IsFinite(outputDelayMs)
+            ? Math.Clamp(outputDelayMs, 0.0, MaxOutputDelayMs)
             : 0.0;
 
         int wire = (int)Math.Round(bounded, MidpointRounding.AwayFromZero);
 
         // Deduplicated on the value: a volume slider can drive many state sends, and a
         // misconfigured delay would otherwise warn on every one of them.
-        if (wire != staticDelayMs && _lastWarnedStaticDelayMs != staticDelayMs)
+        if (wire != outputDelayMs && _lastWarnedOutputDelayMs != outputDelayMs)
         {
-            _lastWarnedStaticDelayMs = staticDelayMs;
+            _lastWarnedOutputDelayMs = outputDelayMs;
             _logger.LogWarning(
                 "static_delay_ms {Configured}ms is reported to the server as {Reported}ms: the wire "
                 + "value is an integer 0-5000 and negatives are not supported. Audio is still "
                 + "scheduled using {Configured}ms, so the server's group calibration will differ.",
-                staticDelayMs, wire, staticDelayMs);
+                outputDelayMs, wire, outputDelayMs);
         }
 
         return wire;
@@ -2064,7 +2064,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 // Recovers everything the window dropped. State is last-write-wins and the
                 // server merges each update, so one full report of the current values restores
-                // its view — a volume the app changed mid-window, a static delay, an
+                // its view — a volume the app changed mid-window, an output delay, an
                 // availability flip — without a queue. Skipped when the initial state has yet
                 // to go out: the branch above owns that case, and a delta before it would
                 // become the connection's "initial" message.
@@ -3641,7 +3641,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Restore any persisted static_delay_ms before reporting initial state, so the server
         // sees the calibrated delay immediately on (re)connect. No-op when no store is configured.
-        LoadPersistedStaticDelay();
+        LoadPersistedOutputDelay();
 
         // Per-connection latches, reset here with the rest of the per-connection state: the
         // initial client/state must be sent again, and sync must be re-established before
@@ -3730,7 +3730,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     Volume = _playerState.Volume,
                     Muted = _playerState.Muted,
-                    StaticDelayMs = ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
+                    OutputDelayMs = ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
                     RequiredLeadTimeMs = _requiredLeadTimeMs,
                     MinBufferMs = _minBufferMs,
                     SupportedCommands = GetPlayerSupportedCommands(),
@@ -4533,7 +4533,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // naming, until servers adopt the rename.
         var requestedDelayMs = player.OutputDelayMs ?? player.StaticDelayMs;
         if ((player.Command == Commands.SetStaticDelay || player.Command == Commands.SetOutputDelay)
-            && _capabilities.SupportsSetStaticDelay
+            && _capabilities.SupportsSetOutputDelay
             && requestedDelayMs.HasValue)
         {
             var clamped = Math.Clamp(requestedDelayMs.Value, 0, 5000);
@@ -4543,10 +4543,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _capabilities.ClientName, requestedDelayMs.Value, clamped);
             }
 
-            _clockSynchronizer.StaticDelayMs = clamped;
-            TrySaveStaticDelay(clamped);
+            _clockSynchronizer.OutputDelayMs = clamped;
+            TrySaveOutputDelay(clamped);
             changed = true;
-            _logger.LogInformation("server/command [{Player}]: Applied static_delay {Delay}ms",
+            _logger.LogInformation("server/command [{Player}]: Applied output delay {Delay}ms",
                 _capabilities.ClientName, clamped);
         }
 
@@ -4584,7 +4584,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     Volume = _playerState.Volume,
                     Muted = _playerState.Muted,
-                    StaticDelayMs = ToWireStaticDelayMs(_clockSynchronizer.StaticDelayMs),
+                    OutputDelayMs = ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
                     RequiredLeadTimeMs = _requiredLeadTimeMs,
                     MinBufferMs = _minBufferMs,
                     SupportedCommands = GetPlayerSupportedCommands(),
@@ -4606,12 +4606,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private async Task SendPlayerStateAckAsync()
     {
-        await SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.StaticDelayMs);
+        await SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.OutputDelayMs);
     }
 
 
     /// <summary>
-    /// Restores the persisted static delay (if a store is configured and a value exists) into the
+    /// Restores the persisted output delay (if a store is configured and a value exists) into the
     /// clock synchronizer. Called on each handshake before the initial client/state is reported.
     /// </summary>
     /// <remarks>
@@ -4620,9 +4620,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// persisted delay. The loaded value is clamped to the same range as the GroupSync offset path,
     /// since that is the broadest legitimate source of a persisted delay (negatives allowed).
     /// </remarks>
-    private void LoadPersistedStaticDelay()
+    private void LoadPersistedOutputDelay()
     {
-        if (_staticDelayStore is null)
+        if (_outputDelayStore is null)
         {
             return;
         }
@@ -4630,11 +4630,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         double? stored;
         try
         {
-            stored = _staticDelayStore.Load();
+            stored = _outputDelayStore.Load();
         }
         catch (Exception ex)
         {
-            // Deliberately broad, reviewed under #109. IStaticDelayStore is implemented by the
+            // Deliberately broad, reviewed under #109. IOutputDelayStore is implemented by the
             // embedder over a store the SDK never sees — file, registry, SQLite, a cloud
             // key-value API — so there is no set of types to narrow to; a filter naming
             // IOException would let a database provider's own exception abort the handshake.
@@ -4642,7 +4642,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // this exists: it is the guard for the implementations that are not. Degrading is
             // right here — a delay we could not read is a lost calibration, not a lost session,
             // and the handshake behind this call still has an initial client/state to send.
-            _logger.LogError(ex, "IStaticDelayStore.Load() threw; continuing without persisted static delay");
+            _logger.LogError(ex, "IOutputDelayStore.Load() threw; continuing without persisted output delay");
             return;
         }
 
@@ -4653,38 +4653,38 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (!double.IsFinite(stored.Value))
         {
-            _logger.LogWarning("Persisted static delay was not finite ({Delay}); ignoring", stored.Value);
+            _logger.LogWarning("Persisted output delay was not finite ({Delay}); ignoring", stored.Value);
             return;
         }
 
-        var clamped = Math.Clamp(stored.Value, MinStaticDelayMs, MaxStaticDelayMs);
-        _clockSynchronizer.StaticDelayMs = clamped;
-        _logger.LogDebug("Restored persisted static delay: {Delay:+0.0;-0.0}ms", clamped);
+        var clamped = Math.Clamp(stored.Value, MinOutputDelayMs, MaxOutputDelayMs);
+        _clockSynchronizer.OutputDelayMs = clamped;
+        _logger.LogDebug("Restored persisted output delay: {Delay:+0.0;-0.0}ms", clamped);
     }
 
     /// <summary>
-    /// Best-effort persistence of <c>static_delay_ms</c>. A throwing store must never break command
+    /// Best-effort persistence of the output delay. A throwing store must never break command
     /// or sync-offset handling — log and continue so the in-memory delay, state event, and ack still flow.
     /// </summary>
-    private void TrySaveStaticDelay(double staticDelayMs)
+    private void TrySaveOutputDelay(double outputDelayMs)
     {
-        if (_staticDelayStore is null)
+        if (_outputDelayStore is null)
         {
             return;
         }
 
         try
         {
-            _staticDelayStore.Save(staticDelayMs);
+            _outputDelayStore.Save(outputDelayMs);
         }
         catch (Exception ex)
         {
-            // Deliberately broad for the same reason as LoadPersistedStaticDelay's catch (#109):
+            // Deliberately broad for the same reason as LoadPersistedOutputDelay's catch (#109):
             // an embedder-implemented store has no enumerable failure set. Degrading is the
             // stronger answer on the save side, because the callers are a server/command and a
             // GroupSync offset — the delay is already applied in memory and already
             // acknowledged, so throwing here would fail a command that in fact succeeded.
-            _logger.LogError(ex, "IStaticDelayStore.Save({Delay}ms) threw; static delay applied in-memory but not persisted", staticDelayMs);
+            _logger.LogError(ex, "IOutputDelayStore.Save({Delay}ms) threw; output delay applied in-memory but not persisted", outputDelayMs);
         }
     }
 

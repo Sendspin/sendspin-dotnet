@@ -223,7 +223,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         catch (Exception ex)
         {
             // Deliberately broad, reviewed under #109, and for the same reason as the
-            // IStaticDelayStore pair in SendspinClientService: ILastPlayedServerStore is
+            // IOutputDelayStore pair in SendspinClientService: ILastPlayedServerStore is
             // implemented by the embedder over storage the SDK never sees, so no filter can
             // enumerate what it raises. Degrading is right — this runs from the constructor,
             // and the value it produces only breaks an arbitration tie between two servers that
@@ -908,15 +908,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// </summary>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
-    /// <param name="staticDelayMs">
-    /// A new static delay in milliseconds to apply, persist, and report, or null (the default)
+    /// <param name="outputDelayMs">
+    /// A new output delay in milliseconds to apply, persist, and report, or null (the default)
     /// to leave the current delay untouched and simply report it. Same semantics as
     /// <see cref="ISendspinClient.SendPlayerStateAsync"/>: a supplied value is written to the
-    /// clock synchronizer and to <see cref="SendspinClientOptions.StaticDelayStore"/>, so omit
+    /// clock synchronizer and to <see cref="SendspinClientOptions.OutputDelayStore"/>, so omit
     /// it for an ordinary volume or mute change.
     /// </param>
     /// <param name="serverId">Target server ID, or null for all servers.</param>
-    public async Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null, string? serverId = null)
+    public async Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null, string? serverId = null)
     {
         List<SendspinClientService> clients;
         lock (_connectionsLock)
@@ -940,7 +940,7 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         foreach (var client in clients)
         {
-            await client.SendPlayerStateAsync(volume, muted, staticDelayMs);
+            await client.SendPlayerStateAsync(volume, muted, outputDelayMs);
         }
     }
 

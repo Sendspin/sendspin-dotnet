@@ -156,7 +156,7 @@ public sealed class SyncCorrectionOptions
     /// <summary>
     /// When true (default), the sync error tracks post-anchor movement of the Kalman
     /// clock offset, so absolute alignment to the server schedule holds over long
-    /// gapless streams instead of drifting with relative crystal error. Static delay
+    /// gapless streams instead of drifting with relative crystal error. Output delay
     /// is excluded; delay changes keep their explicit re-anchor semantics.
     /// Set false to restore the pre-9.2 pace-only behavior.
     /// </summary>

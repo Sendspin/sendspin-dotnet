@@ -5,7 +5,7 @@ namespace Sendspin.SDK.Connection.Noise;
 
 /// <summary>
 /// Persistence seam for the client's long-lived Curve25519 identity. Mirrors
-/// <see cref="Sendspin.SDK.Client.IStaticDelayStore"/> and
+/// <see cref="Sendspin.SDK.Client.IOutputDelayStore"/> and
 /// <see cref="Sendspin.SDK.Client.ILastPlayedServerStore"/>.
 /// </summary>
 /// <remarks>

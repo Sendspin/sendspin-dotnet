@@ -356,9 +356,9 @@ public class MediaDisplaySchedulingTests
     [Theory]
     [InlineData(0.0)]
     [InlineData(5_000.0)]
-    public async Task MediaDisplayTimes_AreNotShiftedByStaticDelay(double staticDelayMs)
+    public async Task MediaDisplayTimes_AreNotShiftedByOutputDelay(double outputDelayMs)
     {
-        var clock = new KalmanClockSynchronizer { StaticDelayMs = staticDelayMs };
+        var clock = new KalmanClockSynchronizer { OutputDelayMs = outputDelayMs };
         var (client, connection, timer) = SchedulingClient(clockSynchronizer: clock);
         using var _c = client;
 

@@ -344,7 +344,7 @@ public class SendspinClientServiceTimeSyncTests
 
         public bool IsConverged => false;
         public bool HasMinimalSync => false;
-        public double StaticDelayMs { get; set; }
+        public double OutputDelayMs { get; set; }
 
         /// <summary>
         /// Convergence as reported through <see cref="GetStatus"/>, which is what the

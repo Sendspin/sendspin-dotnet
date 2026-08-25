@@ -25,7 +25,8 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
 | Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
-| Static delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
+| Output delay | "Static delay" renamed to "output delay" across the C# surface (spec PR #164); the wire is unchanged | Medium — compiler errors only, see §8 for the full table |
+| Output delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
 | Clock sync | `IClockSynchronizer` gains `ServerToClientTimeUncompensated` | Low — compiler error, one-line fix, and only for a custom synchronizer |
 | Clock sync | Filter constants, burst cadence and timestamping now match the reference implementation | Low — behavioural, no code change; see §11 |
 | Connection | `ISendspinConnection` gains `SendTimeMessageAsync`; `TextMessageReceived` carries `TextMessageReceivedEventArgs` | Low — compiler error, only for a custom connection or a raw event subscriber |
@@ -106,7 +107,7 @@ var client = SendspinClientService.CreateForDial(
 | `Capabilities` | no | Roles and per-role support, as in 9.x |
 | `AudioPipeline` | for playback | Unchanged from 9.x |
 | `Suite` | no | Noise cipher suite; defaults to ChaCha20-Poly1305 |
-| `ClockSynchronizer`, `StaticDelayStore` | no | Unchanged from 9.x |
+| `ClockSynchronizer`, `OutputDelayStore` | no | Unchanged from 9.x |
 | `PinLockoutStore`, `PresentPinAsync` | for PIN pairing | See §3 |
 | `CaptureDevice`, `SourceEncoderFactory` | for `source@v1` | See §5 |
 
@@ -227,7 +228,30 @@ Optional — existing code reading `presentation.Pin` keeps working and simply s
 
 ---
 
-## 8. `static_delay_ms` is reported as a spec-conformant integer
+## 8. Output delay
+
+### "Static delay" is now "output delay" on the C# surface
+
+Spec 168a677 (spec PR #164) renamed the player's static delay to **output delay**: `static_delay_ms` → `output_delay_ms`, `set_static_delay` → `set_output_delay`. The .NET surface follows the spec's vocabulary from 10.0.0 on. **The wire does not move with it.** No server has adopted the rename — `aiosendspin` still reads only the old names — so every byte this SDK sends is unchanged: `client/state` still carries `static_delay_ms`, and the `supported_commands` entry it advertises is still `set_static_delay`. Inbound, both spellings are accepted, and the post-rename one wins if a server sends both.
+
+The rename is mechanical: every renamed member is a compiler error at your call site, and none of them changed behaviour.
+
+| Was | Now |
+|---|---|
+| `IStaticDelayStore` | `IOutputDelayStore` |
+| `IStaticDelayStore.Save(double staticDelayMs)` | `IOutputDelayStore.Save(double outputDelayMs)` |
+| `SendspinClientOptions.StaticDelayStore` | `SendspinClientOptions.OutputDelayStore` |
+| `IClockSynchronizer.StaticDelayMs` | `IClockSynchronizer.OutputDelayMs` |
+| `KalmanClockSynchronizer.StaticDelayMs` | `KalmanClockSynchronizer.OutputDelayMs` |
+| `ClientCapabilities.SupportsSetStaticDelay` | `ClientCapabilities.SupportsSetOutputDelay` |
+| `ISendspinClient.SendPlayerStateAsync(int, bool, double? staticDelayMs)` | `…, double? outputDelayMs` |
+| `SendspinHostService.SendPlayerStateAsync(int, bool, double? staticDelayMs, string?)` | `…, double? outputDelayMs, string?` |
+| `PlayerStatePayload.StaticDelayMs` | `PlayerStatePayload.OutputDelayMs` — still `[JsonPropertyName("static_delay_ms")]` |
+| `ClientStateMessage.CreatePlayerState(int, bool, int staticDelayMs, …)` | `…, int outputDelayMs, …` |
+
+Two names deliberately keep the old spelling, because each is named for its own wire literal and both literals exist while servers migrate: `Commands.SetStaticDelay` (`"set_static_delay"`, alongside `Commands.SetOutputDelay`) and `PlayerCommand.StaticDelayMs` (`static_delay_ms`, alongside `PlayerCommand.OutputDelayMs`).
+
+### `static_delay_ms` is reported as a spec-conformant integer
 
 `client/state` now always carries `static_delay_ms`, projected onto the spec's wire type: an **integer in 0–5000**.
 
@@ -237,37 +261,37 @@ Three things changed, all on what goes out on the wire:
 - **It is an integer.** A fractional delay used to serialize as e.g. `12.5`. It is now rounded.
 - **Negatives are clamped to 0.** The spec states negative values are not supported, and `aiosendspin` raises `ValueError` on parse rather than tolerating one — so a negative delay failed the connection.
 
-`IClockSynchronizer.StaticDelayMs` is **unchanged**: still a `double`, still accepting −5000…5000. Negative values still schedule audio *later*, and that is still applied to playback. Only the report is constrained, and the SDK logs a warning naming both values when a configured delay does not survive the projection — because the server's group calibration is then working from a different number than your playback is.
+`IClockSynchronizer.OutputDelayMs` is **unchanged**: still a `double`, still accepting −5000…5000. Negative values still schedule audio *later*, and that is still applied to playback. Only the report is constrained, and the SDK logs a warning naming both values when a configured delay does not survive the projection — because the server's group calibration is then working from a different number than your playback is.
 
-`ClientStateMessage.CreateInitial` / `CreatePlayerState` take `int staticDelayMs` rather than `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
+`ClientStateMessage.CreateInitial` / `CreatePlayerState` take `int outputDelayMs` rather than `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
 
 ### `SendPlayerStateAsync`'s delay parameter is now nullable, and applies
 
 ```csharp
 // ISendspinClient (dial path)
-Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null);   // was double = 0.0
+Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null);   // was double = 0.0
 
 // SendspinHostService (listen path)
-Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null, string? serverId = null);
+Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null, string? serverId = null);
 ```
 
 Both facades carry the same signature and the same semantics.
 
 **Omit it for volume and mute changes.** The old `0.0` default reported `static_delay_ms: 0` on every such call, and the spec requires the server to *merge* each `client/state`, "retaining the last value of any field that is absent" — so a present value overwrites. One volume change after the server set a 250 ms delay wiped it back to 0. The reported delay is now always the one actually applied, regardless of what you pass.
 
-**Supplying a value is now a real update, not just a report.** It is written to `IClockSynchronizer.StaticDelayMs` *and* persisted through `IStaticDelayStore`, which is what the spec requires of a client-initiated change ("clients must persist `static_delay_ms` locally across reboots and server reconnections"). Previously the value was reported and nothing else: playback kept using the old delay, nothing was persisted, and the next reconnect silently reverted to it.
+**Supplying a value is now a real update, not just a report.** It is written to `IClockSynchronizer.OutputDelayMs` *and* persisted through `IOutputDelayStore`, which is what the spec requires of a client-initiated change ("clients must persist `static_delay_ms` locally across reboots and server reconnections"). Previously the value was reported and nothing else: playback kept using the old delay, nothing was persisted, and the next reconnect silently reverted to it.
 
 If you were calling the three-argument form purely to report a delay you had already applied yourself, it now also persists it — which is almost certainly what you wanted.
 
 ### A custom `IClockSynchronizer` needs a one-line update
 
-The interface gains `ServerToClientTimeUncompensated(long)`, so a 9.x implementation fails with a compiler error (CS0535). It is `ServerToClientTime` without the static delay, and for most implementations that is the conversion they already had before subtracting it:
+The interface gains `ServerToClientTimeUncompensated(long)`, so a 9.x implementation fails with a compiler error (CS0535). It is `ServerToClientTime` without the output delay, and for most implementations that is the conversion they already had before subtracting it:
 
 ```csharp
 public long ServerToClientTimeUncompensated(long serverTime) => serverTime - Offset;
 
 public long ServerToClientTime(long serverTime) =>
-    ServerToClientTimeUncompensated(serverTime) - (long)(StaticDelayMs * 1000);
+    ServerToClientTimeUncompensated(serverTime) - (long)(OutputDelayMs * 1000);
 ```
 
 Both exist because `static_delay_ms` belongs to the player role alone: it compensates for hardware past the audio port, so it applies to scheduling sound and not to the visualizer and artwork roles' display timestamps, which the spec translates with the clock offset alone. The SDK calls the uncompensated conversion for those, which is what keeps visuals with the audio on a device that has a delay configured.

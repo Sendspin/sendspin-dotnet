@@ -78,7 +78,7 @@ public class ClientStateAvailableTests
         var json = MessageSerializer.Serialize(ClientStateMessage.CreatePlayerState(
             volume: 50,
             muted: false,
-            staticDelayMs: 0,
+            outputDelayMs: 0,
             requiredLeadTimeMs: 0,
             minBufferMs: 0));
 
