@@ -253,7 +253,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             doc.RootElement.GetProperty("payload").GetProperty("data").GetString()!);
 
         byte[] prologue = [.. _clientInitBytes!, .. _serverInitBytes!];
-        return RunResponderExchange(msg1, prologue);
+        return RunResponderExchange(msg1, prologue, isInitialHandshake: true);
     }
 
     /// <summary>
@@ -265,7 +265,12 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
     /// <see cref="EncodeDeferredReply"/> -- nothing is encrypted here, on the receive
     /// path, because a concurrent send may be using the current transport (#81).
     /// </summary>
-    private InboundFrameResult RunResponderExchange(byte[] msg1, byte[] prologue)
+    /// <param name="isInitialHandshake">
+    /// True for the handshake that establishes the session, false for an in-band re-handshake.
+    /// The Sentinel Fallback below applies only to the former, so the caller says which this is
+    /// rather than the method inferring it.
+    /// </param>
+    private InboundFrameResult RunResponderExchange(byte[] msg1, byte[] prologue, bool isInitialHandshake)
     {
         byte[] serverPub = SendspinIdentity.DecodePeerId(_serverId!);
         var protocol = NoiseProtocol.Parse(_suite.ToProtocolName().AsSpan());
@@ -302,7 +307,28 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
 
         var resolved = _pskResolver.Resolve(pskId);
         if (resolved is null)
-            return Fail($"no PSK matches psk_id {pskId}");
+        {
+            // Sentinel Fallback (connection.md § Sentinel Fallback): a psk_id that matches
+            // nothing means the server referenced a credential this client cannot use -- a lost
+            // pairing record, an interrupted pairing finalize, or a PSK for a pairing method the
+            // client has disabled. On the INITIAL handshake the client completes message 2 with
+            // the published Sentinel PSK instead of failing; the server recognises that as an
+            // authenticated credential-mismatch signal and the session proceeds as an ordinary
+            // Sentinel connection at trust level 'none'. Nothing here touches the record store:
+            // the signal alone must not remove or replace a record.
+            //
+            // A re-handshake keeps failing. There is no unauthenticated peer to rescue by then,
+            // and substituting the Sentinel would silently downgrade a live session's trust.
+            if (!isInitialHandshake)
+                return Fail($"no PSK matches psk_id {pskId}");
+
+            resolved = SentinelPskResolver.Instance.Resolve(NoiseConstants.SentinelPskId)!;
+        }
+
+        // A misbinding, not a miss: the psk_id DID match a stored-pubkey record, but that record
+        // names another server. The spec excludes it from the fallback, and the ordering above
+        // keeps it excluded -- the substituted Sentinel carries no bound server_id, so it can
+        // never be what fails here.
         if (resolved.ServerId is not null && resolved.ServerId != _serverId)
             return Fail("PSK is bound to a different server_id");
 
@@ -455,7 +481,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             root.GetProperty("payload").GetProperty("data").GetString()!);
         byte[] prologue = _handshakeHash
             ?? throw new InvalidOperationException("re-handshake before initial handshake");
-        return RunResponderExchange(msg1, prologue);
+        return RunResponderExchange(msg1, prologue, isInitialHandshake: false);
     }
 
     private InboundFrameResult DispatchMessage(byte type, ReadOnlyMemory<byte> payload)

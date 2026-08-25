@@ -1,4 +1,5 @@
 using System.Linq;
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
@@ -410,5 +411,69 @@ public class SendspinClientServicePairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         Assert.True(Assert.Single(store.List()).Used, "used once a decrypted message arrives");
+    }
+
+    /// <summary>
+    /// connection.md § Sentinel Fallback: the mismatch "SHOULD" be surfaced and re-pairing
+    /// offered. The client side of that is a log line — a session that landed on the Sentinel
+    /// while this client still holds a long-term record for the very server it is talking to is
+    /// a credential mismatch, and it stays at trust 'none' until someone re-pairs.
+    /// </summary>
+    [Fact]
+    public void SentinelSession_WithARecordForThisServer_WarnsThatTheCredentialIsGone()
+    {
+        var store = new InMemoryPairingRecordStore();
+        store.Upsert(new PairingRecord(Enumerable.Repeat((byte)0x5A, 32).ToArray(), PskCategory.LongTerm, ServerId));
+        var logger = new CapturingLogger<SendspinClientService>();
+
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options => options with { PairingRecordStore = store },
+            logger: logger);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        Assert.Contains(
+            logger.MessagesAt(LogLevel.Warning),
+            m => m.Contains("no longer holds", StringComparison.Ordinal)
+                && m.Contains("Re-pair", StringComparison.Ordinal));
+
+        // "The signal alone MUST NOT cause either side to remove or replace a record."
+        Assert.Equal(ServerId, Assert.Single(store.List()).ServerId);
+    }
+
+    /// <summary>
+    /// The ordinary pre-pairing case: a Sentinel session with no record for this server is
+    /// exactly what an unpaired client is supposed to have, so warning about it would put a
+    /// re-pairing prompt in front of every first connection.
+    /// </summary>
+    [Fact]
+    public void SentinelSession_WithNoRecordForThisServer_IsQuiet()
+    {
+        var store = new InMemoryPairingRecordStore();
+        store.Upsert(new PairingRecord(
+            Enumerable.Repeat((byte)0x6B, 32).ToArray(),
+            PskCategory.LongTerm,
+            "SomeOtherServerIdAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        var logger = new CapturingLogger<SendspinClientService>();
+
+        var (client, connection, _) = TestClient.Create(
+            PskCategory.Sentinel,
+            configure: options => options with { PairingRecordStore = store },
+            logger: logger);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+
+        Assert.DoesNotContain(
+            logger.MessagesAt(LogLevel.Warning),
+            m => m.Contains("no longer holds", StringComparison.Ordinal));
+
+        // Positive control for the absence assertion: the server/hello really was handled, so
+        // "nothing was warned" is about the subject and not about a message that never arrived.
+        Assert.Contains(
+            logger.MessagesAt(LogLevel.Information),
+            m => m.Contains("Server hello received", StringComparison.Ordinal));
     }
 }

@@ -26,6 +26,7 @@ internal sealed class TestNoiseServer
     private readonly KeyPair _keys;
     private readonly ReadOnlyMemory<byte> _clientPublicKey;
     private readonly byte[] _psk;
+    private readonly string _advertisedPskId;
     private readonly string _protocolName;
     private HandshakeState? _state;
     private Transport? _transport;
@@ -34,15 +35,24 @@ internal sealed class TestNoiseServer
     /// <param name="psk">The PSK this session authenticates with.</param>
     /// <param name="keys">Static key pair; pass an existing pair to reuse one server_id across instances.</param>
     /// <param name="suite">Cipher suite to run; must match what the client announced in client/init.</param>
+    /// <param name="advertisedPskId">
+    /// The psk_id to name in Noise message 1, when it must differ from <paramref name="psk"/>'s
+    /// own; defaults to that, which is what an ordinary server sends. The spec's Sentinel
+    /// Fallback has the server verify message 2 against the Sentinel PSK after the referenced
+    /// one fails, so a server exercising that path names a credential the client cannot match
+    /// while running its own state on the Sentinel — exactly this pair of arguments.
+    /// </param>
     internal TestNoiseServer(
         ReadOnlyMemory<byte> clientPublicKey,
         byte[] psk,
         KeyPair? keys = null,
-        NoiseCipherSuite suite = NoiseCipherSuite.ChaChaPoly)
+        NoiseCipherSuite suite = NoiseCipherSuite.ChaChaPoly,
+        string? advertisedPskId = null)
     {
         _keys = keys ?? KeyPair.Generate();
         _clientPublicKey = clientPublicKey;
         _psk = psk;
+        _advertisedPskId = advertisedPskId ?? NoiseConstants.DerivePskId(psk);
         _protocolName = suite.ToProtocolName();
         ServerId = TestBase64Url.EncodeToString(_keys.PublicKey);
     }
@@ -69,7 +79,7 @@ internal sealed class TestNoiseServer
 
         string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
-            ["psk_id"] = NoiseConstants.DerivePskId(_psk),
+            ["psk_id"] = _advertisedPskId,
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(msg1Payload), buf);
@@ -112,7 +122,7 @@ internal sealed class TestNoiseServer
 
         string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
-            ["psk_id"] = NoiseConstants.DerivePskId(_psk),
+            ["psk_id"] = _advertisedPskId,
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(msg1Payload), buf);
