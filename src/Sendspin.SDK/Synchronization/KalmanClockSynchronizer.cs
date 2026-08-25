@@ -24,7 +24,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     private readonly double _processNoiseDrift;
     private readonly double _measurementNoiseFloor;
     private readonly double _maxErrorScale;
-    private long _staticDelayMicroseconds;
+    private long _outputDelayMicroseconds;
 
     private readonly double _forgetVarianceFactor;
     private readonly double _adaptiveCutoff;
@@ -446,7 +446,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// cleared 2σ is noise, so the extrapolation stays flat until it has, exactly as the
     /// reference filter's <c>effective_drift</c> does. Exact inverse of
     /// <see cref="ServerToClientTime"/> up to integer rounding, ignoring
-    /// <see cref="StaticDelayMs"/> which only the server→client direction applies.
+    /// <see cref="OutputDelayMs"/> which only the server→client direction applies.
     /// </remarks>
     public long ClientToServerTime(long clientTime)
     {
@@ -466,7 +466,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// Converts a server timestamp to client time.
     /// </summary>
     /// <param name="serverTime">Server time in microseconds.</param>
-    /// <returns>Estimated client time in microseconds, with <see cref="StaticDelayMs"/> applied.</returns>
+    /// <returns>Estimated client time in microseconds, with <see cref="OutputDelayMs"/> applied.</returns>
     /// <remarks>
     /// <para>
     /// Solves the filter's linear mapping <c>t_server = t_client + offset +
@@ -478,7 +478,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// stay exact inverses of each other in either regime.
     /// </para>
     /// <para>
-    /// Subtracts <see cref="StaticDelayMs"/> from the converted client time per the Sendspin
+    /// Subtracts <see cref="OutputDelayMs"/> from the converted client time per the Sendspin
     /// protocol spec (positive value compensates for hardware delay; audio is scheduled earlier
     /// from the digital pipeline so it emerges from external speakers/amplifiers on time).
     /// Timestamps that schedule something other than sound leaving the speakers want
@@ -489,13 +489,13 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     {
         lock (_lock)
         {
-            return ConvertToClientTimeUnsafe(serverTime) - _staticDelayMicroseconds;
+            return ConvertToClientTimeUnsafe(serverTime) - _outputDelayMicroseconds;
         }
     }
 
     /// <summary>
     /// Converts a server timestamp to client time using the synchronized clock alone, without
-    /// <see cref="StaticDelayMs"/>.
+    /// <see cref="OutputDelayMs"/>.
     /// </summary>
     /// <param name="serverTime">Server time in microseconds.</param>
     /// <returns>Estimated client time in microseconds.</returns>
@@ -516,7 +516,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// The server→client conversion both public methods share, before any static delay.
+    /// The server→client conversion both public methods share, before any output delay.
     /// Caller must hold <see cref="_lock"/>.
     /// </summary>
     private long ConvertToClientTimeUnsafe(long serverTime)
@@ -533,15 +533,15 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// Gets or sets the static delay in milliseconds. Compensates for hardware delay beyond
+    /// Gets or sets the output delay in milliseconds. Compensates for hardware delay beyond
     /// the device's audio port (external speakers, amplifiers). Per the Sendspin protocol spec,
     /// this value is subtracted from server timestamps when scheduling playback: positive values
     /// schedule audio earlier from the digital pipeline; negative values schedule it later.
     /// </summary>
-    public double StaticDelayMs
+    public double OutputDelayMs
     {
-        get { lock (_lock) return _staticDelayMicroseconds / 1000.0; }
-        set { lock (_lock) _staticDelayMicroseconds = (long)(value * 1000); }
+        get { lock (_lock) return _outputDelayMicroseconds / 1000.0; }
+        set { lock (_lock) _outputDelayMicroseconds = (long)(value * 1000); }
     }
 
     /// <summary>
@@ -589,14 +589,14 @@ public interface IClockSynchronizer
     long ClientToServerTime(long clientTime);
 
     /// <summary>
-    /// Converts server time to client time, with <see cref="StaticDelayMs"/> subtracted. Use
+    /// Converts server time to client time, with <see cref="OutputDelayMs"/> subtracted. Use
     /// this for anything scheduling audio out of the speakers.
     /// </summary>
     long ServerToClientTime(long serverTime);
 
     /// <summary>
     /// Converts server time to client time using the synchronized clock alone, without
-    /// <see cref="StaticDelayMs"/>. Use this for server timestamps the spec translates with the
+    /// <see cref="OutputDelayMs"/>. Use this for server timestamps the spec translates with the
     /// clock offset only — the visualizer and artwork roles' display times, which must not move
     /// when the user changes a hardware delay that applies to sound.
     /// </summary>
@@ -625,12 +625,12 @@ public interface IClockSynchronizer
     ClockSyncStatus GetStatus();
 
     /// <summary>
-    /// Gets or sets the static delay in milliseconds. Compensates for hardware delay beyond
+    /// Gets or sets the output delay in milliseconds. Compensates for hardware delay beyond
     /// the audio port (external speakers, amplifiers). Per the Sendspin protocol spec, the
     /// value is subtracted from server timestamps when scheduling playback: positive values
     /// schedule audio earlier; negative values schedule it later.
     /// </summary>
-    double StaticDelayMs { get; set; }
+    double OutputDelayMs { get; set; }
 }
 
 /// <summary>

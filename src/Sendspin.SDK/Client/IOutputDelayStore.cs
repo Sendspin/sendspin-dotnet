@@ -1,7 +1,7 @@
 namespace Sendspin.SDK.Client;
 
 /// <summary>
-/// Optional persistence seam for a player's <c>static_delay_ms</c>.
+/// Optional persistence seam for a player's output delay (<c>static_delay_ms</c> on the wire).
 /// </summary>
 /// <remarks>
 /// The Sendspin spec requires clients to persist <c>static_delay_ms</c> locally across reboots and
@@ -15,22 +15,22 @@ namespace Sendspin.SDK.Client;
 /// their store by the active output and hand the SDK a view for the current one.
 /// </para>
 /// </remarks>
-public interface IStaticDelayStore
+public interface IOutputDelayStore
 {
     /// <summary>
-    /// Loads the persisted static delay in milliseconds, or <c>null</c> if none has been stored.
+    /// Loads the persisted output delay in milliseconds, or <c>null</c> if none has been stored.
     /// Called when a connection is established, before the initial client/state is sent.
     /// </summary>
     double? Load();
 
     /// <summary>
-    /// Persists the static delay in milliseconds. Called whenever the delay changes (e.g. an
+    /// Persists the output delay in milliseconds. Called whenever the delay changes (e.g. an
     /// inbound <c>set_static_delay</c> command or a GroupSync calibration offset).
     /// </summary>
-    /// <param name="staticDelayMs">
-    /// The static delay to persist, in milliseconds. May be negative when sourced from a GroupSync
+    /// <param name="outputDelayMs">
+    /// The output delay to persist, in milliseconds. May be negative when sourced from a GroupSync
     /// calibration offset (which schedules audio later); the <c>set_static_delay</c> command path is
     /// always non-negative. Store and round-trip the value as-is.
     /// </param>
-    void Save(double staticDelayMs);
+    void Save(double outputDelayMs);
 }

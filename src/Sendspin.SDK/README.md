@@ -443,7 +443,7 @@ var capabilities = new ClientCapabilities
 
 All fields are optional and omitted from the protocol if null.
 
-## Player Timing & Static Delay
+## Player Timing & Output Delay
 
 Players report timing requirements so the server can schedule audio far enough ahead to avoid
 buffer underruns and start-of-stream truncation (per the Sendspin spec's player timing
@@ -460,13 +460,13 @@ var capabilities = new ClientCapabilities
     MinBufferMs = 150,          // default: 150 ms
 
     // Whether to accept the server's set_static_delay command (advertised in client/state).
-    SupportsSetStaticDelay = true,
+    SupportsSetOutputDelay = true,
 };
 ```
 
 Report the **lowest** values that reliably avoid truncation/underruns for your device and network —
 larger for remote or high-latency links, smaller for stable LAN. Do **not** fold `static_delay_ms`
-into these values; the server applies static delay separately. For empirical tuning, the audio
+into these values; the server applies output delay separately. For empirical tuning, the audio
 pipeline exposes measured latency (e.g. `AudioPipeline.DetectedOutputLatencyMs`).
 
 If conditions change at runtime (e.g. a link-type change, or a measured lead time after warmup),
@@ -478,16 +478,16 @@ await client.UpdateTimingAsync(requiredLeadTimeMs: 120, minBufferMs: 80);
 
 Debounce these updates yourself — report only sustained changes, not transient fluctuations.
 
-### Persisting static delay across restarts
+### Persisting output delay across restarts
 
 `static_delay_ms` compensates for hardware delay beyond the audio port (external speakers,
 amplifiers) and must persist across reboots and reconnections. Because the SDK is a library and
-cannot choose where to store it, implement `IStaticDelayStore` and pass it to the client. The SDK
+cannot choose where to store it, implement `IOutputDelayStore` and pass it to the client. The SDK
 loads on connect (before the first `client/state`) and saves whenever the delay changes (via a
 `set_static_delay` command or a GroupSync offset):
 
 To change the delay from the app (a calibration measurement, or a new audio output), pass it to
-`SendPlayerStateAsync(volume, muted, staticDelayMs)` — that applies it, persists it through the
+`SendPlayerStateAsync(volume, muted, outputDelayMs)` — that applies it, persists it through the
 store, and reports it. Leave the argument off for ordinary volume and mute changes: the server
 merges each `client/state` and retains fields you omit, so the delay it already knows about
 survives.
@@ -495,10 +495,10 @@ survives.
 A server changes it with the `set_static_delay` command, which the SDK advertises in
 `client/state`'s player `supported_commands` (never in `client/hello` — the spec restricts
 `player@v1_support.supported_commands` to `volume` and `mute`, so `client/state` is the only
-place any conformant client can offer it). Set `ClientCapabilities.SupportsSetStaticDelay = false`
+place any conformant client can offer it). Set `ClientCapabilities.SupportsSetOutputDelay = false`
 to decline it.
 
-> `IClockSynchronizer.StaticDelayMs` is a `double` over −5000…5000: fractional values come from
+> `IClockSynchronizer.OutputDelayMs` is a `double` over −5000…5000: fractional values come from
 > calibration, and negative values schedule audio *later*. The spec's wire field is an integer
 > 0–5000 and states negatives are unsupported, so what the client **reports** is rounded and
 > clamped into that range while playback keeps using the value you set. The SDK logs a warning
@@ -506,15 +506,15 @@ to decline it.
 > from a different delay than your playback is.
 
 ```csharp
-public sealed class FileStaticDelayStore : IStaticDelayStore
+public sealed class FileOutputDelayStore : IOutputDelayStore
 {
     // Use InvariantCulture so the value round-trips regardless of the host's locale.
     public double? Load() => File.Exists(path)
         ? double.Parse(File.ReadAllText(path), CultureInfo.InvariantCulture)
         : null;
 
-    public void Save(double staticDelayMs)
-        => File.WriteAllText(path, staticDelayMs.ToString(CultureInfo.InvariantCulture));
+    public void Save(double outputDelayMs)
+        => File.WriteAllText(path, outputDelayMs.ToString(CultureInfo.InvariantCulture));
 }
 
 await using var client = SendspinClientService.CreateForDial(
@@ -523,7 +523,7 @@ await using var client = SendspinClientService.CreateForDial(
     {
         Identity = identity,          // the persisted identity from Quick Start
         AudioPipeline = pipeline,
-        StaticDelayStore = new FileStaticDelayStore(),
+        OutputDelayStore = new FileOutputDelayStore(),
     });
 ```
 

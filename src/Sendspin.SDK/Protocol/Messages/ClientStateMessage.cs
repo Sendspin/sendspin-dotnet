@@ -64,14 +64,14 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
     /// </summary>
     /// <param name="volume">Player volume (0-100).</param>
     /// <param name="muted">Whether the player is muted.</param>
-    /// <param name="staticDelayMs">Static delay in milliseconds (0-5000), as it goes on the wire. Project a scheduler-side <see cref="double"/> onto this range before calling.</param>
+    /// <param name="outputDelayMs">Output delay in milliseconds (0-5000), as it goes on the wire. Project a scheduler-side <see cref="double"/> onto this range before calling.</param>
     /// <param name="requiredLeadTimeMs">Minimum startup lead time in milliseconds (codec init, decode warmup, backend buffering, DAC latency). Always required for players.</param>
     /// <param name="minBufferMs">Requested minimum ongoing buffer duration in milliseconds (absorbs network jitter, primarily for live streams). Always required for players.</param>
     /// <param name="supportedCommands">Optional player commands supported via server/command (subset of: 'set_static_delay'). Omitted from the wire when null.</param>
     public static ClientStateMessage CreatePlayerState(
         int volume,
         bool muted,
-        int staticDelayMs,
+        int outputDelayMs,
         int requiredLeadTimeMs,
         int minBufferMs,
         List<string>? supportedCommands = null)
@@ -84,7 +84,7 @@ public sealed class ClientStateMessage : IMessageWithPayload<ClientStatePayload>
                 {
                     Volume = volume,
                     Muted = muted,
-                    StaticDelayMs = staticDelayMs,
+                    OutputDelayMs = outputDelayMs,
                     RequiredLeadTimeMs = requiredLeadTimeMs,
                     MinBufferMs = minBufferMs,
                     SupportedCommands = supportedCommands
@@ -159,7 +159,7 @@ public sealed class PlayerStatePayload
     public bool? Muted { get; init; }
 
     /// <summary>
-    /// Static delay in milliseconds (0-5000) configured for this player: additional delay
+    /// Output delay in milliseconds (0-5000) configured for this player: additional delay
     /// beyond the device's audio port, such as external speakers or an amplifier. Always
     /// required for players, so it is serialized unconditionally even when zero.
     /// </summary>
@@ -169,9 +169,16 @@ public sealed class PlayerStatePayload
     /// schedule later — so a caller must project it onto this type rather than passing it
     /// through. Reporting the raw value emitted a float, omitted the field entirely at its
     /// default, and could send a negative that a spec-conformant server rejects outright.
+    /// <para>
+    /// The wire name stays <c>static_delay_ms</c> deliberately. Spec 168a677 (spec PR #164)
+    /// renamed the field to <c>output_delay_ms</c> with no alias, but no server has adopted it —
+    /// aiosendspin still reads only the old name — so flipping this attribute would drop the
+    /// delay from every server's view. It flips when servers adopt the rename, not before; the
+    /// C# name follows the spec's vocabulary in the meantime.
+    /// </para>
     /// </remarks>
     [JsonPropertyName("static_delay_ms")]
-    public int StaticDelayMs { get; init; }
+    public int OutputDelayMs { get; init; }
 
     /// <summary>
     /// Minimum startup lead time in milliseconds: codec init, decode warmup, audio

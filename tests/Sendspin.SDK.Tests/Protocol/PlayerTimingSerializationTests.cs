@@ -16,7 +16,7 @@ public class PlayerTimingSerializationTests
         var msg = ClientStateMessage.CreatePlayerState(
             volume: 80,
             muted: false,
-            staticDelayMs: 0,
+            outputDelayMs: 0,
             requiredLeadTimeMs: 200,
             minBufferMs: 150,
             supportedCommands: new List<string> { Commands.SetStaticDelay });
@@ -35,7 +35,7 @@ public class PlayerTimingSerializationTests
         // static_delay_ms used to be omitted at its default — which is 0, the common case — so
         // essentially every player left a required field out of its initial state.
         var msg = ClientStateMessage.CreatePlayerState(
-            volume: 100, muted: false, staticDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0);
+            volume: 100, muted: false, outputDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0);
 
         var json = MessageSerializer.Serialize(msg);
 
@@ -45,7 +45,7 @@ public class PlayerTimingSerializationTests
     }
 
     [Fact]
-    public void ClientState_InitialMessage_CarriesStaticDelayAtItsDefault()
+    public void ClientState_InitialMessage_CarriesOutputDelayAtItsDefault()
     {
         // The initial full state is where the presence requirement actually bites: aiosendspin
         // reads an omitted static_delay_ms as "unchanged", which on the first message leaves it
@@ -57,13 +57,13 @@ public class PlayerTimingSerializationTests
     }
 
     [Fact]
-    public void ClientState_StaticDelayIsAnIntegerOnTheWire()
+    public void ClientState_OutputDelayIsAnIntegerOnTheWire()
     {
         // The spec types static_delay_ms as an integer. The scheduler's own delay is a double,
         // so the factory takes the projected wire value rather than the raw one — this pins
         // that the wire field cannot carry a fraction.
         var msg = ClientStateMessage.CreatePlayerState(
-            volume: 100, muted: false, staticDelayMs: 250, requiredLeadTimeMs: 0, minBufferMs: 0);
+            volume: 100, muted: false, outputDelayMs: 250, requiredLeadTimeMs: 0, minBufferMs: 0);
 
         string json = MessageSerializer.Serialize(msg);
 
@@ -75,7 +75,7 @@ public class PlayerTimingSerializationTests
     public void ClientState_SupportedCommandsOmittedWhenNull()
     {
         var msg = ClientStateMessage.CreatePlayerState(
-            volume: 100, muted: false, staticDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0,
+            volume: 100, muted: false, outputDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0,
             supportedCommands: null);
 
         var json = MessageSerializer.Serialize(msg);

@@ -216,8 +216,8 @@ public interface ISendspinClient : IAsyncDisposable
     /// </remarks>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
-    /// <param name="staticDelayMs">
-    /// A new static delay in milliseconds to apply, persist, and report, or null (the default)
+    /// <param name="outputDelayMs">
+    /// A new output delay in milliseconds to apply, persist, and report, or null (the default)
     /// to leave the current delay untouched and simply report it.
     /// </param>
     /// <remarks>
@@ -225,8 +225,8 @@ public interface ISendspinClient : IAsyncDisposable
     /// Supplying a value is a client-initiated static-delay update — the spec permits one "when
     /// audio output changes" and requires clients to persist <c>static_delay_ms</c> across
     /// reboots and reconnections — so the value is written to
-    /// <see cref="Synchronization.IClockSynchronizer.StaticDelayMs"/> and to
-    /// <see cref="SendspinClientOptions.StaticDelayStore"/>, not merely reported.
+    /// <see cref="Synchronization.IClockSynchronizer.OutputDelayMs"/> and to
+    /// <see cref="SendspinClientOptions.OutputDelayStore"/>, not merely reported.
     /// </para>
     /// <para>
     /// Omit it for an ordinary volume or mute change. The reported delay is always the one
@@ -235,7 +235,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// the server's group calibration working from a different number than your playback.
     /// </para>
     /// </remarks>
-    Task SendPlayerStateAsync(int volume, bool muted, double? staticDelayMs = null);
+    Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null);
 
     /// <summary>
     /// Updates the player timing parameters reported to the server and re-sends client/state.

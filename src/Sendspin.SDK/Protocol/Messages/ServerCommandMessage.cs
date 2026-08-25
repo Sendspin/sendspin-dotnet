@@ -65,9 +65,13 @@ public sealed class PlayerCommand
     public bool? Mute { get; init; }
 
     /// <summary>
-    /// Static delay in milliseconds (0-5000). Only set when <see cref="Command"/> is
-    /// "set_static_delay". Null otherwise.
+    /// Output delay in milliseconds (0-5000), under its pre-rename wire name. Only set when
+    /// <see cref="Command"/> is "set_static_delay". Null otherwise.
     /// </summary>
+    /// <remarks>
+    /// Named for its own wire literal rather than for the concept, so it and
+    /// <see cref="OutputDelayMs"/> stay tellable apart while both spellings are accepted.
+    /// </remarks>
     [JsonPropertyName("static_delay_ms")]
     public int? StaticDelayMs { get; init; }
 

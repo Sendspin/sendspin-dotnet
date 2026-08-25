@@ -21,10 +21,10 @@ internal sealed class FakeClockSynchronizer : IClockSynchronizer
 
     public bool HasMinimalSync { get; set; }
 
-    public double StaticDelayMs { get; set; }
+    public double OutputDelayMs { get; set; }
 
     public long ServerToClientTime(long serverTime) =>
-        ServerToClientTimeUncompensated(serverTime) - (long)(StaticDelayMs * 1000);
+        ServerToClientTimeUncompensated(serverTime) - (long)(OutputDelayMs * 1000);
 
     public long ServerToClientTimeUncompensated(long serverTime) =>
         serverTime - OffsetMicroseconds;

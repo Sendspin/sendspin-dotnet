@@ -114,9 +114,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private double _minBufferedMsRecent;
     private const long MinBufferedWindowMs = 1_000;
 
-    // Scheduled start: when playback should begin (supports static delay feature)
+    // Scheduled start: when playback should begin (supports output delay feature)
     // Derived from the first segment's raw server timestamp via the CURRENT sync state
-    // on every pre-start poll (includes any static delay from IClockSynchronizer).
+    // on every pre-start poll (includes any output delay from IClockSynchronizer).
     // We wait until this time arrives before outputting audio.
     private long _scheduledStartLocalTime;      // Target local time when playback should start (μs)
 
@@ -325,7 +325,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// Local time at which to begin emitting the sample carrying <paramref name="serverTimestamp"/>.
     /// </summary>
     /// <remarks>
-    /// The clock conversion (which already applies <see cref="IClockSynchronizer.StaticDelayMs"/>) is
+    /// The clock conversion (which already applies <see cref="IClockSynchronizer.OutputDelayMs"/>) is
     /// pre-rolled by <see cref="OutputLatencyMicroseconds"/> so the sample is handed to the output that
     /// much earlier and reaches the speaker at the server's intended time. This is what keeps outputs
     /// of different latencies (each reporting its own) aligned in a multi-room group without a manual
@@ -343,9 +343,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <returns>False while still waiting for the scheduled start (caller emits silence).</returns>
     /// <remarks>
     /// <para>
-    /// The clock conversion already has StaticDelayMs applied by
+    /// The clock conversion already has OutputDelayMs applied by
     /// <see cref="IClockSynchronizer.ServerToClientTime"/> (subtracted per spec, so a positive
-    /// static delay schedules earlier). It is re-derived from the raw server timestamp on every
+    /// output delay schedules earlier). It is re-derived from the raw server timestamp on every
     /// poll rather than cached at enqueue: segments written before clock sync converged would
     /// otherwise carry a meaningless conversion and the whole pre-sync burst would look stale.
     /// </para>

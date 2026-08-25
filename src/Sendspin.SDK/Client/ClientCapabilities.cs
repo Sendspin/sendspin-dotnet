@@ -149,11 +149,12 @@ public sealed class ClientCapabilities
     public int MinBufferMs { get; set; } = 150;
 
     /// <summary>
-    /// Whether this client accepts the server's <c>set_static_delay</c> command. When true, the
-    /// client advertises 'set_static_delay' in the client/state player object and applies inbound
-    /// set_static_delay commands to its static delay. Default is true.
+    /// Whether this client accepts the server's output-delay command. When true, the client
+    /// advertises 'set_static_delay' in the client/state player object and applies inbound
+    /// commands to its output delay — both that spelling and the <c>set_output_delay</c> one
+    /// spec 168a677 renamed it to. Default is true.
     /// </summary>
-    public bool SupportsSetStaticDelay { get; set; } = true;
+    public bool SupportsSetOutputDelay { get; set; } = true;
 
     /// <summary>
     /// Whether this client admits servers with no pairing record over the encrypted

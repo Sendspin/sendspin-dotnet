@@ -15,13 +15,13 @@ namespace Sendspin.SDK.Tests.Client;
 /// <remarks>
 /// The facade took a non-nullable <c>double = 0.0</c>, so the natural call for a volume or mute
 /// change forwarded a real zero — which the client writes to
-/// <see cref="Synchronization.IClockSynchronizer.StaticDelayMs"/> and through
-/// <see cref="IStaticDelayStore"/>, wiping a server-set delay and persisting the wipe.
+/// <see cref="Synchronization.IClockSynchronizer.OutputDelayMs"/> and through
+/// <see cref="IOutputDelayStore"/>, wiping a server-set delay and persisting the wipe.
 /// A real loopback connection is needed because the facade only forwards to clients that have
 /// completed a handshake.
 /// </remarks>
 [Collection("RealSockets")]
-public class SendspinHostServiceStaticDelayTests
+public class SendspinHostServiceOutputDelayTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
@@ -35,11 +35,11 @@ public class SendspinHostServiceStaticDelayTests
         await using var host = await StartHostAsync(clock, store);
         await using var server = await ConnectServerAsync(host);
 
-        clock.StaticDelayMs = 250.0; // where a server/command set_static_delay would leave it
+        clock.OutputDelayMs = 250.0; // where a server/command set_static_delay would leave it
 
         await host.SendPlayerStateAsync(volume: 60, muted: false);
 
-        Assert.Equal(250.0, clock.StaticDelayMs);
+        Assert.Equal(250.0, clock.OutputDelayMs);
         Assert.Empty(store.Saved);
     }
 
@@ -53,9 +53,9 @@ public class SendspinHostServiceStaticDelayTests
         await using var host = await StartHostAsync(clock, store);
         await using var server = await ConnectServerAsync(host);
 
-        await host.SendPlayerStateAsync(volume: 60, muted: false, staticDelayMs: 400.0);
+        await host.SendPlayerStateAsync(volume: 60, muted: false, outputDelayMs: 400.0);
 
-        Assert.Equal(400.0, clock.StaticDelayMs);
+        Assert.Equal(400.0, clock.OutputDelayMs);
         Assert.Equal(new[] { 400.0 }, store.Saved);
     }
 
@@ -77,7 +77,7 @@ public class SendspinHostServiceStaticDelayTests
                 // Configured, so BuildClientOptions hands the same instance to the connection
                 // rather than minting a per-connection Kalman synchronizer.
                 ClockSynchronizer = clock,
-                StaticDelayStore = store,
+                OutputDelayStore = store,
             },
             listenerOptions: new ListenerOptions { Port = 0 },
             advertiserOptions: new AdvertiserOptions { Enabled = false });
@@ -122,12 +122,12 @@ public class SendspinHostServiceStaticDelayTests
         }
     }
 
-    private sealed class RecordingDelayStore : IStaticDelayStore
+    private sealed class RecordingDelayStore : IOutputDelayStore
     {
         public List<double> Saved { get; } = new List<double>();
 
         public double? Load() => null;
 
-        public void Save(double staticDelayMs) => Saved.Add(staticDelayMs);
+        public void Save(double outputDelayMs) => Saved.Add(outputDelayMs);
     }
 }
