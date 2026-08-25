@@ -354,7 +354,12 @@ public interface ISendspinClient : IAsyncDisposable
     /// <b>Threading:</b> as for <see cref="VisualizationReceived"/> — an update that takes effect
     /// on arrival is announced on the receive loop, as before, while one applied at a scheduled
     /// moment is announced on an SDK background thread. A subscriber must be safe to call from
-    /// either, and must marshal to a UI thread itself.
+    /// either, and must marshal to a UI thread itself. The two are not serialized against each
+    /// other: a scheduled update reaching its moment while a <c>server/state</c> is being handled
+    /// puts two raises of this event in a handler at once, on both threads, each carrying the
+    /// same <see cref="GroupState"/> instance mid-merge. A handler that reads several properties
+    /// and expects them to belong to one consistent snapshot must take its own copy under its own
+    /// lock.
     /// </para>
     /// </remarks>
     event EventHandler<GroupState>? GroupStateChanged;

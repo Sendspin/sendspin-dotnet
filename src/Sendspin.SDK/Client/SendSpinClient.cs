@@ -4300,7 +4300,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     takesEffectAt,
                     () => ApplyScheduledMetadata(meta)))
             {
-                ApplyMetadata(meta);
+                ApplyMetadata(_currentGroup, meta);
             }
         }
 
@@ -4358,7 +4358,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     color?.Timestamp,
                     () => ApplyScheduledColor(color)))
             {
-                ApplyColor(color);
+                ApplyColor(_currentGroup, color);
                 colorChanged = true;
             }
         }
@@ -4383,24 +4383,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// role, anything else applies its Optional deltas (absent = keep existing, present-null =
     /// clear, present-with-value = update).
     /// </summary>
-    private void ApplyMetadata(ServerMetadata? meta)
+    /// <param name="group">
+    /// The group state to merge into, resolved by the caller. Passed rather than read from
+    /// <see cref="_currentGroup"/> here, because the scheduled callers run on the scheduler loop
+    /// and must not create a group state the disconnect that raced them has already dropped.
+    /// </param>
+    /// <param name="meta">The role object, or null to clear the role.</param>
+    private static void ApplyMetadata(GroupState group, ServerMetadata? meta)
     {
-        _currentGroup ??= new GroupState();
-
         if (meta is null)
         {
             // Dropping the merge base too, not just the exposed object: a later partial
             // update must start from empty rather than resurrect pre-clear fields.
-            _currentGroup.Metadata = null;
+            group.Metadata = null;
             return;
         }
 
-        var existing = _currentGroup.Metadata ?? new TrackMetadata();
+        var existing = group.Metadata ?? new TrackMetadata();
 
         // Merged against the state as it stands when the update takes effect, not as it stood
         // when the message arrived: the spec's current state is the running merge of applied
         // updates, and a scheduled update joins that running merge at its own moment.
-        _currentGroup.Metadata = new TrackMetadata
+        group.Metadata = new TrackMetadata
         {
             Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
             Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
@@ -4419,10 +4423,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// it, so a consumer holding the <see cref="ColorPalette"/> it was handed by an earlier
     /// <see cref="ColorChanged"/> sees the update — including a clear.
     /// </summary>
-    private void ApplyColor(ColorState? color)
+    /// <param name="group">
+    /// The group state whose palette is merged into — see <see cref="ApplyMetadata"/> on why it
+    /// is the caller that resolves it.
+    /// </param>
+    /// <param name="color">The role object, or null to clear the role.</param>
+    private static void ApplyColor(GroupState group, ColorState? color)
     {
-        _currentGroup ??= new GroupState();
-        var colors = _currentGroup.Colors;
+        var colors = group.Colors;
 
         if (color is null)
         {
@@ -4451,13 +4459,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// merge needs an announcement of its own.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Runs on the scheduler's loop, not the receive loop — see
     /// <see cref="ISendspinClient.GroupStateChanged"/> on threading.
+    /// </para>
+    /// <para>
+    /// Which is also why the group is resolved once and the whole apply abandoned when there is
+    /// none: <see cref="DisconnectAsync"/> drops <see cref="_currentGroup"/> after flushing the
+    /// scheduler, and the flush only empties the pending slots — an update the loop had already
+    /// lifted out of its slot is past that point and lands here with the connection gone. Every
+    /// read after this line goes through the local, so nothing can create a group state for a
+    /// connection that has ended, and nothing dereferences a field that may have just been
+    /// nulled. The next connection's first <c>server/state</c> carries each role in full anyway.
+    /// </para>
     /// </remarks>
     private void ApplyScheduledMetadata(ServerMetadata? meta)
     {
-        ApplyMetadata(meta);
-        GroupStateChanged?.Invoke(this, _currentGroup!);
+        if (_currentGroup is not { } group)
+        {
+            return;
+        }
+
+        ApplyMetadata(group, meta);
+        GroupStateChanged?.Invoke(this, group);
     }
 
     /// <summary>
@@ -4465,11 +4489,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// scheduler's loop. <see cref="ColorChanged"/> marks the moment the palette takes effect,
     /// which is here and not when the update was merely scheduled.
     /// </summary>
+    /// <remarks>
+    /// Resolves the group once and abandons the apply when there is none, for the reason
+    /// <see cref="ApplyScheduledMetadata"/> gives.
+    /// </remarks>
     private void ApplyScheduledColor(ColorState? color)
     {
-        ApplyColor(color);
-        GroupStateChanged?.Invoke(this, _currentGroup!);
-        ColorChanged?.Invoke(this, _currentGroup!.Colors);
+        if (_currentGroup is not { } group)
+        {
+            return;
+        }
+
+        ApplyColor(group, color);
+        GroupStateChanged?.Invoke(this, group);
+        ColorChanged?.Invoke(this, group.Colors);
     }
 
     /// <summary>

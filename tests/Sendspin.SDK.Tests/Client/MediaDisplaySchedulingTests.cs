@@ -925,4 +925,52 @@ public class MediaDisplaySchedulingTests
         """{"type":"stream/start","payload":{"artwork":{"channels":["""
         + string.Join(",", channels)
         + "]}}}";
+
+    // -- Scheduled applies racing a disconnect ----------------------------------------------
+
+    [Fact]
+    public async Task ScheduledStateUpdate_AppliedAsADisconnectLands_DoesNotResurrectTheGroup()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        // Three items due in one dispatch pass: the two state roles, applied first and in role
+        // order, and an artwork clear, which the pass raises after them. The disconnect lands
+        // inside the announcement of the metadata apply, so the color apply that follows runs on
+        // the scheduler loop with the group already gone — the interleaving the disconnect's
+        // flush cannot prevent, since the loop lifted both updates out of their slots before it.
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Second"}"""));
+        connection.RaiseTextMessageReceived(
+            ColorState($$"""{"timestamp":{{Now + 1_000}},"primary":[2,2,2]}"""));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(
+            Now + 1_000, Array.Empty<byte>(), (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel)));
+
+        var passComplete = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ArtworkCleared += (_, e) =>
+        {
+            if (e.Channel == MarkerChannel)
+            {
+                passComplete.TrySetResult();
+            }
+        };
+
+        void OnGroupState(object? sender, GroupState state)
+        {
+            // Once: the disconnect must not be re-entered from an announcement the color apply
+            // would make if it wrongly went ahead.
+            client.GroupStateChanged -= OnGroupState;
+            client.DisconnectAsync().GetAwaiter().GetResult();
+        }
+
+        client.GroupStateChanged += OnGroupState;
+
+        timer.CurrentTime = Now + 1_000;
+        await passComplete.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // The color apply ran between the disconnect and the marker. It had to find no group and
+        // leave none behind: creating one would republish group state for a connection that is
+        // gone, and the next connection's first server/state carries every role in full anyway.
+        Assert.Null(client.CurrentGroup);
+    }
 }
