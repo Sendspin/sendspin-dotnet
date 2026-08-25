@@ -2057,16 +2057,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     ReadSamplesFromBuffer(droppedFrame);
                     samplesConsumed += frameSamples;
 
-                    // 3-point weighted interpolation: lastOutput + frameA + frameB
-                    // Weights: 0.25 (continuity from previous) + 0.5 (primary) + 0.25 (dropped)
-                    // This creates smoother transitions than simple 2-point averaging
+                    // The shared splice kernel: 3-point weighted interpolation of the last output,
+                    // the frame at the splice, and the one being dropped.
                     var outputSpan = buffer.Slice(outputPos, frameSamples);
-                    for (int i = 0; i < frameSamples; i++)
-                    {
-                        outputSpan[i] = (0.25f * _lastOutputFrame[i]) +
-                                        (0.5f * tempFrame[i]) +
-                                        (0.25f * droppedFrame[i]);
-                    }
+                    SpliceBlend.Blend(_lastOutputFrame, tempFrame, droppedFrame, outputSpan);
 
                     // Save interpolated frame as last output for continuity
                     outputSpan.CopyTo(_lastOutputFrame);
@@ -2093,7 +2087,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
                 var outputSpan = buffer.Slice(outputPos, frameSamples);
 
-                // Try to peek at next TWO frames for 3-point interpolation (without consuming)
+                // Peek at the next frames without consuming them, and let the shared splice kernel
+                // degrade from a 3-point blend to a 2-point one and then to a hold as they run out.
                 if (_count - samplesConsumed >= frameSamples * 2)
                 {
                     // Peek at next frame (position 0 in buffer)
@@ -2104,36 +2099,22 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     Span<float> frameAfterNext = stackalloc float[frameSamples];
                     PeekSamplesFromBufferAtOffset(frameAfterNext, frameSamples, frameSamples);
 
-                    // 3-point weighted interpolation: lastOutput + nextFrame + frameAfterNext
-                    // Weights: 0.25 (previous) + 0.5 (next) + 0.25 (future) for curve smoothing
-                    for (int i = 0; i < frameSamples; i++)
-                    {
-                        outputSpan[i] = (0.25f * _lastOutputFrame[i]) +
-                                        (0.5f * nextFrame[i]) +
-                                        (0.25f * frameAfterNext[i]);
-                    }
-
-                    // Save interpolated frame for continuity
-                    outputSpan.CopyTo(_lastOutputFrame);
+                    SpliceBlend.Blend(_lastOutputFrame, nextFrame, frameAfterNext, outputSpan);
                 }
                 else if (_count - samplesConsumed >= frameSamples)
                 {
-                    // Fallback to 2-point: only 1 frame available
                     Span<float> nextFrame = stackalloc float[frameSamples];
                     PeekSamplesFromBuffer(nextFrame, frameSamples);
 
-                    for (int i = 0; i < frameSamples; i++)
-                    {
-                        outputSpan[i] = (_lastOutputFrame[i] + nextFrame[i]) * 0.5f;
-                    }
-
-                    outputSpan.CopyTo(_lastOutputFrame);
+                    SpliceBlend.Blend(_lastOutputFrame, nextFrame, default, outputSpan);
                 }
                 else
                 {
-                    // Fallback: no next frame available, duplicate last
-                    _lastOutputFrame.AsSpan().CopyTo(outputSpan);
+                    SpliceBlend.Blend(_lastOutputFrame, default, default, outputSpan);
                 }
+
+                // Save the spliced frame for continuity
+                outputSpan.CopyTo(_lastOutputFrame);
 
                 outputPos += frameSamples;
                 _samplesInsertedForSync += frameSamples;

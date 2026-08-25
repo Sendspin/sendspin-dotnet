@@ -669,9 +669,8 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// </summary>
     /// <remarks>
     /// A dropped frame is not simply discarded and an inserted one is not simply duplicated: both
-    /// emit a 3-point weighted blend (0.25 previous, 0.5 primary, 0.25 neighbour), which keeps the
-    /// waveform's slope continuous across the splice. A raw cut or repeat puts a step in the signal,
-    /// and a step is a click.
+    /// emit the weighted blend in <see cref="SpliceBlend"/>, shared with
+    /// <see cref="TimedAudioBuffer"/>'s internal corrector so the two cannot drift apart.
     /// </remarks>
     /// <returns>Frames produced, and the samples dropped and inserted for the buffer's accounting.</returns>
     private (int ProducedFrames, int SamplesDropped, int SamplesInserted) ApplyStepping(
@@ -741,38 +740,28 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     }
 
     /// <summary>
-    /// Writes one spliced frame: the 3-point blend where the input allows it, degrading to a
-    /// 2-point blend and then to a straight hold as the input runs out.
+    /// Writes one spliced frame from the input the splice point has in front of it, through the
+    /// shared <see cref="SpliceBlend"/> kernel.
     /// </summary>
     private void BlendSpliceFrame(ReadOnlySpan<float> input, int inputPos, Span<float> destination)
     {
         var frameSamples = _channels;
         var remainingInput = input.Length - inputPos;
 
-        if (remainingInput >= frameSamples * 2)
-        {
-            var neighbour = inputPos + frameSamples;
-            for (var i = 0; i < frameSamples; i++)
-            {
-                destination[i] = (0.25f * _previousFrame[i])
-                    + (0.5f * input[inputPos + i])
-                    + (0.25f * input[neighbour + i]);
-            }
-
-            return;
-        }
+        ReadOnlySpan<float> primary = default;
+        ReadOnlySpan<float> neighbour = default;
 
         if (remainingInput >= frameSamples)
         {
-            for (var i = 0; i < frameSamples; i++)
-            {
-                destination[i] = 0.5f * (_previousFrame[i] + input[inputPos + i]);
-            }
-
-            return;
+            primary = input.Slice(inputPos, frameSamples);
         }
 
-        _previousFrame.CopyTo(destination);
+        if (remainingInput >= frameSamples * 2)
+        {
+            neighbour = input.Slice(inputPos + frameSamples, frameSamples);
+        }
+
+        SpliceBlend.Blend(_previousFrame, primary, neighbour, destination);
     }
 
     /// <summary>
