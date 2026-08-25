@@ -307,14 +307,33 @@ public class SendspinClientServiceTimeSyncTests
 
         // The connection drops with that probe still in flight.
         await connection.DisconnectAsync("network_drop");
-        await Task.Delay(200);
 
-        // The guard is free again well inside the timeout the orphan would have sat out.
+        // The guard is free again well inside the timeout the orphan would have sat out. The
+        // cancellation unwinds the orphan on a continuation, so what proves the release is a
+        // burst that is no longer skipped — a skipped one sends nothing at all, which makes the
+        // probe count the signal to retry against. The ceiling is generous in wall-clock terms
+        // and still far below the 8 x 10 s an uncancelled orphan holds the guard for, so it
+        // separates "released a little late under load" from "never released" without a fixed
+        // sleep deciding which one happened (#239).
         await connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin"));
         connection.RespondToTimeSync = true;
         int probesBeforeNewBurst = Probes(connection);
-        await client.SendTimeSyncBurstAsync(CancellationToken.None);
 
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (true)
+        {
+            await client.SendTimeSyncBurstAsync(CancellationToken.None);
+            if (Probes(connection) > probesBeforeNewBurst)
+                break;
+
+            Assert.True(
+                DateTime.UtcNow < deadline,
+                "The disconnect never released the single-burst guard: every burst was skipped");
+            await Task.Delay(10);
+        }
+
+        // And the burst that got through ran whole, so the guard was released rather than
+        // merely yielded partway through the orphan's run.
         Assert.Equal(probesBeforeNewBurst + 8, Probes(connection));
     }
 

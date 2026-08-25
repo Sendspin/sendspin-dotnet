@@ -11,8 +11,9 @@ namespace Sendspin.SDK.Tests.Client;
 /// makes "already due" and "still in the future" decidable without waiting: with
 /// <see cref="ConvergedClockSynchronizer"/>'s zero offset, a frame stamped
 /// <see cref="CurrentTime"/> is due exactly now, and one stamped later is held. A test that needs
-/// a scheduled item to actually fire must use the real clock instead — a frozen clock never
-/// reaches a future deadline, which is precisely what the "held" assertions rely on.
+/// a held item to fire moves <see cref="CurrentTime"/> past its display time rather than waiting
+/// for wall time to reach it: the scheduler's loop reads this clock on every pass, so the item
+/// goes out on the next one.
 /// </remarks>
 internal sealed class FakePrecisionTimer : IHighPrecisionTimer
 {
