@@ -14,13 +14,11 @@ namespace Sendspin.SDK.Tests.Client;
 /// whereas late artwork and late state are applied immediately.
 /// </summary>
 /// <remarks>
-/// Most tests here freeze the local clock with <see cref="FakePrecisionTimer"/>, which decides
-/// "due" and "held" with no waiting at all — a frozen clock never reaches a future deadline, so
-/// "held" is a stable state rather than a race. The two tests that assert an item actually fires
-/// necessarily run against the real clock and poll, in the shape the connection-level tests use.
-/// Assertions that something must <em>never</em> surface go through
-/// <see cref="DrainPastAsync"/> rather than a sleep, so they decide on an event rather than on
-/// elapsed wall time (#239).
+/// Every test here freezes the local clock with <see cref="FakePrecisionTimer"/> and advances it
+/// by hand, so "due", "held", and "raised at its display time" are all decided by a clock the test
+/// controls rather than by elapsed wall time (#239). Whether an item surfaced is then settled by
+/// an event — <see cref="WaitUntilAsync"/> for one that must arrive, <see cref="DrainPastAsync"/>
+/// for one that must not — never by sleeping long enough to assume it would have.
 /// </remarks>
 public class MediaDisplaySchedulingTests
 {
@@ -85,6 +83,11 @@ public class MediaDisplaySchedulingTests
         return (client, connection, timer);
     }
 
+    /// <summary>
+    /// Waits for the scheduler loop to act on a clock the test has already moved. The deadline is
+    /// a stuck-test guard, not a schedule: every wait here is for a loop pass, never for wall time
+    /// to reach a display moment.
+    /// </summary>
     private static async Task WaitUntilAsync(Func<bool> condition, string because)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
@@ -92,6 +95,61 @@ public class MediaDisplaySchedulingTests
         {
             Assert.True(DateTime.UtcNow < deadline, $"Timed out waiting for {because}");
             await Task.Delay(10);
+        }
+    }
+
+    /// <summary>Artwork channel the drain marker uses, so no test's own images collide with it.</summary>
+    private const int MarkerChannel = 3;
+
+    /// <summary>
+    /// Moves the frozen clock past <paramref name="through"/> and waits for a marker the
+    /// scheduler can only raise once it has processed everything due up to that point, so
+    /// "this item never surfaced" is decided by an event rather than by a sleep.
+    /// </summary>
+    /// <remarks>
+    /// The marker is an empty image on <see cref="MarkerChannel"/> stamped one microsecond after
+    /// <paramref name="through"/>. Anything due at or before <paramref name="through"/> is taken
+    /// in the same dispatch pass as the marker at the latest, and a pass raises its state updates
+    /// and visualizer frames before its artwork — so had the item survived, it would already have
+    /// surfaced by the time this returns.
+    /// </remarks>
+    /// <param name="through">Local-clock time to drain past, in microseconds.</param>
+    /// <param name="clock">
+    /// The client's synchronizer, for a test that gave it a non-zero offset. The marker arrives on
+    /// the wire in server time like every other message, so it has to be stamped through the same
+    /// translation the data under test goes through. Omit when the offset is zero and the two
+    /// clocks coincide.
+    /// </param>
+    private static async Task DrainPastAsync(
+        SendspinClientService client,
+        FakeSendspinConnection connection,
+        FakePrecisionTimer timer,
+        long through,
+        ConvergedClockSynchronizer? clock = null)
+    {
+        var marker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnCleared(object? sender, ArtworkClearedEventArgs e)
+        {
+            if (e.Channel == MarkerChannel)
+            {
+                marker.TrySetResult();
+            }
+        }
+
+        client.ArtworkCleared += OnCleared;
+        try
+        {
+            connection.RaiseBinaryMessageReceived(ArtworkBinary(
+                clock is null ? through + 1 : clock.ClientToServerTime(through + 1),
+                Array.Empty<byte>(),
+                (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel)));
+            timer.CurrentTime = through + 1;
+            await marker.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            client.ArtworkCleared -= OnCleared;
         }
     }
 
@@ -150,50 +208,34 @@ public class MediaDisplaySchedulingTests
     [Fact]
     public async Task VisualizerFrame_StampedInTheFuture_IsRaisedAtItsTranslatedDisplayTime()
     {
-        // Real clock: a frozen one never reaches the deadline. The frame is stamped in server
-        // time, and the synchronizer's offset means the local display time is 150 ms out — so
-        // this also proves the translation is applied rather than the raw timestamp used.
+        // A non-zero offset is what makes the translation observable: the frame is stamped in
+        // server time, four seconds beyond the local moment it belongs to, so a scheduler that
+        // held it against the raw timestamp would still be holding it when this test ends.
         const long offsetMicroseconds = 4_000_000;
-        var clockSync = new ConvergedClockSynchronizer { OffsetMicroseconds = offsetMicroseconds };
-        var (client, connection, _) = TestClient.Create(configure: options =>
-            options with
-            {
-                ClockSynchronizer = clockSync,
-                Capabilities = new ClientCapabilities
-                {
-                    Roles = new List<string> { "visualizer@v1" },
-                    VisualizerSupport = new VisualizerSupport
-                    {
-                        BufferCapacity = 65_536,
-                        RateMax = 30,
-                        Types = new List<string> { VisualizerTypes.Loudness },
-                    },
-                },
-            });
+        var clock = new ConvergedClockSynchronizer { OffsetMicroseconds = offsetMicroseconds };
+        var (client, connection, timer) = SchedulingClient(clockSynchronizer: clock);
         using var _c = client;
 
         var frames = new List<VisualizerFrame>();
         client.VisualizationReceived += (_, f) => frames.Add(f);
 
-        long localNow = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
-        long serverTimestamp = clockSync.ClientToServerTime(localNow + 150_000);
-
+        long displayTime = Now + 1_000;
+        long serverTimestamp = clock.ClientToServerTime(displayTime);
         connection.RaiseBinaryMessageReceived(LoudnessFrame(serverTimestamp, 40_000));
 
         // Not on arrival...
         Assert.Empty(frames);
 
-        // ...but by its display time.
-        await WaitUntilAsync(() => frames.Count > 0, "the scheduled visualizer frame");
+        // ...nor at any local moment short of the translated display time.
+        await DrainPastAsync(client, connection, timer, Now + 500, clock);
+        Assert.Empty(frames);
 
-        long raisedAt = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+        // ...but at that moment, carrying the server timestamp it arrived with.
+        timer.CurrentTime = displayTime;
+        await WaitUntilAsync(() => frames.Count == 1, "the scheduled visualizer frame");
+
         Assert.Equal(serverTimestamp, frames[0].Timestamp);
-
-        // Raised after the display moment, not before it. Only the lower bound is asserted
-        // tightly; the upper bound is loose because a loaded CI box can wake the loop late.
-        Assert.True(
-            raisedAt >= localNow + 150_000,
-            $"raised {localNow + 150_000 - raisedAt}us before its display time");
+        Assert.Equal(40_000, frames[0].Loudness);
     }
 
     [Fact]
@@ -275,22 +317,34 @@ public class MediaDisplaySchedulingTests
     }
 
     [Fact]
-    public async Task Artwork_StampedInTheFuture_IsRaisedAtItsDisplayTime()
+    public async Task Artwork_StampedInTheFuture_IsRaisedAtItsTranslatedDisplayTime()
     {
-        var (client, connection, _) = TestClient.Create(configure: options =>
-            options with { ClockSynchronizer = new ConvergedClockSynchronizer() });
+        // The artwork twin of the visualizer case: this role translates its timestamp with the
+        // same clock offset, so the same non-zero offset separates a scheduler that converts
+        // from one that schedules against the raw server value.
+        const long offsetMicroseconds = 4_000_000;
+        var clock = new ConvergedClockSynchronizer { OffsetMicroseconds = offsetMicroseconds };
+        var (client, connection, timer) = SchedulingClient(clockSynchronizer: clock);
         using var _c = client;
 
         var received = new List<ArtworkReceivedEventArgs>();
         client.ArtworkReceived += (_, e) => received.Add(e);
 
-        long displayTime = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds() + 150_000;
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(displayTime, new byte[] { 9 }));
+        long displayTime = Now + 1_000;
+        long serverTimestamp = clock.ClientToServerTime(displayTime);
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(serverTimestamp, new byte[] { 9 }));
 
         Assert.Empty(received);
 
-        await WaitUntilAsync(() => received.Count > 0, "the scheduled artwork");
-        Assert.Equal(displayTime, received[0].Timestamp);
+        await DrainPastAsync(client, connection, timer, Now + 500, clock);
+        Assert.Empty(received);
+
+        timer.CurrentTime = displayTime;
+        await WaitUntilAsync(() => received.Count == 1, "the scheduled artwork");
+
+        // The event carries the server timestamp, not the local time it was translated to.
+        Assert.Equal(serverTimestamp, received[0].Timestamp);
+        Assert.Equal(new byte[] { 9 }, received[0].ImageData);
     }
 
     [Fact]
@@ -399,7 +453,8 @@ public class MediaDisplaySchedulingTests
         // Handled synchronously, so the flush has happened by the time this returns.
         connection.RaiseTextMessageReceived("""{"type":"stream/clear","payload":{}}""");
 
-        Assert.Empty(await SurvivorsOfClockAdvanceAsync(timer, frames));
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(frames);
         Assert.Empty(received);
     }
 
@@ -414,12 +469,13 @@ public class MediaDisplaySchedulingTests
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
 
-        // stream/end is dispatched fire-and-forget, so the flush lands on another thread; give
-        // it room to run before the clock is moved past the frame's display time.
+        // stream/end is dispatched fire-and-forget, but its handler flushes the display roles
+        // before its first await — so the flush has already happened when this call returns,
+        // and no sleep is needed to separate it from the clock advance below.
         connection.RaiseTextMessageReceived("""{"type":"stream/end","payload":{"reason":"eos"}}""");
-        await Task.Delay(200);
 
-        Assert.Empty(await SurvivorsOfClockAdvanceAsync(timer, frames));
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(frames);
     }
 
     /// <summary>
@@ -471,7 +527,6 @@ public class MediaDisplaySchedulingTests
 
         connection.RaiseTextMessageReceived(
             """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["visualizer"]}}""");
-        await Task.Delay(200);
 
         // Artwork is dispatched after any frame due in the same pass, so its arrival is the
         // point at which a surviving frame would have surfaced too.
@@ -503,7 +558,6 @@ public class MediaDisplaySchedulingTests
 
         connection.RaiseTextMessageReceived(
             """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["visualizer"]}}""");
-        await Task.Delay(200);
 
         // Artwork is dispatched after any frame due in the same pass, so its arrival is the
         // point at which a surviving frame would have surfaced too.
@@ -535,8 +589,10 @@ public class MediaDisplaySchedulingTests
             """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":[]}}""");
         connection.RaiseTextMessageReceived(
             """{"type":"stream/end","payload":{"server_transmitted":2,"roles":[]}}""");
-        await Task.Delay(200);
 
+        // Both handlers reach their flush decision before returning — stream/clear is fully
+        // synchronous and stream/end flushes before its first await — so a flush either of them
+        // wrongly performed has already happened here, ahead of the clock advance.
         timer.CurrentTime = Now + 1_000;
         await WaitUntilAsync(
             () => frames.Count == 1 && artwork.Count == 1, "the media neither message named");
@@ -557,70 +613,11 @@ public class MediaDisplaySchedulingTests
         // old offset cannot be honoured on the next connection. Raised synchronously.
         connection.SimulateConnectionLoss();
 
-        Assert.Empty(await SurvivorsOfClockAdvanceAsync(timer, frames));
-    }
-
-    /// <summary>
-    /// Moves the frozen clock past every display time used in the teardown tests and gives the
-    /// scheduler loop time to act on it, so that an empty result means "flushed" rather than
-    /// "not due yet".
-    /// </summary>
-    private static async Task<List<VisualizerFrame>> SurvivorsOfClockAdvanceAsync(
-        FakePrecisionTimer timer, List<VisualizerFrame> frames)
-    {
-        timer.CurrentTime = Now + 5_000;
-        await Task.Delay(200);
-        return frames;
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(frames);
     }
 
     // -- Scheduled metadata and color updates (spec #135, pending merge) --------------------
-
-    /// <summary>Artwork channel the drain marker uses, so no test's own images collide with it.</summary>
-    private const int MarkerChannel = 3;
-
-    /// <summary>
-    /// Moves the frozen clock past <paramref name="through"/> and waits for a marker the
-    /// scheduler can only raise once it has processed everything due up to that point, so
-    /// "this update never applied" is decided by an event rather than by a sleep.
-    /// </summary>
-    /// <remarks>
-    /// The marker is an empty image on <see cref="MarkerChannel"/> stamped one microsecond after
-    /// <paramref name="through"/>. A state update due at or before <paramref name="through"/> is
-    /// taken in the same dispatch pass as the marker at the latest, and the scheduler applies the
-    /// state roles before the artwork of a pass — so if it had survived, it would already have
-    /// been applied when this returns.
-    /// </remarks>
-    private static async Task DrainPastAsync(
-        SendspinClientService client,
-        FakeSendspinConnection connection,
-        FakePrecisionTimer timer,
-        long through)
-    {
-        var marker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        void OnCleared(object? sender, ArtworkClearedEventArgs e)
-        {
-            if (e.Channel == MarkerChannel)
-            {
-                marker.TrySetResult();
-            }
-        }
-
-        client.ArtworkCleared += OnCleared;
-        try
-        {
-            connection.RaiseBinaryMessageReceived(ArtworkBinary(
-                through + 1,
-                Array.Empty<byte>(),
-                (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel)));
-            timer.CurrentTime = through + 1;
-            await marker.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        }
-        finally
-        {
-            client.ArtworkCleared -= OnCleared;
-        }
-    }
 
     /// <summary>A <c>server/state</c> carrying only the given <c>metadata</c> role object.</summary>
     private static string MetadataState(string metadata) =>
