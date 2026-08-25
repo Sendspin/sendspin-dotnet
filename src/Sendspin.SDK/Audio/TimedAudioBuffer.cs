@@ -91,11 +91,12 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private int _reanchorEventPending;    // 0 = not pending, 1 = pending (for thread-safe event coalescing)
     private float[]? _lastOutputFrame;    // Last output frame for smooth drop/insert (Python CLI approach)
 
-    // Mode the policy last chose on the internal path, reported verbatim by GetStats
+    // Mode the policy last chose on the internal path, reported verbatim by GetStats. Every
+    // change goes through EnterCorrectionMode, which is what logs the transition — there used
+    // to be a second field tracking the same concept for the log alone, and the suppression
+    // paths moved this one without it, so a correction session could end unlogged.
     private SyncCorrectionMode _correctionMode = SyncCorrectionMode.None;
 
-    // Correction mode transition tracking (for diagnostic logging)
-    private SyncCorrectionMode _previousCorrectionMode = SyncCorrectionMode.None;
     private long _correctionStartTimeUs;       // When current correction session started
     private long _droppedAtSessionStart;       // Samples dropped count at start of drop session
     private long _insertedAtSessionStart;      // Samples inserted count at start of insert session
@@ -471,12 +472,46 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             return; // Catastrophic: leave it to the re-anchor tier.
         }
 
-        var samples = (long)Math.Round(latenessMicroseconds / _microsecondsPerSample);
+        ScheduleSnap(latenessMicroseconds, "startup");
+    }
+
+    /// <summary>
+    /// Schedules a one-shot snap of <paramref name="errorMicroseconds"/>, rounded to whole
+    /// frames. Must be called under lock, with no snap already in flight.
+    /// </summary>
+    /// <param name="errorMicroseconds">
+    /// How far out playback is: positive to skip that much buffered content, negative to emit
+    /// that much silence.
+    /// </param>
+    /// <param name="reason">Which tier asked for it, for diagnostics.</param>
+    /// <remarks>
+    /// Both callers — <see cref="ScheduleStartupAlignment"/> and <see cref="EvaluateHardSync"/>
+    /// — close the error the same way, through <see cref="ApplyPendingHardSync"/>, so both
+    /// count toward <see cref="AudioBufferStats.HardSyncCount"/>. The spec requires one-shot
+    /// resynchronizations to be rare (roles/player/v1.md:140), and a startup snap that did not
+    /// count made that impossible to check from outside the buffer.
+    /// </remarks>
+    private void ScheduleSnap(long errorMicroseconds, string reason)
+    {
+        var samples = (long)Math.Round(errorMicroseconds / _microsecondsPerSample);
         samples -= samples % _channels; // Whole frames only.
-        if (samples != 0)
+        if (samples == 0)
         {
-            _pendingHardSyncSamples = samples;
+            return;
         }
+
+        _pendingHardSyncSamples = samples;
+        _hardSyncCount++;
+
+        _logger.LogInformation(
+            "[Correction] Hard sync #{Count} ({Reason}): {Action} {AmountMs:F1}ms in one step " +
+            "(error {ErrorMs:+0.00;-0.00}ms, timing={TimingSource})",
+            _hardSyncCount,
+            reason,
+            samples > 0 ? "skipping" : "inserting silence for",
+            Math.Abs(samples) * _microsecondsPerSample / 1000.0,
+            errorMicroseconds / 1000.0,
+            TimingSourceName ?? "unknown");
     }
 
     /// <inheritdoc/>
@@ -830,12 +865,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _inReconnectStabilization = true;
             _reconnectStabilizationStartOutput = _samplesOutputSinceStart;
 
-            // Reset internal correction state to neutral
-            _correctionMode = SyncCorrectionMode.None;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
+            SetNeutralCorrectionLocked();
             _framesSinceLastCorrection = 0;
-            SetTargetPlaybackRate(1.0);
 
             // A snap still draining was sized from a pre-disconnect error the re-converging
             // clock is about to invalidate. Abandon it for the same reason the EMA is reset;
@@ -858,55 +889,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _count = 0;
             _segments.Clear();
             _headConsumedSamples = 0;
-            _playbackStarted = false;
 
-            // Timeline state belongs to the discarded stream, not the next one
-            _readCursorValid = false;
-            _readCursorServerTimestamp = 0;
-            _segmentGapMicroseconds = 0;
-            _pendingHardSyncSamples = 0;
-            _hardSyncCompleted = false;
-
-            // Reset scheduled start state
-            _scheduledStartLocalTime = 0;
-
-            // Reset sync error tracking (CLI-style: reset EVERYTHING on clear)
-            // This matches Python CLI's clear() behavior for track changes
-            _playbackStartLocalTime = 0;
-            _lastElapsedMicroseconds = 0;
-            _samplesReadSinceStart = 0;
-            _samplesOutputSinceStart = 0;
-            _currentSyncErrorMicroseconds = 0;
-            _smoothedSyncErrorMicroseconds = 0;
-            _syncErrorBaselineMicroseconds = 0;
-            _syncErrorBaselineCaptured = false;
-            _baselineDeferredLogged = false;
-            _clockOffsetCaptured = false;
-            _clockDriftUs = 0;
-
-            // Reset sync correction state
-            _correctionMode = SyncCorrectionMode.None;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
-            _framesSinceLastCorrection = 0;
-            _needsReanchor = false;
-            Interlocked.Exchange(ref _reanchorEventPending, 0);
-            _lastOutputFrame = null;
-            TargetPlaybackRate = 1.0;
-            _externalPlaybackRate = 1.0;
-
-            // Note: Don't reset _samplesDroppedForSync/_samplesInsertedForSync - these are cumulative stats
-            // Note: Don't reset _lastReanchorTimeMicroseconds - reanchor itself calls Clear(),
-            // so resetting the cooldown here would defeat its purpose (matches Android/Python CLI)
-
-            // Reset reconnect stabilization state
-            _inReconnectStabilization = false;
-
-            // Reset correction mode transition tracking (avoids stale logging after clear)
-            _previousCorrectionMode = SyncCorrectionMode.None;
-            _correctionStartTimeUs = 0;
-            _droppedAtSessionStart = 0;
-            _insertedAtSessionStart = 0;
+            ResetSyncStateLocked();
         }
     }
 
@@ -917,66 +901,90 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// </summary>
     /// <remarks>
     /// Unlike <see cref="Clear"/>, this preserves buffered audio and only resets
-    /// the timing state. The next audio callback will re-anchor timing from scratch.
+    /// the timing state. The next audio callback will re-anchor timing from scratch,
+    /// from the read cursor rather than from the head segment's start.
     /// </remarks>
     public void ResetSyncTracking()
     {
         lock (_lock)
         {
-            // Signal that playback needs to re-establish its timing anchor
-            // on the next Read() call, but keep buffered audio
-            _playbackStarted = false;
-
-            // Reset scheduled start state (will re-capture from next segment)
-            _scheduledStartLocalTime = 0;
-
-            // The next start re-derives the content cursor from the segment it begins on, and
-            // a snap scheduled against the old anchor would be measured from nothing.
-            _readCursorValid = false;
-            _readCursorServerTimestamp = 0;
-            _segmentGapMicroseconds = 0;
-            _pendingHardSyncSamples = 0;
-            _hardSyncCompleted = false;
-
-            // Reset sync error tracking
-            _playbackStartLocalTime = 0;
-            _lastElapsedMicroseconds = 0;
-            _samplesReadSinceStart = 0;
-            _samplesOutputSinceStart = 0;
-            _currentSyncErrorMicroseconds = 0;
-            _smoothedSyncErrorMicroseconds = 0;
-            _syncErrorBaselineMicroseconds = 0;
-            _syncErrorBaselineCaptured = false;
-            _baselineDeferredLogged = false;
-            _clockOffsetCaptured = false;
-            _clockDriftUs = 0;
-
-            // Reset sync correction state
-            _correctionMode = SyncCorrectionMode.None;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
-            _framesSinceLastCorrection = 0;
-            _needsReanchor = false;
-            Interlocked.Exchange(ref _reanchorEventPending, 0);
-            _lastOutputFrame = null;
-            TargetPlaybackRate = 1.0;
-            _externalPlaybackRate = 1.0;
-
-            // Reset the reconnect-stabilization window too (Clear() resets the flag for the same
-            // reason). _samplesOutputSinceStart is zeroed above, so leaving
-            // _reconnectStabilizationStartOutput at its old (larger) value would make
-            // samplesSinceReconnect go negative and the 2s window never close — silently suppressing
-            // corrections (internal path) / blocking the reconnect re-capture (ReadRaw path) if a
-            // device switch lands inside the window.
-            _inReconnectStabilization = false;
-            _reconnectStabilizationStartOutput = 0;
-
-            // Reset correction mode transition tracking (avoids stale logging after reset)
-            _previousCorrectionMode = SyncCorrectionMode.None;
-            _correctionStartTimeUs = 0;
-            _droppedAtSessionStart = 0;
-            _insertedAtSessionStart = 0;
+            ResetSyncStateLocked();
         }
+    }
+
+    /// <summary>
+    /// Returns every piece of timing and correction state to its post-construction value,
+    /// without touching the ring or the segment queue. Must be called under lock.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The whole difference between <see cref="Clear"/> and <see cref="ResetSyncTracking"/> is
+    /// whether the buffered audio survives; everything else was two copies of this list, kept
+    /// in step by hand. They drifted anyway — the reconnect window's start marker was reset in
+    /// one and not the other — which is the failure mode the duplication guarantees.
+    /// </para>
+    /// <para>
+    /// Deliberately <em>not</em> reset: <see cref="_samplesDroppedForSync"/> and
+    /// <see cref="_samplesInsertedForSync"/> are cumulative stats, and
+    /// <see cref="_lastReanchorTimeMicroseconds"/> is the re-anchor cooldown — a re-anchor
+    /// calls <see cref="Clear"/>, so resetting it here would defeat the cooldown's purpose
+    /// (matching the Android and Python CLI clients).
+    /// </para>
+    /// </remarks>
+    private void ResetSyncStateLocked()
+    {
+        // Playback has to re-establish its timing anchor on the next read.
+        _playbackStarted = false;
+        _scheduledStartLocalTime = 0;
+
+        // Timeline state belongs to the discarded stream, not the next one. The next start
+        // re-derives the content cursor from the segment it begins on, and a snap scheduled
+        // against the old anchor would be measured from nothing.
+        _readCursorValid = false;
+        _readCursorServerTimestamp = 0;
+        _segmentGapMicroseconds = 0;
+        _pendingHardSyncSamples = 0;
+        _hardSyncCompleted = false;
+
+        // Sync error tracking, reset in full — as the Python CLI's clear() does for a track
+        // change.
+        _playbackStartLocalTime = 0;
+        _lastElapsedMicroseconds = 0;
+        _samplesReadSinceStart = 0;
+        _samplesOutputSinceStart = 0;
+        _currentSyncErrorMicroseconds = 0;
+        _smoothedSyncErrorMicroseconds = 0;
+        _syncErrorBaselineMicroseconds = 0;
+        _syncErrorBaselineCaptured = false;
+        _baselineDeferredLogged = false;
+        _clockOffsetCaptured = false;
+        _clockDriftUs = 0;
+
+        // Correction state. The rate is assigned rather than set through
+        // SetTargetPlaybackRate: a reset is not a correction decision, and raising the change
+        // event here would ask a subscriber to re-rate audio that no longer exists.
+        _correctionMode = SyncCorrectionMode.None;
+        _dropEveryNFrames = 0;
+        _insertEveryNFrames = 0;
+        _framesSinceLastCorrection = 0;
+        _needsReanchor = false;
+        Interlocked.Exchange(ref _reanchorEventPending, 0);
+        _lastOutputFrame = null;
+        TargetPlaybackRate = 1.0;
+        _externalPlaybackRate = 1.0;
+
+        // The reconnect window's start is a marker into _samplesOutputSinceStart, zeroed just
+        // above: leaving it at its old (larger) value would make samplesSinceReconnect go
+        // negative and the window never close — silently suppressing corrections on the
+        // internal path, and blocking the reconnect baseline re-capture on the ReadRaw one.
+        _inReconnectStabilization = false;
+        _reconnectStabilizationStartOutput = 0;
+
+        // Correction session tracking, so a session that ended with the stream is not
+        // reported against the next one.
+        _correctionStartTimeUs = 0;
+        _droppedAtSessionStart = 0;
+        _insertedAtSessionStart = 0;
     }
 
     /// <inheritdoc/>
@@ -1652,10 +1660,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // top would correct the same error twice.
         if (_pendingHardSyncSamples != 0)
         {
-            SetTargetPlaybackRate(1.0);
-            _correctionMode = SyncCorrectionMode.None;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
+            SetNeutralCorrectionLocked();
             return;
         }
 
@@ -1664,10 +1669,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
         if (elapsedSinceStart < _syncOptions.StartupGracePeriodMicroseconds)
         {
-            SetTargetPlaybackRate(1.0);
-            _correctionMode = SyncCorrectionMode.None;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
+            SetNeutralCorrectionLocked();
             return;
         }
 
@@ -1693,10 +1695,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             }
             else
             {
-                SetTargetPlaybackRate(1.0);
-                _correctionMode = SyncCorrectionMode.None;
-                _dropEveryNFrames = 0;
-                _insertEveryNFrames = 0;
+                SetNeutralCorrectionLocked();
                 return;
             }
         }
@@ -1718,14 +1717,31 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             ? SyncCorrectionMode.Dropping
             : insertEveryN > 0 ? SyncCorrectionMode.Inserting : decision.Mode;
 
-        LogCorrectionModeTransition(mode);
+        EnterCorrectionMode(mode);
 
         // Stays neutral: TargetPlaybackRate is a request to a resampler, and this path is the
         // one that has none. See ITimedAudioBuffer.TargetPlaybackRate.
         SetTargetPlaybackRate(1.0);
-        _correctionMode = mode;
         _dropEveryNFrames = dropEveryN;
         _insertEveryNFrames = insertEveryN;
+    }
+
+    /// <summary>
+    /// Stands the continuous corrector down: neutral rate, no frame stepping, mode
+    /// <see cref="SyncCorrectionMode.None"/>. Must be called under lock.
+    /// </summary>
+    /// <remarks>
+    /// Every path that suppresses correction — a snap in flight, the startup grace, the
+    /// reconnect stabilization window, a reconnect itself — wants exactly this, and each used
+    /// to spell it out. Routing them through <see cref="EnterCorrectionMode"/> also means a
+    /// correction session cut short by suppression is logged as ending, which it was not.
+    /// </remarks>
+    private void SetNeutralCorrectionLocked()
+    {
+        EnterCorrectionMode(SyncCorrectionMode.None);
+        SetTargetPlaybackRate(1.0);
+        _dropEveryNFrames = 0;
+        _insertEveryNFrames = 0;
     }
 
     /// <summary>
@@ -1774,25 +1790,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             return;
         }
 
-        var samples = (long)Math.Round(_currentSyncErrorMicroseconds / _microsecondsPerSample);
-        samples -= samples % _channels; // Whole frames only.
-        if (samples == 0)
-        {
-            return;
-        }
-
-        _pendingHardSyncSamples = samples;
-        _hardSyncCount++;
-
-        _logger.LogInformation(
-            "[Correction] Hard sync #{Count}: {Action} {AmountMs:F1}ms in one step " +
-            "(error {ErrorMs:+0.00;-0.00}ms exceeds {ThresholdMs:F1}ms, timing={TimingSource})",
-            _hardSyncCount,
-            samples > 0 ? "skipping" : "inserting silence for",
-            Math.Abs(samples) * _microsecondsPerSample / 1000.0,
-            _currentSyncErrorMicroseconds / 1000.0,
-            _syncOptions.HardSyncThresholdMicroseconds / 1000.0,
-            TimingSourceName ?? "unknown");
+        ScheduleSnap(_currentSyncErrorMicroseconds, "threshold");
     }
 
     /// <summary>
@@ -1872,18 +1870,20 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     }
 
     /// <summary>
-    /// Logs sync correction mode transitions for debugging.
-    /// Must be called under lock.
+    /// Moves <see cref="_correctionMode"/> to <paramref name="newMode"/>, logging the session
+    /// that ended and the one that started. Must be called under lock.
     /// </summary>
     /// <remarks>
-    /// This method tracks when correction mode changes (e.g., None -> Dropping, Dropping -> None)
-    /// and logs the transition with cumulative counts and duration information.
-    /// This helps diagnose what triggers large frame drop/insert corrections.
+    /// The single writer of the field, so the mode <see cref="GetStats"/> reports and the mode
+    /// the log describes cannot disagree. They used to be separate fields, and the suppression
+    /// paths wrote only the former — so a drop/insert session cut short by the reconnect window
+    /// was never logged as ending, and the next transition was reported against a session that
+    /// had finished seconds earlier.
     /// </remarks>
     /// <param name="newMode">The new correction mode being entered.</param>
-    private void LogCorrectionModeTransition(SyncCorrectionMode newMode)
+    private void EnterCorrectionMode(SyncCorrectionMode newMode)
     {
-        if (newMode == _previousCorrectionMode)
+        if (newMode == _correctionMode)
         {
             return; // No transition
         }
@@ -1893,7 +1893,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             : 0;
 
         // Log the END of the previous correction session (if any)
-        if (_previousCorrectionMode == SyncCorrectionMode.Dropping)
+        if (_correctionMode == SyncCorrectionMode.Dropping)
         {
             var sessionDropped = _samplesDroppedForSync - _droppedAtSessionStart;
             var sessionDurationMs = _correctionStartTimeUs > 0
@@ -1907,7 +1907,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 sessionDurationMs,
                 TimingSourceName ?? "unknown");
         }
-        else if (_previousCorrectionMode == SyncCorrectionMode.Inserting)
+        else if (_correctionMode == SyncCorrectionMode.Inserting)
         {
             var sessionInserted = _samplesInsertedForSync - _insertedAtSessionStart;
             var sessionDurationMs = _correctionStartTimeUs > 0
@@ -1952,7 +1952,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 TimingSourceName ?? "unknown");
         }
 
-        _previousCorrectionMode = newMode;
+        _correctionMode = newMode;
     }
 
     /// <summary>

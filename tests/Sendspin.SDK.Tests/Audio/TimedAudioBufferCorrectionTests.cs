@@ -528,6 +528,38 @@ public class TimedAudioBufferCorrectionTests
     }
 
     [Fact]
+    public void StartupSnap_CountsAsAHardSync()
+    {
+        // The startup alignment performs the same one-shot splice the hard-sync tier does, and
+        // the spec requires those to be rare (roles/player/v1.md:140). GetStats is how a
+        // deployment checks that, and a startup snap used to be invisible there: HardSyncCount
+        // read 0 while a snap had just moved the audio.
+        var clockSync = new FakeClockSynchronizer
+        {
+            OffsetMicroseconds = ServerT0 - LocalT0,
+            IsConverged = true,
+            HasMinimalSync = true,
+        };
+        using var buffer = new TimedAudioBuffer(Format, clockSync, bufferCapacityMs: 5_000);
+
+        var chunk = new float[ChunkMs * SamplesPerMs];
+        for (var i = 0; i < 300 / ChunkMs; i++)
+        {
+            buffer.Write(chunk, ServerT0 + (i * ChunkMs * 1000L));
+        }
+
+        // 5 ms late: inside the scheduled-start grace window, so nothing is discarded as stale
+        // and the residual is closed by the startup snap alone.
+        var output = new float[StepMs * SamplesPerMs];
+        buffer.Read(output, LocalT0 + 5_000);
+
+        var stats = buffer.GetStats();
+        Assert.Equal(1, stats.HardSyncCount);
+        Assert.Equal(0, stats.DroppedSamples);
+        Assert.InRange(Ms(stats.SamplesDroppedForSync), 4, 6);
+    }
+
+    [Fact]
     public void OnTimeStart_SnapsNothing()
     {
         using var player = new Player();
