@@ -703,6 +703,40 @@ public class SyncCorrectedSampleSourceTests
         Assert.Equal(1.0, buffer.LastReportedRate);
     }
 
+    /// <summary>
+    /// The rate reaches the buffer when it moves, and only then. Every report takes the buffer's
+    /// lock from the audio thread, and the rate holds still for long stretches — but the contract
+    /// is that every change is reported, including the return to 1.0, or the stats latch on the
+    /// last value seen.
+    /// </summary>
+    [Fact]
+    public void ReportedRate_IsSentOnChangeOnly_IncludingTheReturnToUnity()
+    {
+        var buffer = SignalBuffer.Constant(0.3f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+
+        provider.SetResampling(1.004);
+        for (var cb = 0; cb < 20; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        Assert.Equal(1, buffer.ReportedRateCallCount);
+        Assert.Equal(1.004, buffer.LastReportedRate, 9);
+
+        provider.SetResampling(1.0);
+        for (var cb = 0; cb < 20; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        Assert.Equal(2, buffer.ReportedRateCallCount);
+        Assert.Equal(1.0, buffer.LastReportedRate);
+    }
+
     [Fact]
     public void ReadAfterDispose_Throws()
     {
@@ -918,6 +952,9 @@ public class SyncCorrectedSampleSourceTests
 
         public double LastReportedRate { get; private set; } = 1.0;
 
+        /// <summary>Every call, not every distinct value: the source reports only on a change.</summary>
+        public int ReportedRateCallCount { get; private set; }
+
         public long SamplesDroppedReported { get; private set; }
 
         public long SamplesInsertedReported { get; private set; }
@@ -988,7 +1025,11 @@ public class SyncCorrectedSampleSourceTests
             SamplesInsertedReported += samplesInserted;
         }
 
-        public void ReportExternalPlaybackRate(double rate) => LastReportedRate = rate;
+        public void ReportExternalPlaybackRate(double rate)
+        {
+            LastReportedRate = rate;
+            ReportedRateCallCount++;
+        }
 
         public int Read(Span<float> buffer, long currentLocalTime) => ReadRaw(buffer, currentLocalTime);
 
