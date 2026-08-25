@@ -7,20 +7,47 @@ using Sendspin.SDK.Synchronization;
 namespace Sendspin.SDK.Client;
 
 /// <summary>
-/// Holds visualizer frames and artwork until their display timestamp, translated from server
-/// time to the local clock, and raises them then.
+/// A <c>server/state</c> role that carries scheduled updates: one whose object has a timestamp at
+/// which it takes effect, so a future-stamped update is held rather than merged on receipt.
+/// </summary>
+/// <remarks>
+/// The two roles spec #135 (pending merge) gives the current-plus-pending model to, alongside
+/// artwork. Used as an index into <see cref="MediaDisplayScheduler"/>'s pending slots, so each
+/// role holds at most one update and neither can displace the other's.
+/// </remarks>
+internal enum ScheduledStateRole
+{
+    /// <summary>The <c>metadata</c> role object.</summary>
+    Metadata = 0,
+
+    /// <summary>The <c>color</c> role object.</summary>
+    Color = 1,
+}
+
+/// <summary>
+/// Holds visualizer frames, artwork, and scheduled <c>metadata</c>/<c>color</c> updates until
+/// their timestamp, translated from server time to the local clock, and raises or applies them
+/// then.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Both roles carry a timestamp that is "server clock time when this data should be displayed",
-/// which clients must translate to their own clock. The two roles differ in what a timestamp
-/// already in the past means: a visualizer frame more than <see cref="StaleThresholdMicroseconds"/>
-/// late is dropped ("stale visualization frames are never rendered"), while artwork is displayed
-/// immediately and is never dropped for lateness.
+/// Every role here carries a timestamp that is "server clock time when this takes effect", which
+/// clients must translate to their own clock. They differ in what a timestamp already in the past
+/// means: a visualizer frame more than <see cref="StaleThresholdMicroseconds"/> late is dropped
+/// ("stale visualization frames are never rendered"), while artwork and state updates take effect
+/// immediately and are never dropped for lateness.
+/// </para>
+/// <para>
+/// Artwork (per channel) and the two <see cref="ScheduledStateRole"/>s follow one model, spec
+/// #135 (pending merge): each slot keeps <em>at most one</em> pending item, a future-stamped
+/// message replaces whatever the slot held, and a past-or-present one takes effect at once and
+/// discards what the slot held. Timestamps are never compared between messages — the newest
+/// message always wins its slot, even when it is due sooner than the item it displaces — because
+/// only the server knows which of the two it meant to stand.
 /// </para>
 /// <para>
 /// The translation is <see cref="IClockSynchronizer.ServerToClientTimeUncompensated"/>, the clock
-/// offset alone: both role specs say to translate "using the offset computed from clock
+/// offset alone: the role specs say to translate "using the offset computed from clock
 /// synchronization", and only the player role goes on to subtract <c>static_delay_ms</c>. That
 /// delay compensates for hardware past the audio port, so applying it here would show every
 /// visual ahead of the sound it belongs to by up to the 5 s the setting allows.
@@ -31,7 +58,9 @@ namespace Sendspin.SDK.Client;
 /// escaping into the receive loop). Only data with a future display time is deferred to this
 /// class's background loop, and while that loop is raising an event, a newly arrived due item
 /// queues behind it rather than racing past it — so each role's events stay in timestamp order
-/// whichever thread raises them.
+/// whichever thread raises them. Within one dispatch pass the state roles are applied before the
+/// media of that pass, so a subscriber handling the artwork of a track change already sees the
+/// metadata and colors it belongs to.
 /// </para>
 /// </remarks>
 internal sealed class MediaDisplayScheduler : IDisposable
@@ -53,6 +82,8 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
     private const int ArtworkChannelCount = 4;
 
+    private const int StateRoleCount = 2;
+
     private readonly object _lock = new();
     private readonly IClockSynchronizer _clockSynchronizer;
     private readonly IHighPrecisionTimer _timer;
@@ -73,6 +104,14 @@ internal sealed class MediaDisplayScheduler : IDisposable
     /// Guarded by <see cref="_lock"/>.
     /// </summary>
     private readonly PendingArtwork?[] _artwork = new PendingArtwork?[ArtworkChannelCount];
+
+    /// <summary>
+    /// One pending update per <see cref="ScheduledStateRole"/>, indexed by the enum. The roles
+    /// are independent: a scheduled <c>color</c> update never displaces a scheduled
+    /// <c>metadata</c> one, and neither is ordered against the other.
+    /// Guarded by <see cref="_lock"/>.
+    /// </summary>
+    private readonly PendingStateUpdate?[] _stateUpdates = new PendingStateUpdate?[StateRoleCount];
 
     private readonly SemaphoreSlim _wakeup = new(0);
     private readonly CancellationTokenSource _cts = new();
@@ -188,7 +227,8 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
     /// <summary>
     /// Raises artwork now if its display time has passed, and otherwise holds it until then.
-    /// A later image for the same channel supersedes one still pending, per "latest wins".
+    /// The newest image for a channel supersedes one still pending for it, per "latest wins" —
+    /// arrival order, not timestamp order (spec #135, pending merge).
     /// </summary>
     /// <param name="chunk">The parsed artwork message; empty image data means clear.</param>
     internal void SubmitArtwork(ArtworkChunk chunk)
@@ -229,9 +269,61 @@ internal sealed class MediaDisplayScheduler : IDisposable
     }
 
     /// <summary>
-    /// Discards everything still pending, for both roles. Called where buffered media must not
-    /// survive whatever the message named: loss of the connection, and a <c>stream/clear</c> or
-    /// <c>stream/end</c> that omits <c>roles</c> and so ends every stream.
+    /// Offers a <c>server/state</c> role update to its pending slot, and reports whether the slot
+    /// took it. Whatever the slot was holding is discarded either way — the newest message wins
+    /// it, with no comparison of timestamps.
+    /// </summary>
+    /// <param name="role">The role whose slot this update belongs to.</param>
+    /// <param name="serverTimestamp">
+    /// The role object's <c>timestamp</c>, in server clock time. Null when the message carried
+    /// none — nothing to schedule against, so it takes effect now, as a past-or-present one does.
+    /// </param>
+    /// <param name="apply">
+    /// Applies the update to the client's state and announces it. Invoked from the scheduler
+    /// loop when its moment arrives, and only then: a caller told the slot did not take the
+    /// update applies it itself, in the place the message it arrived in already announces.
+    /// </param>
+    /// <returns>
+    /// True when the update is now held for a future moment (or queued behind a dispatch already
+    /// in flight) and <paramref name="apply"/> will run later; false when it is due and the
+    /// caller must apply it.
+    /// </returns>
+    internal bool TryScheduleStateUpdate(ScheduledStateRole role, long? serverTimestamp, Action apply)
+    {
+        lock (_lock)
+        {
+            if (_disposed)
+            {
+                // Nothing will ever run the action, and the client is going away with it.
+                return true;
+            }
+
+            long now = _timer.GetCurrentTimeMicroseconds();
+            long effectiveTime = serverTimestamp is { } timestamp
+                ? _clockSynchronizer.ServerToClientTimeUncompensated(timestamp)
+                : now;
+
+            // Cleared before the decision, not after it: this message supersedes whatever the
+            // slot held whether it schedules or applies now.
+            _stateUpdates[(int)role] = null;
+
+            // A due update still has to queue when the loop is mid-dispatch, or it would race
+            // past an update for the same role that the loop is applying right now.
+            if (effectiveTime <= now && !_dispatching)
+            {
+                return false;
+            }
+
+            _stateUpdates[(int)role] = new PendingStateUpdate(effectiveTime, apply);
+            WakeLocked(effectiveTime, now);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Discards everything still pending, for every role. Called where nothing buffered may
+    /// survive: loss of the connection, whose re-handshake resets the clock offset every pending
+    /// item's local time was computed against.
     /// </summary>
     internal void Flush()
     {
@@ -267,10 +359,30 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
     }
 
+    /// <summary>
+    /// Discards the image one artwork channel is holding, leaving every other channel and role
+    /// alone. For a <c>stream/start</c> that reconfigures the channel: the held image was encoded
+    /// for a configuration that no longer applies, and the server re-sends it if it still does.
+    /// </summary>
+    /// <param name="channel">Channel index, 0-3.</param>
+    internal void FlushArtworkChannel(int channel)
+    {
+        if (channel < 0 || channel >= ArtworkChannelCount)
+        {
+            return;
+        }
+
+        lock (_lock)
+        {
+            _artwork[channel] = null;
+        }
+    }
+
     private void ClearPendingLocked()
     {
         ClearPendingFramesLocked();
         Array.Clear(_artwork);
+        Array.Clear(_stateUpdates);
     }
 
     private void ClearPendingFramesLocked()
@@ -357,6 +469,15 @@ internal sealed class MediaDisplayScheduler : IDisposable
             }
         }
 
+        for (int role = 0; role < _stateUpdates.Length; role++)
+        {
+            var slot = _stateUpdates[role];
+            if (slot is not null && slot.EffectiveTime < next)
+            {
+                next = slot.EffectiveTime;
+            }
+        }
+
         return next == long.MaxValue ? long.MaxValue : Math.Max(next, now);
     }
 
@@ -364,6 +485,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
     {
         var dueFrames = new List<PendingFrame>();
         var dueArtwork = new List<PendingArtwork>();
+        var dueState = new List<PendingStateUpdate>();
 
         try
         {
@@ -375,17 +497,18 @@ internal sealed class MediaDisplayScheduler : IDisposable
                 lock (_lock)
                 {
                     long now = _timer.GetCurrentTimeMicroseconds();
-                    TakeDueLocked(now, dueFrames, dueArtwork);
-                    hasDue = dueFrames.Count > 0 || dueArtwork.Count > 0;
+                    TakeDueLocked(now, dueFrames, dueArtwork, dueState);
+                    hasDue = dueFrames.Count > 0 || dueArtwork.Count > 0 || dueState.Count > 0;
                     _dispatching = hasDue;
                     waitMilliseconds = WaitMillisecondsLocked(now);
                 }
 
                 if (hasDue)
                 {
-                    DispatchDue(dueFrames, dueArtwork);
+                    DispatchDue(dueFrames, dueArtwork, dueState);
                     dueFrames.Clear();
                     dueArtwork.Clear();
+                    dueState.Clear();
 
                     lock (_lock)
                     {
@@ -412,7 +535,11 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
     }
 
-    private void TakeDueLocked(long now, List<PendingFrame> dueFrames, List<PendingArtwork> dueArtwork)
+    private void TakeDueLocked(
+        long now,
+        List<PendingFrame> dueFrames,
+        List<PendingArtwork> dueArtwork,
+        List<PendingStateUpdate> dueState)
     {
         while (_frames.Count > 0 && _frames[0].DisplayTime <= now)
         {
@@ -446,6 +573,18 @@ internal sealed class MediaDisplayScheduler : IDisposable
         {
             dueArtwork.Sort(static (left, right) => left.DisplayTime.CompareTo(right.DisplayTime));
         }
+
+        // Taken in role order rather than by time: the two roles carry no ordering against each
+        // other, and each can only ever contribute the one update its slot holds.
+        for (int role = 0; role < _stateUpdates.Length; role++)
+        {
+            var slot = _stateUpdates[role];
+            if (slot is not null && slot.EffectiveTime <= now)
+            {
+                dueState.Add(slot);
+                _stateUpdates[role] = null;
+            }
+        }
     }
 
     private int WaitMillisecondsLocked(long now)
@@ -467,8 +606,18 @@ internal sealed class MediaDisplayScheduler : IDisposable
         return (int)Math.Min(int.MaxValue, (deltaMicroseconds + 999) / 1000);
     }
 
-    private void DispatchDue(List<PendingFrame> dueFrames, List<PendingArtwork> dueArtwork)
+    private void DispatchDue(
+        List<PendingFrame> dueFrames,
+        List<PendingArtwork> dueArtwork,
+        List<PendingStateUpdate> dueState)
     {
+        // State first, so a subscriber reacting to the artwork of a track change already sees
+        // the metadata and colors that image belongs to. See the class remarks.
+        foreach (var update in dueState)
+        {
+            SafeRaise(update.Apply, "state update");
+        }
+
         foreach (var frame in dueFrames)
         {
             SafeRaise(() => _raiseVisualization(frame.Frame), "visualizer frame");
@@ -528,6 +677,21 @@ internal sealed class MediaDisplayScheduler : IDisposable
         internal VisualizerFrame Frame { get; }
 
         internal int WireBytes { get; }
+    }
+
+    private sealed class PendingStateUpdate
+    {
+        internal PendingStateUpdate(long effectiveTime, Action apply)
+        {
+            EffectiveTime = effectiveTime;
+            Apply = apply;
+        }
+
+        /// <summary>Local-clock time at which the update takes effect.</summary>
+        internal long EffectiveTime { get; }
+
+        /// <summary>Merges the update into the client's state and announces it.</summary>
+        internal Action Apply { get; }
     }
 
     private sealed class PendingArtwork

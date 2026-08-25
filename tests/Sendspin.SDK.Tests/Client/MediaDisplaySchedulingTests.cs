@@ -7,16 +7,20 @@ using Sendspin.SDK.Synchronization;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Display-timestamp scheduling for the visualizer and artwork roles (#198, #199): both carry a
-/// server-clock time at which their data should be shown, which the SDK translates to the local
-/// clock and holds against. The two roles differ on lateness — a stale visualizer frame is never
-/// rendered, whereas late artwork is shown immediately.
+/// Display-timestamp scheduling for the visualizer and artwork roles (#198, #199) and for the
+/// scheduled <c>metadata</c> and <c>color</c> updates of spec #135 (pending merge): each carries a
+/// server-clock time at which its data takes effect, which the SDK translates to the local clock
+/// and holds against. The roles differ on lateness — a stale visualizer frame is never rendered,
+/// whereas late artwork and late state are applied immediately.
 /// </summary>
 /// <remarks>
 /// Most tests here freeze the local clock with <see cref="FakePrecisionTimer"/>, which decides
 /// "due" and "held" with no waiting at all — a frozen clock never reaches a future deadline, so
 /// "held" is a stable state rather than a race. The two tests that assert an item actually fires
 /// necessarily run against the real clock and poll, in the shape the connection-level tests use.
+/// Assertions that something must <em>never</em> surface go through
+/// <see cref="DrainPastAsync"/> rather than a sleep, so they decide on an event rather than on
+/// elapsed wall time (#239).
 /// </remarks>
 public class MediaDisplaySchedulingTests
 {
@@ -568,4 +572,360 @@ public class MediaDisplaySchedulingTests
         await Task.Delay(200);
         return frames;
     }
+
+    // -- Scheduled metadata and color updates (spec #135, pending merge) --------------------
+
+    /// <summary>Artwork channel the drain marker uses, so no test's own images collide with it.</summary>
+    private const int MarkerChannel = 3;
+
+    /// <summary>
+    /// Moves the frozen clock past <paramref name="through"/> and waits for a marker the
+    /// scheduler can only raise once it has processed everything due up to that point, so
+    /// "this update never applied" is decided by an event rather than by a sleep.
+    /// </summary>
+    /// <remarks>
+    /// The marker is an empty image on <see cref="MarkerChannel"/> stamped one microsecond after
+    /// <paramref name="through"/>. A state update due at or before <paramref name="through"/> is
+    /// taken in the same dispatch pass as the marker at the latest, and the scheduler applies the
+    /// state roles before the artwork of a pass — so if it had survived, it would already have
+    /// been applied when this returns.
+    /// </remarks>
+    private static async Task DrainPastAsync(
+        SendspinClientService client,
+        FakeSendspinConnection connection,
+        FakePrecisionTimer timer,
+        long through)
+    {
+        var marker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnCleared(object? sender, ArtworkClearedEventArgs e)
+        {
+            if (e.Channel == MarkerChannel)
+            {
+                marker.TrySetResult();
+            }
+        }
+
+        client.ArtworkCleared += OnCleared;
+        try
+        {
+            connection.RaiseBinaryMessageReceived(ArtworkBinary(
+                through + 1,
+                Array.Empty<byte>(),
+                (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel)));
+            timer.CurrentTime = through + 1;
+            await marker.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            client.ArtworkCleared -= OnCleared;
+        }
+    }
+
+    /// <summary>A <c>server/state</c> carrying only the given <c>metadata</c> role object.</summary>
+    private static string MetadataState(string metadata) =>
+        """{"type":"server/state","payload":{"metadata":""" + metadata + "}}";
+
+    /// <summary>A <c>server/state</c> carrying only the given <c>color</c> role object.</summary>
+    private static string ColorState(string color) =>
+        """{"type":"server/state","payload":{"color":""" + color + "}}";
+
+    [Fact]
+    public void Metadata_StampedInTheFuture_LeavesTheAppliedStateUntouched()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now - 1}},"title":"First"}"""));
+
+        var seen = new List<string?>();
+        client.GroupStateChanged += (_, g) => seen.Add(g.Metadata?.Title);
+
+        // The gapless case the spec is written for: the next track's metadata, timed to the
+        // audible track change. Merging it on receipt would relabel the track still playing.
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Second"}"""));
+
+        Assert.Equal("First", client.CurrentGroup!.Metadata!.Title);
+        Assert.DoesNotContain("Second", seen);
+    }
+
+    [Fact]
+    public async Task Metadata_StampedInTheFuture_IsAppliedAtItsDisplayTime()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now - 1}},"title":"First"}"""));
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Second","album":"Later"}"""));
+
+        var applied = new List<string?>();
+        client.GroupStateChanged += (_, g) => applied.Add(g.Metadata?.Title);
+
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(() => applied.Contains("Second"), "the scheduled metadata");
+
+        // Applied as a merge onto the current state, not as a replacement of it.
+        var meta = client.CurrentGroup!.Metadata!;
+        Assert.Equal("Second", meta.Title);
+        Assert.Equal("Later", meta.Album);
+        Assert.Equal(Now + 1_000, meta.Timestamp);
+    }
+
+    [Fact]
+    public async Task Metadata_NewerFutureUpdate_ReplacesTheHeldOne_EvenStampedEarlier()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        // Newest wins outright: clients never compare timestamps between messages, so the
+        // second update takes the slot even though it is due before the one it displaces —
+        // and the displaced one must never surface.
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 5_000}},"title":"Displaced"}"""));
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Winner"}"""));
+
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(() => client.CurrentGroup?.Metadata?.Title == "Winner", "the replacement");
+
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Equal("Winner", client.CurrentGroup!.Metadata!.Title);
+    }
+
+    [Fact]
+    public async Task Metadata_StampedNow_AppliesImmediatelyAndDiscardsTheHeldUpdate()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 5_000}},"title":"Scheduled"}"""));
+
+        // A present timestamp is not a future one: it applies on receipt, and takes the
+        // scheduled update with it (the server cancels by re-sending now-timestamped values).
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now}},"title":"Cancelled to"}"""));
+
+        Assert.Equal("Cancelled to", client.CurrentGroup!.Metadata!.Title);
+
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Equal("Cancelled to", client.CurrentGroup.Metadata!.Title);
+    }
+
+    [Fact]
+    public async Task MetadataRoleObject_ExplicitNull_ClearsNowAndDiscardsTheHeldUpdate()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now - 1}},"title":"First"}"""));
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Scheduled"}"""));
+
+        // messaging.md: a null role object clears the role's state, taking effect immediately
+        // and discarding any pending scheduled update — the role has left active_roles, so
+        // nothing it had queued may still arrive.
+        connection.RaiseTextMessageReceived(MetadataState("null"));
+
+        Assert.Null(client.CurrentGroup!.Metadata);
+
+        await DrainPastAsync(client, connection, timer, Now + 1_000);
+        Assert.Null(client.CurrentGroup.Metadata);
+    }
+
+    [Fact]
+    public async Task PendingMetadata_LeavesTheProgressAnchorAlone_UntilItApplies()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(MetadataState(
+            $$"""
+            {"timestamp":{{Now - 1_000_000}},
+             "progress":{"track_progress":5000,"track_duration":180000,"playback_speed":1000},
+             "title":"First"}
+            """));
+
+        connection.RaiseTextMessageReceived(MetadataState(
+            $$"""
+            {"timestamp":{{Now + 1_000}},
+             "progress":{"track_progress":0,"track_duration":200000,"playback_speed":1000},
+             "title":"Second"}
+            """));
+
+        // Progress is extrapolated from the timestamp/progress pair of the most recent APPLIED
+        // metadata. A pending update that moved either would rewind the position readout of the
+        // track still playing, a second before its successor starts.
+        var playing = client.CurrentGroup!.Metadata!;
+        Assert.Equal(Now - 1_000_000, playing.Timestamp);
+        Assert.Equal(5000, playing.Progress!.TrackProgress);
+
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(
+            () => client.CurrentGroup?.Metadata?.Title == "Second", "the scheduled metadata");
+
+        var next = client.CurrentGroup!.Metadata!;
+        Assert.Equal(Now + 1_000, next.Timestamp);
+        Assert.Equal(0, next.Progress!.TrackProgress);
+    }
+
+    [Fact]
+    public async Task Color_StampedInTheFuture_IsHeldWithoutColorChanged_ThenAppliedAtItsTime()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            ColorState($$"""{"timestamp":{{Now - 1}},"primary":[1,1,1]}"""));
+
+        var raised = new List<RgbColor?>();
+        client.ColorChanged += (_, p) => raised.Add(p.Primary);
+
+        connection.RaiseTextMessageReceived(
+            ColorState($$"""{"timestamp":{{Now + 1_000}},"primary":[2,2,2]}"""));
+
+        // ColorChanged marks the moment the palette takes effect, never the moment one was
+        // merely scheduled — a renderer that blended on this event would change colour early.
+        Assert.Empty(raised);
+        Assert.Equal(new RgbColor(1, 1, 1), client.CurrentGroup!.Colors.Primary);
+
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(() => raised.Count == 1, "the scheduled color update");
+
+        Assert.Equal(new RgbColor(2, 2, 2), raised[0]);
+        Assert.Equal(new RgbColor(2, 2, 2), client.CurrentGroup.Colors.Primary);
+        Assert.Equal(Now + 1_000, client.CurrentGroup.Colors.Timestamp);
+    }
+
+    [Fact]
+    public async Task Color_StampedNow_AppliesImmediatelyAndDiscardsTheHeldUpdate()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            ColorState($$"""{"timestamp":{{Now + 5_000}},"primary":[9,9,9]}"""));
+        connection.RaiseTextMessageReceived(
+            ColorState($$"""{"timestamp":{{Now}},"primary":[3,3,3]}"""));
+
+        Assert.Equal(new RgbColor(3, 3, 3), client.CurrentGroup!.Colors.Primary);
+
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Equal(new RgbColor(3, 3, 3), client.CurrentGroup.Colors.Primary);
+    }
+
+    [Fact]
+    public async Task ConnectionLoss_DiscardsAPendingStateUpdate()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now - 1}},"title":"First"}"""));
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Scheduled"}"""));
+
+        // Same reason the media roles are flushed: the display time was computed against a
+        // clock offset that resets on re-handshake, and the first server/state of the next
+        // connection has to carry the role's full state anyway.
+        connection.SimulateConnectionLoss();
+
+        await DrainPastAsync(client, connection, timer, Now + 1_000);
+        Assert.Equal("First", client.CurrentGroup!.Metadata!.Title);
+    }
+
+    // -- Artwork rules of spec #135 not already covered above -------------------------------
+
+    [Fact]
+    public async Task Artwork_NewerImageStampedEarlier_StillSupersedesTheHeldOne()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        // The channel keeps one pending image and the newest message takes the slot, with no
+        // comparison against what is held — so an image due sooner than the one it displaces
+        // still wins, and the displaced one is gone rather than merely reordered.
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now + 5_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now + 1_000, new byte[] { 2 }, BinaryMessageTypes.Artwork0));
+
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(() => received.Count == 1, "the replacement image");
+        Assert.Equal(new byte[] { 2 }, received[0].ImageData);
+
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Single(received);
+    }
+
+    [Fact]
+    public async Task StreamEnd_NamingArtwork_DiscardsThePendingImage()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+
+        // "On stream/end, clearing buffers includes discarding pending images": an image sent
+        // ahead for a track the server has just stopped streaming must not still appear.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+
+        await DrainPastAsync(client, connection, timer, Now + 1_000);
+        Assert.Empty(received);
+    }
+
+    [Fact]
+    public async Task StreamStart_ChangingAChannelsConfiguration_DiscardsOnlyThatChannelsPendingImage()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":512,"height":512}""",
+            """{"source":"artist","format":"jpeg","width":256,"height":256}"""));
+
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now + 1_000, new byte[] { 2 }, BinaryMessageTypes.Artwork1));
+
+        // Channel 0 is reconfigured, so the image held for it was encoded for a size that no
+        // longer applies and the server will re-send it if it still does. Channel 1 is
+        // re-announced unchanged and keeps what it is holding.
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":128,"height":128}""",
+            """{"source":"artist","format":"jpeg","width":256,"height":256}"""));
+
+        await DrainPastAsync(client, connection, timer, Now + 1_000);
+
+        var only = Assert.Single(received);
+        Assert.Equal(1, only.Channel);
+        Assert.Equal(new byte[] { 2 }, only.ImageData);
+    }
+
+    /// <summary>
+    /// An artwork-only <c>stream/start</c> (no <c>player</c> key) declaring the given channels.
+    /// Artwork-only so the handler runs to completion synchronously, with no pipeline start to
+    /// await, which keeps the discard decided by the time the message returns.
+    /// </summary>
+    private static string ArtworkStreamStart(params string[] channels) =>
+        """{"type":"stream/start","payload":{"artwork":{"channels":["""
+        + string.Join(",", channels)
+        + "]}}}";
 }
