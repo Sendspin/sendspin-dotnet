@@ -1872,7 +1872,55 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ServerId = _session.ServerId;
         _logger.LogInformation("Server hello received (encrypted): {ServerId} ({ServerName})",
             ServerId, ServerName);
+        WarnOnCredentialMismatch();
         SendEncryptedClientHelloAsync().SafeFireAndForget(_logger);
+    }
+
+    /// <summary>
+    /// Surfaces the spec's credential-mismatch signal to the operator: a Sentinel-keyed session
+    /// with a stored long-term record for this very server means the server referenced a
+    /// credential this client could not use, and the client answered with the published Sentinel
+    /// PSK (connection.md § Sentinel Fallback). The connection works, but at trust level 'none'
+    /// — no playback, no management — until someone re-pairs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Reports and nothing else. The spec is explicit that the signal alone MUST NOT cause
+    /// either side to remove or replace a record; records change only through pairing or
+    /// management.
+    /// </para>
+    /// <para>
+    /// Only a stored-pubkey record can answer "am I paired with the server I am talking to".
+    /// A shared-PSK record carries no server id by design, so it is not evidence of a mismatch
+    /// — treating one as evidence would warn on every connection to an unrelated server.
+    /// Raised from server/hello rather than the handshake because that is where the client
+    /// learns the session's PSK category, and it runs once per Noise session, including after
+    /// an in-band re-handshake.
+    /// </para>
+    /// </remarks>
+    private void WarnOnCredentialMismatch()
+    {
+        if (_pairingStore is null
+            || ServerId is null
+            || _session.MatchedPsk?.Category != PskCategory.Sentinel)
+        {
+            return;
+        }
+
+        bool holdsARecordForThisServer;
+        lock (_pairingStoreLock)
+        {
+            holdsARecordForThisServer = _pairingStore.List()
+                .Any(r => r.Category == PskCategory.LongTerm && r.ServerId == ServerId);
+        }
+
+        if (holdsARecordForThisServer)
+        {
+            _logger.LogWarning(
+                "Server {ServerId} referenced a credential this client no longer holds; the "
+                + "session is running unpaired on the Sentinel PSK. Re-pair to restore service.",
+                ServerId);
+        }
     }
 
     /// <summary>

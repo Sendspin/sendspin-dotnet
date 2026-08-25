@@ -83,12 +83,28 @@ public class NoiseWireFramingTests
         Assert.True(framing.IsTransportReady);
     }
 
+    /// <summary>
+    /// connection.md § Sentinel Fallback: a psk_id the client cannot match in the <b>initial</b>
+    /// handshake completes message 2 with the published Sentinel PSK instead of failing, and
+    /// the session proceeds as an ordinary Sentinel connection at trust level 'none'.
+    /// </summary>
+    /// <remarks>
+    /// The server does here what the spec has a server do on this path: it names a credential
+    /// the client does not hold, then verifies message 2 against the Sentinel. Its
+    /// <c>CompleteHandshake</c> throws if that verification fails, so this is a cryptographic
+    /// check that the client really mixed the Sentinel in — not merely an assertion about the
+    /// category the session reports.
+    /// </remarks>
     [Fact]
-    public void Handshake_UnknownPskId_IsFatal()
+    public void InitialHandshake_UnknownPskId_FallsBackToTheSentinel()
     {
         var identity = SendspinIdentity.Generate();
+        byte[] unknownPsk = RandomNumberGenerator.GetBytes(32);
         var framing = new NoiseWireFraming(identity);
-        var server = new TestNoiseServer(identity.PublicKey, psk: RandomNumberGenerator.GetBytes(32));
+        var server = new TestNoiseServer(
+            identity.PublicKey,
+            NoiseConstants.SentinelPsk.ToArray(),
+            advertisedPskId: NoiseConstants.DerivePskId(unknownPsk));
 
         var clientInit = Assert.Single(framing.Start());
         var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
@@ -96,10 +112,45 @@ public class NoiseWireFramingTests
         Assert.Null(framing.ProcessInbound(WireFrame.FromText(serverInit)).FatalReason);
         var result = framing.ProcessInbound(WireFrame.FromText(msg1));
 
-        Assert.NotNull(result.FatalReason);
+        Assert.Null(result.FatalReason);
+        server.CompleteHandshake(Assert.Single(result.Replies!).PayloadAsText());
+        Assert.True(framing.IsTransportReady);
+        Assert.Equal(PskCategory.Sentinel, framing.MatchedPsk!.Category);
+    }
+
+    /// <summary>
+    /// The fallback is scoped to the initial handshake: connection.md § Sentinel Fallback has a
+    /// miss during a re-handshake fail as before. The channel is already authenticated by then,
+    /// so there is nothing for the Sentinel to rescue — substituting it would silently downgrade
+    /// a live session's trust level instead.
+    /// </summary>
+    [Fact]
+    public void Rehandshake_UnknownPskId_IsFatal()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity, new RecordPskResolver(new InMemoryPairingRecordStore()));
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var hs = framing.ProcessInbound(WireFrame.FromText(msg1));
+        server.CompleteHandshake(Assert.Single(hs.Replies!).PayloadAsText());
+
+        byte[] unknownPsk = RandomNumberGenerator.GetBytes(32);
+        var result = framing.ProcessInbound(
+            new WireFrame(WireFrameKind.Binary, server.StartRehandshake(unknownPsk)));
+
+        Assert.Contains($"no PSK matches psk_id {NoiseConstants.DerivePskId(unknownPsk)}", result.FatalReason);
         Assert.False(framing.IsTransportReady);
     }
 
+    /// <summary>
+    /// A failed stored-pubkey post-match check is a misbinding, not a miss: the psk_id <i>did</i>
+    /// match a record, but that record is bound to another server. connection.md § Sentinel
+    /// Fallback excludes it from the fallback explicitly, so it fails even on the initial
+    /// handshake.
+    /// </summary>
     [Fact]
     public void Handshake_PskBoundToOtherServer_IsFatal()
     {
@@ -113,7 +164,42 @@ public class NoiseWireFramingTests
         framing.ProcessInbound(WireFrame.FromText(serverInit));
 
         var result = framing.ProcessInbound(WireFrame.FromText(msg1));
-        Assert.NotNull(result.FatalReason);
+        Assert.Contains("bound to a different server_id", result.FatalReason);
+        Assert.False(framing.IsTransportReady);
+    }
+
+    /// <summary>
+    /// connection.md § Sentinel Fallback: "The signal alone MUST NOT cause either side to remove
+    /// or replace a record - records change only through pairing or management." Falling back is
+    /// a decision about one handshake, so every record the client held before it survives it.
+    /// </summary>
+    [Fact]
+    public void SentinelFallback_LeavesTheRecordStoreUntouched()
+    {
+        var identity = SendspinIdentity.Generate();
+        var store = new InMemoryPairingRecordStore();
+        store.Upsert(new PairingRecord(
+            RandomNumberGenerator.GetBytes(32), PskCategory.LongTerm, "SomeOtherServerIdAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+        store.Upsert(new PairingRecord(RandomNumberGenerator.GetBytes(32), PskCategory.Pairing));
+        var before = Snapshot(store);
+
+        byte[] unknownPsk = RandomNumberGenerator.GetBytes(32);
+        var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
+        var server = new TestNoiseServer(
+            identity.PublicKey,
+            NoiseConstants.SentinelPsk.ToArray(),
+            advertisedPskId: NoiseConstants.DerivePskId(unknownPsk));
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var result = framing.ProcessInbound(WireFrame.FromText(msg1));
+        server.CompleteHandshake(Assert.Single(result.Replies!).PayloadAsText());
+
+        // Positive control: without the fallback the handshake would have failed here, and
+        // "the store is unchanged" would hold for the uninteresting reason.
+        Assert.Equal(PskCategory.Sentinel, framing.MatchedPsk!.Category);
+        Assert.Equal(before, Snapshot(store));
     }
 
     [Fact]
@@ -433,6 +519,17 @@ public class NoiseWireFramingTests
         server.CompleteHandshake(reply.PayloadAsText());
         return (framing, server);
     }
+
+    /// <summary>
+    /// The store's contents by value, ordered, for an equality check that a later Upsert of the
+    /// same record under a new <c>Used</c> flag would fail — record instances alone compare equal
+    /// whenever the store handed back the ones it was given.
+    /// </summary>
+    private static List<(string PskId, PskCategory Category, string? ServerId, bool Used)> Snapshot(
+        IPairingRecordStore store) =>
+        [.. store.List()
+            .Select(r => (r.PskId, r.Category, r.ServerId, r.Used))
+            .OrderBy(r => r.PskId, StringComparer.Ordinal)];
 
     private sealed class BoundResolver(string serverId) : INoisePskResolver
     {

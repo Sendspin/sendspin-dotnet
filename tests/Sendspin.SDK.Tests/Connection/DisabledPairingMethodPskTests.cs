@@ -7,11 +7,17 @@ namespace Sendspin.SDK.Tests.Connection;
 
 /// <summary>
 /// connection.md: "A PSK for a pairing method disabled in the client's pairing config is
-/// excluded from the candidate set, so a handshake referencing it fails as a lookup miss."
+/// excluded from the candidate set, so a handshake referencing it is treated as a lookup miss."
 /// The resolver used to hand back any matching record, leaving a server with a stale or
 /// leaked Pairing PSK holding an authenticated channel that was only refused later, if it
 /// went on to attempt a pairing activation (#202).
 /// </summary>
+/// <remarks>
+/// A lookup miss in the initial handshake is answered with the Sentinel PSK (connection.md
+/// § Sentinel Fallback), so the observable outcome of the exclusion is a Sentinel-keyed
+/// session at trust 'none' rather than a failed handshake. Either way the disabled record
+/// never authenticates the channel, which is the property #202 is about.
+/// </remarks>
 public class DisabledPairingMethodPskTests
 {
     [Fact]
@@ -24,10 +30,10 @@ public class DisabledPairingMethodPskTests
 
         var result = Handshake(SendspinIdentity.Generate(), resolver, psk, out var framing);
 
-        // A lookup miss, not a late refusal: the handshake never reaches transport mode, so
-        // there is no authenticated channel to refuse anything on.
-        Assert.Contains($"no PSK matches psk_id {NoiseConstants.DerivePskId(psk)}", result.FatalReason);
-        Assert.False(framing.IsTransportReady);
+        // A lookup miss, not a late refusal: the excluded record never keys the session, so
+        // there is no Pairing-trust channel to refuse a pairing activation on later.
+        Assert.Null(result.FatalReason);
+        Assert.Equal(PskCategory.Sentinel, framing.MatchedPsk!.Category);
     }
 
     [Fact]
@@ -43,7 +49,8 @@ public class DisabledPairingMethodPskTests
         var resolver = new RecordPskResolver(store, () => enabled);
         var identity = SendspinIdentity.Generate();
 
-        Assert.NotNull(Handshake(identity, resolver, psk, out _).FatalReason);
+        Handshake(identity, resolver, psk, out var disabled);
+        Assert.Equal(PskCategory.Sentinel, disabled.MatchedPsk!.Category);
 
         enabled = true;
         var result = Handshake(identity, resolver, psk, out var framing);
@@ -116,7 +123,8 @@ public class DisabledPairingMethodPskTests
 
             var result = framing.ProcessInbound(WireFrame.FromText(msg1));
 
-            Assert.Contains($"no PSK matches psk_id {NoiseConstants.DerivePskId(psk)}", result.FatalReason);
+            Assert.Null(result.FatalReason);
+            Assert.Equal(PskCategory.Sentinel, framing.MatchedPsk!.Category);
         }
     }
 
