@@ -706,6 +706,13 @@ For older release notes (v5.0.0 and earlier), see https://github.com/chrisuthe/w
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
+
+    <!--
+      The package carries vendored third-party source, whose licenses require their notices to
+      travel with any distribution. Shipping the notices only in the git repository would not
+      cover a consumer who only ever sees the .nupkg.
+    -->
+    <None Include="..\..\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>

@@ -77,8 +77,9 @@ internal static class SyncCorrectionPolicy
     /// <param name="sampleRate">Sample rate in Hz.</param>
     /// <param name="channels">Channel count.</param>
     /// <param name="selfApplied">
-    /// True for a corrector that has no resampler and must realize the continuous tier itself,
-    /// which is the case for <see cref="TimedAudioBuffer.Read"/>. Such a caller gets the same
+    /// True for a corrector that has no resampler and must realize the continuous tier itself:
+    /// <see cref="TimedAudioBuffer.Read"/> always, and an external corrector that selected
+    /// <see cref="SyncCorrectionMechanism.FrameStepping"/>. Such a caller gets the same
     /// speed change expressed as frame stepping — the spec's own suggested strategy
     /// (roles/player/v1.md:169-176) and what the C++ reference does per chunk — instead of a
     /// rate it has nothing to apply to. False for a caller that drives a resampler.
