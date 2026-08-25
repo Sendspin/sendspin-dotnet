@@ -4126,6 +4126,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         bool wasConverged = _clockSynchronizer.IsConverged;
         _clockSynchronizer.ProcessMeasurement(best.T1, best.T2, best.T3, best.T4);
 
+        // Media and state held for a display moment translate their server timestamps through
+        // this offset every time the scheduler looks at them, so this correction reaches them on
+        // its own — but not the sleep the scheduler is already in, which was sized against the
+        // previous offset. Before the first measurement that sleep runs until the server's
+        // uptime has elapsed on the local clock, so the very first correction is the one that
+        // most needs the loop woken to notice it.
+        _displayScheduler.NotifyClockAdjusted();
+
         var status = _clockSynchronizer.GetStatus();
         if (status.MeasurementCount <= 10 || status.MeasurementCount % 10 == 0)
         {

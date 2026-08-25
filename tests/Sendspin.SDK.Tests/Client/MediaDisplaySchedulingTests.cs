@@ -125,7 +125,7 @@ public class MediaDisplaySchedulingTests
         FakeSendspinConnection connection,
         FakePrecisionTimer timer,
         long through,
-        ConvergedClockSynchronizer? clock = null)
+        IClockSynchronizer? clock = null)
     {
         var marker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -925,6 +925,150 @@ public class MediaDisplaySchedulingTests
         """{"type":"stream/start","payload":{"artwork":{"channels":["""
         + string.Join(",", channels)
         + "]}}}";
+
+    // -- Display times held across a clock that has not converged yet -----------------------
+
+    /// <summary>
+    /// The gap a server's uptime puts between the two clocks before any offset is known — an
+    /// hour, so an item translated against the zero offset lands somewhere no test could mistake
+    /// for merely late.
+    /// </summary>
+    private const long UptimeOffsetMicroseconds = 3_600_000_000;
+
+    /// <summary>
+    /// Clock that maps the two domains identically until its first measurement lands and reports
+    /// <see cref="UptimeOffsetMicroseconds"/> from then on. The shape of a real client's first
+    /// second: the offset is zero until a <c>client/time</c> exchange completes, and every server
+    /// timestamp arriving in the meantime is the server's uptime.
+    /// </summary>
+    /// <remarks>
+    /// Reports converged throughout, as <see cref="ConvergedClockSynchronizer"/> does: what these
+    /// tests vary is the offset, and an unconverged clock would additionally withhold the initial
+    /// <c>client/state</c>, which is <c>InitialClientStateGatingTests</c>' subject.
+    /// </remarks>
+    private sealed class ConvergingClockSynchronizer : IClockSynchronizer
+    {
+        /// <summary>Offset in effect, server − client as KalmanClockSynchronizer defines it.</summary>
+        public long OffsetMicroseconds { get; private set; }
+
+        public bool IsConverged => true;
+
+        public bool HasMinimalSync => true;
+
+        public double OutputDelayMs { get; set; }
+
+        public long ServerToClientTime(long serverTime) => serverTime - OffsetMicroseconds;
+
+        public long ServerToClientTimeUncompensated(long serverTime) => serverTime - OffsetMicroseconds;
+
+        public long ClientToServerTime(long clientTime) => clientTime + OffsetMicroseconds;
+
+        public void ProcessMeasurement(long t1, long t2, long t3, long t4) =>
+            OffsetMicroseconds = UptimeOffsetMicroseconds;
+
+        public void Reset() => OffsetMicroseconds = 0;
+
+        public ClockSyncStatus GetStatus() => new() { IsConverged = true };
+    }
+
+    /// <summary>
+    /// Runs one time-sync burst to completion against the fake's synthetic replies, which is what
+    /// feeds <see cref="ConvergingClockSynchronizer"/> its measurement — and, on the way, the
+    /// client's own notification that held display times need re-deriving.
+    /// </summary>
+    private static async Task ConvergeClockAsync(
+        SendspinClientService client, FakeSendspinConnection connection)
+    {
+        connection.RespondToTimeSync = true;
+        await client.SendTimeSyncBurstAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Artwork_HeldWhileTheClockConverges_IsRaisedAtItsTrueDisplayTime()
+    {
+        // A client joining mid-track is handed server/state and artwork before its first
+        // client/time exchange completes. The offset is still zero then, so the server's
+        // timestamp — its uptime — translates to a local moment an hour out: converted once at
+        // submission, that is frozen in, and the image is never shown. Every pending item stores
+        // the server timestamp instead and translates it at each evaluation, so the offset the
+        // burst establishes moments later applies to what is already held.
+        var clock = new ConvergingClockSynchronizer();
+        var (client, connection, timer) = SchedulingClient(clockSynchronizer: clock);
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        long displayTime = Now + 1_000;
+        long serverTimestamp = displayTime + UptimeOffsetMicroseconds;
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(serverTimestamp, new byte[] { 9 }));
+
+        Assert.Empty(received);
+
+        await ConvergeClockAsync(client, connection);
+
+        timer.CurrentTime = displayTime;
+        await WaitUntilAsync(() => received.Count == 1, "the artwork held across the clock correction");
+
+        Assert.Equal(serverTimestamp, received[0].Timestamp);
+        Assert.Equal(new byte[] { 9 }, received[0].ImageData);
+    }
+
+    [Fact]
+    public async Task Metadata_HeldWhileTheClockConverges_IsAppliedAtItsTrueMoment()
+    {
+        // The same join, on a role the client applies rather than raises: the scheduled state
+        // updates translate their timestamps through the same conversion and must survive the
+        // same correction.
+        var clock = new ConvergingClockSynchronizer();
+        var (client, connection, timer) = SchedulingClient(clockSynchronizer: clock);
+        using var _c = client;
+
+        long effectiveAt = Now + 1_000;
+        connection.RaiseTextMessageReceived(MetadataState(
+            $$"""{"timestamp":{{effectiveAt + UptimeOffsetMicroseconds}},"title":"Playing"}"""));
+
+        Assert.Null(client.CurrentGroup!.Metadata);
+
+        await ConvergeClockAsync(client, connection);
+
+        timer.CurrentTime = effectiveAt;
+        await WaitUntilAsync(
+            () => client.CurrentGroup?.Metadata?.Title == "Playing",
+            "the metadata held across the clock correction");
+    }
+
+    [Fact]
+    public async Task VisualizerFrame_HeldWhileTheClockConverges_IsDroppedWhenTheCorrectionMakesItStale()
+    {
+        // Lateness is judged against the conversion in force at dispatch, not the one that was
+        // in force on arrival. Against the zero offset this frame looks an hour early, so it is
+        // held rather than dropped; the correction reveals it as five seconds late, which is far
+        // past the threshold, and stale visualization frames are never rendered.
+        var clock = new ConvergingClockSynchronizer();
+        var (client, connection, timer) = SchedulingClient(clockSynchronizer: clock);
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+
+        connection.RaiseBinaryMessageReceived(
+            LoudnessFrame(Now - 5_000_000 + UptimeOffsetMicroseconds, 40_000));
+
+        Assert.Empty(frames);
+
+        await ConvergeClockAsync(client, connection);
+
+        // Past the moment the corrected conversion puts the frame at, then past the one the
+        // uncorrected conversion had put it at. Neither may render it: the first because it is
+        // five seconds stale by then, the second because that moment was never the frame's.
+        await DrainPastAsync(client, connection, timer, Now + 5_000, clock);
+        Assert.Empty(frames);
+
+        await DrainPastAsync(
+            client, connection, timer, Now - 5_000_000 + UptimeOffsetMicroseconds, clock);
+        Assert.Empty(frames);
+    }
 
     // -- Scheduled applies racing a disconnect ----------------------------------------------
 
