@@ -9,9 +9,17 @@ namespace Sendspin.SDK.Audio;
 /// </summary>
 /// <remarks>
 /// <para>
-/// This interface abstracts the correction strategy, allowing platforms to implement
-/// their own correction logic. The SDK provides <see cref="SyncCorrectionCalculator"/>
-/// as a default implementation that mirrors the CLI's tiered correction approach.
+/// <b>This is the advanced seam, not the default.</b> It belongs to players that drive
+/// <see cref="ITimedAudioBuffer.ReadRaw"/> because the platform owns a smooth-correction
+/// mechanism the buffer cannot drive from the inside — hardware rate adjust, device-clock
+/// steering, or a resampler already in the output chain. A player without one should call
+/// <see cref="ITimedAudioBuffer.Read"/>, which applies the same spec-fixed ladder itself.
+/// </para>
+/// <para>
+/// The interface abstracts the correction <em>mechanism</em>, not the policy: the thresholds and the
+/// ±0.5% cap are spec constants either way. The SDK provides
+/// <see cref="SyncCorrectionCalculator"/> as a default implementation that mirrors the CLI's
+/// tiered correction approach.
 /// </para>
 /// <para>
 /// Usage pattern:

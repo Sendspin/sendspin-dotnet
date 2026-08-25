@@ -147,38 +147,51 @@ public interface ITimedAudioBuffer : IDisposable
     void Write(ReadOnlySpan<float> samples, long serverTimestamp);
 
     /// <summary>
-    /// Reads samples that are ready for playback at the current time.
-    /// Called from audio output thread. Applies internal sync correction (drop/insert).
+    /// Reads samples that are ready for playback at the current time, applying the spec's
+    /// sync correction. Called from audio output thread. <b>This is the default read path.</b>
     /// </summary>
     /// <param name="buffer">Buffer to fill with samples.</param>
     /// <param name="currentLocalTime">Current local time in microseconds.</param>
     /// <returns>Number of samples written.</returns>
     /// <remarks>
     /// <para>
-    /// This path corrects end to end and needs nothing from the caller: below the dead band it
-    /// leaves the audio alone, between the dead band and
+    /// New players should start here. This path corrects end to end and needs nothing from the
+    /// caller: below the dead band it leaves the audio alone, between the dead band and
     /// <see cref="SyncCorrectionOptions.HardSyncThresholdMicroseconds"/> it drops or duplicates
     /// whole frames at an interval bounded by the spec's ±0.5% cap (the strategy
     /// roles/player/v1.md:169-176 suggests, and what the C++ reference does per chunk), and
-    /// above that threshold it snaps in one discontinuity.
+    /// above that threshold it snaps in one discontinuity. Hand it the buffer your audio
+    /// callback wants filled and the player is conformant with no correction code of its own.
+    /// </para>
+    /// <para>
+    /// Every tolerance in that ladder is a spec constant, so there is no correction <em>policy</em>
+    /// left for an application to pick — only the <em>mechanism</em>. <see cref="ReadRaw"/> is the
+    /// advanced seam for platforms that own a smoother mechanism than stepping whole frames
+    /// (hardware rate adjust, device-clock steering, a resampler already in the output chain);
+    /// it is the exception, not the starting point.
     /// </para>
     /// <para>
     /// Because it applies the correction itself, <see cref="TargetPlaybackRate"/> stays at 1.0
-    /// here — do not also drive a resampler from it, or the same error is corrected twice. For
-    /// external correction control use <see cref="ReadRaw"/> instead.
+    /// here — do not also drive a resampler from it, or the same error is corrected twice.
     /// </para>
     /// </remarks>
-    [Obsolete("Use ReadRaw() with external ISyncCorrectionProvider for correction control. This method applies internal correction.")]
     int Read(Span<float> buffer, long currentLocalTime);
 
     /// <summary>
-    /// Reads samples without applying internal sync correction.
-    /// Use this with an external <see cref="ISyncCorrectionProvider"/> for correction control.
+    /// Reads samples without applying the continuous sync correction, leaving it to an external
+    /// <see cref="ISyncCorrectionProvider"/>. <b>Advanced seam — see <see cref="Read"/> first.</b>
     /// </summary>
     /// <param name="buffer">Buffer to fill with samples.</param>
     /// <param name="currentLocalTime">Current local time in microseconds.</param>
     /// <returns>Number of samples written (always matches samples read from buffer).</returns>
     /// <remarks>
+    /// <para>
+    /// Take this path when the platform owns a smooth-correction mechanism the buffer cannot
+    /// drive from the inside — hardware rate adjust, device-clock steering, or a resampler
+    /// already in the output chain. What to correct, and by how much, is fixed by the spec on
+    /// both paths, so a player with no such mechanism gains nothing here: it would be
+    /// reimplementing <see cref="Read"/>'s frame stepping outside the SDK.
+    /// </para>
     /// <para>
     /// Unlike <see cref="Read"/>, this method does NOT apply continuous drop/insert or
     /// rate correction. It still calculates and updates <see cref="SyncErrorMicroseconds"/>

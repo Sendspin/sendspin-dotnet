@@ -104,8 +104,8 @@ public sealed class SyncCorrectionOptions
     /// caller lowers the resampling threshold below this one.
     /// </para>
     /// <para>
-    /// The snap is applied by <see cref="TimedAudioBuffer"/> itself on both the
-    /// internal and the external (<c>ReadRaw</c>) correction paths, because skipping
+    /// The snap is applied by <see cref="TimedAudioBuffer"/> itself on both the default
+    /// (<c>Read</c>) and the external (<c>ReadRaw</c>) correction paths, because skipping
     /// buffered content or manufacturing silence is a buffer-timeline operation an
     /// external corrector cannot perform on the samples it has already been handed.
     /// </para>

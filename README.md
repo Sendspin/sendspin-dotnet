@@ -11,7 +11,7 @@ Cross-platform .NET SDK implementing the [Sendspin Protocol](https://www.sendspi
 - **Microsecond-precision sync** - Kalman filter clock synchronization across devices
 - **Built-in codecs** - PCM, FLAC, and Opus decoding out of the box
 - **Server discovery** - mDNS-based automatic server finding
-- **External sync correction** - SDK reports error, your app chooses the correction strategy
+- **Sync correction built in** - `TimedAudioBuffer.Read()` applies the spec's strategy; `ReadRaw()` hands the error out for platforms with their own rate-control mechanism
 - **NativeAOT & trimming** - Fully compatible with `PublishAot` for single-file native executables
 - **Cross-platform** - Windows, Linux, macOS (.NET 8.0 / .NET 10.0)
 
@@ -143,7 +143,7 @@ await client.SendCommandAsync("play");
 await client.SetVolumeAsync(75);
 ```
 
-You provide the audio output by implementing `IAudioPlayer` for your platform (WASAPI, PulseAudio, CoreAudio, SDL2, etc.). See the [NuGet package README](src/Sendspin.SDK/README.md) for the full API reference, sync correction system, and migration guides.
+You provide the audio output by implementing `IAudioPlayer` for your platform (WASAPI, PulseAudio, CoreAudio, SDL2, etc.) and pulling samples through `TimedAudioBuffer.Read()`, which applies the spec's sync correction for you. See the [NuGet package README](src/Sendspin.SDK/README.md) for the player quickstart, the full API reference, the sync correction system, and migration guides.
 
 ## Example Projects
 
