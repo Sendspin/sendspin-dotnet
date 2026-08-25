@@ -4946,6 +4946,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void HandleStreamClear(string json)
     {
+        // No null-payload guard of its own, unlike its two siblings: "payload": null never gets
+        // past the Deserialize below, because PeerMessageValidation's stream/clear arm rejects
+        // it there — and this handler is synchronous, so that JsonException lands in
+        // OnTextMessageReceived's malformed-payload close rather than in a fire-and-forget
+        // swallow. NullStreamClearPayload_ClosesTheConnection pins that end to end.
         var message = MessageSerializer.Deserialize<StreamClearMessage>(json);
         if (message is null)
         {
