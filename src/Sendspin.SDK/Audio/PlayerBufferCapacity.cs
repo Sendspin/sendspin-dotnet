@@ -42,6 +42,22 @@ public static class PlayerBufferCapacity
     public const int DefaultDecodedBufferMilliseconds = 30_000;
 
     /// <summary>
+    /// Minimum ongoing buffer depth, in milliseconds, that the SDK defaults to — the value a
+    /// player reports as <c>min_buffer_ms</c> and the depth its readiness gate waits for. Used
+    /// both by <c>ClientCapabilities.MinBufferMs</c> and by
+    /// <see cref="TimedAudioBuffer.MinBufferMilliseconds"/>, so the two agree unless a caller
+    /// deliberately changes one.
+    /// </summary>
+    /// <remarks>
+    /// The server schedules a live stream's first chunk only <c>min_buffer_ms +
+    /// output_delay_ms</c> ahead (spec roles/player/v1.md:28), so this is simultaneously what
+    /// the client asks the server to keep queued and the most a live stream can have buffered
+    /// before its scheduled start. 150 ms is a conservative LAN starting point; raise it — on
+    /// both sides — for remote or high-latency links.
+    /// </remarks>
+    public const int DefaultMinBufferMilliseconds = 150;
+
+    /// <summary>
     /// Fraction of the real capacity that is advertised, as a denominator: the advertisement is
     /// <c>(N-1)/N</c> of what the buffer holds. Matches the C++ reference's
     /// <c>AUDIO_BUFFER_ADVERTISE_DENOMINATOR</c>, and leaves headroom for the burst that is
@@ -62,18 +78,17 @@ public static class PlayerBufferCapacity
     private const double FlacCompressionFloor = 0.5;
 
     /// <summary>
-    /// Byte rate assumed for an <c>opus</c> format that declares no bitrate.
+    /// Highest byte rate an <c>opus</c> format is assumed to occupy, whatever it declares.
     /// </summary>
     /// <remarks>
     /// Safety runs one way here. Assuming a rate <em>higher</em> than the server actually
     /// encodes at inflates the advertisement, because more real seconds then fit in a byte than
     /// were assumed — which is how falling through to the PCM rate overstated a bitrate-less
-    /// Opus entry roughly sixfold. The fallback therefore assumes a low bitrate: 64 kbps sits
+    /// Opus entry roughly sixfold. The assumption is therefore a low bitrate: 64 kbps sits
     /// below anything a server would choose for music, without collapsing the advertisement to
-    /// something unusable. Declare <see cref="AudioFormat.Bitrate"/> to get an advertisement
-    /// matched to what you actually asked for.
+    /// something unusable.
     /// </remarks>
-    private const int UndeclaredOpusBytesPerSecond = 64 * 1000 / 8;
+    private const int MinimumOpusBytesPerSecond = 64 * 1000 / 8;
 
     /// <summary>
     /// Compressed bytes per second the given format is expected to occupy on the wire.
@@ -90,10 +105,16 @@ public static class PlayerBufferCapacity
 
         return format.Codec?.ToLowerInvariant() switch
         {
-            // The bitrate we ask for is the rate the server encodes at.
-            "opus" when format.Bitrate > 0 => format.Bitrate.Value * 1000 / 8,
-            "opus" => UndeclaredOpusBytesPerSecond,
-            "flac" => (int)(pcmBytesPerSecond * FlacCompressionFloor),
+            // A declared bitrate may lower the assumption but never raise it. Nothing
+            // negotiates it: client/hello's supported_formats entry is codec, channels,
+            // sample_rate and bit_depth (roles/player/v1.md:13-17), so the server encodes at
+            // whatever rate it likes and a client asking for 256 kbps may be sent 96. Sizing
+            // the promise off the request then overstates it by the ratio between them, and
+            // the server fills the difference legally with audio the buffer cannot hold.
+            AudioCodecs.Opus when format.Bitrate > 0 =>
+                Math.Min(format.Bitrate.Value * 1000 / 8, MinimumOpusBytesPerSecond),
+            AudioCodecs.Opus => MinimumOpusBytesPerSecond,
+            AudioCodecs.Flac => (int)(pcmBytesPerSecond * FlacCompressionFloor),
             _ => (int)pcmBytesPerSecond,
         };
     }
