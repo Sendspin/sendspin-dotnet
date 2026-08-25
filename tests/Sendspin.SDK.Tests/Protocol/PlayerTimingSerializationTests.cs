@@ -102,4 +102,28 @@ public class PlayerTimingSerializationTests
         Assert.Equal(Commands.SetStaticDelay, msg.Payload.Player.Command);
         Assert.Equal(250, msg.Payload.Player.StaticDelayMs);
     }
+
+    [Fact]
+    public void ServerCommand_SetOutputDelay_Deserializes()
+    {
+        // Spec 168a677 (PR #164) renamed the command to set_output_delay and the field to
+        // output_delay_ms, with no alias on either. Inbound tolerance only: what the SDK sends
+        // stays on the pre-rename names until servers adopt the rename.
+        var json = """
+        {
+            "type": "server/command",
+            "payload": {
+                "player": { "command": "set_output_delay", "output_delay_ms": 120 }
+            }
+        }
+        """;
+
+        var msg = MessageSerializer.Deserialize<ServerCommandMessage>(json);
+
+        Assert.NotNull(msg);
+        Assert.NotNull(msg.Payload.Player);
+        Assert.Equal(Commands.SetOutputDelay, msg.Payload.Player.Command);
+        Assert.Equal(120, msg.Payload.Player.OutputDelayMs);
+        Assert.Null(msg.Payload.Player.StaticDelayMs);
+    }
 }

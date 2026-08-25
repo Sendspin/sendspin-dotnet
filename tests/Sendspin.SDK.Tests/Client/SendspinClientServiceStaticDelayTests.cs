@@ -16,6 +16,10 @@ public class SendspinClientServiceStaticDelayTests
         { "type": "server/command", "payload": { "player": { "command": "set_static_delay", "static_delay_ms": {{delayMs}} } } }
         """;
 
+    private static string SetOutputDelayCommand(int delayMs) => $$"""
+        { "type": "server/command", "payload": { "player": { "command": "set_output_delay", "output_delay_ms": {{delayMs}} } } }
+        """;
+
     [Fact]
     public void SetStaticDelay_AppliesDelayAndPersists()
     {
@@ -62,6 +66,61 @@ public class SendspinClientServiceStaticDelayTests
         using var _c = client;
 
         connection.RaiseTextMessageReceived(SetStaticDelayCommand(250));
+
+        Assert.Equal(0.0, sync.StaticDelayMs);
+        Assert.Empty(store.Saved);
+    }
+
+    [Fact]
+    public void SetOutputDelay_AppliesDelayAndPersists()
+    {
+        // Spec 168a677 renamed the command and its field with no alias; a server that has
+        // adopted the rename must land on the same delay as the pre-rename shape does.
+        var sync = new KalmanClockSynchronizer();
+        var store = new FakeStaticDelayStore();
+        var (client, connection, _) = TestClient.Create(configure: options => options with
+        {
+            ClockSynchronizer = sync,
+            StaticDelayStore = store,
+        });
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(SetOutputDelayCommand(120));
+
+        Assert.Equal(120.0, sync.StaticDelayMs);
+        Assert.Equal(new[] { 120.0 }, store.Saved);
+    }
+
+    [Fact]
+    public void SetOutputDelay_WithBothFields_PrefersOutputDelayMs()
+    {
+        // A transitional server may send both names. The post-rename field is the authoritative
+        // one, so it wins rather than the legacy field it replaced.
+        var sync = new KalmanClockSynchronizer();
+        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = sync });
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/command", "payload": { "player": { "command": "set_output_delay", "output_delay_ms": 120, "static_delay_ms": 250 } } }
+            """);
+
+        Assert.Equal(120.0, sync.StaticDelayMs);
+    }
+
+    [Fact]
+    public void SetOutputDelay_IgnoredWhenCapabilityDisabled()
+    {
+        var sync = new KalmanClockSynchronizer();
+        var store = new FakeStaticDelayStore();
+        var (client, connection, _) = TestClient.Create(configure: options => options with
+        {
+            ClockSynchronizer = sync,
+            Capabilities = new ClientCapabilities { SupportsSetStaticDelay = false },
+            StaticDelayStore = store,
+        });
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(SetOutputDelayCommand(120));
 
         Assert.Equal(0.0, sync.StaticDelayMs);
         Assert.Empty(store.Saved);

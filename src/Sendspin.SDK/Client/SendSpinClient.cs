@@ -4403,15 +4403,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Apply set_static_delay only when advertised as supported and a value is present.
         // Per spec the value is 0-5000 ms (negatives are not supported), so we clamp to that range.
-        if (player.Command == Commands.SetStaticDelay
+        //
+        // Spec 168a677 (spec PR #164) renamed the command to 'set_output_delay' and the field to
+        // 'output_delay_ms' with no alias, so both spellings are accepted here — a client fielded
+        // now keeps working the day a server flips. The post-rename field wins if both arrive.
+        // Only the read side changed: what this client advertises and reports is still the old
+        // naming, until servers adopt the rename.
+        var requestedDelayMs = player.OutputDelayMs ?? player.StaticDelayMs;
+        if ((player.Command == Commands.SetStaticDelay || player.Command == Commands.SetOutputDelay)
             && _capabilities.SupportsSetStaticDelay
-            && player.StaticDelayMs.HasValue)
+            && requestedDelayMs.HasValue)
         {
-            var clamped = Math.Clamp(player.StaticDelayMs.Value, 0, 5000);
-            if (clamped != player.StaticDelayMs.Value)
+            var clamped = Math.Clamp(requestedDelayMs.Value, 0, 5000);
+            if (clamped != requestedDelayMs.Value)
             {
                 _logger.LogWarning("server/command [{Player}]: static_delay_ms clamped from {Requested}ms to {Clamped}ms",
-                    _capabilities.ClientName, player.StaticDelayMs.Value, clamped);
+                    _capabilities.ClientName, requestedDelayMs.Value, clamped);
             }
 
             _clockSynchronizer.StaticDelayMs = clamped;
