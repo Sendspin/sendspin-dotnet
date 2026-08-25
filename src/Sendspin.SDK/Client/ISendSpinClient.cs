@@ -334,6 +334,29 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Event raised when group state updates (playback, metadata, volume).
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The <c>metadata</c> and <c>color</c> role objects of a <c>server/state</c> carry a
+    /// timestamp at which they take effect. One stamped in the future is held as that role's
+    /// single pending update — the role keeps its current state until then — and this event
+    /// announces the merge when it happens, not when it was scheduled. Any further message for
+    /// the role takes the slot from it: another future-stamped one replaces it, and one stamped
+    /// in the past or present (or carrying no timestamp, or a null role object) is merged at once
+    /// and discards it. Timestamps are never compared between messages, so the newest wins even
+    /// when it takes effect sooner than the update it displaces.
+    /// </para>
+    /// <para>
+    /// So <see cref="GroupState.Metadata"/> and its <c>Timestamp</c> always describe applied
+    /// state, which is what the spec's track-position extrapolation must read from: a scheduled
+    /// update never moves the position anchor of the track still playing.
+    /// </para>
+    /// <para>
+    /// <b>Threading:</b> as for <see cref="VisualizationReceived"/> — an update that takes effect
+    /// on arrival is announced on the receive loop, as before, while one applied at a scheduled
+    /// moment is announced on an SDK background thread. A subscriber must be safe to call from
+    /// either, and must marshal to a UI thread itself.
+    /// </para>
+    /// </remarks>
     event EventHandler<GroupState>? GroupStateChanged;
 
     /// <summary>
@@ -369,10 +392,17 @@ public interface ISendspinClient : IAsyncDisposable
     event EventHandler<ArtworkClearedEventArgs>? ArtworkCleared;
 
     /// <summary>
-    /// Event raised whenever a <c>server/state</c> carries a <c>color</c> object (the <c>color</c>
-    /// role) — including updates that leave the resolved values unchanged. Carries the current
-    /// merged <see cref="ColorPalette"/>, also available as <see cref="GroupState.Colors"/>.
+    /// Event raised whenever a <c>color</c> object from a <c>server/state</c> takes effect (the
+    /// <c>color</c> role) — including updates that leave the resolved values unchanged. Carries
+    /// the current merged <see cref="ColorPalette"/>, also available as
+    /// <see cref="GroupState.Colors"/>.
     /// </summary>
+    /// <remarks>
+    /// A future-stamped <c>color</c> object is held rather than merged, so this event marks the
+    /// moment the palette takes effect rather than the moment it arrived — a renderer may blend
+    /// on it. See <see cref="GroupStateChanged"/> for the pending-update rules and the thread
+    /// each case is raised on.
+    /// </remarks>
     event EventHandler<ColorPalette>? ColorChanged;
 
     /// <summary>

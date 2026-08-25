@@ -1559,7 +1559,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             // Same reason, and additionally: the clock synchronizer resets on re-handshake,
             // so a pending item's display time was computed against an offset that no longer
-            // holds and cannot be honoured on the new connection.
+            // holds and cannot be honoured on the new connection. That covers the scheduled
+            // metadata and color updates too — the first server/state of the next connection
+            // has to carry each role's full state anyway.
             _displayScheduler.Flush();
         }
 
@@ -4272,34 +4274,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // that role's state (sent when the role leaves active_roles, and on pairing quiesce),
         // present-with-value = merge the delta. Clearing one role leaves the others alone.
         // Every branch below is announced by the GroupStateChanged at the end of this method,
-        // which is how a UI learns to drop the deactivated role's data (#196).
+        // which is how a UI learns to drop the deactivated role's data (#196). What that
+        // announcement carries is the state as it stands: a scheduled metadata or color update
+        // has not been merged yet and announces itself when it is (spec #135, pending merge).
 
         // Update metadata from server/state (merge with existing to preserve data across partial updates)
         if (payload.Metadata.IsPresent)
         {
-            if (payload.Metadata.Value is not { } meta)
-            {
-                // Dropping the merge base too, not just the exposed object: a later partial
-                // update must start from empty rather than resurrect pre-clear fields.
-                _currentGroup.Metadata = null;
-            }
-            else
-            {
-                var existing = _currentGroup.Metadata ?? new TrackMetadata();
+            var meta = payload.Metadata.Value;
 
-                // All fields use Optional<T>: absent = keep existing, present-null = clear, present-with-value = update.
-                _currentGroup.Metadata = new TrackMetadata
-                {
-                    Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
-                    Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
-                    Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
-                    AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
-                    Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
-                    ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
-                    Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
-                    Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
-                    Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
-                };
+            // A future timestamp defers the merge to that moment; anything else — a past or
+            // present timestamp, no timestamp, or the null role object — merges now and
+            // discards whatever update was being held.
+            long? takesEffectAt = meta is not null && meta.Timestamp.IsPresent ? meta.Timestamp.Value : null;
+
+            if (!_displayScheduler.TryScheduleStateUpdate(
+                    ScheduledStateRole.Metadata,
+                    takesEffectAt,
+                    () => ApplyScheduledMetadata(meta)))
+            {
+                ApplyMetadata(meta);
             }
         }
 
@@ -4346,33 +4340,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         // Merge color deltas (color role). Each field is Optional: absent keeps the existing color,
-        // present-null clears it, present-with-value updates it.
-        var colorChanged = payload.Color.IsPresent;
-        if (colorChanged)
+        // present-null clears it, present-with-value updates it. Scheduled exactly as metadata is.
+        var colorChanged = false;
+        if (payload.Color.IsPresent)
         {
-            // Mutated in place rather than replaced, so a consumer holding the ColorPalette it
-            // was handed by an earlier ColorChanged sees the update — including a clear.
-            var colors = _currentGroup.Colors;
+            var color = payload.Color.Value;
 
-            if (payload.Color.Value is not { } c)
+            if (!_displayScheduler.TryScheduleStateUpdate(
+                    ScheduledStateRole.Color,
+                    color?.Timestamp,
+                    () => ApplyScheduledColor(color)))
             {
-                colors.Timestamp = null;
-                colors.BackgroundDark = null;
-                colors.BackgroundLight = null;
-                colors.Primary = null;
-                colors.Accent = null;
-                colors.OnDark = null;
-                colors.OnLight = null;
-            }
-            else
-            {
-                colors.Timestamp = c.Timestamp ?? colors.Timestamp;
-                if (c.BackgroundDark.IsPresent) colors.BackgroundDark = c.BackgroundDark.Value;
-                if (c.BackgroundLight.IsPresent) colors.BackgroundLight = c.BackgroundLight.Value;
-                if (c.Primary.IsPresent) colors.Primary = c.Primary.Value;
-                if (c.Accent.IsPresent) colors.Accent = c.Accent.Value;
-                if (c.OnDark.IsPresent) colors.OnDark = c.OnDark.Value;
-                if (c.OnLight.IsPresent) colors.OnLight = c.OnLight.Value;
+                ApplyColor(color);
+                colorChanged = true;
             }
         }
 
@@ -4389,6 +4369,100 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             ColorChanged?.Invoke(this, _currentGroup.Colors);
         }
+    }
+
+    /// <summary>
+    /// Merges a <c>metadata</c> role object into the current state: a null object clears the
+    /// role, anything else applies its Optional deltas (absent = keep existing, present-null =
+    /// clear, present-with-value = update).
+    /// </summary>
+    private void ApplyMetadata(ServerMetadata? meta)
+    {
+        _currentGroup ??= new GroupState();
+
+        if (meta is null)
+        {
+            // Dropping the merge base too, not just the exposed object: a later partial
+            // update must start from empty rather than resurrect pre-clear fields.
+            _currentGroup.Metadata = null;
+            return;
+        }
+
+        var existing = _currentGroup.Metadata ?? new TrackMetadata();
+
+        // Merged against the state as it stands when the update takes effect, not as it stood
+        // when the message arrived: the spec's current state is the running merge of applied
+        // updates, and a scheduled update joins that running merge at its own moment.
+        _currentGroup.Metadata = new TrackMetadata
+        {
+            Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
+            Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
+            Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
+            AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
+            Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
+            ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
+            Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
+            Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
+            Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
+        };
+    }
+
+    /// <summary>
+    /// Merges a <c>color</c> role object into the current palette, in place rather than replacing
+    /// it, so a consumer holding the <see cref="ColorPalette"/> it was handed by an earlier
+    /// <see cref="ColorChanged"/> sees the update — including a clear.
+    /// </summary>
+    private void ApplyColor(ColorState? color)
+    {
+        _currentGroup ??= new GroupState();
+        var colors = _currentGroup.Colors;
+
+        if (color is null)
+        {
+            colors.Timestamp = null;
+            colors.BackgroundDark = null;
+            colors.BackgroundLight = null;
+            colors.Primary = null;
+            colors.Accent = null;
+            colors.OnDark = null;
+            colors.OnLight = null;
+            return;
+        }
+
+        colors.Timestamp = color.Timestamp ?? colors.Timestamp;
+        if (color.BackgroundDark.IsPresent) colors.BackgroundDark = color.BackgroundDark.Value;
+        if (color.BackgroundLight.IsPresent) colors.BackgroundLight = color.BackgroundLight.Value;
+        if (color.Primary.IsPresent) colors.Primary = color.Primary.Value;
+        if (color.Accent.IsPresent) colors.Accent = color.Accent.Value;
+        if (color.OnDark.IsPresent) colors.OnDark = color.OnDark.Value;
+        if (color.OnLight.IsPresent) colors.OnLight = color.OnLight.Value;
+    }
+
+    /// <summary>
+    /// Applies a held <c>metadata</c> update at its scheduled moment and announces it. The
+    /// <c>server/state</c> that carried it announced only the state as it stood then, so the
+    /// merge needs an announcement of its own.
+    /// </summary>
+    /// <remarks>
+    /// Runs on the scheduler's loop, not the receive loop — see
+    /// <see cref="ISendspinClient.GroupStateChanged"/> on threading.
+    /// </remarks>
+    private void ApplyScheduledMetadata(ServerMetadata? meta)
+    {
+        ApplyMetadata(meta);
+        GroupStateChanged?.Invoke(this, _currentGroup!);
+    }
+
+    /// <summary>
+    /// Applies a held <c>color</c> update at its scheduled moment and announces it, on the
+    /// scheduler's loop. <see cref="ColorChanged"/> marks the moment the palette takes effect,
+    /// which is here and not when the update was merely scheduled.
+    /// </summary>
+    private void ApplyScheduledColor(ColorState? color)
+    {
+        ApplyColor(color);
+        GroupStateChanged?.Invoke(this, _currentGroup!);
+        ColorChanged?.Invoke(this, _currentGroup!.Colors);
     }
 
     /// <summary>
@@ -4663,6 +4737,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         var payload = message.Payload;
+        DiscardArtworkForReconfiguredChannels(LastStreamStart?.Artwork, payload.Artwork);
         LastStreamStart = payload;
         StreamStartReceived?.Invoke(this, payload);
 
@@ -4746,6 +4821,57 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _currentGroup.PlaybackState = PlaybackState.Playing;
             GroupStateChanged?.Invoke(this, _currentGroup);
         }
+    }
+
+    /// <summary>
+    /// Drops the image a channel is still holding when a <c>stream/start</c> changes that
+    /// channel's configuration, per spec #135 (pending merge): the held image was encoded for a
+    /// configuration that no longer applies, and the server re-sends it if it still does.
+    /// </summary>
+    /// <param name="previous">The artwork object of the last <c>stream/start</c>, if any.</param>
+    /// <param name="current">The artwork object of the one being handled.</param>
+    /// <remarks>
+    /// A <c>stream/start</c> with no <c>artwork</c> object reconfigures nothing — it is a
+    /// player-only or visualizer-only start — so it leaves every channel's pending image alone.
+    /// A channel that disappears from the array is treated as changed: the server has stopped
+    /// describing it, so nothing it sent for it may still surface.
+    /// </remarks>
+    private void DiscardArtworkForReconfiguredChannels(
+        StreamStartArtwork? previous, StreamStartArtwork? current)
+    {
+        if (current is null)
+        {
+            return;
+        }
+
+        var before = previous?.Channels;
+        var after = current.Channels;
+        int channels = Math.Max(before?.Count ?? 0, after.Count);
+
+        for (int channel = 0; channel < channels; channel++)
+        {
+            var wasConfigured = channel < (before?.Count ?? 0) ? before![channel] : null;
+            var isConfigured = channel < after.Count ? after[channel] : null;
+
+            if (!SameArtworkChannelConfiguration(wasConfigured, isConfigured))
+            {
+                _displayScheduler.FlushArtworkChannel(channel);
+            }
+        }
+    }
+
+    private static bool SameArtworkChannelConfiguration(
+        ArtworkStreamChannel? left, ArtworkStreamChannel? right)
+    {
+        if (left is null || right is null)
+        {
+            return left is null && right is null;
+        }
+
+        return left.Source == right.Source
+               && left.Format == right.Format
+               && left.Width == right.Width
+               && left.Height == right.Height;
     }
 
     private async Task HandleStreamEndAsync(string json)
@@ -4864,12 +4990,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <c>stream/end</c>'s role vocabulary but not <c>stream/clear</c>'s; it is honoured in both
     /// anyway, as the C++ reference client switches on the same three names for either message.
     /// A present-but-empty array names no role and so ends nothing, as everywhere else.
+    /// Dropping the artwork still held is what spec #135 (pending merge) means by "on
+    /// <c>stream/end</c>, clearing buffers includes discarding pending images".
     /// </remarks>
     private void FlushDisplayRoles(List<string>? roles)
     {
         if (roles is null)
         {
-            _displayScheduler.Flush();
+            // Every stream, which for this scheduler is the two media roles. The state roles
+            // hold no stream, and spec #135 (pending merge) ties a pending metadata or color
+            // update to nothing a stream teardown says.
+            _displayScheduler.FlushVisualizer();
+            _displayScheduler.FlushArtwork();
             return;
         }
 
