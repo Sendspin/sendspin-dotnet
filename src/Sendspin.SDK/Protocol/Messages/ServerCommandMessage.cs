@@ -46,7 +46,8 @@ public sealed class SourceCommand
 public sealed class PlayerCommand
 {
     /// <summary>
-    /// The command type: "volume", "mute", or "set_static_delay".
+    /// The command type: "volume", "mute", "set_static_delay", or its post-rename spelling
+    /// "set_output_delay" (spec 168a677, roles/player/v1.md).
     /// </summary>
     [JsonPropertyName("command")]
     public string? Command { get; init; }
@@ -69,4 +70,18 @@ public sealed class PlayerCommand
     /// </summary>
     [JsonPropertyName("static_delay_ms")]
     public int? StaticDelayMs { get; init; }
+
+    /// <summary>
+    /// Output delay in milliseconds (0-5000). Only set when <see cref="Command"/> is
+    /// "set_output_delay". Null otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Post-rename spelling of <see cref="StaticDelayMs"/>: spec 168a677 (spec PR #164) renamed
+    /// <c>static_delay_ms</c> to <c>output_delay_ms</c> in the server/command player object, with
+    /// no alias. Read-side tolerance so a client fielded today survives a server flipping to the
+    /// new names; when both fields arrive this one wins. The SDK's own outbound naming is
+    /// unchanged until servers adopt the rename (see <see cref="Commands.SetOutputDelay"/>).
+    /// </remarks>
+    [JsonPropertyName("output_delay_ms")]
+    public int? OutputDelayMs { get; init; }
 }

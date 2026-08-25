@@ -123,4 +123,18 @@ public static class Commands
     /// Player command: set the player's static delay (server/command player object).
     /// </summary>
     public const string SetStaticDelay = "set_static_delay";
+
+    /// <summary>
+    /// Post-rename spelling of <see cref="SetStaticDelay"/>: spec 168a677 (spec PR #164) renamed
+    /// the command to <c>set_output_delay</c> and its payload field to <c>output_delay_ms</c>,
+    /// with no alias for the old names.
+    /// </summary>
+    /// <remarks>
+    /// Accepted inbound only. No server has adopted the rename yet — aiosendspin still sends
+    /// <c>set_static_delay</c> — so what this SDK puts on the wire is unchanged: the player's
+    /// advertised <c>supported_commands</c> entry stays <see cref="SetStaticDelay"/> and
+    /// client/state still reports <c>static_delay_ms</c>. Switch the outbound names only once
+    /// servers have adopted spec PR #164.
+    /// </remarks>
+    public const string SetOutputDelay = "set_output_delay";
 }
