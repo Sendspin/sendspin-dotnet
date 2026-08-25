@@ -255,9 +255,15 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
         }
 
-        // One decision ladder, shared with TimedAudioBuffer's internal corrector.
+        // One decision ladder, shared with TimedAudioBuffer's internal corrector. The mechanism
+        // decides the currency, not the amount: a caller that has no resampler gets the same speed
+        // change expressed as frame stepping rather than a rate it cannot apply to anything.
         var decision = SyncCorrectionPolicy.Decide(
-            smoothedMicroseconds, _options, _sampleRate, _channels);
+            smoothedMicroseconds,
+            _options,
+            _sampleRate,
+            _channels,
+            selfApplied: _options.Mechanism == SyncCorrectionMechanism.FrameStepping);
 
         _currentMode = decision.Mode;
         _targetPlaybackRate = decision.TargetPlaybackRate;

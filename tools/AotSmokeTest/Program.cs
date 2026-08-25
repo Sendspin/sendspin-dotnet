@@ -8,10 +8,13 @@
 // here instead of in a consumer's app.
 
 using Microsoft.Extensions.Logging.Abstractions;
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
+using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Synchronization;
 
 int failures = 0;
 
@@ -76,6 +79,26 @@ Check("pairing store round-trip", () =>
     {
         if (File.Exists(path)) File.Delete(path);
     }
+});
+
+// 6. The smooth correction chain, which carries the vendored WDL resampler. It is pure managed
+//    math, so the analyzers ought to be enough — but that is what was said about the transport
+//    before #89. Publishing and running it costs nothing and turns the claim into an observation.
+Check("pull audio through the smooth correction chain", () =>
+{
+    var format = new AudioFormat { Codec = "pcm", SampleRate = 48_000, Channels = 2 };
+    using var buffer = new TimedAudioBuffer(format, new KalmanClockSynchronizer());
+    buffer.Write(new float[48_000 * 2 / 10], serverTimestamp: 0); // 100 ms
+
+    using var source = new SyncCorrectedSampleSource(buffer, () => 0);
+    var block = new float[960]; // one 10 ms callback at 48 kHz stereo
+    for (int i = 0; i < 5; i++)
+    {
+        source.Read(block, 0, block.Length);
+    }
+
+    return source.PlaybackRate >= buffer.SyncOptions.MinRate
+        && source.PlaybackRate <= buffer.SyncOptions.MaxRate;
 });
 
 Console.WriteLine(failures == 0 ? "PASS" : $"FAIL ({failures})");

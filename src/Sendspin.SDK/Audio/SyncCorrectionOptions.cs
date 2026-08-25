@@ -5,6 +5,33 @@
 namespace Sendspin.SDK.Audio;
 
 /// <summary>
+/// How an external corrector realizes the continuous correction tier. This is a choice of
+/// <em>mechanism</em>, not of policy: the thresholds and the ±0.5% cap are spec constants under
+/// either one.
+/// </summary>
+/// <remarks>
+/// Read by <see cref="SyncCorrectedSampleSource"/> and by
+/// <see cref="SyncCorrectionCalculator"/>, which reports its decision in whichever currency the
+/// selected mechanism can spend. <see cref="TimedAudioBuffer.Read"/> ignores it — that path has no
+/// resampler and always steps frames.
+/// </remarks>
+public enum SyncCorrectionMechanism
+{
+    /// <summary>
+    /// Trim playback speed continuously through a resampler. The quality mode, and the default:
+    /// a ±0.5% speed change is inaudible where stepping whole frames is faintly granular.
+    /// </summary>
+    SmoothResampling,
+
+    /// <summary>
+    /// Drop or duplicate whole frames instead, at an interval bounded by the same ±0.5% cap.
+    /// The fallback, for hosts that must not carry a resampler in the output chain; it is the
+    /// same mechanism <see cref="TimedAudioBuffer.Read"/> applies internally.
+    /// </summary>
+    FrameStepping,
+}
+
+/// <summary>
 /// Configuration for sync correction in <see cref="TimedAudioBuffer"/>. Defaults are
 /// tuned for Windows WASAPI; Linux/macOS callers may want <see cref="CliDefaults"/>.
 /// </summary>
@@ -154,6 +181,26 @@ public sealed class SyncCorrectionOptions
     public long ReconnectStabilizationMicroseconds { get; set; } = 2_000_000;
 
     /// <summary>
+    /// How an external corrector realizes the continuous tier — a resampler by default, whole-frame
+    /// stepping as the fallback. See <see cref="SyncCorrectionMechanism"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This selects the mechanism, not the policy. It is <em>not</em> a way to correct harder or
+    /// more gently: both mechanisms obey <see cref="DeadbandMicroseconds"/>,
+    /// <see cref="CorrectionTargetSeconds"/> and the ±0.5% cap, and both hand the same errors to
+    /// the same one-shot and re-anchor tiers.
+    /// </para>
+    /// <para>
+    /// Distinct from <see cref="ResamplingThresholdMicroseconds"/>, which is a magnitude boundary
+    /// <em>within</em> the resampling mechanism — how large an error is still worth trimming
+    /// smoothly before switching to discrete corrections. This property decides whether a resampler
+    /// is in the picture at all, and <see cref="TimedAudioBuffer.Read"/> ignores it either way.
+    /// </para>
+    /// </remarks>
+    public SyncCorrectionMechanism Mechanism { get; set; } = SyncCorrectionMechanism.SmoothResampling;
+
+    /// <summary>
     /// When true (default), the sync error tracks post-anchor movement of the Kalman
     /// clock offset, so absolute alignment to the server schedule holds over long
     /// gapless streams instead of drifting with relative crystal error. Output delay
@@ -284,6 +331,7 @@ public sealed class SyncCorrectionOptions
         ScheduledStartGraceWindowMicroseconds = ScheduledStartGraceWindowMicroseconds,
         ReconnectStabilizationMicroseconds = ReconnectStabilizationMicroseconds,
         TrackClockDrift = TrackClockDrift,
+        Mechanism = Mechanism,
     };
 
     /// <summary>
