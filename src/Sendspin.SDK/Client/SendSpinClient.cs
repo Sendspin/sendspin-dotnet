@@ -4798,23 +4798,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
-        // Chunks only queue while the pipeline cannot take them, so anything queued now arrived
-        // before this stream/start. When it re-announces the format already running, the pipeline
-        // keeps that stream alive rather than restarting it (see IAudioPipeline.StartAsync), and
-        // the queued chunks belong to it: they are drained into it below instead of being dropped,
-        // per the spec's "without clearing buffers" (#201). Every other stream/start rebuilds the
-        // decode chain, which leaves anything from the previous stream undecodable.
-        var reannouncesRunningFormat =
-            _audioPipeline is { State: AudioPipelineState.Buffering or AudioPipelineState.Playing }
-            && _audioPipeline.CurrentFormat?.IsSameStreamConfiguration(payload.Format) == true;
-
-        if (!reannouncesRunningFormat)
-        {
-            while (_earlyChunkQueue.TryDequeue(out _))
-            {
-            }
-        }
-
         // Smart sync burst: only trigger if clock isn't already synced
         // If we've been connected for a while, the continuous sync loop has already converged
         if (LastServerActivate?.ActivitiesList.Contains(Activities.Pairing) == true)
@@ -4843,32 +4826,59 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Start pipeline immediately - don't block on sync burst
         // The continuous sync loop + sync correction will handle any residual drift
-        if (_audioPipeline != null)
+        if (_audioPipeline == null)
         {
-            // A pipeline-start failure is a local fault, not peer input: the pipeline
-            // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
-            // and it propagates from here so a real bug surfaces instead of being
-            // collapsed into a log line (#88 item 2).
-            await _audioPipeline.StartAsync(payload.Format);
-
-            // Drain any chunks that arrived during initialization
-            var drainedCount = 0;
-            while (_earlyChunkQueue.TryDequeue(out var chunk))
+            // Nothing will ever drain the queue, so a client configured without a pipeline
+            // would otherwise accumulate chunks until it hit MaxEarlyChunks and stayed there.
+            while (_earlyChunkQueue.TryDequeue(out _))
             {
-                _audioPipeline.ProcessAudioChunk(chunk);
-                drainedCount++;
             }
 
-            if (drainedCount > 0)
-            {
-                _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
-            }
-
-            // Infer Playing state from stream/start for servers that don't send group/update
-            _currentGroup ??= new GroupState();
-            _currentGroup.PlaybackState = PlaybackState.Playing;
-            GroupStateChanged?.Invoke(this, _currentGroup);
+            return;
         }
+
+        // Chunks only queue while the pipeline cannot take them, so everything queued at this
+        // point arrived before this stream/start and belongs to the stream it is replacing.
+        // Counted rather than dropped now: the start below is awaited, and chunks arriving
+        // during it belong to the new stream and are drained into it.
+        var queuedForPreviousStream = _earlyChunkQueue.Count;
+
+        // A pipeline-start failure is a local fault, not peer input: the pipeline
+        // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
+        // and it propagates from here so a real bug surfaces instead of being
+        // collapsed into a log line (#88 item 2).
+        var outcome = await _audioPipeline.StartAsync(payload.Format);
+
+        // Only a re-announced format keeps them: that stream is still running and the queued
+        // chunks are its own, so they are drained in below rather than dropped, per the spec's
+        // "without clearing buffers" (#201). Every other outcome rebuilt the decoder, which
+        // leaves anything encoded for the previous stream unreadable. Which of the two happened
+        // is the pipeline's to decide and to report — deriving it here from its state and format
+        // meant a second copy of the rule, free to drift from the one that matters.
+        if (outcome != AudioPipelineStartOutcome.FormatReannounced)
+        {
+            for (int i = 0; i < queuedForPreviousStream && _earlyChunkQueue.TryDequeue(out _); i++)
+            {
+            }
+        }
+
+        // Drain what is left: the chunks kept above, plus any that arrived during initialization
+        var drainedCount = 0;
+        while (_earlyChunkQueue.TryDequeue(out var chunk))
+        {
+            _audioPipeline.ProcessAudioChunk(chunk);
+            drainedCount++;
+        }
+
+        if (drainedCount > 0)
+        {
+            _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
+        }
+
+        // Infer Playing state from stream/start for servers that don't send group/update
+        _currentGroup ??= new GroupState();
+        _currentGroup.PlaybackState = PlaybackState.Playing;
+        GroupStateChanged?.Invoke(this, _currentGroup);
     }
 
     /// <summary>

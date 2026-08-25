@@ -31,6 +31,13 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     /// <summary>Formats the client started the pipeline with, in order.</summary>
     public List<AudioFormat> StartCalls { get; } = new List<AudioFormat>();
 
+    /// <summary>
+    /// What <see cref="StartAsync"/> reports it did. The real pipeline derives this from the
+    /// format it is handed; a test states it outright, which is the point — the client is meant
+    /// to act on what the pipeline reports rather than work the answer out for itself.
+    /// </summary>
+    public AudioPipelineStartOutcome StartOutcome { get; set; } = AudioPipelineStartOutcome.Restarted;
+
     /// <summary>Calls to <see cref="StopAsync"/>, for tests asserting a role-targeted stream/end left playback alone.</summary>
     public int StopCount { get; private set; }
 
@@ -51,10 +58,11 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
         StateChanged?.Invoke(this, state);
     }
 
-    public Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
+    public Task<AudioPipelineStartOutcome> StartAsync(
+        AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
         StartCalls.Add(format);
-        return Task.CompletedTask;
+        return Task.FromResult(StartOutcome);
     }
 
     public Task StopAsync()

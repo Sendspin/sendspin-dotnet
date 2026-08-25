@@ -208,6 +208,25 @@ public class AudioPipelineStreamStartTests
         Assert.Equal(0, harness.Buffer.BufferedMilliseconds);
     }
 
+    [Fact]
+    public async Task StartAsync_ReportsWhichOfTheThreePathsItTook()
+    {
+        // The decision is the pipeline's, and the caller acts on the answer rather than
+        // re-deriving it from State and CurrentFormat: a client holding chunks still encoded for
+        // the previous stream can keep them only for the first of these three.
+        await using var harness = new Harness();
+
+        Assert.Equal(AudioPipelineStartOutcome.Restarted, await harness.Pipeline.StartAsync(Pcm()));
+        Assert.Equal(
+            AudioPipelineStartOutcome.FormatReannounced, await harness.Pipeline.StartAsync(Pcm()));
+        Assert.Equal(
+            AudioPipelineStartOutcome.DecoderReplaced,
+            await harness.Pipeline.StartAsync(Pcm(bitDepth: 24)));
+        Assert.Equal(
+            AudioPipelineStartOutcome.Restarted,
+            await harness.Pipeline.StartAsync(Pcm(bitDepth: 24, sampleRate: 44_100)));
+    }
+
     private sealed class Harness : IAsyncDisposable
     {
         private long _nextTimestamp = 1_000_000;
