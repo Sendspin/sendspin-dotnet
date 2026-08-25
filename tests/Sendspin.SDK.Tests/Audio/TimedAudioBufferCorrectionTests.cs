@@ -122,6 +122,14 @@ public class TimedAudioBufferCorrectionTests
         /// <summary>Writes one chunk at an explicit timestamp, bypassing the producer.</summary>
         public void WriteAt(long serverTimestamp) => Buffer.Write(_chunk, serverTimestamp);
 
+        /// <summary>
+        /// Server timestamp the read cursor currently sits on, derived from the producer's
+        /// write head and the buffer depth so a test can place a chunk a known distance
+        /// behind it.
+        /// </summary>
+        public long CursorServerTimestamp =>
+            WriteServerTs - (long)(Buffer.BufferedMilliseconds * 1000);
+
         /// <summary>Runs past the 500 ms startup grace so the baseline is captured and error ~0.</summary>
         public Player Settled()
         {
@@ -405,6 +413,41 @@ public class TimedAudioBufferCorrectionTests
         var stats = player.Buffer.GetStats();
         Assert.Equal(1, stats.LateChunksDropped);
         Assert.Equal(bufferedBefore, player.Buffer.BufferedMilliseconds);
+    }
+
+    [Fact]
+    public void LateChunkAdmission_IsNotLoosenedByRaisingTheSnapThreshold()
+    {
+        // Admission is a write-side spec rule (roles/player/v1.md:145) and the snap threshold
+        // is a read-side correction size. While admission borrowed the snap knob, a client
+        // that tuned the snap silently changed which chunks it accepted.
+        var options = new SyncCorrectionOptions { HardSyncThresholdMicroseconds = 300_000 };
+        using var player = new Player(options).Settled();
+        var bufferedBefore = player.Buffer.BufferedMilliseconds;
+
+        // 100 ms behind the cursor: past the spec tolerance, but far inside the raised snap
+        // threshold that used to double as the admission window.
+        player.WriteAt(player.CursorServerTimestamp - 100_000);
+
+        Assert.Equal(1, player.Buffer.GetStats().LateChunksDropped);
+        Assert.Equal(bufferedBefore, player.Buffer.BufferedMilliseconds);
+    }
+
+    [Fact]
+    public void LateChunkAdmission_SurvivesDisablingTheSnapTier()
+    {
+        // HardSyncThresholdMicroseconds = 0 disables the snap. It used to collapse admission
+        // to the 1 ms segment-rounding tolerance too, so turning the snap off started dropping
+        // chunks that are still perfectly playable.
+        var options = new SyncCorrectionOptions { HardSyncThresholdMicroseconds = 0 };
+        using var player = new Player(options).Settled();
+        var bufferedBefore = player.Buffer.BufferedMilliseconds;
+
+        // 2 ms behind the cursor: inside the default 5 ms tolerance, so it must be enqueued.
+        player.WriteAt(player.CursorServerTimestamp - 2_000);
+
+        Assert.Equal(0, player.Buffer.GetStats().LateChunksDropped);
+        Assert.True(player.Buffer.BufferedMilliseconds > bufferedBefore);
     }
 
     [Fact]

@@ -140,6 +140,30 @@ public sealed class SyncCorrectionOptions
     public long HardSyncThresholdMicroseconds { get; set; } = 5_000;
 
     /// <summary>
+    /// How far behind the read cursor an arriving chunk's timestamp may sit and still be
+    /// enqueued. Anything further behind is dropped. Default 5 ms.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The spec's rule: "Audio chunks may arrive with timestamps in the past due to network
+    /// delays or buffering; clients should drop these late chunks to maintain sync"
+    /// (roles/player/v1.md:145). Enqueueing one would splice already-played content back into
+    /// the timeline and shift everything after it, so the tolerance only has to cover the
+    /// sub-millisecond rounding that exactly-tiling chunk timestamps produce, plus a margin.
+    /// The C++ reference makes the same check per chunk before decoding
+    /// (sync_task.cpp:596-600).
+    /// </para>
+    /// <para>
+    /// This is a write-side admission window, deliberately independent of
+    /// <see cref="HardSyncThresholdMicroseconds"/>, which is a read-side correction size.
+    /// Admission used to borrow that knob, so disabling the snap tier tightened the window to
+    /// 1 ms and raising the snap threshold widened it to hundreds of milliseconds — neither of
+    /// which is anything the caller asked for.
+    /// </para>
+    /// </remarks>
+    public long LateChunkToleranceMicroseconds { get; set; } = 5_000;
+
+    /// <summary>
     /// Below this error magnitude the correction is a smooth rate adjustment;
     /// above it the correction switches to frame drop/insert. Default 100 ms.
     /// </summary>
@@ -285,6 +309,13 @@ public sealed class SyncCorrectionOptions
                 nameof(HardSyncThresholdMicroseconds));
         }
 
+        if (LateChunkToleranceMicroseconds < 0)
+        {
+            throw new ArgumentException(
+                "LateChunkToleranceMicroseconds must be non-negative.",
+                nameof(LateChunkToleranceMicroseconds));
+        }
+
         if (ReanchorCooldownMicroseconds < 0)
         {
             throw new ArgumentException(
@@ -324,6 +355,7 @@ public sealed class SyncCorrectionOptions
         MaxSpeedCorrection = MaxSpeedCorrection,
         CorrectionTargetSeconds = CorrectionTargetSeconds,
         HardSyncThresholdMicroseconds = HardSyncThresholdMicroseconds,
+        LateChunkToleranceMicroseconds = LateChunkToleranceMicroseconds,
         ResamplingThresholdMicroseconds = ResamplingThresholdMicroseconds,
         ReanchorThresholdMicroseconds = ReanchorThresholdMicroseconds,
         ReanchorCooldownMicroseconds = ReanchorCooldownMicroseconds,

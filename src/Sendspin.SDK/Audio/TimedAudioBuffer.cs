@@ -505,7 +505,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             // their content, so enqueueing them would splice already-played audio back into
             // the timeline and shift everything after it. Spec roles/player/v1.md:145 says to
             // drop these; the C++ reference makes the same check per chunk before decoding
-            // (sync_task.cpp:596-600), against the same hard-sync tolerance.
+            // (sync_task.cpp:596-600). See SyncCorrectionOptions.LateChunkToleranceMicroseconds.
             if (_playbackStarted && _readCursorValid && IsChunkTooLate(serverTimestamp))
             {
                 _lateChunksDropped++;
@@ -1434,17 +1434,18 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     }
 
     /// <summary>
-    /// Whether a chunk arriving now is already behind the content cursor and can never play.
-    /// Must be called under lock.
+    /// Whether a chunk arriving now is already behind the content cursor and can never play
+    /// (spec roles/player/v1.md:145). Must be called under lock.
     /// </summary>
+    /// <remarks>
+    /// The window is <see cref="SyncCorrectionOptions.LateChunkToleranceMicroseconds"/>, which
+    /// exists for this rule alone. It used to be taken from
+    /// <see cref="SyncCorrectionOptions.HardSyncThresholdMicroseconds"/> — a read-side
+    /// correction size — so disabling the snap tier tightened admission to the segment
+    /// rounding tolerance and raising it widened admission to match.
+    /// </remarks>
     private bool IsChunkTooLate(long serverTimestamp)
-    {
-        var tolerance = _syncOptions.HardSyncThresholdMicroseconds > 0
-            ? _syncOptions.HardSyncThresholdMicroseconds
-            : SegmentTimestampToleranceMicroseconds;
-
-        return serverTimestamp < _readCursorServerTimestamp - tolerance;
-    }
+        => serverTimestamp < _readCursorServerTimestamp - _syncOptions.LateChunkToleranceMicroseconds;
 
     /// <summary>
     /// Rate-limited logging for timeline anomalies (holes, late chunks), which arrive in
