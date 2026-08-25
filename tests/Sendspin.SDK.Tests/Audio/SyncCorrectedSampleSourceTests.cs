@@ -967,6 +967,9 @@ public class SyncCorrectedSampleSourceTests
 
         public double TargetBufferMilliseconds { get; set; } = 500;
 
+        public double MinBufferMilliseconds { get; set; } =
+            PlayerBufferCapacity.DefaultMinBufferMilliseconds;
+
         public bool IsReadyForPlayback => true;
 
         public long OutputLatencyMicroseconds { get; set; }

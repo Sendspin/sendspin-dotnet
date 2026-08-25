@@ -177,19 +177,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <inheritdoc/>
     public double TargetBufferMilliseconds { get; set; } = 250;
 
-    /// <summary>
-    /// Gets or sets the negotiated minimum ongoing buffer depth in milliseconds — the same
-    /// value the client reports to the server as <c>min_buffer_ms</c>. Default 150 ms, matching
-    /// <c>ClientCapabilities.MinBufferMs</c>.
-    /// </summary>
-    /// <remarks>
-    /// This bounds <see cref="IsReadyForPlayback"/>. A live stream's first chunk is scheduled
-    /// only <c>min_buffer_ms + static_delay_ms</c> ahead (spec roles/player/v1.md:30), so the
-    /// buffer will never hold more than this before the scheduled start arrives. Gating
-    /// readiness on the (larger) target depth therefore guarantees a late start on exactly the
-    /// streams that can least afford one. Keep this in step with what the app advertises.
-    /// </remarks>
-    public double MinBufferMilliseconds { get; set; } = 150;
+    /// <inheritdoc/>
+    public double MinBufferMilliseconds { get; set; } =
+        PlayerBufferCapacity.DefaultMinBufferMilliseconds;
 
     /// <summary>
     /// Gets the buffer's decoded-audio capacity in milliseconds, as constructed.

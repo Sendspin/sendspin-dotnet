@@ -96,9 +96,10 @@ public interface IAudioPipeline : IAsyncDisposable
     /// Suppresses sync corrections during the reconnect stabilization period.
     /// </summary>
     /// <remarks>
-    /// Call this after the clock synchronizer is reset on reconnect. The buffer
-    /// and player correction systems will suppress corrections until the Kalman
-    /// filter has had time to re-converge (~2 seconds by default).
+    /// Call this after the clock synchronizer is reset on reconnect. The buffer,
+    /// the player and a sample source implementing <see cref="IPlaybackLifecycleAware"/>
+    /// will suppress corrections until the Kalman filter has had time to re-converge
+    /// (~2 seconds by default).
     /// </remarks>
     void NotifyReconnect();
 
@@ -106,6 +107,11 @@ public interface IAudioPipeline : IAsyncDisposable
     /// Clears the buffer (for seek).
     /// Called when stream/clear is received.
     /// </summary>
+    /// <remarks>
+    /// Resets the decoder and a sample source implementing
+    /// <see cref="IPlaybackLifecycleAware"/> along with the buffer: everything holding audio or
+    /// correction state from the discarded stream, so none of it is spliced into the new one.
+    /// </remarks>
     /// <param name="newTargetTimestamp">Optional new target timestamp.</param>
     void Clear(long? newTargetTimestamp = null);
 
@@ -145,6 +151,26 @@ public interface IAudioPipeline : IAsyncDisposable
     /// </summary>
     /// <param name="muted">Whether to mute.</param>
     void SetMuted(bool muted);
+
+    /// <summary>
+    /// Applies the <c>min_buffer_ms</c> the client advertises to the buffer's readiness gate,
+    /// now and for every stream started afterwards.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The SDK calls this from the client with <c>ClientCapabilities.MinBufferMs</c>, and again
+    /// whenever <c>ISendspinClient.UpdateTimingAsync</c> changes it — the spec lets a client
+    /// update its timing parameters at any time (roles/player/v1.md:68). Without it an app
+    /// advertising 500 ms would still start at the 150 ms default, before the audio it told the
+    /// server it needs has arrived.
+    /// </para>
+    /// <para>
+    /// Until it is called, the buffer keeps whatever
+    /// <see cref="ITimedAudioBuffer.MinBufferMilliseconds"/> its factory gave it.
+    /// </para>
+    /// </remarks>
+    /// <param name="minBufferMs">Advertised minimum ongoing buffer depth, in milliseconds.</param>
+    void SetMinBufferMilliseconds(int minBufferMs);
 
     /// <summary>
     /// Switches to a different audio output device.

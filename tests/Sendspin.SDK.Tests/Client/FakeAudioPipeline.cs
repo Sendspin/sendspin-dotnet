@@ -37,6 +37,9 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     /// <summary>Calls to <see cref="Clear"/>, for tests asserting a role-targeted stream/clear left the buffers alone.</summary>
     public int ClearCount { get; private set; }
 
+    /// <summary>Values passed to <see cref="SetMinBufferMilliseconds"/>, in order.</summary>
+    public List<int> MinBufferMsCalls { get; } = new();
+
     public event EventHandler<AudioPipelineState>? StateChanged;
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
 
@@ -66,6 +69,7 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     public void ProcessAudioChunk(AudioChunk chunk) => Chunks.Add(chunk);
     public void SetVolume(int volume) { }
     public void SetMuted(bool muted) { }
+    public void SetMinBufferMilliseconds(int minBufferMs) => MinBufferMsCalls.Add(minBufferMs);
     public Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
