@@ -167,6 +167,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // field costs a duplicate warning and nothing else, so it needs no synchronization.
     private int _warnedUndefinedPlayerAudioTypes;
 
+    // Tail of the stream-lifecycle chain: the task the next lifecycle handler waits for. See
+    // DispatchStreamLifecycle. The lock covers the read-and-replace only.
+    private readonly object _streamLifecycleLock = new();
+    private Task _streamLifecycleChain = Task.CompletedTask;
+
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
@@ -1814,11 +1819,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
 
                 case MessageTypes.StreamStart:
-                    HandleStreamStartAsync(json).SafeFireAndForget(_logger);
+                    DispatchStreamLifecycle(() => HandleStreamStartAsync(json));
                     break;
 
                 case MessageTypes.StreamEnd:
-                    HandleStreamEndAsync(json).SafeFireAndForget(_logger);
+                    DispatchStreamLifecycle(() => HandleStreamEndAsync(json));
                     break;
 
                 case MessageTypes.StreamClear:
@@ -4736,6 +4741,69 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
+    /// <summary>
+    /// Runs a stream-lifecycle handler after every lifecycle handler dispatched before it, without
+    /// making the receive loop wait for any of them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>stream/start</c>, <c>stream/end</c> and <c>stream/clear</c> all reach into the audio
+    /// pipeline, whose start and stop open and close an output device — which is why they are
+    /// handled off the receive loop in the first place. Dispatched independently they can also
+    /// <i>land</i> independently: a track boundary sends <c>stream/end</c> then
+    /// <c>stream/start</c> back to back, and the end's teardown finishing after the start's build
+    /// leaves the pipeline stopped for a stream the server has started — silence until the next
+    /// track. Chaining each handler onto the one before restores the wire order at the point the
+    /// handlers take effect.
+    /// </para>
+    /// <para>
+    /// The chain is only a queue, not a thread: a handler dispatched while the chain is idle still
+    /// runs inline on the receive loop up to its first real await, exactly as the bare
+    /// fire-and-forget did. The receive loop never waits for a handler already in flight.
+    /// </para>
+    /// <para>
+    /// Only the lifecycle messages take this path. Everything else — including the binary audio
+    /// chunks, which arrive at chunk rate — keeps its current dispatch.
+    /// </para>
+    /// </remarks>
+    /// <param name="handler">The handler to run once the chain reaches it.</param>
+    private void DispatchStreamLifecycle(Func<Task> handler)
+    {
+        Task predecessor;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Held for two field accesses only. Handlers run outside it, so nothing this class does
+        // under the lock can reach an application event handler.
+        lock (_streamLifecycleLock)
+        {
+            predecessor = _streamLifecycleChain;
+            _streamLifecycleChain = completion.Task;
+        }
+
+        RunStreamLifecycleAsync(predecessor, handler, completion).SafeFireAndForget(_logger);
+    }
+
+    private static async Task RunStreamLifecycleAsync(
+        Task predecessor, Func<Task> handler, TaskCompletionSource completion)
+    {
+        try
+        {
+            if (!predecessor.IsCompleted)
+            {
+                // Never faults: every link completes its own slot in the finally below, so a
+                // handler that throws stops at its own SafeFireAndForget and the next one still
+                // runs. A lifecycle message must not be skipped because the one before it failed.
+                await predecessor.ConfigureAwait(false);
+            }
+
+            await handler().ConfigureAwait(false);
+        }
+        finally
+        {
+            completion.SetResult();
+        }
+    }
+
     private async Task HandleStreamStartAsync(string json)
     {
         try
@@ -5019,9 +5087,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // after this message" — the same boundary applies to artwork still held for display.
         FlushDisplayRoles(payload.Roles);
 
-        if (ReachesPlayerRole(payload.Roles))
+        if (ReachesPlayerRole(payload.Roles) && _audioPipeline is { } pipeline)
         {
-            _audioPipeline?.Clear();
+            // Deserialization stays on the receive loop above — that is what routes a malformed
+            // payload into OnTextMessageReceived's close — but the pipeline call joins the
+            // lifecycle chain, so a seek cannot clear buffers ahead of the stream/start that
+            // creates them.
+            DispatchStreamLifecycle(() =>
+            {
+                pipeline.Clear();
+                return Task.CompletedTask;
+            });
         }
     }
 
