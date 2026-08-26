@@ -1,9 +1,10 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Net.WebSockets;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Connection;
 
@@ -11,7 +12,7 @@ namespace Sendspin.SDK.Connection;
 /// WebSocket connection to a Sendspin server.
 /// Handles connection lifecycle, message sending/receiving, and automatic reconnection.
 /// </summary>
-public sealed class SendspinConnection : ISendspinConnection
+public sealed class SendspinConnection : ISendspinConnection, ITimeProbeTransport
 {
     private readonly ILogger<SendspinConnection> _logger;
     private readonly ConnectionOptions _options;
@@ -25,6 +26,10 @@ public sealed class SendspinConnection : ISendspinConnection
     private int _reconnectAttempt;
     private int _connectionLostGuard;
     private bool _disposed;
+    private long _lastTextReceivedAtMicroseconds;
+
+    /// <inheritdoc/>
+    long ITimeProbeTransport.LastTextReceivedAtMicroseconds => _lastTextReceivedAtMicroseconds;
 
     public ConnectionState State => (ConnectionState)Volatile.Read(ref _state);
     public Uri? ServerUri => _serverUri;
@@ -233,6 +238,55 @@ public sealed class SendspinConnection : ISendspinConnection
         }
     }
 
+    /// <inheritdoc/>
+    async Task ITimeProbeTransport.SendTimeMessageAsync(Action<long> onTransmitted, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (_webSocket?.State != WebSocketState.Open)
+        {
+            if (State is ConnectionState.Connected or ConnectionState.Handshaking)
+            {
+                _ = Task.Run(() => HandleConnectionLostAsync());
+            }
+
+            throw new InvalidOperationException("WebSocket is not connected");
+        }
+
+        string json;
+        byte[] bytes;
+
+        await _sendLock.WaitAsync(cancellationToken);
+        try
+        {
+            // T1 is stamped here and not by the caller: after the wait on the send lock, so a
+            // probe queued behind another message does not carry a timestamp from before that
+            // message was even written, and inside the lock, so nothing can be written between
+            // the stamp and this frame. Serialization still falls between the two, exactly as
+            // it does in the reference transport, which likewise captures client_transmitted
+            // and then formats the JSON inline.
+            var clientTransmitted = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+            onTransmitted(clientTransmitted);
+
+            json = MessageSerializer.Serialize(ClientTimeMessage.Create(clientTransmitted));
+            bytes = Encoding.UTF8.GetBytes(json);
+
+            await _webSocket.SendAsync(
+                new ArraySegment<byte>(bytes),
+                WebSocketMessageType.Text,
+                endOfMessage: true,
+                cancellationToken);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+
+        // Logged after the write rather than before it, so the logging sink's cost cannot land
+        // between the T1 stamp and the socket.
+        _logger.LogDebug("Sending: {Message}", json);
+    }
+
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(_options.ReceiveBufferSize);
@@ -267,6 +321,13 @@ public sealed class SendspinConnection : ISendspinConnection
                     messageBuffer.Write(buffer, 0, result.Count);
                 }
                 while (!result.EndOfMessage);
+
+                // T4 for any clock-sync exchange this frame carries. Taken here — the frame is
+                // complete, nothing has been parsed yet — because the spec defines it as the
+                // receive time "captured locally when the response arrives". Stamping it after
+                // deserialization charged parse time to the round trip.
+                Volatile.Write(ref _lastTextReceivedAtMicroseconds,
+                    HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds());
 
                 var messageData = messageBuffer.ToArray();
 

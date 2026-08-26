@@ -1,7 +1,8 @@
-using System.Text;
+﻿using System.Text;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Connection;
 
@@ -9,7 +10,7 @@ namespace Sendspin.SDK.Connection;
 /// Wraps an incoming WebSocket connection from a Sendspin server.
 /// Used for server-initiated connections where the server connects to us.
 /// </summary>
-public sealed class IncomingConnection : ISendspinConnection
+public sealed class IncomingConnection : ISendspinConnection, ITimeProbeTransport
 {
     private readonly ILogger<IncomingConnection> _logger;
     private readonly WebSocketClientConnection _socket;
@@ -18,6 +19,10 @@ public sealed class IncomingConnection : ISendspinConnection
     private ConnectionState _state = ConnectionState.Disconnected;
     private bool _disposed;
     private bool _isOpen;
+    private long _lastTextReceivedAtMicroseconds;
+
+    /// <inheritdoc/>
+    long ITimeProbeTransport.LastTextReceivedAtMicroseconds => _lastTextReceivedAtMicroseconds;
 
     public ConnectionState State => _state;
     public Uri? ServerUri { get; private set; }
@@ -148,6 +153,37 @@ public sealed class IncomingConnection : ISendspinConnection
         }
     }
 
+    /// <inheritdoc/>
+    async Task ITimeProbeTransport.SendTimeMessageAsync(Action<long> onTransmitted, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (!_isOpen)
+        {
+            throw new InvalidOperationException("WebSocket is not connected");
+        }
+
+        string json;
+
+        await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Stamped inside the send lock, after the queue wait — see the dial path's
+            // SendTimeMessageAsync for why the caller must not stamp it.
+            var clientTransmitted = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+            onTransmitted(clientTransmitted);
+
+            json = MessageSerializer.Serialize(ClientTimeMessage.Create(clientTransmitted));
+            await _socket.SendAsync(json).ConfigureAwait(false);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+
+        _logger.LogDebug("Sending: {Message}", json);
+    }
+
     /// <summary>
     /// Marks the connection as fully connected (called after handshake).
     /// </summary>
@@ -161,6 +197,12 @@ public sealed class IncomingConnection : ISendspinConnection
 
     private void OnTextMessage(string message)
     {
+        // T4 for any clock-sync exchange this frame carries. Taken at the socket callback, so a
+        // server/time carried by it yields a receive time that predates parsing — same reason
+        // and same placement as the dial path's.
+        Volatile.Write(ref _lastTextReceivedAtMicroseconds,
+            HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds());
+
         _logger.LogDebug("Received text: {Message}", message.Length > 500 ? message[..500] + "..." : message);
         TextMessageReceived?.Invoke(this, message);
     }
