@@ -21,6 +21,10 @@ public class SendspinClientServiceStaticDelayTests
         { "type": "server/command", "payload": { "player": { "command": "set_static_delay", "static_delay_ms": {{delayMs}} } } }
         """;
 
+    private static string SetOutputDelayCommand(int delayMs) => $$"""
+        { "type": "server/command", "payload": { "player": { "command": "set_output_delay", "output_delay_ms": {{delayMs}} } } }
+        """;
+
     [Fact]
     public void SetStaticDelay_AppliesDelayAndPersists()
     {
@@ -73,6 +77,67 @@ public class SendspinClientServiceStaticDelayTests
             staticDelayStore: store);
 
         connection.RaiseTextMessageReceived(SetStaticDelayCommand(250));
+
+        Assert.Equal(0.0, sync.StaticDelayMs);
+        Assert.Empty(store.Saved);
+    }
+
+    [Fact]
+    public void SetOutputDelay_AppliesDelayAndPersists()
+    {
+        // Spec 168a677 renamed the command and its field with no alias; a server that has
+        // adopted the rename must land on the same delay as the pre-rename shape does.
+        var sync = new KalmanClockSynchronizer();
+        var store = new FakeStaticDelayStore();
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection,
+            sync,
+            new ClientCapabilities(),
+            audioPipeline: null,
+            staticDelayStore: store);
+
+        connection.RaiseTextMessageReceived(SetOutputDelayCommand(120));
+
+        Assert.Equal(120.0, sync.StaticDelayMs);
+        Assert.Equal(new[] { 120.0 }, store.Saved);
+    }
+
+    [Fact]
+    public void SetOutputDelay_WithBothFields_PrefersOutputDelayMs()
+    {
+        // A transitional server may send both names. The post-rename field is the authoritative
+        // one, so it wins rather than the legacy field it replaced.
+        var sync = new KalmanClockSynchronizer();
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection,
+            sync);
+
+        connection.RaiseTextMessageReceived("""
+            { "type": "server/command", "payload": { "player": { "command": "set_output_delay", "output_delay_ms": 120, "static_delay_ms": 250 } } }
+            """);
+
+        Assert.Equal(120.0, sync.StaticDelayMs);
+    }
+
+    [Fact]
+    public void SetOutputDelay_IgnoredWhenCapabilityDisabled()
+    {
+        var sync = new KalmanClockSynchronizer();
+        var store = new FakeStaticDelayStore();
+        var connection = new FakeSendspinConnection();
+        using var client = new SendspinClientService(
+            NullLogger<SendspinClientService>.Instance,
+            connection,
+            sync,
+            new ClientCapabilities { SupportsSetStaticDelay = false },
+            audioPipeline: null,
+            staticDelayStore: store);
+
+        connection.RaiseTextMessageReceived(SetOutputDelayCommand(120));
 
         Assert.Equal(0.0, sync.StaticDelayMs);
         Assert.Empty(store.Saved);
