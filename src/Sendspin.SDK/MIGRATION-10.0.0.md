@@ -665,7 +665,32 @@ error until it does:
 
 ---
 
-## 15. Checklist
+## 15. Stream-lifecycle messages reach the pipeline one at a time
+
+`stream/start`, `stream/end` and `stream/clear` are handled off the receive loop — the pipeline
+calls they make open and close an output device, and the receive loop must not wait for that.
+They are now dispatched on a per-client chain, so each handler runs only after the one dispatched
+before it has finished. A track boundary's `stream/end` + `stream/start` can no longer take effect
+in the reverse order and leave the pipeline stopped for a stream the server has started.
+
+Nothing to do for a caller. For a **custom `IAudioPipeline`** it means the SDK's client no longer
+issues an overlapping `StartAsync` / `StopAsync` / `Clear`, so an implementation needs no
+reentrancy guard of its own for that caller. It still needs one for anything else that can reach
+it — an app calling `SwitchDeviceAsync` or `DisposeAsync` from its own thread. `AudioPipeline`
+uses a single lifecycle gate for all four, and after `DisposeAsync` its `StartAsync` and
+`SwitchDeviceAsync` throw `ObjectDisposedException` rather than rebuilding a decode chain.
+
+One behavioural note for a custom pipeline that drives an `IAudioDecoder`: `AudioPipeline` no
+longer calls `IAudioDecoder.Reset()` from `Clear()`. A `stream/clear` defers the reset to the next
+`ProcessAudioChunk`, because `Clear` runs on whichever thread delivered the message while the
+receive loop may be inside `Decode` — and Concentus' Opus decoder is single-threaded. A re-anchor
+does not reset the decoder at all: it discards audio the decoder has already produced and then
+carries on with the next packet of the same stream, so a reset there would only manufacture a
+transient the codec did not have.
+
+---
+
+## 16. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
