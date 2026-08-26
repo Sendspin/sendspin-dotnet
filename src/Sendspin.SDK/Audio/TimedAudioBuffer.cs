@@ -187,9 +187,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// only <c>min_buffer_ms + static_delay_ms</c> ahead (spec roles/player/v1.md:30), so the
     /// buffer will never hold more than this before the scheduled start arrives. Gating
     /// readiness on the (larger) target depth therefore guarantees a late start on exactly the
-    /// streams that can least afford one. Keep this in step with what the app advertises.
+    /// streams that can least afford one.
+    /// <para>
+    /// Internal on the 9.x line: the published surface is frozen, so this stays at the SDK's
+    /// default rather than becoming a knob. A client advertising a different
+    /// <c>ClientCapabilities.MinBufferMs</c> keeps the 150 ms readiness gate.
+    /// </para>
     /// </remarks>
-    public double MinBufferMilliseconds { get; set; } = 150;
+    internal double MinBufferMilliseconds { get; set; } = 150;
 
     /// <summary>
     /// Gets the buffer's decoded-audio capacity in milliseconds, as constructed.

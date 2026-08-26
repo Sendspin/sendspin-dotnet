@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Sendspin.SDK</PackageId>
-    <Version>9.2.0</Version>
+    <Version>9.3.0</Version>
     <Authors>Sendspin Contributors</Authors>
     <Company>Sendspin</Company>
     <Product>Sendspin SDK</Product>
@@ -20,6 +20,68 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
+v9.3.0 - Sync Conformance and Stability (9.x legacy line):
+
+A curated backport for apps that cannot take 10.0's breaking renames. The public
+API surface is unchanged from 9.2.0; every fix below is carried on internal
+members where the upstream change added public ones.
+
+SYNC CONFORMANCE - THESE CHANGE CORRECTION DEFAULTS:
+- SyncCorrectionOptions.MaxSpeedCorrection defaults to 0.005 (0.5%), down from
+  0.02 (2%). The spec caps effective playback speed at +/-0.5% (a MUST), and the
+  cap is a fleet-homogeneity contract: every player in a group must recover from
+  a disturbance at the same bounded rate. A larger configured value is now
+  clamped where correction is applied, with a warning, rather than honoured.
+- SyncCorrectionOptions.DeadbandMicroseconds defaults to 100 us, down from
+  1_000. The old band sat exactly on the spec's +/-1 ms MUST floor, which makes
+  the +/-0.5 ms SHOULD target unreachable by construction.
+- New one-shot resynchronization tier above 5 ms: the excess is skipped or
+  padded in a single discontinuity, which the spec describes and exempts from
+  the speed cap. Grinding a 50 ms error out at 0.5% takes 10 seconds, during
+  which the player audibly trails the rest of the group. Errors in that range
+  now snap instead of being ground out - audible as one splice rather than as
+  sustained misalignment.
+- Clock synchronization matches the reference filter's constants and rules:
+  reference process noise, non-positive round trips dropped rather than floored,
+  T1/T4 stamped at the transport boundary, the reference probe cadence and
+  timeout, and a converging-vs-steady burst interval keyed on convergence. A
+  client on a good network now converges in seconds instead of twenty-odd.
+- Decoder buffers are sized for the spec's 150 ms maximum chunk (PCM was sized
+  for 50 ms, FLAC for a fixed 8192 frames). A chunk that still overruns decodes
+  its legal prefix and reports the loss instead of truncating silently.
+- ClientCapabilities.BufferCapacity is derived from the decoded buffer and the
+  most compressed advertised codec instead of defaulting to a flat 32 MB. The
+  spec lets a server fill toward whatever is advertised, so the old default
+  licensed it to queue far more audio than the client could hold. A configured
+  value above what the buffer can hold is clamped, with a warning.
+- ITimedAudioBuffer.NotifyExternalCorrection is stats-only. It also moved the
+  read cursor that ReadRaw had already advanced, so the reported sync error
+  converged at twice the physical correction: the metric read near zero while
+  the player stayed about half the drift out of the group.
+
+STABILITY:
+- The audio pipeline's start, stop, device switch and dispose are serialized.
+  Interleaved, a track boundary could have one call's teardown dispose what
+  another was still building, ending in Error and silence until the next stream.
+- stream/start, stream/end and stream/clear take effect in the order they
+  arrived, so an end's teardown can no longer land after the following start.
+- The decoder reset requested by stream/clear is taken on the decoding thread
+  rather than the requesting one, and a re-anchor no longer resets the decoder
+  at all. The pipeline can no longer be left reporting Playing over an empty
+  ring, which was permanent silence for the rest of the stream.
+- A chunk arriving mid-start can no longer overtake the queued ones or decode
+  through the pipeline's scratch buffer at the same time as one being drained.
+- A peer message carrying JSON null where the protocol declares a value is
+  rejected and closes the connection deliberately, instead of being half applied
+  or handed to app event subscribers.
+
+FORWARD COMPATIBILITY:
+- server/command accepts set_output_delay and output_delay_ms alongside
+  set_static_delay and static_delay_ms, so a client fielded now keeps working
+  when a server adopts the rename. Outbound naming is unchanged.
+
+----
+
 v9.2.0 - Clock Drift Tracking:
 - Sync error now tracks post-anchor movement of the Kalman clock offset, holding
   absolute alignment over long gapless streams (windowsSpin issue #63 drift fix)
