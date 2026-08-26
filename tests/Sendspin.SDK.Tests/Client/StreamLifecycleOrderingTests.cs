@@ -1,5 +1,8 @@
+using System.Buffers.Binary;
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Tests.Audio;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -38,6 +41,15 @@ public class StreamLifecycleOrderingTests
             ClockSynchronizer = new ConvergedClockSynchronizer(),
         });
         return (client, connection, pipe);
+    }
+
+    private static byte[] AudioFrame(long timestamp, params byte[] audio)
+    {
+        var buf = new byte[9 + audio.Length];
+        buf[0] = BinaryMessageTypes.PlayerAudio0;
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1, 8), timestamp);
+        audio.CopyTo(buf, 9);
+        return buf;
     }
 
     private static Task WithTimeout(Task task) => task.WaitAsync(TimeSpan.FromSeconds(30));
@@ -108,5 +120,45 @@ public class StreamLifecycleOrderingTests
         await WithTimeout(pipe.CallsCompleted(2));
 
         Assert.Equal(new[] { "start", "clear" }, pipe.CallLog);
+    }
+
+    [Fact]
+    public async Task AChunkArrivingDuringAStart_StaysBehindTheQueuedOnes()
+    {
+        // ProcessAudioChunk is reachable from two threads: the receive loop hands chunks straight
+        // to a ready pipeline, and the stream/start handler drains what queued before it. A chunk
+        // arriving mid-start went in front of the queue, so the pipeline saw it out of order — and
+        // both callers wrote through the pipeline's one decode scratch buffer at the same time.
+        var pipe = new FakeAudioPipeline
+        {
+            IsReady = false,
+            StartOutcome = AudioPipelineStartOutcome.FormatReannounced,
+            HoldNextStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var (client, connection, _) = PlayerClient(pipe);
+        using var _c = client;
+
+        // Queued: the pipeline is not ready yet.
+        connection.RaiseBinaryMessageReceived(AudioFrame(1_000, 0x01));
+
+        var held = pipe.HoldNextStart!;
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.StartEntered);
+
+        // The decoder and ring exist part-way through a real StartAsync, so the pipeline reports
+        // itself ready while the start is still running.
+        pipe.IsReady = true;
+        connection.RaiseBinaryMessageReceived(AudioFrame(2_000, 0x02));
+
+        // Queued behind the start handler, so its Clear landing is proof that handler — drain
+        // included — has finished, without polling for it.
+        connection.RaiseTextMessageReceived(StreamClear);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(2));
+
+        Assert.Equal(
+            new long[] { 1_000, 2_000 },
+            pipe.Chunks.Select(c => c.ServerTimestamp).ToArray());
     }
 }

@@ -179,6 +179,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
 
     /// <summary>
+    /// Serializes the two places a chunk is handed to the pipeline: the receive loop's direct
+    /// hand-off, and the <c>stream/start</c> handler draining what queued while the pipeline was
+    /// not ready.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Those are two threads by construction — the start is awaited, and the receive loop must not
+    /// wait for it — and the pipeline reports itself ready part-way through a start, as soon as it
+    /// has a decoder and a ring. So a chunk arriving mid-start went straight in while the drain was
+    /// still feeding the ones that arrived before it: the pipeline saw them out of order, and both
+    /// callers decoded through its single scratch buffer at the same time, one overwriting the
+    /// other's samples between the decode and the write.
+    /// </para>
+    /// <para>
+    /// Ordering alone cannot close this: the two calls come from different threads whatever
+    /// dispatch the lifecycle messages use, so the drain and the hand-off have to exclude each
+    /// other. The cost is one uncontended monitor per chunk — a chunk arrives every 20 ms or so,
+    /// and the drain is bounded by <see cref="MaxEarlyChunks"/> and happens once per stream start.
+    /// </para>
+    /// </remarks>
+    private readonly object _audioHandoffLock = new();
+
+    /// <summary>
     /// Maximum chunks to queue before pipeline ready (~2 seconds of audio at typical rates).
     /// </summary>
     private const int MaxEarlyChunks = 100;
@@ -4917,25 +4940,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // collapsed into a log line (#88 item 2).
         var outcome = await _audioPipeline.StartAsync(payload.Format);
 
-        // Only a re-announced format keeps them: that stream is still running and the queued
-        // chunks are its own, so they are drained in below rather than dropped, per the spec's
-        // "without clearing buffers" (#201). Every other outcome rebuilt the decoder, which
-        // leaves anything encoded for the previous stream unreadable. Which of the two happened
-        // is the pipeline's to decide and to report — deriving it here from its state and format
-        // meant a second copy of the rule, free to drift from the one that matters.
-        if (outcome != AudioPipelineStartOutcome.FormatReannounced)
+        // Held across the drop and the drain, and taken by the receive loop's hand-off, so a
+        // chunk arriving mid-start cannot overtake the queue or decode through the pipeline's
+        // scratch buffer at the same time as one being drained (see _audioHandoffLock).
+        int drainedCount;
+        lock (_audioHandoffLock)
         {
-            for (int i = 0; i < queuedForPreviousStream && _earlyChunkQueue.TryDequeue(out _); i++)
+            // Only a re-announced format keeps them: that stream is still running and the queued
+            // chunks are its own, so they are drained in below rather than dropped, per the spec's
+            // "without clearing buffers" (#201). Every other outcome rebuilt the decoder, which
+            // leaves anything encoded for the previous stream unreadable. Which of the two happened
+            // is the pipeline's to decide and to report — deriving it here from its state and format
+            // meant a second copy of the rule, free to drift from the one that matters.
+            if (outcome != AudioPipelineStartOutcome.FormatReannounced)
             {
+                for (int i = 0; i < queuedForPreviousStream && _earlyChunkQueue.TryDequeue(out _); i++)
+                {
+                }
             }
-        }
 
-        // Drain what is left: the chunks kept above, plus any that arrived during initialization
-        var drainedCount = 0;
-        while (_earlyChunkQueue.TryDequeue(out var chunk))
-        {
-            _audioPipeline.ProcessAudioChunk(chunk);
-            drainedCount++;
+            // Drain what is left: the chunks kept above, plus any that arrived during initialization
+            drainedCount = 0;
+            while (_earlyChunkQueue.TryDequeue(out var chunk))
+            {
+                _audioPipeline.ProcessAudioChunk(chunk);
+                drainedCount++;
+            }
         }
 
         if (drainedCount > 0)
@@ -5192,19 +5222,27 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 var audioChunk = BinaryMessageParser.ParseAudioChunk(data.Span);
                 if (audioChunk != null)
                 {
-                    if (_audioPipeline?.IsReady == true)
+                    // Excludes the stream/start handler's drain, which feeds the same pipeline
+                    // from another thread — see _audioHandoffLock. The queue must be empty as
+                    // well as the pipeline ready: a chunk handed over while earlier ones are
+                    // still queued would overtake them.
+                    lock (_audioHandoffLock)
                     {
-                        // Pipeline ready - process immediately
-                        _audioPipeline.ProcessAudioChunk(audioChunk);
+                        if (_audioPipeline?.IsReady == true && _earlyChunkQueue.IsEmpty)
+                        {
+                            // Pipeline ready - process immediately
+                            _audioPipeline.ProcessAudioChunk(audioChunk);
+                        }
+                        else if (_earlyChunkQueue.Count < MaxEarlyChunks)
+                        {
+                            // Pipeline not ready yet - queue for later processing
+                            // This prevents chunk loss during decoder/buffer initialization
+                            _earlyChunkQueue.Enqueue(audioChunk);
+                            _logger.LogTrace("Queued early chunk ({QueueSize} in queue)", _earlyChunkQueue.Count);
+                        }
+
+                        // else: queue full, drop chunk (should rarely happen)
                     }
-                    else if (_earlyChunkQueue.Count < MaxEarlyChunks)
-                    {
-                        // Pipeline not ready yet - queue for later processing
-                        // This prevents chunk loss during decoder/buffer initialization
-                        _earlyChunkQueue.Enqueue(audioChunk);
-                        _logger.LogTrace("Queued early chunk ({QueueSize} in queue)", _earlyChunkQueue.Count);
-                    }
-                    // else: queue full, drop chunk (should rarely happen)
                 }
 
                 _logger.LogTrace("Audio chunk: {Length} bytes @ {Timestamp}", payload.Length, timestamp);
