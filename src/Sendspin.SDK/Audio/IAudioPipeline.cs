@@ -216,7 +216,9 @@ public enum AudioPipelineStartOutcome
     /// <summary>
     /// The decode chain was built from scratch — the ordinary cold start, and any format change
     /// the implementation could not apply in place. Audio encoded for the previous stream cannot
-    /// be fed to it.
+    /// be fed to it. An implementation may still recycle the decoded ring's allocation across
+    /// such a start, as <see cref="AudioPipeline"/> does; it is cleared on the way, so nothing
+    /// buffered survives and this remains the outcome that discards.
     /// </summary>
     Restarted = 0,
 
