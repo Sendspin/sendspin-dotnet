@@ -370,8 +370,7 @@ TimedAudioBuffer.Read()                TimedAudioBuffer.ReadRaw()
                                            ↓
                                        SyncCorrectionCalculator
                                        ├─ UpdateFromSyncError()
-                                       ├─ DropEveryNFrames / InsertEveryNFrames
-                                       └─ TargetPlaybackRate
+                                       └─ TargetPlaybackRate  ← the only currency
 ```
 
 ### Tiered Correction Strategy
@@ -385,15 +384,24 @@ Both read paths follow the same ladder — they differ only in who applies the c
 | 5 ms – 500 ms | One-shot hard sync (single discontinuity) | `TimedAudioBuffer`, on **both** paths |
 | > 500 ms | Re-anchor (clear buffer, restart sync) | `TimedAudioBuffer`, on **both** paths |
 
-`ResamplingThresholdMicroseconds` (100 ms) splits the continuous tier into rate adjustment and
-discrete drop/insert, so with the default 5 ms hard-sync threshold below it that split is never
-reached — it applies only if you lower the hard-sync threshold or disable that tier.
+`ResamplingThresholdMicroseconds` (100 ms) marks where an error stops being worth trimming
+smoothly, so with the default 5 ms hard-sync threshold below it that mark is never reached — it
+applies only if you lower the hard-sync threshold or disable that tier.
+
+A correction is always expressed as a **playback rate**, in every tier. That is the single
+currency between a provider and whoever applies it: a provider cannot see whether its caller has
+a resampler, so it never chooses the mechanism. A caller without one realizes the same speed as
+one dropped or inserted frame every `1 / |rate - 1|` frames — one frame in N is a speed change of
+1/N — which is exactly what `TimedAudioBuffer.Read` and `SyncCorrectedSampleSource` under
+`FrameStepping` do.
 
 ### Advanced: correcting externally with `ReadRaw`
 
 Only for platforms with their own rate-control mechanism. The buffer still performs the one-shot
-snap itself, because skipping buffered content is something only it can do — when the provider
-reports `SyncCorrectionMode.HardSync` it is telling you to stand down, not to correct.
+snap itself, because skipping buffered content is something only it can do — stand down while
+`ITimedAudioBuffer.IsHardSyncPending` is true, rather than while a provider reports
+`SyncCorrectionMode.HardSync`. The mode is a forecast from the smoothed error; the flag is the
+buffer actually doing it, and the two disagree in both directions.
 
 If what you want is smooth resampling rather than a mechanism peculiar to your platform, use
 `SyncCorrectedSampleSource` (see [Playing audio](#playing-audio)) instead of writing the loop
@@ -415,14 +423,12 @@ var correctionProvider = new SyncCorrectionCalculator(
 // Subscribe to correction changes
 correctionProvider.CorrectionChanged += provider =>
 {
-    // Update your resampler rate
+    // One currency: a speed. Apply it however your platform can.
     myResampler.Rate = provider.TargetPlaybackRate;
 
-    // Or handle drop/insert
-    if (provider.CurrentMode == SyncCorrectionMode.Dropping)
-    {
-        dropEveryN = provider.DropEveryNFrames;
-    }
+    // With no resampler, the same speed is one frame every N:
+    //   var deviation = provider.TargetPlaybackRate - 1.0;
+    //   var everyN = (int)Math.Ceiling(1.0 / Math.Abs(deviation));   // drop if > 0, insert if < 0
 };
 
 // In your IAudioSampleSource, in place of the Read() call from "Playing audio":
@@ -439,7 +445,9 @@ public int Read(float[] buffer, int offset, int count)
         _buffer.SmoothedSyncErrorMicroseconds);
 
     // Apply your correction strategy to `span`, then report what you did.
-    // Drop or insert, never both in the same cycle:
+    // Drop or insert, never both in the same cycle. This feeds the stats only — ReadRaw has
+    // already credited every sample it handed you, so size the read to the correction rather
+    // than expecting this call to account for it:
     _buffer.NotifyExternalCorrection(samplesDropped, samplesInserted);
     _buffer.ReportExternalPlaybackRate(correctionProvider.TargetPlaybackRate);
 

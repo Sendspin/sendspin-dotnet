@@ -8,8 +8,8 @@ namespace Sendspin.SDK.Tests.Audio;
 /// <see cref="ITimedAudioBuffer.ReadRaw"/> and <see cref="ISyncCorrectionProvider"/>. These cover
 /// the two artefacts the chain shipped with — the click at the rate-1.0 boundary and the silence
 /// gap on a mid-callback shortfall, both from windowsSpin issue #63 — plus the invariants that make
-/// the correction conformant: the ±0.5% cap, an exact passthrough inside the dead band, and
-/// neutrality while the buffer's one-shot snap is in flight.
+/// the correction conformant: the ±0.5% cap, a transparent dead band, and neutrality while the
+/// buffer's one-shot snap is in flight.
 /// </summary>
 public class SyncCorrectedSampleSourceTests
 {
@@ -114,9 +114,12 @@ public class SyncCorrectedSampleSourceTests
     /// second (861 events in 21 s were observed on the reporter's USB DAC).
     /// </para>
     /// <para>
-    /// The signal is DC, which a correct resampler passes through unchanged, so an exact-zero
-    /// output sample is the unambiguous signature of a leaked silence pad — nothing else in the
-    /// chain can produce one.
+    /// The signal is DC, which a correct resampler passes through unchanged whatever the ratio,
+    /// so every real output sample must come back bit-exact and anything else was manufactured.
+    /// A weaker "no exact zeros" assertion missed the real defect: a short region fed to WDL's
+    /// <c>ResampleOut</c> fires its zero-pad, and the pad-compensation trim's rounding leaks
+    /// exactly one contaminated frame — a dip of <c>fracpos × signal</c>, up to ~49% — which
+    /// concealment then holds for the rest of the callback.
     /// </para>
     /// </remarks>
     [Fact]
@@ -153,7 +156,12 @@ public class SyncCorrectedSampleSourceTests
             // The buffer is four frames short of what this callback needs — content that has not
             // arrived yet, not a stall. It is made good on the next callback.
             buffer.AvailableSamples = CallbackSamples - (4 * Channels);
-            source.Read(output, 0, CallbackSamples);
+            var real = source.Read(output, 0, CallbackSamples);
+
+            for (var i = 0; i < real; i++)
+            {
+                Assert.Equal(dc, output[i]);
+            }
 
             foreach (var sample in output)
             {
@@ -166,6 +174,44 @@ public class SyncCorrectedSampleSourceTests
 
         Assert.True(source.ConcealedFrameCount > 0, "the run never hit the shortfall path");
         Assert.Equal(0, silenceSamples);
+    }
+
+    /// <summary>
+    /// The frames of a region that came up short are held, not dropped.
+    /// </summary>
+    /// <remarks>
+    /// <c>ResamplePrepare</c> hands out a region without committing to it, so a partial region
+    /// abandoned mid-callback is silently overwritten by the next prepare — which converts the
+    /// pad-path dip into a real dropout, a worse artefact than the one being fixed. Everything the
+    /// buffer hands over must therefore end up in the output, bar the handful of frames the
+    /// resampler and the carry are holding at any instant.
+    /// </remarks>
+    [Fact]
+    public void Shortfall_HoldsThePartialRegion_RatherThanDroppingIt()
+    {
+        var buffer = SignalBuffer.Constant(0.5f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+        for (var i = 0; i < 5; i++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        var deliveredBefore = buffer.FramesDelivered;
+        long realFramesOut = 0;
+
+        for (var cb = 0; cb < 300; cb++)
+        {
+            buffer.AvailableSamples = CallbackSamples - (4 * Channels);
+            realFramesOut += source.Read(output, 0, CallbackSamples) / Channels;
+        }
+
+        var consumed = buffer.FramesDelivered - deliveredBefore;
+
+        // A chain that dropped its partial region would strand ~4 frames per callback.
+        Assert.InRange(consumed - realFramesOut, 0, 32);
     }
 
     /// <summary>
@@ -192,6 +238,46 @@ public class SyncCorrectedSampleSourceTests
 
         Assert.Equal(0, realSamples);
         Assert.All(output, sample => Assert.Equal(0f, sample));
+        Assert.Equal(1, source.UnderrunCount);
+    }
+
+    /// <summary>
+    /// Callbacks before playback has started are not underruns.
+    /// </summary>
+    /// <remarks>
+    /// The buffer hands back nothing at all until its scheduled start arrives, and the output
+    /// device is already running by then, so every stream start produces a run of empty callbacks
+    /// that are entirely expected. Counting them logged "starved" at Warning dozens of times on
+    /// every start, which buries the stalls the counter exists to surface.
+    /// <see cref="TimedAudioBuffer"/> gates its own underrun counter the same way.
+    /// </remarks>
+    [Fact]
+    public void PreStartCallbacks_AreNotCountedAsUnderruns()
+    {
+        var buffer = SignalBuffer.Constant(0.5f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+
+        buffer.AvailableSamples = 0;
+        for (var i = 0; i < 50; i++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        Assert.Equal(0, source.UnderrunCount);
+
+        // Once real audio has flowed, an empty callback is a genuine stall and still counts.
+        buffer.AvailableSamples = long.MaxValue;
+        for (var i = 0; i < 5; i++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        buffer.AvailableSamples = 0;
+        source.Read(output, 0, CallbackSamples);
+
         Assert.Equal(1, source.UnderrunCount);
     }
 
@@ -258,9 +344,10 @@ public class SyncCorrectedSampleSourceTests
 
     /// <summary>
     /// Inside the dead band the rate is exactly 1.0 and the chain must be transparent — not
-    /// "close enough", bit for bit. At an identity ratio WDL's linear interpolation reads every
-    /// output frame at fraction 0.0, so the samples come through untouched; anything else would
-    /// mean the chain is colouring audio that needs no correction at all.
+    /// "close enough", bit for bit. From a fresh start the fractional read position is 0 and stays
+    /// there while the ratio is unity, so WDL's linear interpolation reads every output frame at
+    /// fraction 0.0 and the samples come through untouched; anything else would mean the chain is
+    /// colouring audio that needs no correction at all.
     /// </summary>
     [Fact]
     public void DeadbandSteadyState_IsBitIdenticalPassthrough()
@@ -283,27 +370,115 @@ public class SyncCorrectedSampleSourceTests
     }
 
     /// <summary>
-    /// While the buffer's one-shot snap is in flight the provider reports
-    /// <see cref="SyncCorrectionMode.HardSync"/>, and an external corrector must stand down: the
-    /// snap is a buffer-timeline operation, and correcting on top of it corrects the same error
-    /// twice. Enforced here rather than trusted, because a custom provider can report any rate
-    /// alongside the mode.
+    /// Re-entering the dead band <em>after</em> a correction, which is the case that actually
+    /// happens: bit-identity is not what to expect, and claiming it would be wrong.
+    /// </summary>
+    /// <remarks>
+    /// The fractional read position stops advancing at an identity ratio but does not reset — it
+    /// freezes wherever the correction left it — so the interpolation settles into a fixed
+    /// two-tap average of adjacent frames. That is a mild, unchanging FIR, not a re-colouring:
+    /// the amplitude is essentially intact and, crucially, nothing steps. A bypass at rate 1.0
+    /// would be the thing that steps, which is the whole point of not having one.
+    /// </remarks>
+    [Fact]
+    public void DeadbandAfterACorrection_StaysContinuous()
+    {
+        const double frequency = 997.0;
+        const double amplitude = 0.8;
+
+        var buffer = SignalBuffer.Sine(frequency, amplitude);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+
+        // A correction cycle first, so the read position lands somewhere other than 0...
+        provider.SetResampling(1.003);
+        for (var cb = 0; cb < 20; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        // ...then back inside the dead band, where the rate is exactly 1.0 again.
+        provider.SetResampling(1.0);
+
+        var previous = new float[Channels];
+        source.Read(output, 0, CallbackSamples);
+        for (var c = 0; c < Channels; c++)
+        {
+            previous[c] = output[CallbackSamples - Channels + c];
+        }
+
+        var slopeBound = amplitude * 2 * Math.PI * frequency / SampleRate;
+        var peak = 0.0f;
+
+        for (var cb = 0; cb < 50; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+
+            for (var c = 0; c < Channels; c++)
+            {
+                var prev = previous[c];
+                for (var i = c; i < CallbackSamples; i += Channels)
+                {
+                    Assert.True(
+                        Math.Abs(output[i] - prev) < 2 * slopeBound,
+                        $"the dead band stepped by {Math.Abs(output[i] - prev):F5} at sample {i}");
+                    prev = output[i];
+                    peak = Math.Max(peak, Math.Abs(output[i]));
+                }
+
+                previous[c] = output[CallbackSamples - Channels + c];
+            }
+        }
+
+        // A fixed two-tap average at 997 Hz costs well under 1% of amplitude; anything more would
+        // mean the chain is genuinely filtering audio that needs no correction.
+        Assert.InRange(peak, amplitude * 0.99, amplitude);
+    }
+
+    /// <summary>
+    /// While the buffer's one-shot snap is actually in flight an external corrector must stand
+    /// down: the snap is a buffer-timeline operation, and correcting on top of it corrects the
+    /// same error twice. Gated on the buffer, not on the provider's prediction, and enforced
+    /// rather than trusted — a custom provider can report any rate it likes.
     /// </summary>
     [Fact]
-    public void HardSyncMode_HoldsTheRateAtUnity_AndSplicesNothing()
+    public void SnapInFlight_HoldsTheRateAtUnity_AndSplicesNothing()
     {
         var buffer = SignalBuffer.Constant(0.4f);
         var provider = new ScriptedCorrectionProvider();
         using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
 
-        // A provider misreporting a correction alongside the snap.
-        provider.SetHardSync(rate: 1.004, dropEveryN: 200, insertEveryN: 0);
+        buffer.IsHardSyncPending = true;
+        provider.SetResampling(1.004);
         source.Read(new float[CallbackSamples], 0, CallbackSamples);
 
         Assert.Equal(1.0, source.PlaybackRate);
         Assert.Equal(1.0, buffer.LastReportedRate);
         Assert.Equal(0, buffer.SamplesDroppedReported);
         Assert.Equal(0, buffer.SamplesInsertedReported);
+    }
+
+    /// <summary>
+    /// The other half of moving the gate to the actor: a provider <em>predicting</em>
+    /// <see cref="SyncCorrectionMode.HardSync"/> is not a reason to stand down. The buffer
+    /// declines to snap on a sign disagreement, past the re-anchor ceiling and inside its grace
+    /// windows, and while it is declining the drift is this source's to correct — standing
+    /// down on the forecast left it uncorrected with nobody acting at all.
+    /// </summary>
+    [Fact]
+    public void PredictedHardSync_WithNoSnapInFlight_StillCorrects()
+    {
+        var buffer = SignalBuffer.Constant(0.4f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        provider.SetHardSync(rate: 1.004);
+        source.Read(new float[CallbackSamples], 0, CallbackSamples);
+
+        Assert.Equal(1.004, source.PlaybackRate, 9);
+        Assert.Equal(1.004, buffer.LastReportedRate, 9);
     }
 
     // ── The correction actually lands ───────────────────────────────────────
@@ -438,27 +613,57 @@ public class SyncCorrectedSampleSourceTests
     }
 
     /// <summary>
-    /// The wiring behind the mechanism switch: the policy ladder is the same either way, but the
-    /// decision is reported in the currency the selected mechanism can actually spend. A caller
-    /// with no resampler gets an interval, not a rate it has nothing to apply to.
+    /// The provider emits a rate whatever mechanism the host runs, because it cannot see which
+    /// one the host has: the options it was built from are its own copy, not the buffer's. It
+    /// used to decide from that copy, so a mismatched pair produced a rate nothing applied.
     /// </summary>
-    [Fact]
-    public void Calculator_UnderFrameStepping_ReportsAnIntervalRatherThanARate()
+    [Theory]
+    [InlineData(SyncCorrectionMechanism.SmoothResampling)]
+    [InlineData(SyncCorrectionMechanism.FrameStepping)]
+    public void Calculator_ReportsARate_WhicheverMechanismTheHostRuns(SyncCorrectionMechanism mechanism)
     {
-        var options = FrameSteppingOptions();
+        var options = SyncCorrectionOptions.Default;
+        options.Mechanism = mechanism;
+
         var calculator = new SyncCorrectionCalculator(options, SampleRate, Channels);
         calculator.NotifySamplesProcessed(SampleRate * Channels);
 
         calculator.UpdateFromSyncError(2_000, 2_000);
 
-        Assert.Equal(SyncCorrectionMode.Dropping, calculator.CurrentMode);
-        Assert.True(calculator.DropEveryNFrames > 0);
-        Assert.Equal(1.0, calculator.TargetPlaybackRate);
+        Assert.Equal(SyncCorrectionMode.Resampling, calculator.CurrentMode);
+        Assert.InRange(calculator.TargetPlaybackRate, 1.0 + 1e-9, options.MaxRate);
+    }
 
-        // One frame in N is a speed change of 1/N, so the cap is a floor on N.
+    /// <summary>
+    /// And the host spends that rate as frame stepping when it has no resampler, at an interval
+    /// whose implied speed is the rate's — one frame in N is a speed change of 1/N — and
+    /// never short enough to exceed the spec's ±0.5% cap.
+    /// </summary>
+    [Fact]
+    public void FrameStepping_SpendsTheRateAtTheEquivalentInterval()
+    {
+        var options = FrameSteppingOptions();
+        var buffer = SignalBuffer.Sine(220.0, 0.5, options);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        // The cap itself: the tightest interval the ladder can ask for is one frame in 200.
+        provider.SetResampling(options.MaxRate);
+
+        var output = new float[CallbackSamples];
+        const int callbacks = 100;
+        for (var cb = 0; cb < callbacks; cb++)
+        {
+            Assert.Equal(CallbackSamples, source.Read(output, 0, CallbackSamples));
+        }
+
+        var outputFrames = (long)callbacks * (CallbackSamples / Channels);
+        var drops = buffer.SamplesDroppedReported / Channels;
+
+        Assert.Equal(outputFrames / (int)Math.Ceiling(1.0 / options.EffectiveMaxSpeedCorrection), drops);
         Assert.True(
-            calculator.DropEveryNFrames >= (int)Math.Ceiling(1.0 / options.EffectiveMaxSpeedCorrection),
-            "the drop interval is short enough to exceed the spec's ±0.5% cap");
+            drops / (double)outputFrames <= SyncCorrectionOptions.SpecMaxSpeedCorrection,
+            "the stepping interval implies a speed past the spec's cap");
     }
 
     /// <summary>
@@ -495,6 +700,40 @@ public class SyncCorrectedSampleSourceTests
         source.Reset();
 
         Assert.Equal(1.0, source.PlaybackRate);
+        Assert.Equal(1.0, buffer.LastReportedRate);
+    }
+
+    /// <summary>
+    /// The rate reaches the buffer when it moves, and only then. Every report takes the buffer's
+    /// lock from the audio thread, and the rate holds still for long stretches — but the contract
+    /// is that every change is reported, including the return to 1.0, or the stats latch on the
+    /// last value seen.
+    /// </summary>
+    [Fact]
+    public void ReportedRate_IsSentOnChangeOnly_IncludingTheReturnToUnity()
+    {
+        var buffer = SignalBuffer.Constant(0.3f);
+        var provider = new ScriptedCorrectionProvider();
+        using var source = new SyncCorrectedSampleSource(buffer, () => 0, provider);
+
+        var output = new float[CallbackSamples];
+
+        provider.SetResampling(1.004);
+        for (var cb = 0; cb < 20; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        Assert.Equal(1, buffer.ReportedRateCallCount);
+        Assert.Equal(1.004, buffer.LastReportedRate, 9);
+
+        provider.SetResampling(1.0);
+        for (var cb = 0; cb < 20; cb++)
+        {
+            source.Read(output, 0, CallbackSamples);
+        }
+
+        Assert.Equal(2, buffer.ReportedRateCallCount);
         Assert.Equal(1.0, buffer.LastReportedRate);
     }
 
@@ -596,6 +835,39 @@ public class SyncCorrectedSampleSourceTests
             $"the source corrected on top of the snap at rate {player.RateWhileHardSyncing}");
     }
 
+    /// <summary>
+    /// The external path must credit consumption exactly once, as the internal one does.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ITimedAudioBuffer.ReadRaw"/> adds every sample it hands over to the read
+    /// cursor, and the read is deliberately sized to what the splice will consume, so the
+    /// correction is already accounted for before it is reported. Counting it again in
+    /// <see cref="ITimedAudioBuffer.NotifyExternalCorrection"/> made the error metric converge at
+    /// twice the physical correction: under steady drift the player leaves the group by about
+    /// half the drift while reporting a sync error near zero.
+    /// </remarks>
+    [Fact]
+    public void FrameStepping_AgainstTheRealBuffer_CreditsEachConsumedSampleOnce()
+    {
+        var provider = new ScriptedCorrectionProvider();
+        var player = new RealBufferPlayer(FrameSteppingOptions(), provider);
+        player.Run(callbacks: 100);
+
+        // Gentle enough that four seconds of it stays inside the one-shot band: the snap credits
+        // the cursor on its own terms and would blur what is being measured here.
+        provider.SetDropping(4_800);
+        player.Run(callbacks: 400);
+
+        var stats = player.Buffer.GetStats();
+
+        // Both counters are fed only by what actually left the ring buffer, and neither survives
+        // a snap or a re-anchor intact, so those are excluded rather than compensated for.
+        Assert.Equal(0, stats.HardSyncCount);
+        Assert.Equal(0, stats.ReanchorCount);
+        Assert.True(stats.SamplesDroppedForSync > 0, "the run never applied a correction");
+        Assert.Equal(stats.TotalSamplesRead, stats.SamplesReadSinceStart);
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     private static SyncCorrectionOptions FrameSteppingOptions()
@@ -680,6 +952,9 @@ public class SyncCorrectedSampleSourceTests
 
         public double LastReportedRate { get; private set; } = 1.0;
 
+        /// <summary>Every call, not every distinct value: the source reports only on a change.</summary>
+        public int ReportedRateCallCount { get; private set; }
+
         public long SamplesDroppedReported { get; private set; }
 
         public long SamplesInsertedReported { get; private set; }
@@ -705,6 +980,9 @@ public class SyncCorrectedSampleSourceTests
         public long SyncErrorMicroseconds => SyncError;
 
         public double SmoothedSyncErrorMicroseconds => SyncError;
+
+        /// <summary>Whether the buffer is mid-snap, which is what the source stands down on.</summary>
+        public bool IsHardSyncPending { get; set; }
 
         public static SignalBuffer Sine(double frequencyHz, double amplitude, SyncCorrectionOptions? options = null)
         {
@@ -747,7 +1025,11 @@ public class SyncCorrectedSampleSourceTests
             SamplesInsertedReported += samplesInserted;
         }
 
-        public void ReportExternalPlaybackRate(double rate) => LastReportedRate = rate;
+        public void ReportExternalPlaybackRate(double rate)
+        {
+            LastReportedRate = rate;
+            ReportedRateCallCount++;
+        }
 
         public int Read(Span<float> buffer, long currentLocalTime) => ReadRaw(buffer, currentLocalTime);
 
@@ -788,10 +1070,6 @@ public class SyncCorrectedSampleSourceTests
     {
         public SyncCorrectionMode CurrentMode { get; private set; } = SyncCorrectionMode.None;
 
-        public int DropEveryNFrames { get; private set; }
-
-        public int InsertEveryNFrames { get; private set; }
-
         public double TargetPlaybackRate { get; private set; } = 1.0;
 
         public event Action<ISyncCorrectionProvider>? CorrectionChanged;
@@ -800,43 +1078,34 @@ public class SyncCorrectedSampleSourceTests
         {
             CurrentMode = Math.Abs(rate - 1.0) < 1e-12 ? SyncCorrectionMode.None : SyncCorrectionMode.Resampling;
             TargetPlaybackRate = rate;
-            DropEveryNFrames = 0;
-            InsertEveryNFrames = 0;
             CorrectionChanged?.Invoke(this);
         }
 
-        public void SetDropping(int everyNFrames)
-        {
-            CurrentMode = SyncCorrectionMode.Dropping;
-            TargetPlaybackRate = 1.0;
-            DropEveryNFrames = everyNFrames;
-            InsertEveryNFrames = 0;
-            CorrectionChanged?.Invoke(this);
-        }
+        /// <summary>
+        /// Asks for the speed that one dropped frame in <paramref name="everyNFrames"/> realizes.
+        /// A rate is the only currency a provider has; the interval is the source's translation
+        /// of it, which is what these tests are checking.
+        /// </summary>
+        public void SetDropping(int everyNFrames) =>
+            SetTier(SyncCorrectionMode.Dropping, 1.0 + (1.0 / everyNFrames));
 
-        public void SetInserting(int everyNFrames)
-        {
-            CurrentMode = SyncCorrectionMode.Inserting;
-            TargetPlaybackRate = 1.0;
-            DropEveryNFrames = 0;
-            InsertEveryNFrames = everyNFrames;
-            CorrectionChanged?.Invoke(this);
-        }
+        public void SetInserting(int everyNFrames) =>
+            SetTier(SyncCorrectionMode.Inserting, 1.0 - (1.0 / everyNFrames));
 
-        public void SetHardSync(double rate, int dropEveryN, int insertEveryN)
-        {
-            CurrentMode = SyncCorrectionMode.HardSync;
-            TargetPlaybackRate = rate;
-            DropEveryNFrames = dropEveryN;
-            InsertEveryNFrames = insertEveryN;
-            CorrectionChanged?.Invoke(this);
-        }
+        public void SetHardSync(double rate) => SetTier(SyncCorrectionMode.HardSync, rate);
 
         public void UpdateFromSyncError(long rawMicroseconds, double smoothedMicroseconds)
         {
         }
 
         public void Reset() => SetResampling(1.0);
+
+        private void SetTier(SyncCorrectionMode mode, double rate)
+        {
+            CurrentMode = mode;
+            TargetPlaybackRate = rate;
+            CorrectionChanged?.Invoke(this);
+        }
     }
 
     /// <summary>
@@ -858,9 +1127,11 @@ public class SyncCorrectedSampleSourceTests
 
         private long _writeServerTs = ServerT0;
 
-        public RealBufferPlayer()
+        public RealBufferPlayer(
+            SyncCorrectionOptions? options = null,
+            ISyncCorrectionProvider? provider = null)
         {
-            Buffer = new TimedAudioBuffer(Format, _clockSync, bufferCapacityMs: 5_000);
+            Buffer = new TimedAudioBuffer(Format, _clockSync, bufferCapacityMs: 5_000, options);
 
             // A steady tone rather than DC, so a splice would be visible if one happened.
             for (var i = 0; i < _chunk.Length; i += Channels)
@@ -876,7 +1147,7 @@ public class SyncCorrectedSampleSourceTests
             _clockSync.IsConverged = true;
             _clockSync.HasMinimalSync = true;
 
-            Source = new SyncCorrectedSampleSource(Buffer, () => WallNow);
+            Source = new SyncCorrectedSampleSource(Buffer, () => WallNow, provider);
 
             PumpProducer();
             Read();
@@ -916,9 +1187,9 @@ public class SyncCorrectedSampleSourceTests
 
         private void Read()
         {
-            // Sampled before the read: the rate for a callback is settled from the mode standing
-            // when it starts, so that is the pairing the neutrality invariant is about.
-            var modeAtEntry = Source.CorrectionProvider.CurrentMode;
+            // Sampled before the read: the rate for a callback is settled from the snap state
+            // standing when it starts, so that is the pairing the neutrality invariant is about.
+            var snapInFlightAtEntry = Buffer.IsHardSyncPending;
 
             Source.Read(_callback, 0, _callback.Length);
 
@@ -926,7 +1197,7 @@ public class SyncCorrectedSampleSourceTests
             MaxRateSeen = Math.Max(MaxRateSeen, rate);
             MinRateSeen = Math.Min(MinRateSeen, rate);
 
-            if (modeAtEntry == SyncCorrectionMode.HardSync)
+            if (snapInFlightAtEntry)
             {
                 RateWhileHardSyncing = rate;
             }

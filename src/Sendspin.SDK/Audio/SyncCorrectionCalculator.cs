@@ -8,16 +8,15 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace Sendspin.SDK.Audio;
 
 /// <summary>
-/// Computes sync-correction parameters (playback rate, drop/insert intervals)
-/// from an observed sync error and raises <see cref="CorrectionChanged"/>
-/// when those parameters change. Subscribers are responsible for unsubscribing
-/// before discarding the reference.
+/// Computes the sync correction — a target playback rate — from an observed sync error, and
+/// raises <see cref="CorrectionChanged"/> when it changes. Subscribers are responsible for
+/// unsubscribing before discarding the reference.
 /// </summary>
 /// <remarks>
 /// The decision itself lives in <see cref="SyncCorrectionPolicy"/>, shared with
 /// <see cref="TimedAudioBuffer"/>'s internal corrector so the two cannot diverge.
 /// When the policy selects <see cref="SyncCorrectionMode.HardSync"/> this reports
-/// a neutral correction: the buffer applies that snap itself on both read paths,
+/// a neutral rate: the buffer applies that snap itself on both read paths,
 /// and a caller adding its own on top would double-correct.
 /// </remarks>
 public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
@@ -28,8 +27,6 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
     private readonly object _lock = new();
 
     private SyncCorrectionMode _currentMode = SyncCorrectionMode.None;
-    private int _dropEveryNFrames;
-    private int _insertEveryNFrames;
     private double _targetPlaybackRate = 1.0;
 
     private long _totalSamplesProcessed;
@@ -43,18 +40,6 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
     public SyncCorrectionMode CurrentMode
     {
         get { lock (_lock) return _currentMode; }
-    }
-
-    /// <inheritdoc/>
-    public int DropEveryNFrames
-    {
-        get { lock (_lock) return _dropEveryNFrames; }
-    }
-
-    /// <inheritdoc/>
-    public int InsertEveryNFrames
-    {
-        get { lock (_lock) return _insertEveryNFrames; }
     }
 
     /// <inheritdoc/>
@@ -127,13 +112,9 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         lock (_lock)
         {
             changed = _currentMode != SyncCorrectionMode.None
-                || _dropEveryNFrames != 0
-                || _insertEveryNFrames != 0
                 || Math.Abs(_targetPlaybackRate - 1.0) > 0.0001;
 
             _currentMode = SyncCorrectionMode.None;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
             _targetPlaybackRate = 1.0;
             _totalSamplesProcessed = 0;
             _inStartupGracePeriod = true;
@@ -168,15 +149,11 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         lock (_lock)
         {
             changed = _currentMode != SyncCorrectionMode.None
-                || _dropEveryNFrames != 0
-                || _insertEveryNFrames != 0
                 || Math.Abs(_targetPlaybackRate - 1.0) > 0.0001;
 
             _inReconnectStabilization = true;
             _reconnectSamplesProcessed = 0;
             _currentMode = SyncCorrectionMode.None;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
             _targetPlaybackRate = 1.0;
         }
 
@@ -230,8 +207,6 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
     private bool UpdateCorrectionInternal(double smoothedMicroseconds)
     {
         var previousMode = _currentMode;
-        var previousDrop = _dropEveryNFrames;
-        var previousInsert = _insertEveryNFrames;
         var previousRate = _targetPlaybackRate;
 
         // During startup grace period, don't apply corrections
@@ -239,9 +214,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         {
             _currentMode = SyncCorrectionMode.None;
             _targetPlaybackRate = 1.0;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
-            return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
+            return HasChanged(previousMode, previousRate);
         }
 
         // While the Kalman filter is re-converging after reconnect, sync error
@@ -250,37 +223,28 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         {
             _currentMode = SyncCorrectionMode.None;
             _targetPlaybackRate = 1.0;
-            _dropEveryNFrames = 0;
-            _insertEveryNFrames = 0;
-            return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
+            return HasChanged(previousMode, previousRate);
         }
 
-        // One decision ladder, shared with TimedAudioBuffer's internal corrector. The mechanism
-        // decides the currency, not the amount: a caller that has no resampler gets the same speed
-        // change expressed as frame stepping rather than a rate it cannot apply to anything.
-        var decision = SyncCorrectionPolicy.Decide(
-            smoothedMicroseconds,
-            _options,
-            _sampleRate,
-            _channels,
-            selfApplied: _options.Mechanism == SyncCorrectionMechanism.FrameStepping);
+        // One decision ladder, shared with TimedAudioBuffer's internal corrector, and one
+        // currency. The mechanism is not decided here: this object cannot see whether its caller
+        // has a resampler, and the SyncCorrectionOptions.Mechanism it used to read belongs to a
+        // different object's copy of the options. A caller without a resampler converts the rate
+        // to a stepping interval itself.
+        var decision = SyncCorrectionPolicy.Decide(smoothedMicroseconds, _options);
 
         _currentMode = decision.Mode;
         _targetPlaybackRate = decision.TargetPlaybackRate;
-        _dropEveryNFrames = decision.DropEveryNFrames;
-        _insertEveryNFrames = decision.InsertEveryNFrames;
 
-        return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
+        return HasChanged(previousMode, previousRate);
     }
 
     /// <summary>
     /// Checks if correction parameters changed from previous values.
     /// </summary>
-    private bool HasChanged(SyncCorrectionMode previousMode, int previousDrop, int previousInsert, double previousRate)
+    private bool HasChanged(SyncCorrectionMode previousMode, double previousRate)
     {
         return previousMode != _currentMode
-            || previousDrop != _dropEveryNFrames
-            || previousInsert != _insertEveryNFrames
             || Math.Abs(previousRate - _targetPlaybackRate) > 0.0001;
     }
 }

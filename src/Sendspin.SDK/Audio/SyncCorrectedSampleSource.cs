@@ -32,14 +32,16 @@ namespace Sendspin.SDK.Audio;
 /// a vendored WDL resampler applies the rate. The buffer keeps the one-shot snap and the re-anchor
 /// on both read paths, because skipping buffered content — or manufacturing silence — is a
 /// timeline operation no external corrector can perform on samples it has already been handed.
-/// While a snap is in flight the provider reports <see cref="SyncCorrectionMode.HardSync"/> and
-/// this source holds the rate at exactly 1.0, so the two never correct the same error twice.
+/// While <see cref="ITimedAudioBuffer.IsHardSyncPending"/> is true this source holds the rate at
+/// exactly 1.0 and splices nothing, so the two never correct the same error twice.
 /// </para>
 /// <para>
 /// Set <see cref="SyncCorrectionOptions.Mechanism"/> to
 /// <see cref="SyncCorrectionMechanism.FrameStepping"/> to fall back to discrete drop/insert; the
 /// resampler is then not constructed and no audio passes through it. That is for hosts that must
-/// not carry a resampler in the output chain, not a tuning choice.
+/// not carry a resampler in the output chain, not a tuning choice. The provider is not told:
+/// it emits a rate either way, and this source — the only object that knows whether a resampler
+/// exists — converts that rate to a drop/insert interval of the same magnitude.
 /// </para>
 /// <para>
 /// Threading: <see cref="Read"/> is the audio-thread entry point and is not re-entrant; call it
@@ -65,10 +67,27 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// </summary>
     private readonly float[] _previousFrame;
 
+    /// <summary>
+    /// Input frames read for a resampler region that came up short, held to be prefixed to the
+    /// next one. Never handed to the resampler as a partial region — see <see cref="ReadResampled"/>.
+    /// </summary>
+    private float[] _carry = Array.Empty<float>();
+
+    private int _carryFrames;
+
     private double _playbackRate = 1.0;
+
+    /// <summary>Last rate handed to the buffer, so an unchanged one costs no lock.</summary>
+    private double _lastReportedRate = 1.0;
 
     /// <summary>Output frames since the last discrete drop/insert, when frame stepping.</summary>
     private int _framesSinceLastCorrection;
+
+    /// <summary>
+    /// Set by the first callback that produced real audio. Before it, an empty callback is the
+    /// buffer waiting for its scheduled start rather than starving.
+    /// </summary>
+    private bool _playbackStarted;
 
     private long _underrunCount;
     private long _concealedFrameCount;
@@ -149,6 +168,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// Gets the number of callbacks that produced no buffered audio at all and were filled with
     /// silence. A count that keeps climbing during playback means the buffer is starving.
     /// </summary>
+    /// <remarks>
+    /// Counts only after playback has started. The empty callbacks between the output device
+    /// opening and the buffer's scheduled start are expected, not starvation, and counting them
+    /// made every stream start look like a stall.
+    /// </remarks>
     public long UnderrunCount => Interlocked.Read(ref _underrunCount);
 
     /// <summary>
@@ -196,14 +220,16 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
 
         var now = _nowMicroseconds();
 
-        // The rate for this callback comes from the error the previous one measured. A callback of
-        // lag is nothing against a correction target measured in seconds, and settling it up front
-        // keeps the rate constant for the whole block instead of stepping mid-buffer.
-        ApplyCurrentRate();
+        // The correction for this callback comes from the error the previous one measured. A
+        // callback of lag is nothing against a correction target measured in seconds, and settling
+        // it up front — once, from one snapshot — keeps it constant for the whole block instead of
+        // stepping mid-buffer, and keeps the provider's lock out of the inner loop.
+        var correction = ResolveCorrection();
+        ApplyCorrection(correction);
 
         var producedFrames = _resampler is null
-            ? ReadCorrectedFrames(buffer.AsSpan(offset, outputFrames * _channels), outputFrames, now)
-            : ReadResampled(buffer, offset, outputFrames, now);
+            ? ReadCorrectedFrames(buffer.AsSpan(offset, outputFrames * _channels), outputFrames, now, correction)
+            : ReadResampled(buffer, offset, outputFrames, now, correction);
 
         return Conceal(buffer, offset, count, producedFrames * _channels);
     }
@@ -219,9 +245,12 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
         _correctionProvider.Reset();
         _resampler?.Reset();
         _framesSinceLastCorrection = 0;
+        _carryFrames = 0;
+        _playbackStarted = false;
         Array.Clear(_previousFrame);
         Volatile.Write(ref _playbackRate, 1.0);
         _buffer.ReportExternalPlaybackRate(1.0);
+        _lastReportedRate = 1.0;
         SetResamplerRate(1.0);
     }
 
@@ -240,6 +269,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _correctionProvider.NotifyReconnect();
+
+        // Held input belongs to the pre-disconnect timeline, and the buffer abandons its own
+        // in-flight snap for the same reason. Splicing it onto whatever arrives next would put a
+        // step in the waveform at the one moment the clock is least able to explain it.
+        _carryFrames = 0;
     }
 
     /// <inheritdoc/>
@@ -281,6 +315,15 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// present in program material and is not audible if it were. A resampler doing genuine rate
     /// conversion would need the chain; this one does not.
     /// </para>
+    /// <para>
+    /// <b>Do not raise <c>filtercnt</c> here.</b> Besides the click above, WDL's output-side IIR
+    /// pass — the one that runs while the ratio is below 1.0 — filters from index 0 of the output
+    /// array rather than from the offset it was asked to write at. This source writes at a
+    /// non-zero offset whenever the loop needs a second pass, so a non-zero <c>filtercnt</c> would
+    /// filter over frames already generated in this callback and leave the new ones unfiltered.
+    /// The fault is upstream and the vendored file is kept diffable against it (see its header),
+    /// so the guard lives here, at the only call site that could arm it.
+    /// </para>
     /// </remarks>
     private WdlResampler CreateResampler()
     {
@@ -301,30 +344,66 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     }
 
     /// <summary>
-    /// Reads the provider's current decision, clamps it to the spec's cap, and hands it to the
-    /// resampler.
+    /// Takes one snapshot of the provider's decision and turns it into what this callback will
+    /// actually do — a resampler rate, or a drop/insert interval of the same magnitude.
     /// </summary>
-    private void ApplyCurrentRate()
+    private CallbackCorrection ResolveCorrection()
     {
-        var rate = 1.0;
-
-        // HardSync is the buffer's to apply on both read paths, and it is exempt from the speed
-        // cap precisely because it is a single discontinuity rather than a speed change. Correcting
-        // on top of it would double-correct the same error, so the rate stays neutral for the
-        // duration — enforced here rather than trusted, since a custom provider may report anything.
-        if (_correctionProvider.CurrentMode != SyncCorrectionMode.HardSync)
+        // The one-shot snap is the buffer's on both read paths, and it is exempt from the speed
+        // cap precisely because it is a single discontinuity rather than a speed change. Ask the
+        // actor, not the forecast: the provider predicts HardSync from the smoothed error alone,
+        // while the buffer declines to snap on a sign disagreement, past the re-anchor ceiling and
+        // inside its grace windows — so the two disagree in both directions, and standing down on
+        // the prediction left ordinary drift uncorrected while the buffer was doing nothing.
+        if (_buffer.IsHardSyncPending)
         {
-            var reported = _correctionProvider.TargetPlaybackRate;
-            rate = double.IsFinite(reported)
-                ? Math.Clamp(reported, _options.MinRate, _options.MaxRate)
-                : 1.0;
+            return CallbackCorrection.Neutral;
         }
 
+        // Clamped here as well as in the provider, so a custom one cannot take this player out of
+        // spec (roles/player/v1.md:134).
+        var reported = _correctionProvider.TargetPlaybackRate;
+        var rate = double.IsFinite(reported)
+            ? Math.Clamp(reported, _options.MinRate, _options.MaxRate)
+            : 1.0;
+
+        // The mechanism is this object's to choose: it is the only one that can see whether a
+        // resampler exists. The provider's tier still gets a say in one direction — Dropping and
+        // Inserting mean the error is past what SyncCorrectionOptions.ResamplingThresholdMicroseconds
+        // considers worth trimming smoothly — but a rate is all it ever emits.
+        var mode = _correctionProvider.CurrentMode;
+        var stepping = _resampler is null
+            || mode is SyncCorrectionMode.Dropping or SyncCorrectionMode.Inserting;
+
+        if (!stepping)
+        {
+            return new CallbackCorrection(rate, 0, 0);
+        }
+
+        var (dropEveryN, insertEveryN) =
+            SyncCorrectionPolicy.SteppingIntervalFrames(rate, _options, _channels);
+
+        // The resampler, if there is one, stays at unity: the speed is being spent on the splices.
+        return new CallbackCorrection(1.0, dropEveryN, insertEveryN);
+    }
+
+    /// <summary>
+    /// Publishes the resolved rate and points the resampler at it.
+    /// </summary>
+    private void ApplyCorrection(in CallbackCorrection correction)
+    {
+        var rate = correction.ResamplerRate;
         Volatile.Write(ref _playbackRate, rate);
 
         // The rate is applied out here, so without this the buffer's stats would read 1.0 while the
-        // audio is actively being resampled.
-        _buffer.ReportExternalPlaybackRate(rate);
+        // audio is actively being resampled. Reported only when it moves — the buffer takes its
+        // lock for every call and the rate holds still for long stretches — which still includes
+        // the return to 1.0, because that is a move.
+        if (rate != _lastReportedRate)
+        {
+            _buffer.ReportExternalPlaybackRate(rate);
+            _lastReportedRate = rate;
+        }
 
         SetResamplerRate(rate);
     }
@@ -358,52 +437,159 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// concealed on the output side and counted.
     /// </para>
     /// <para>
+    /// <b>A partial region is never fed to the resampler.</b> WDL treats an input region shorter
+    /// than the one it asked for as end-of-stream: it zero-pads to that length, resamples across
+    /// the pad, and then trims the output back by a rounded estimate of the padded frames. The
+    /// rounding leaks exactly one contaminated frame — a dip of <c>fracpos × signal</c>, up to
+    /// ~49% — which concealment then holds for the rest of the callback. Bailing before
+    /// <c>ResampleOut</c> is not an alternative either: <c>ResamplePrepare</c> does not commit, so
+    /// the next call's prepare overwrites the region and the dip becomes a dropout instead. The
+    /// short read is therefore carried in <see cref="_carry"/> and prefixed to the next callback's
+    /// region, which is the only way the content survives intact.
+    /// </para>
+    /// <para>
     /// There is deliberately no bypass at rate 1.0. The resampler holds buffered input and a
     /// fractional read position across calls; stepping around it strands that content and re-entry
     /// resumes from a position the stream has moved past — an audible discontinuity every time the
-    /// error crosses the dead band, which is many times a minute. At an identity ratio the linear
-    /// interpolation is an exact passthrough anyway (each output frame reads at fraction 0.0), so
-    /// the bypass would buy nothing but the click. See
-    /// <c>DeadbandSteadyState_IsBitIdenticalPassthrough</c>.
+    /// error crosses the dead band, which is many times a minute. At an identity ratio the read
+    /// position stops advancing, so the linear interpolation settles into a fixed two-tap
+    /// average: from a fresh start that fraction is 0 and the samples come through bit for bit,
+    /// and after a correction it is whatever the rate left behind, which is a fixed, gentle FIR
+    /// rather than anything that moves. Either way the bypass would buy nothing but the click.
+    /// See <c>DeadbandSteadyState_IsBitIdenticalPassthrough</c> and
+    /// <c>DeadbandAfterACorrection_StaysContinuous</c>.
     /// </para>
     /// </remarks>
-    private int ReadResampled(float[] output, int offset, int outputFrames, long now)
+    private int ReadResampled(float[] output, int offset, int outputFrames, long now, in CallbackCorrection correction)
     {
         var resampler = _resampler!;
         var totalFramesGenerated = 0;
+        var framesWanted = outputFrames;
+        var bufferDry = false;
 
-        while (totalFramesGenerated < outputFrames)
+        while (totalFramesGenerated < outputFrames && framesWanted > 0)
         {
-            var framesWanted = outputFrames - totalFramesGenerated;
             var framesNeeded = resampler.ResamplePrepare(
                 framesWanted, _channels, out var inBuffer, out var inBufferOffset);
 
             // Zero means the resampler already holds enough input to make more output without
-            // reading; only a non-zero request that comes back empty is a genuine stall.
-            var framesRead = framesNeeded > 0
-                ? ReadCorrectedFrames(
-                    inBuffer.AsSpan(inBufferOffset, framesNeeded * _channels), framesNeeded, now)
-                : 0;
-
-            if (framesNeeded > 0 && framesRead == 0)
+            // reading; only a non-zero request that comes back short is a genuine stall.
+            if (framesNeeded > 0)
             {
-                break;
+                var framesRead = FillRegion(inBuffer, inBufferOffset, framesNeeded, now, correction, bufferDry);
+
+                if (framesRead < framesNeeded)
+                {
+                    // Hold what arrived and ask for less output instead: a short region makes WDL
+                    // pad, and simply abandoning the region loses the frames, because
+                    // ResamplePrepare does not commit and the next prepare overwrites them. One
+                    // output frame less per input frame missing always shrinks the request enough
+                    // in one or two passes, the ratio being within ±0.5% of 1, and it strictly
+                    // decreases, so the loop terminates.
+                    StoreCarry(inBuffer, inBufferOffset, framesRead);
+                    framesWanted -= framesNeeded - framesRead;
+                    bufferDry = true;
+                    continue;
+                }
             }
 
             var framesGenerated = resampler.ResampleOut(
-                output, offset + (totalFramesGenerated * _channels), framesRead, framesWanted, _channels);
+                output, offset + (totalFramesGenerated * _channels), framesNeeded, framesWanted, _channels);
 
             if (framesGenerated == 0)
             {
-                // No forward progress despite the read: the filter still wants lookahead it does
-                // not have. Bail rather than spin; the residual is concealed by the caller.
+                // No forward progress despite a full region: the filter still wants lookahead it
+                // does not have. Bail rather than spin; the residual is concealed by the caller.
                 break;
             }
 
             totalFramesGenerated += framesGenerated;
+            framesWanted = outputFrames - totalFramesGenerated;
         }
 
         return totalFramesGenerated;
+    }
+
+    /// <summary>
+    /// Fills a resampler region: whatever was carried over from a short read first, then fresh
+    /// content from the buffer for the remainder.
+    /// </summary>
+    /// <param name="region">The resampler's input region.</param>
+    /// <param name="regionOffset">Where in <paramref name="region"/> the input starts.</param>
+    /// <param name="frames">Frames the resampler asked for.</param>
+    /// <param name="now">Current local time, for the buffer's error calculation.</param>
+    /// <param name="correction">What this callback is doing about the sync error.</param>
+    /// <param name="bufferDry">
+    /// True once the buffer has already under-delivered in this callback, so a retry at a smaller
+    /// output size fills from the carry alone. Asking a dry buffer again would count a second
+    /// underrun for one stall.
+    /// </param>
+    /// <returns>Frames in the region; fewer than <paramref name="frames"/> when the buffer is dry.</returns>
+    private int FillRegion(
+        float[] region,
+        int regionOffset,
+        int frames,
+        long now,
+        in CallbackCorrection correction,
+        bool bufferDry)
+    {
+        var carried = Math.Min(_carryFrames, frames);
+        if (carried > 0)
+        {
+            _carry.AsSpan(0, carried * _channels)
+                .CopyTo(region.AsSpan(regionOffset, carried * _channels));
+
+            // A later region can be smaller than the one the carry was taken from (a shorter
+            // callback, or a rate that lowered the demand), so keep any surplus rather than
+            // dropping it on the floor.
+            var surplus = _carryFrames - carried;
+            if (surplus > 0)
+            {
+                _carry.AsSpan(carried * _channels, surplus * _channels).CopyTo(_carry);
+            }
+
+            _carryFrames = surplus;
+        }
+
+        if (carried == frames || bufferDry)
+        {
+            return carried;
+        }
+
+        var fresh = ReadCorrectedFrames(
+            region.AsSpan(regionOffset + (carried * _channels), (frames - carried) * _channels),
+            frames - carried,
+            now,
+            correction);
+
+        return carried + fresh;
+    }
+
+    /// <summary>
+    /// Holds an under-filled region for the next callback to complete.
+    /// </summary>
+    /// <remarks>
+    /// The frames already carried in sit at the head of the region, so copying the whole prefix
+    /// back is idempotent: a callback that adds nothing leaves the carry exactly as it was.
+    /// </remarks>
+    private void StoreCarry(float[] region, int regionOffset, int frames)
+    {
+        if (frames <= 0)
+        {
+            _carryFrames = 0;
+            return;
+        }
+
+        var samples = frames * _channels;
+        if (_carry.Length < samples)
+        {
+            // Off the audio thread's steady state: the region only grows when the callback size or
+            // the rate does, and it settles after the first shortfall at that size.
+            _carry = new float[samples];
+        }
+
+        region.AsSpan(regionOffset, samples).CopyTo(_carry);
+        _carryFrames = frames;
     }
 
     /// <summary>
@@ -412,11 +598,12 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// back to the buffer.
     /// </summary>
     /// <returns>Frames actually produced; fewer than requested when the buffer under-delivers.</returns>
-    private int ReadCorrectedFrames(Span<float> destination, int frames, long now)
+    private int ReadCorrectedFrames(Span<float> destination, int frames, long now, in CallbackCorrection correction)
     {
-        var (dropEveryN, insertEveryN) = CurrentStepping();
+        var dropEveryN = correction.DropEveryNFrames;
+        var insertEveryN = correction.InsertEveryNFrames;
 
-        if (dropEveryN == 0 && insertEveryN == 0)
+        if (!correction.IsStepping)
         {
             // Nothing to splice: read straight into the destination. No copy, no rented buffer, and
             // at an identity resampler ratio the samples reach the output bit for bit.
@@ -462,31 +649,6 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     }
 
     /// <summary>
-    /// Gets the discrete drop/insert intervals to apply, with the mode-neutrality rules enforced.
-    /// </summary>
-    private (int DropEveryN, int InsertEveryN) CurrentStepping()
-    {
-        // Same reasoning as the rate: the buffer owns the snap, so nothing is spliced on top of it.
-        if (_correctionProvider.CurrentMode == SyncCorrectionMode.HardSync)
-        {
-            return (0, 0);
-        }
-
-        var dropEveryN = Math.Max(_correctionProvider.DropEveryNFrames, 0);
-        var insertEveryN = Math.Max(_correctionProvider.InsertEveryNFrames, 0);
-
-        // NotifyExternalCorrection's contract: one or the other, never both in a cycle. Dropping and
-        // inserting at once is not a correction, it is two corrections cancelling, so prefer the
-        // one the provider is actually asking for rather than splicing incoherently.
-        if (dropEveryN > 0 && insertEveryN > 0)
-        {
-            insertEveryN = 0;
-        }
-
-        return (dropEveryN, insertEveryN);
-    }
-
-    /// <summary>
     /// Updates the provider from the error this read just measured, and tells it how much audio
     /// went by, so its startup grace and reconnect windows advance.
     /// </summary>
@@ -507,9 +669,8 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// </summary>
     /// <remarks>
     /// A dropped frame is not simply discarded and an inserted one is not simply duplicated: both
-    /// emit a 3-point weighted blend (0.25 previous, 0.5 primary, 0.25 neighbour), which keeps the
-    /// waveform's slope continuous across the splice. A raw cut or repeat puts a step in the signal,
-    /// and a step is a click.
+    /// emit the weighted blend in <see cref="SpliceBlend"/>, shared with
+    /// <see cref="TimedAudioBuffer"/>'s internal corrector so the two cannot drift apart.
     /// </remarks>
     /// <returns>Frames produced, and the samples dropped and inserted for the buffer's accounting.</returns>
     private (int ProducedFrames, int SamplesDropped, int SamplesInserted) ApplyStepping(
@@ -579,38 +740,28 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     }
 
     /// <summary>
-    /// Writes one spliced frame: the 3-point blend where the input allows it, degrading to a
-    /// 2-point blend and then to a straight hold as the input runs out.
+    /// Writes one spliced frame from the input the splice point has in front of it, through the
+    /// shared <see cref="SpliceBlend"/> kernel.
     /// </summary>
     private void BlendSpliceFrame(ReadOnlySpan<float> input, int inputPos, Span<float> destination)
     {
         var frameSamples = _channels;
         var remainingInput = input.Length - inputPos;
 
-        if (remainingInput >= frameSamples * 2)
-        {
-            var neighbour = inputPos + frameSamples;
-            for (var i = 0; i < frameSamples; i++)
-            {
-                destination[i] = (0.25f * _previousFrame[i])
-                    + (0.5f * input[inputPos + i])
-                    + (0.25f * input[neighbour + i]);
-            }
-
-            return;
-        }
+        ReadOnlySpan<float> primary = default;
+        ReadOnlySpan<float> neighbour = default;
 
         if (remainingInput >= frameSamples)
         {
-            for (var i = 0; i < frameSamples; i++)
-            {
-                destination[i] = 0.5f * (_previousFrame[i] + input[inputPos + i]);
-            }
-
-            return;
+            primary = input.Slice(inputPos, frameSamples);
         }
 
-        _previousFrame.CopyTo(destination);
+        if (remainingInput >= frameSamples * 2)
+        {
+            neighbour = input.Slice(inputPos + frameSamples, frameSamples);
+        }
+
+        SpliceBlend.Blend(_previousFrame, primary, neighbour, destination);
     }
 
     /// <summary>
@@ -647,6 +798,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
     /// </remarks>
     private int Conceal(float[] buffer, int offset, int count, int producedSamples)
     {
+        if (producedSamples > 0)
+        {
+            _playbackStarted = true;
+        }
+
         if (producedSamples >= count)
         {
             return count;
@@ -655,8 +811,18 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
         if (producedSamples == 0)
         {
             buffer.AsSpan(offset, count).Clear();
-            Interlocked.Increment(ref _underrunCount);
-            LogUnderrun();
+
+            // Only once playback has actually started. The buffer holds its content back until
+            // the scheduled start arrives while the output device is already calling, so every
+            // stream start produces a run of empty callbacks that are expected, not starvation —
+            // and logging them at Warning buried the stalls this counter exists to surface.
+            // TimedAudioBuffer gates its own underrun counter on the same thing.
+            if (_playbackStarted)
+            {
+                Interlocked.Increment(ref _underrunCount);
+                LogUnderrun();
+            }
+
             return 0;
         }
 
@@ -691,5 +857,31 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
             _correctionProvider.CurrentMode,
             _totalSamplesDropped,
             _totalSamplesInserted);
+    }
+
+    /// <summary>
+    /// What one callback will do about the sync error: the resolved rate, already translated into
+    /// whichever currency this source can actually spend.
+    /// </summary>
+    /// <param name="ResamplerRate">
+    /// Rate for the resampler. Exactly 1.0 when there is no resampler, when the speed is being
+    /// spent on splices instead, and while the buffer's one-shot snap is in flight.
+    /// </param>
+    /// <param name="DropEveryNFrames">Drop one frame every N; 0 when not dropping.</param>
+    /// <param name="InsertEveryNFrames">Insert one frame every N; 0 when not inserting.</param>
+    private readonly record struct CallbackCorrection(
+        double ResamplerRate,
+        int DropEveryNFrames,
+        int InsertEveryNFrames)
+    {
+        /// <summary>Gets the do-nothing correction: unity rate, no splices.</summary>
+        internal static CallbackCorrection Neutral { get; } = new(1.0, 0, 0);
+
+        /// <summary>
+        /// Gets whether this callback splices frames. Never both directions at once:
+        /// <see cref="SyncCorrectionPolicy.SteppingIntervalFrames"/> returns one or the other,
+        /// because dropping and inserting together is two corrections cancelling.
+        /// </summary>
+        internal bool IsStepping => DropEveryNFrames > 0 || InsertEveryNFrames > 0;
     }
 }

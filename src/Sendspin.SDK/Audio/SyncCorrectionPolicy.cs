@@ -26,13 +26,21 @@ namespace Sendspin.SDK.Audio;
 /// <see cref="SyncCorrectionMode.HardSync"/> — one discontinuity, exempt from the speed cap;</item>
 /// <item>below <see cref="SyncCorrectionOptions.ResamplingThresholdMicroseconds"/>: a rate
 /// adjustment clamped to <see cref="SyncCorrectionOptions.MaxSpeedCorrection"/>;</item>
-/// <item>otherwise: discrete frame drop/insert, whose interval is floored so the implied
-/// speed change also respects the cap.</item>
+/// <item>otherwise: the same rate, tagged <see cref="SyncCorrectionMode.Dropping"/> or
+/// <see cref="SyncCorrectionMode.Inserting"/> — an error too large to be worth trimming
+/// smoothly.</item>
 /// </list>
 /// <para>
 /// Errors above <see cref="SyncCorrectionOptions.ReanchorThresholdMicroseconds"/> are not a
 /// tier here: the buffer clears and re-anchors, and until its cooldown allows that it keeps
 /// correcting through the drop/insert band.
+/// </para>
+/// <para>
+/// <b>The decision is always a rate.</b> A speed change is the whole correction; how it is
+/// realized belongs to whoever applies it, because only that object knows whether it has a
+/// resampler. A caller without one converts the rate to a drop/insert interval through
+/// <see cref="SteppingIntervalFrames"/>, which is the exact same correction expressed the other
+/// way round — one frame in N is a speed change of 1/N.
 /// </para>
 /// </remarks>
 internal static class SyncCorrectionPolicy
@@ -74,23 +82,10 @@ internal static class SyncCorrectionPolicy
     /// ahead (slow down / insert).
     /// </param>
     /// <param name="options">Correction options (thresholds and the speed cap).</param>
-    /// <param name="sampleRate">Sample rate in Hz.</param>
-    /// <param name="channels">Channel count.</param>
-    /// <param name="selfApplied">
-    /// True for a corrector that has no resampler and must realize the continuous tier itself:
-    /// <see cref="TimedAudioBuffer.Read"/> always, and an external corrector that selected
-    /// <see cref="SyncCorrectionMechanism.FrameStepping"/>. Such a caller gets the same
-    /// speed change expressed as frame stepping — the spec's own suggested strategy
-    /// (roles/player/v1.md:169-176) and what the C++ reference does per chunk — instead of a
-    /// rate it has nothing to apply to. False for a caller that drives a resampler.
-    /// </param>
-    /// <returns>The correction to apply.</returns>
+    /// <returns>The correction to apply, always expressed as a playback rate.</returns>
     internal static SyncCorrectionDecision Decide(
         double smoothedMicroseconds,
-        SyncCorrectionOptions options,
-        int sampleRate,
-        int channels,
-        bool selfApplied = false)
+        SyncCorrectionOptions options)
     {
         var absError = Math.Abs(smoothedMicroseconds);
 
@@ -108,63 +103,81 @@ internal static class SyncCorrectionPolicy
             return SyncCorrectionDecision.HardSync;
         }
 
-        // A rate is only a correction to someone who can resample. The buffer's own read path
-        // cannot, so for it the continuous tier is expressed as frame stepping of the same
-        // magnitude; handing it an advisory rate instead left the error to walk up to the
-        // hard-sync threshold and splice, which is not what "rare" means.
-        if (!selfApplied && absError < options.ResamplingThresholdMicroseconds)
-        {
-            // Rate = 1 + error / (targetSeconds × 1e6), clamped to the spec's speed cap.
-            var correctionFactor = Math.Clamp(
-                smoothedMicroseconds / options.CorrectionTargetSeconds / 1_000_000.0,
-                -options.EffectiveMaxSpeedCorrection,
-                options.EffectiveMaxSpeedCorrection);
+        // Rate = 1 + error / (targetSeconds × 1e6), clamped to the spec's speed cap. This is the
+        // whole continuous decision, in every band: the tier below only says whether the error is
+        // small enough to be worth trimming smoothly, and the caller that applies it decides how.
+        var correctionFactor = Math.Clamp(
+            smoothedMicroseconds / options.CorrectionTargetSeconds / 1_000_000.0,
+            -options.EffectiveMaxSpeedCorrection,
+            options.EffectiveMaxSpeedCorrection);
 
-            return new SyncCorrectionDecision(
-                SyncCorrectionMode.Resampling,
-                1.0 + correctionFactor,
-                DropEveryNFrames: 0,
-                InsertEveryNFrames: 0);
+        var rate = 1.0 + correctionFactor;
+
+        if (absError < options.ResamplingThresholdMicroseconds)
+        {
+            return new SyncCorrectionDecision(SyncCorrectionMode.Resampling, rate);
         }
 
-        var interval = CorrectionInterval(absError, options, sampleRate, channels);
-
         return smoothedMicroseconds > 0
-            ? new SyncCorrectionDecision(SyncCorrectionMode.Dropping, 1.0, interval, 0)
-            : new SyncCorrectionDecision(SyncCorrectionMode.Inserting, 1.0, 0, interval);
+            ? new SyncCorrectionDecision(SyncCorrectionMode.Dropping, rate)
+            : new SyncCorrectionDecision(SyncCorrectionMode.Inserting, rate);
     }
 
     /// <summary>
-    /// Frames between consecutive discrete corrections, i.e. correct one frame every N.
+    /// Expresses a playback rate as a discrete frame drop/insert interval — correct one frame
+    /// every N — for a corrector that has no resampler to apply the rate to.
     /// </summary>
+    /// <param name="targetPlaybackRate">
+    /// The rate to realize. Above 1.0 speeds up, so frames are dropped; below 1.0 slows down, so
+    /// frames are inserted.
+    /// </param>
+    /// <param name="options">Correction options, for the speed cap.</param>
+    /// <param name="channels">Channel count.</param>
+    /// <returns>
+    /// The drop interval or the insert interval; never both, because dropping and inserting at
+    /// once is two corrections cancelling rather than one correction.
+    /// </returns>
     /// <remarks>
-    /// One frame in N is a speed change of 1/N, so the cap is enforced by flooring N at
-    /// <c>ceil(1 / MaxSpeedCorrection)</c> — 200 frames at the spec's ±0.5%. This is the
-    /// per-chunk bound <c>N ≤ floor(0.005 × samples_in_chunk)</c> (roles/player/v1.md:174)
-    /// restated as a rate, and it holds for any chunk length. Rounding is deliberately
-    /// upward: truncating N downward is what let the old code sit just over the cap.
+    /// One frame in N is a speed change of 1/N, so the interval is simply the reciprocal of the
+    /// rate's deviation from unity — the spec's own suggested strategy (roles/player/v1.md:169-176)
+    /// and what the C++ reference does per chunk. The cap is enforced by clamping the deviation
+    /// first, which floors N at <c>ceil(1 / MaxSpeedCorrection)</c> — 200 frames at the spec's
+    /// ±0.5%. That is the per-chunk bound <c>N ≤ floor(0.005 × samples_in_chunk)</c>
+    /// (roles/player/v1.md:174) restated as a rate, and it holds for any chunk length. Rounding is
+    /// deliberately upward: truncating N downward is what let the old code sit just over the cap.
     /// </remarks>
-    private static int CorrectionInterval(
-        double absError,
+    internal static (int DropEveryNFrames, int InsertEveryNFrames) SteppingIntervalFrames(
+        double targetPlaybackRate,
         SyncCorrectionOptions options,
-        int sampleRate,
         int channels)
     {
-        var framesError = absError * sampleRate / 1_000_000.0;
-        var desiredCorrectionsPerSec = framesError / options.CorrectionTargetSeconds;
-        var framesPerSecond = (double)sampleRate;
-        var maxCorrectionsPerSec = framesPerSecond * options.EffectiveMaxSpeedCorrection;
-        var actualCorrectionsPerSec = Math.Min(desiredCorrectionsPerSec, maxCorrectionsPerSec);
+        var deviation = targetPlaybackRate - 1.0;
+        if (!double.IsFinite(deviation) || deviation == 0.0)
+        {
+            return (0, 0);
+        }
 
-        var interval = actualCorrectionsPerSec > 0
-            ? (int)Math.Ceiling(framesPerSecond / actualCorrectionsPerSec)
-            : 0;
+        var magnitude = Math.Min(Math.Abs(deviation), options.EffectiveMaxSpeedCorrection);
 
-        // The speed cap, as a hard floor on the interval.
-        interval = Math.Max(interval, (int)Math.Ceiling(1.0 / options.EffectiveMaxSpeedCorrection));
+        // The ceiling is relaxed by a relative whisker first. A rate is built as 1 + deviation and
+        // recovered by subtracting 1, which can lose an ulp, so the exact reciprocal of an integer
+        // interval comes back a hair above it — and a bare ceiling would then answer N+1 for a rate
+        // that means N, quietly correcting at 1/201 where the ladder asked for 1/200. The tolerance
+        // is nine orders of magnitude below the interval, so it cannot round a genuine fraction
+        // away, and the speed it can add is ~5e-12 against a cap of 5e-3.
+        const double ReciprocalTolerance = 1e-9;
+
+        var frames = Math.Ceiling(1.0 / magnitude * (1.0 - ReciprocalTolerance));
+        if (frames > int.MaxValue)
+        {
+            // Slower than one correction per 12 hours at 48 kHz: not a correction.
+            return (0, 0);
+        }
 
         // Floor to channels × 10 frames so corrections don't run faster than ~440Hz at 48kHz stereo.
-        return Math.Max(interval, channels * 10);
+        var interval = Math.Max((int)frames, channels * 10);
+
+        return deviation > 0 ? (interval, 0) : (0, interval);
     }
 }
 
@@ -172,24 +185,24 @@ internal static class SyncCorrectionPolicy
 /// The correction <see cref="SyncCorrectionPolicy"/> selected for one sync-error reading.
 /// </summary>
 /// <param name="Mode">Which tier applies.</param>
-/// <param name="TargetPlaybackRate">Resampling rate; 1.0 in every other mode.</param>
-/// <param name="DropEveryNFrames">Drop one frame every N; 0 when not dropping.</param>
-/// <param name="InsertEveryNFrames">Insert one frame every N; 0 when not inserting.</param>
+/// <param name="TargetPlaybackRate">
+/// The correction, as a playback speed; 1.0 when there is nothing to correct continuously.
+/// A caller with no resampler spends it through
+/// <see cref="SyncCorrectionPolicy.SteppingIntervalFrames"/>.
+/// </param>
 internal readonly record struct SyncCorrectionDecision(
     SyncCorrectionMode Mode,
-    double TargetPlaybackRate,
-    int DropEveryNFrames,
-    int InsertEveryNFrames)
+    double TargetPlaybackRate)
 {
     /// <summary>Gets the neutral decision: no correction of any kind.</summary>
     internal static SyncCorrectionDecision None { get; } =
-        new(SyncCorrectionMode.None, 1.0, 0, 0);
+        new(SyncCorrectionMode.None, 1.0);
 
     /// <summary>
     /// Gets the one-shot decision. The magnitude is not carried here: the buffer derives it
-    /// from the same error, and an external corrector must stand down entirely (rate 1.0, no
-    /// stepping) because only the buffer can skip or manufacture the samples involved.
+    /// from the same error, and an external corrector must stand down entirely because only
+    /// the buffer can skip or manufacture the samples involved.
     /// </summary>
     internal static SyncCorrectionDecision HardSync { get; } =
-        new(SyncCorrectionMode.HardSync, 1.0, 0, 0);
+        new(SyncCorrectionMode.HardSync, 1.0);
 }

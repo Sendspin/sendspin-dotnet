@@ -274,6 +274,18 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         }
     }
 
+    /// <inheritdoc/>
+    public bool IsHardSyncPending
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _pendingHardSyncSamples != 0;
+            }
+        }
+    }
+
     /// <summary>
     /// Initializes a new instance of the <see cref="TimedAudioBuffer"/> class.
     /// </summary>
@@ -735,8 +747,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && !_inReconnectStabilization)
                 {
-                    EvaluateHardSync(SyncCorrectionPolicy.Decide(
-                        _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels));
+                    EvaluateHardSync(
+                        SyncCorrectionPolicy.Decide(_smoothedSyncErrorMicroseconds, _syncOptions));
                 }
 
                 // Check re-anchor threshold
@@ -765,10 +777,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// cycle is logically invalid - you either need to speed up (drop) or slow down (insert), not both.
     /// </para>
     /// <para>
-    /// The <see cref="SyncCorrectionCalculator"/> enforces this by design - it only sets either
-    /// <see cref="ISyncCorrectionProvider.DropEveryNFrames"/> or <see cref="ISyncCorrectionProvider.InsertEveryNFrames"/>
-    /// to a non-zero value, never both. However, if using a custom correction provider, ensure this
-    /// invariant is maintained.
+    /// A correction derived from a rate cannot violate this: a speed has one sign, so it resolves
+    /// to a drop interval or an insert interval, never both. If you splice by some other rule,
+    /// maintain the invariant yourself.
     /// </para>
     /// </remarks>
     public void NotifyExternalCorrection(int samplesDropped, int samplesInserted)
@@ -795,16 +806,14 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         lock (_lock)
         {
-            // When dropping: we read MORE samples than we output
-            // This advances the server cursor, making sync error smaller
-            _samplesReadSinceStart += samplesDropped;
+            // Stats only. The read cursor is already correct: ReadRaw credits every sample it
+            // hands over, and a corrector must size its read to the correction — dropping needs
+            // an extra frame per splice and inserting needs one fewer, and reading a fixed block
+            // instead either strands content or leaves the output short by exactly the
+            // corrections applied. Adjusting here as well counted the same frames twice, which
+            // made the error metric converge at twice the physical correction: the reported error
+            // settled near zero while the player stayed about half the drift out of the group.
             _samplesDroppedForSync += samplesDropped;
-
-            // When inserting: we output samples WITHOUT consuming from buffer
-            // ReadRaw already added the full read count to _samplesReadSinceStart,
-            // but inserted samples came from duplicating previous output, not from new input.
-            // So we need to SUBTRACT them to reflect actual consumption from buffer.
-            _samplesReadSinceStart -= samplesInserted;
             _samplesInsertedForSync += samplesInserted;
         }
     }
@@ -1701,20 +1710,31 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             }
         }
 
-        // One decision ladder for the whole SDK — see SyncCorrectionPolicy. selfApplied: this
-        // path owns the correction end to end, so the continuous tier comes back as frame
-        // stepping the read loop actually performs rather than as a rate only a resampler
-        // could honour.
-        var decision = SyncCorrectionPolicy.Decide(
-            _smoothedSyncErrorMicroseconds, _syncOptions, _sampleRate, _channels, selfApplied: true);
+        // One decision ladder for the whole SDK — see SyncCorrectionPolicy — and one currency,
+        // the rate.
+        var decision = SyncCorrectionPolicy.Decide(_smoothedSyncErrorMicroseconds, _syncOptions);
 
         EvaluateHardSync(decision);
 
-        LogCorrectionModeTransition(decision.Mode);
-        SetTargetPlaybackRate(decision.TargetPlaybackRate);
-        _correctionMode = decision.Mode;
-        _dropEveryNFrames = decision.DropEveryNFrames;
-        _insertEveryNFrames = decision.InsertEveryNFrames;
+        // This path has no resampler, so the speed the policy chose is realized as whole-frame
+        // stepping of the same magnitude: the spec's own suggested strategy (roles/player/v1.md:
+        // 169-176), and what the C++ reference does per chunk. Applying the rate to nothing is
+        // what once left ordinary drift to walk up to the hard-sync threshold and splice.
+        var (dropEveryN, insertEveryN) = SyncCorrectionPolicy.SteppingIntervalFrames(
+            decision.TargetPlaybackRate, _syncOptions, _channels);
+
+        var mode = dropEveryN > 0
+            ? SyncCorrectionMode.Dropping
+            : insertEveryN > 0 ? SyncCorrectionMode.Inserting : decision.Mode;
+
+        LogCorrectionModeTransition(mode);
+
+        // Stays neutral: TargetPlaybackRate is a request to a resampler, and this path is the
+        // one that has none. See ITimedAudioBuffer.TargetPlaybackRate.
+        SetTargetPlaybackRate(1.0);
+        _correctionMode = mode;
+        _dropEveryNFrames = dropEveryN;
+        _insertEveryNFrames = insertEveryN;
     }
 
     /// <summary>
@@ -2037,16 +2057,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     ReadSamplesFromBuffer(droppedFrame);
                     samplesConsumed += frameSamples;
 
-                    // 3-point weighted interpolation: lastOutput + frameA + frameB
-                    // Weights: 0.25 (continuity from previous) + 0.5 (primary) + 0.25 (dropped)
-                    // This creates smoother transitions than simple 2-point averaging
+                    // The shared splice kernel: 3-point weighted interpolation of the last output,
+                    // the frame at the splice, and the one being dropped.
                     var outputSpan = buffer.Slice(outputPos, frameSamples);
-                    for (int i = 0; i < frameSamples; i++)
-                    {
-                        outputSpan[i] = (0.25f * _lastOutputFrame[i]) +
-                                        (0.5f * tempFrame[i]) +
-                                        (0.25f * droppedFrame[i]);
-                    }
+                    SpliceBlend.Blend(_lastOutputFrame, tempFrame, droppedFrame, outputSpan);
 
                     // Save interpolated frame as last output for continuity
                     outputSpan.CopyTo(_lastOutputFrame);
@@ -2073,7 +2087,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
                 var outputSpan = buffer.Slice(outputPos, frameSamples);
 
-                // Try to peek at next TWO frames for 3-point interpolation (without consuming)
+                // Peek at the next frames without consuming them, and let the shared splice kernel
+                // degrade from a 3-point blend to a 2-point one and then to a hold as they run out.
                 if (_count - samplesConsumed >= frameSamples * 2)
                 {
                     // Peek at next frame (position 0 in buffer)
@@ -2084,36 +2099,22 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     Span<float> frameAfterNext = stackalloc float[frameSamples];
                     PeekSamplesFromBufferAtOffset(frameAfterNext, frameSamples, frameSamples);
 
-                    // 3-point weighted interpolation: lastOutput + nextFrame + frameAfterNext
-                    // Weights: 0.25 (previous) + 0.5 (next) + 0.25 (future) for curve smoothing
-                    for (int i = 0; i < frameSamples; i++)
-                    {
-                        outputSpan[i] = (0.25f * _lastOutputFrame[i]) +
-                                        (0.5f * nextFrame[i]) +
-                                        (0.25f * frameAfterNext[i]);
-                    }
-
-                    // Save interpolated frame for continuity
-                    outputSpan.CopyTo(_lastOutputFrame);
+                    SpliceBlend.Blend(_lastOutputFrame, nextFrame, frameAfterNext, outputSpan);
                 }
                 else if (_count - samplesConsumed >= frameSamples)
                 {
-                    // Fallback to 2-point: only 1 frame available
                     Span<float> nextFrame = stackalloc float[frameSamples];
                     PeekSamplesFromBuffer(nextFrame, frameSamples);
 
-                    for (int i = 0; i < frameSamples; i++)
-                    {
-                        outputSpan[i] = (_lastOutputFrame[i] + nextFrame[i]) * 0.5f;
-                    }
-
-                    outputSpan.CopyTo(_lastOutputFrame);
+                    SpliceBlend.Blend(_lastOutputFrame, nextFrame, default, outputSpan);
                 }
                 else
                 {
-                    // Fallback: no next frame available, duplicate last
-                    _lastOutputFrame.AsSpan().CopyTo(outputSpan);
+                    SpliceBlend.Blend(_lastOutputFrame, default, default, outputSpan);
                 }
+
+                // Save the spliced frame for continuity
+                outputSpan.CopyTo(_lastOutputFrame);
 
                 outputPos += frameSamples;
                 _samplesInsertedForSync += frameSamples;

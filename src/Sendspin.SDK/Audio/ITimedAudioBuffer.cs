@@ -109,6 +109,27 @@ public interface ITimedAudioBuffer : IDisposable
     double SmoothedSyncErrorMicroseconds { get; }
 
     /// <summary>
+    /// Gets whether a one-shot hard sync is in flight right now — the buffer is skipping
+    /// buffered content, or emitting silence, to close the error in a single discontinuity.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>An external corrector must stand down while this is true</b>: rate 1.0, no stepping.
+    /// The snap is exempt from the ±0.5% cap precisely because it is one discontinuity rather
+    /// than a speed change, and correcting on top of it corrects the same error twice.
+    /// </para>
+    /// <para>
+    /// Ask this rather than inferring it from
+    /// <see cref="ISyncCorrectionProvider.CurrentMode"/>. A provider predicts
+    /// <see cref="SyncCorrectionMode.HardSync"/> from the smoothed error alone, while the buffer
+    /// declines to snap when the raw and smoothed errors disagree in sign, when the raw error is
+    /// past the re-anchor ceiling, and inside its startup and reconnect windows — so the two
+    /// disagree in both directions. This is the actor; the mode is a forecast.
+    /// </para>
+    /// </remarks>
+    bool IsHardSyncPending { get; }
+
+    /// <summary>
     /// Gets the target playback rate for smooth sync correction via resampling.
     /// </summary>
     /// <remarks>
@@ -226,12 +247,14 @@ public interface ITimedAudioBuffer : IDisposable
     /// <param name="samplesInserted">Number of samples inserted (output without consuming). Must be non-negative.</param>
     /// <remarks>
     /// <para>
-    /// This updates internal tracking so <see cref="SyncErrorMicroseconds"/> remains accurate.
-    /// </para>
-    /// <para>
-    /// When dropping: samplesRead cursor advances by droppedCount (we consumed more than output).
-    /// When inserting: samplesRead cursor is reduced by insertedCount because <see cref="ReadRaw"/>
-    /// already counted the full read, but inserted samples were duplicated output, not new consumption.
+    /// This feeds <see cref="AudioBufferStats.SamplesDroppedForSync"/> and
+    /// <see cref="AudioBufferStats.SamplesInsertedForSync"/>. It does <b>not</b> move the read
+    /// cursor <see cref="SyncErrorMicroseconds"/> is measured against, and callers must not
+    /// expect it to: <see cref="ReadRaw"/> already credits every sample it hands over, and a
+    /// corrector has to size its read to the correction — dropping consumes an extra frame per
+    /// splice, inserting one fewer — so the consumption is fully counted before this is called.
+    /// It used to adjust the cursor as well, which counted the same frames twice and made the
+    /// error converge at twice the physical correction.
     /// </para>
     /// <para>
     /// <b>Contract:</b> Either <paramref name="samplesDropped"/> OR <paramref name="samplesInserted"/>
