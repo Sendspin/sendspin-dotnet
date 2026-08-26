@@ -621,12 +621,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
 
                 case MessageTypes.StreamStart:
-                    DispatchStreamLifecycle(() => HandleStreamStartAsync(json));
+                {
+                    // Deserialized here rather than inside the handler, so a malformed payload
+                    // raises its JsonException on the receive loop and reaches the close below.
+                    // Thrown from inside the handler it would land in the lifecycle chain's
+                    // fire-and-forget instead, where nothing but a log line comes of it.
+                    var start = MessageSerializer.Deserialize<StreamStartMessage>(json);
+                    if (start is not null)
+                    {
+                        DispatchStreamLifecycle(() => HandleStreamStartAsync(start));
+                    }
+
                     break;
+                }
 
                 case MessageTypes.StreamEnd:
-                    DispatchStreamLifecycle(() => HandleStreamEndAsync(json));
+                {
+                    var end = MessageSerializer.Deserialize<StreamEndMessage>(json);
+                    if (end is not null)
+                    {
+                        DispatchStreamLifecycle(() => HandleStreamEndAsync(end));
+                    }
+
                     break;
+                }
 
                 case MessageTypes.StreamClear:
                     HandleStreamClear(json);
@@ -644,6 +662,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _logger.LogDebug("Unhandled message type: {Type}", messageType);
                     break;
             }
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            // Malformed input from an authenticated peer: either the JSON itself, or a member the
+            // protocol declares non-nullable arriving as null (see PeerMessageValidation). Closing
+            // is the deliberate answer; carrying on would leave this client acting on a message it
+            // could only half apply. Deliberately narrower than the catch below, which keeps its
+            // log-and-continue behaviour for everything that is not the peer's input being wrong.
+            _logger.LogError(ex, "Malformed message from server; closing connection");
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
         }
         catch (Exception ex)
         {
@@ -1408,12 +1436,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private async Task HandleStreamStartAsync(string json)
+    private async Task HandleStreamStartAsync(StreamStartMessage message)
     {
-        var message = MessageSerializer.Deserialize<StreamStartMessage>(json);
-        if (message is null)
+        // PeerMessageValidation already rejected a null payload where the caller deserialized
+        // this, so reaching here with one is impossible today. The guard stays because this
+        // handler runs on the lifecycle chain's fire-and-forget: a NullReferenceException here
+        // would be swallowed there rather than reaching OnTextMessageReceived's close, and the
+        // StreamStartReceived below would have handed a null to every app subscriber of an
+        // event whose argument is declared non-nullable. Both are silent failures, so the check
+        // is cheap insurance against the validation arm ever being dropped.
+        if (message.Payload is null)
         {
-            return;
+            throw new System.Text.Json.JsonException("stream/start payload is null");
         }
 
         var payload = message.Payload;
@@ -1494,10 +1528,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private async Task HandleStreamEndAsync(string json)
+    private async Task HandleStreamEndAsync(StreamEndMessage message)
     {
-        var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
-        _logger.LogInformation("Stream ended: {Reason}", message?.Reason ?? "unknown");
+        // As in HandleStreamStartAsync: Reason reads straight through Payload, and this handler
+        // runs on the fire-and-forget chain, so a NullReferenceException would never reach the
+        // close.
+        if (message.Payload is null)
+        {
+            throw new System.Text.Json.JsonException("stream/end payload is null");
+        }
+
+        _logger.LogInformation("Stream ended: {Reason}", message.Reason ?? "unknown");
 
         while (_earlyChunkQueue.TryDequeue(out _))
         {

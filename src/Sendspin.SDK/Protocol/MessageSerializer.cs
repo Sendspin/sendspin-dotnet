@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -34,7 +34,22 @@ public static class MessageSerializer
     /// <summary>
     /// Deserializes a JSON message, returning the appropriate message type.
     /// </summary>
+    /// <exception cref="JsonException">
+    /// The JSON is malformed, or a member the protocol declares non-nullable arrived as null.
+    /// See <see cref="PeerMessageValidation"/>.
+    /// </exception>
     public static IMessage? Deserialize(string json)
+    {
+        var message = DeserializeCore(json);
+        if (message is not null)
+        {
+            PeerMessageValidation.ThrowIfNullMembers(message);
+        }
+
+        return message;
+    }
+
+    private static IMessage? DeserializeCore(string json)
     {
         // First, parse to get the message type
         using var doc = JsonDocument.Parse(json);
@@ -60,9 +75,22 @@ public static class MessageSerializer
     /// <summary>
     /// Deserializes a specific message type.
     /// </summary>
+    /// <exception cref="JsonException">
+    /// The JSON is malformed, or a member the protocol declares non-nullable arrived as null.
+    /// System.Text.Json enforces neither nullable annotations nor <c>required</c> against an
+    /// explicit null, so this is the only thing standing between a peer-supplied
+    /// <c>"payload": null</c> and a NullReferenceException in a handler — see
+    /// <see cref="PeerMessageValidation"/>.
+    /// </exception>
     public static T? Deserialize<T>(string json) where T : class, IMessage
     {
-        return JsonSerializer.Deserialize(json, GetTypeInfo<T>());
+        var message = JsonSerializer.Deserialize(json, GetTypeInfo<T>());
+        if (message is not null)
+        {
+            PeerMessageValidation.ThrowIfNullMembers(message);
+        }
+
+        return message;
     }
 
     /// <summary>
