@@ -81,8 +81,14 @@ public interface IAudioPipeline : IAsyncDisposable
     /// <param name="format">Audio format for the stream.</param>
     /// <param name="targetTimestamp">Optional target timestamp for playback alignment.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A task representing the async operation.</returns>
-    Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default);
+    /// <returns>
+    /// What the call did to the running stream. The implementation decides this — how much of the
+    /// decode chain a given format change forces it to rebuild is its own business — and reports
+    /// it so a caller holding audio for the stream can tell whether that audio survived, without
+    /// re-deriving the decision from the pipeline's state and format.
+    /// </returns>
+    Task<AudioPipelineStartOutcome> StartAsync(
+        AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Stops the pipeline.
@@ -199,6 +205,35 @@ public interface IAudioPipeline : IAsyncDisposable
     /// Event raised on pipeline errors.
     /// </summary>
     event EventHandler<AudioPipelineError>? ErrorOccurred;
+}
+
+/// <summary>
+/// What an <see cref="IAudioPipeline.StartAsync"/> call did to the stream that was running, which
+/// is what decides whether audio already held for that stream is still playable.
+/// </summary>
+public enum AudioPipelineStartOutcome
+{
+    /// <summary>
+    /// The decode chain was built from scratch — the ordinary cold start, and any format change
+    /// the implementation could not apply in place. Audio encoded for the previous stream cannot
+    /// be fed to it. An implementation may still recycle the decoded ring's allocation across
+    /// such a start, as <see cref="AudioPipeline"/> does; it is cleared on the way, so nothing
+    /// buffered survives and this remains the outcome that discards.
+    /// </summary>
+    Restarted = 0,
+
+    /// <summary>
+    /// Only the decoder was rebuilt: audio decoded before the change, the timeline and the output
+    /// device were all kept. Audio still encoded for the previous stream cannot be fed to the new
+    /// decoder, so a caller holding any must drop it, as for <see cref="Restarted"/>.
+    /// </summary>
+    DecoderReplaced = 1,
+
+    /// <summary>
+    /// The running format was re-announced and nothing was rebuilt (spec: a configuration update
+    /// "without clearing buffers"). The stream continues, so audio held for it is still its own.
+    /// </summary>
+    FormatReannounced = 2,
 }
 
 /// <summary>

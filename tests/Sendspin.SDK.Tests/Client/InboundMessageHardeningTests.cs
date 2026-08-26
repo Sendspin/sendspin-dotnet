@@ -91,6 +91,22 @@ public class InboundMessageHardeningTests
     }
 
     [Fact]
+    public void NullStreamClearPayload_ClosesTheConnection()
+    {
+        // stream/clear is the one member of the stream trio whose handler dereferences its
+        // payload with no guard of its own, so this pins that the central null-member
+        // validation reaches it: the deliberate malformed-payload close, not the
+        // NullReferenceException that would tear the receive loop down as an internal fault.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""{"type":"stream/clear","payload":null}""");
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void NullServerStatePayload_ClosesTheConnection()
     {
         // server/state is the highest-traffic peer-supplied type and had no PeerMessageValidation

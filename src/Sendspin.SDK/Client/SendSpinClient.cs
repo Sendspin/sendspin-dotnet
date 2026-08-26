@@ -4126,6 +4126,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         bool wasConverged = _clockSynchronizer.IsConverged;
         _clockSynchronizer.ProcessMeasurement(best.T1, best.T2, best.T3, best.T4);
 
+        // Media and state held for a display moment translate their server timestamps through
+        // this offset every time the scheduler looks at them, so this correction reaches them on
+        // its own — but not the sleep the scheduler is already in, which was sized against the
+        // previous offset. Before the first measurement that sleep runs until the server's
+        // uptime has elapsed on the local clock, so the very first correction is the one that
+        // most needs the loop woken to notice it.
+        _displayScheduler.NotifyClockAdjusted();
+
         var status = _clockSynchronizer.GetStatus();
         if (status.MeasurementCount <= 10 || status.MeasurementCount % 10 == 0)
         {
@@ -4300,7 +4308,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     takesEffectAt,
                     () => ApplyScheduledMetadata(meta)))
             {
-                ApplyMetadata(meta);
+                ApplyMetadata(_currentGroup, meta);
             }
         }
 
@@ -4358,7 +4366,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     color?.Timestamp,
                     () => ApplyScheduledColor(color)))
             {
-                ApplyColor(color);
+                ApplyColor(_currentGroup, color);
                 colorChanged = true;
             }
         }
@@ -4383,24 +4391,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// role, anything else applies its Optional deltas (absent = keep existing, present-null =
     /// clear, present-with-value = update).
     /// </summary>
-    private void ApplyMetadata(ServerMetadata? meta)
+    /// <param name="group">
+    /// The group state to merge into, resolved by the caller. Passed rather than read from
+    /// <see cref="_currentGroup"/> here, because the scheduled callers run on the scheduler loop
+    /// and must not create a group state the disconnect that raced them has already dropped.
+    /// </param>
+    /// <param name="meta">The role object, or null to clear the role.</param>
+    private static void ApplyMetadata(GroupState group, ServerMetadata? meta)
     {
-        _currentGroup ??= new GroupState();
-
         if (meta is null)
         {
             // Dropping the merge base too, not just the exposed object: a later partial
             // update must start from empty rather than resurrect pre-clear fields.
-            _currentGroup.Metadata = null;
+            group.Metadata = null;
             return;
         }
 
-        var existing = _currentGroup.Metadata ?? new TrackMetadata();
+        var existing = group.Metadata ?? new TrackMetadata();
 
         // Merged against the state as it stands when the update takes effect, not as it stood
         // when the message arrived: the spec's current state is the running merge of applied
         // updates, and a scheduled update joins that running merge at its own moment.
-        _currentGroup.Metadata = new TrackMetadata
+        group.Metadata = new TrackMetadata
         {
             Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
             Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
@@ -4419,10 +4431,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// it, so a consumer holding the <see cref="ColorPalette"/> it was handed by an earlier
     /// <see cref="ColorChanged"/> sees the update — including a clear.
     /// </summary>
-    private void ApplyColor(ColorState? color)
+    /// <param name="group">
+    /// The group state whose palette is merged into — see <see cref="ApplyMetadata"/> on why it
+    /// is the caller that resolves it.
+    /// </param>
+    /// <param name="color">The role object, or null to clear the role.</param>
+    private static void ApplyColor(GroupState group, ColorState? color)
     {
-        _currentGroup ??= new GroupState();
-        var colors = _currentGroup.Colors;
+        var colors = group.Colors;
 
         if (color is null)
         {
@@ -4451,13 +4467,29 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// merge needs an announcement of its own.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Runs on the scheduler's loop, not the receive loop — see
     /// <see cref="ISendspinClient.GroupStateChanged"/> on threading.
+    /// </para>
+    /// <para>
+    /// Which is also why the group is resolved once and the whole apply abandoned when there is
+    /// none: <see cref="DisconnectAsync"/> drops <see cref="_currentGroup"/> after flushing the
+    /// scheduler, and the flush only empties the pending slots — an update the loop had already
+    /// lifted out of its slot is past that point and lands here with the connection gone. Every
+    /// read after this line goes through the local, so nothing can create a group state for a
+    /// connection that has ended, and nothing dereferences a field that may have just been
+    /// nulled. The next connection's first <c>server/state</c> carries each role in full anyway.
+    /// </para>
     /// </remarks>
     private void ApplyScheduledMetadata(ServerMetadata? meta)
     {
-        ApplyMetadata(meta);
-        GroupStateChanged?.Invoke(this, _currentGroup!);
+        if (_currentGroup is not { } group)
+        {
+            return;
+        }
+
+        ApplyMetadata(group, meta);
+        GroupStateChanged?.Invoke(this, group);
     }
 
     /// <summary>
@@ -4465,11 +4497,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// scheduler's loop. <see cref="ColorChanged"/> marks the moment the palette takes effect,
     /// which is here and not when the update was merely scheduled.
     /// </summary>
+    /// <remarks>
+    /// Resolves the group once and abandons the apply when there is none, for the reason
+    /// <see cref="ApplyScheduledMetadata"/> gives.
+    /// </remarks>
     private void ApplyScheduledColor(ColorState? color)
     {
-        ApplyColor(color);
-        GroupStateChanged?.Invoke(this, _currentGroup!);
-        ColorChanged?.Invoke(this, _currentGroup!.Colors);
+        if (_currentGroup is not { } group)
+        {
+            return;
+        }
+
+        ApplyColor(group, color);
+        GroupStateChanged?.Invoke(this, group);
+        ColorChanged?.Invoke(this, group.Colors);
     }
 
     /// <summary>
@@ -4757,23 +4798,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
-        // Chunks only queue while the pipeline cannot take them, so anything queued now arrived
-        // before this stream/start. When it re-announces the format already running, the pipeline
-        // keeps that stream alive rather than restarting it (see IAudioPipeline.StartAsync), and
-        // the queued chunks belong to it: they are drained into it below instead of being dropped,
-        // per the spec's "without clearing buffers" (#201). Every other stream/start rebuilds the
-        // decode chain, which leaves anything from the previous stream undecodable.
-        var reannouncesRunningFormat =
-            _audioPipeline is { State: AudioPipelineState.Buffering or AudioPipelineState.Playing }
-            && _audioPipeline.CurrentFormat?.IsSameStreamConfiguration(payload.Format) == true;
-
-        if (!reannouncesRunningFormat)
-        {
-            while (_earlyChunkQueue.TryDequeue(out _))
-            {
-            }
-        }
-
         // Smart sync burst: only trigger if clock isn't already synced
         // If we've been connected for a while, the continuous sync loop has already converged
         if (LastServerActivate?.ActivitiesList.Contains(Activities.Pairing) == true)
@@ -4802,32 +4826,59 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Start pipeline immediately - don't block on sync burst
         // The continuous sync loop + sync correction will handle any residual drift
-        if (_audioPipeline != null)
+        if (_audioPipeline == null)
         {
-            // A pipeline-start failure is a local fault, not peer input: the pipeline
-            // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
-            // and it propagates from here so a real bug surfaces instead of being
-            // collapsed into a log line (#88 item 2).
-            await _audioPipeline.StartAsync(payload.Format);
-
-            // Drain any chunks that arrived during initialization
-            var drainedCount = 0;
-            while (_earlyChunkQueue.TryDequeue(out var chunk))
+            // Nothing will ever drain the queue, so a client configured without a pipeline
+            // would otherwise accumulate chunks until it hit MaxEarlyChunks and stayed there.
+            while (_earlyChunkQueue.TryDequeue(out _))
             {
-                _audioPipeline.ProcessAudioChunk(chunk);
-                drainedCount++;
             }
 
-            if (drainedCount > 0)
-            {
-                _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
-            }
-
-            // Infer Playing state from stream/start for servers that don't send group/update
-            _currentGroup ??= new GroupState();
-            _currentGroup.PlaybackState = PlaybackState.Playing;
-            GroupStateChanged?.Invoke(this, _currentGroup);
+            return;
         }
+
+        // Chunks only queue while the pipeline cannot take them, so everything queued at this
+        // point arrived before this stream/start and belongs to the stream it is replacing.
+        // Counted rather than dropped now: the start below is awaited, and chunks arriving
+        // during it belong to the new stream and are drained into it.
+        var queuedForPreviousStream = _earlyChunkQueue.Count;
+
+        // A pipeline-start failure is a local fault, not peer input: the pipeline
+        // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
+        // and it propagates from here so a real bug surfaces instead of being
+        // collapsed into a log line (#88 item 2).
+        var outcome = await _audioPipeline.StartAsync(payload.Format);
+
+        // Only a re-announced format keeps them: that stream is still running and the queued
+        // chunks are its own, so they are drained in below rather than dropped, per the spec's
+        // "without clearing buffers" (#201). Every other outcome rebuilt the decoder, which
+        // leaves anything encoded for the previous stream unreadable. Which of the two happened
+        // is the pipeline's to decide and to report — deriving it here from its state and format
+        // meant a second copy of the rule, free to drift from the one that matters.
+        if (outcome != AudioPipelineStartOutcome.FormatReannounced)
+        {
+            for (int i = 0; i < queuedForPreviousStream && _earlyChunkQueue.TryDequeue(out _); i++)
+            {
+            }
+        }
+
+        // Drain what is left: the chunks kept above, plus any that arrived during initialization
+        var drainedCount = 0;
+        while (_earlyChunkQueue.TryDequeue(out var chunk))
+        {
+            _audioPipeline.ProcessAudioChunk(chunk);
+            drainedCount++;
+        }
+
+        if (drainedCount > 0)
+        {
+            _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
+        }
+
+        // Infer Playing state from stream/start for servers that don't send group/update
+        _currentGroup ??= new GroupState();
+        _currentGroup.PlaybackState = PlaybackState.Playing;
+        GroupStateChanged?.Invoke(this, _currentGroup);
     }
 
     /// <summary>
@@ -4946,6 +4997,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void HandleStreamClear(string json)
     {
+        // No null-payload guard of its own, unlike its two siblings: "payload": null never gets
+        // past the Deserialize below, because PeerMessageValidation's stream/clear arm rejects
+        // it there — and this handler is synchronous, so that JsonException lands in
+        // OnTextMessageReceived's malformed-payload close rather than in a fire-and-forget
+        // swallow. NullStreamClearPayload_ClosesTheConnection pins that end to end.
         var message = MessageSerializer.Deserialize<StreamClearMessage>(json);
         if (message is null)
         {

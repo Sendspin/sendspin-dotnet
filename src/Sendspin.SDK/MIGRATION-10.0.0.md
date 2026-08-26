@@ -40,6 +40,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Sync correction | `ITimedAudioBuffer.Read` is no longer `[Obsolete]` — it is the default path again | None — drop any `CS0618` suppression that existed to call it |
 | Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
 | Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |
+| Audio pipeline | `IAudioPipeline.StartAsync` returns `Task<AudioPipelineStartOutcome>` instead of `Task` | Low — compiler error, and only for a custom pipeline; see §14 |
 
 ---
 
@@ -631,7 +632,40 @@ counted. Adjusting again counted the same frames twice and made the sync error c
 the physical correction: it settled near zero while the player stayed about half the drift out of
 the group. Size your read to the correction and this needs no compensation.
 
-## 14. Checklist
+---
+
+## 14. `IAudioPipeline.StartAsync` reports what it did
+
+A `stream/start` for a stream that is already running is a configuration update rather than a
+restart (§10 covers the teardown half of that rule), and how much of the decode chain a given
+change forces the pipeline to rebuild is the pipeline's decision. It now reports that decision
+instead of leaving callers to infer it:
+
+```csharp
+// Before
+Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken ct = default);
+
+// After
+Task<AudioPipelineStartOutcome> StartAsync(
+    AudioFormat format, long? targetTimestamp = null, CancellationToken ct = default);
+```
+
+`AudioPipelineStartOutcome` is `Restarted`, `DecoderReplaced` or `FormatReannounced`. Only the
+last one leaves audio encoded for the previous stream still decodable; the SDK's client uses this
+to decide whether chunks queued before the message can be drained into the pipeline or have to be
+dropped, which it previously worked out by reading `State` and `CurrentFormat`.
+
+Nothing changes for a caller that awaits the result — `await pipeline.StartAsync(format)` compiles
+and behaves as before. A **custom `IAudioPipeline`** has to return an outcome, which is a compiler
+error until it does:
+
+- Rebuilt the decode chain, or started cold → `Restarted`
+- Replaced the decoder and kept the buffered audio and timeline → `DecoderReplaced`
+- Re-announced the format already running and rebuilt nothing → `FormatReannounced`
+
+---
+
+## 15. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
@@ -648,6 +682,7 @@ the group. Size your read to the correction and this needs no compensation.
 - [ ] `ClientCapabilities.AudioBufferCapacityMs` and `TimedAudioBuffer`'s `bufferCapacityMs` are the same number
 - [ ] `TimedAudioBuffer.MinBufferMilliseconds` matches `ClientCapabilities.MinBufferMs` — automatic behind `AudioPipeline`; check it only if you drive a buffer yourself
 - [ ] A custom `IAudioSampleSource` that keeps correction state implements `IPlaybackLifecycleAware`
+- [ ] A custom `IAudioPipeline` returns an `AudioPipelineStartOutcome` from `StartAsync`
 - [ ] A custom `ISyncCorrectionProvider` emits its correction as `TargetPlaybackRate` — the
       `DropEveryNFrames` / `InsertEveryNFrames` members are gone
 - [ ] An external corrector stands down on `ITimedAudioBuffer.IsHardSyncPending`, not on

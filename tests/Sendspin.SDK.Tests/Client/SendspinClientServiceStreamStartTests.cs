@@ -13,6 +13,12 @@ namespace Sendspin.SDK.Tests.Client;
 /// cold, or a format change that rebuilds the decode chain — still drops what the previous stream
 /// left behind. The message itself is reported to consumers either way.
 /// </summary>
+/// <remarks>
+/// Which of those happened is the pipeline's decision, reported back from
+/// <see cref="IAudioPipeline.StartAsync"/>, so these tests state the outcome the pipeline reports
+/// rather than arranging a format the client would classify for itself. What the shipped pipeline
+/// reports for a given format change is <c>AudioPipelineStreamStartTests</c>' subject.
+/// </remarks>
 public class SendspinClientServiceStreamStartTests
 {
     private const string RunningCodec = "pcm";
@@ -41,12 +47,15 @@ public class SendspinClientServiceStreamStartTests
     /// A client whose pipeline is mid-stream on 48 kHz stereo PCM but cannot take chunks directly,
     /// so anything arriving now queues — the state a stream/start has to classify correctly.
     /// </summary>
+    /// <param name="startOutcome">What the pipeline reports the next stream/start did to it.</param>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeAudioPipeline Pipeline)
-        ClientWithRunningStream()
+        ClientWithRunningStream(
+            AudioPipelineStartOutcome startOutcome = AudioPipelineStartOutcome.Restarted)
     {
         var pipeline = new FakeAudioPipeline
         {
             IsReady = false,
+            StartOutcome = startOutcome,
             CurrentFormat = new AudioFormat
             {
                 Codec = RunningCodec,
@@ -64,7 +73,8 @@ public class SendspinClientServiceStreamStartTests
     [Fact]
     public void StreamStart_ReAnnouncingRunningFormat_DrainsQueuedChunksInsteadOfDroppingThem()
     {
-        var (client, connection, pipeline) = ClientWithRunningStream();
+        var (client, connection, pipeline) =
+            ClientWithRunningStream(AudioPipelineStartOutcome.FormatReannounced);
         using var _c = client;
 
         connection.RaiseBinaryMessageReceived(AudioFrame(1_000, new byte[] { 1, 2, 3, 4 }));
@@ -81,7 +91,8 @@ public class SendspinClientServiceStreamStartTests
     [Fact]
     public void StreamStart_ReAnnouncingRunningFormat_DoesNotStopOrClearThePipeline()
     {
-        var (client, connection, pipeline) = ClientWithRunningStream();
+        var (client, connection, pipeline) =
+            ClientWithRunningStream(AudioPipelineStartOutcome.FormatReannounced);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(StreamStartJson(RunningSampleRate));
@@ -96,7 +107,8 @@ public class SendspinClientServiceStreamStartTests
     [Fact]
     public void StreamStart_ReAnnouncingRunningFormat_StillReportsTheMessage()
     {
-        var (client, connection, _) = ClientWithRunningStream();
+        var (client, connection, _) =
+            ClientWithRunningStream(AudioPipelineStartOutcome.FormatReannounced);
         using var _c = client;
 
         StreamStartPayload? received = null;
@@ -127,6 +139,24 @@ public class SendspinClientServiceStreamStartTests
         // decoder cannot read.
         Assert.Empty(pipeline.Chunks);
         Assert.Equal(44_100, Assert.Single(pipeline.StartCalls).SampleRate);
+    }
+
+    [Fact]
+    public void StreamStart_RebuildingOnlyTheDecoder_StillDropsChunksQueuedForThePreviousStream()
+    {
+        var (client, connection, pipeline) =
+            ClientWithRunningStream(AudioPipelineStartOutcome.DecoderReplaced);
+        using var _c = client;
+
+        connection.RaiseBinaryMessageReceived(AudioFrame(1_000, new byte[] { 1, 2, 3, 4 }));
+
+        pipeline.IsReady = true;
+        connection.RaiseTextMessageReceived(StreamStartJson(RunningSampleRate));
+
+        // The pipeline's third answer, and the one a keep-or-restart reading of it loses: the
+        // decoded audio and the timeline survive, but the decoder that could read this chunk
+        // does not, so it is as undecodable here as after a full restart.
+        Assert.Empty(pipeline.Chunks);
     }
 
     [Fact]

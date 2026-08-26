@@ -198,7 +198,8 @@ public sealed class AudioPipeline : IAudioPipeline
     }
 
     /// <inheritdoc/>
-    public async Task StartAsync(AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
+    public async Task<AudioPipelineStartOutcome> StartAsync(
+        AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
         // A stream/start for a stream that is already running is an in-place configuration update,
         // not a restart: the spec has it update the configuration "without clearing buffers", and
@@ -221,7 +222,7 @@ public sealed class AudioPipeline : IAudioPipeline
             _logger.LogInformation(
                 "[Playback] stream/start re-announced the running format ({Format}); pipeline and buffered audio kept",
                 format);
-            return;
+            return AudioPipelineStartOutcome.FormatReannounced;
         }
 
         // Sample rate and channel count are what the buffer and the output device are built from,
@@ -289,7 +290,7 @@ public sealed class AudioPipeline : IAudioPipeline
                 _logger.LogInformation(
                     "[Playback] In-place stream/start: decoder rebuilt for {Format}, buffered audio and timeline kept",
                     format);
-                return;
+                return AudioPipelineStartOutcome.DecoderReplaced;
             }
 
             _buffer = TakeOrCreateBuffer(format);
@@ -363,6 +364,7 @@ public sealed class AudioPipeline : IAudioPipeline
 
             SetState(AudioPipelineState.Buffering);
             _logger.LogInformation("[Playback] Audio pipeline started: {Format}", format);
+            return AudioPipelineStartOutcome.Restarted;
         }
         catch (Exception ex)
         {
