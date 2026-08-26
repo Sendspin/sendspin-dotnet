@@ -2,7 +2,11 @@ name: Build
 
 on:
   push:
-    branches: [main, dev]
+    # release/** covers the maintained legacy lines (release/9.3 and any successor).
+    # Those branches never merge to main, so without this they are never built by CI.
+    # Only the build job runs for them: publish is gated on refs/tags/v below, which a
+    # branch push cannot satisfy.
+    branches: [main, dev, 'release/**']
     tags: ['v*.*.*']
   pull_request:
     branches: [main, dev]
