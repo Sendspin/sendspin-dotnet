@@ -11,8 +11,66 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 internal sealed class FakeAudioPipeline : IAudioPipeline
 {
+    private readonly List<string> _callLog = new();
+    private readonly List<(int Count, TaskCompletionSource Source)> _callWaiters = new();
+
+    private readonly TaskCompletionSource _startEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _stopEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     /// <summary>Chunks handed to <see cref="ProcessAudioChunk"/>, in arrival order.</summary>
     public List<AudioChunk> Chunks { get; } = new();
+
+    /// <summary>
+    /// Names of the lifecycle calls the client made — <c>start</c>, <c>stop</c>, <c>clear</c> — in
+    /// the order they <b>finished</b>, which is the order the pipeline actually saw them in.
+    /// Entry order says nothing: a handler can be entered first and land last.
+    /// </summary>
+    public IReadOnlyList<string> CallLog
+    {
+        get
+        {
+            lock (_callLog)
+            {
+                return _callLog.ToList();
+            }
+        }
+    }
+
+    /// <summary>
+    /// When set, the next <see cref="StartAsync"/> parks until it is resolved. This is the seam a
+    /// synchronously-completing double cannot offer: a real pipeline start opens an output device,
+    /// so a message handled while one is in flight is the ordinary case, not an exotic one.
+    /// Consumed by that one call.
+    /// </summary>
+    public TaskCompletionSource? HoldNextStart { get; set; }
+
+    /// <summary>As <see cref="HoldNextStart"/>, for <see cref="StopAsync"/>.</summary>
+    public TaskCompletionSource? HoldNextStop { get; set; }
+
+    /// <summary>Completes when the first <see cref="StartAsync"/> has been entered.</summary>
+    public Task StartEntered => _startEntered.Task;
+
+    /// <summary>Completes when the first <see cref="StopAsync"/> has been entered.</summary>
+    public Task StopEntered => _stopEntered.Task;
+
+    /// <summary>
+    /// Completes once <paramref name="count"/> lifecycle calls have finished, so a test can wait
+    /// for the client's handlers to land rather than poll for them.
+    /// </summary>
+    public Task CallsCompleted(int count)
+    {
+        lock (_callLog)
+        {
+            if (_callLog.Count >= count)
+            {
+                return Task.CompletedTask;
+            }
+
+            var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _callWaiters.Add((count, waiter));
+            return waiter.Task;
+        }
+    }
 
     public AudioPipelineState State { get; private set; } = AudioPipelineState.Idle;
 
@@ -58,21 +116,43 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
         StateChanged?.Invoke(this, state);
     }
 
-    public Task<AudioPipelineStartOutcome> StartAsync(
+    public async Task<AudioPipelineStartOutcome> StartAsync(
         AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
         StartCalls.Add(format);
-        return Task.FromResult(StartOutcome);
+        _startEntered.TrySetResult();
+
+        if (HoldNextStart is { } hold)
+        {
+            HoldNextStart = null;
+            await hold.Task;
+        }
+
+        Record("start");
+        return StartOutcome;
     }
 
-    public Task StopAsync()
+    public async Task StopAsync()
     {
         StopCount++;
-        return Task.CompletedTask;
+        _stopEntered.TrySetResult();
+
+        if (HoldNextStop is { } hold)
+        {
+            HoldNextStop = null;
+            await hold.Task;
+        }
+
+        Record("stop");
     }
 
     public void NotifyReconnect() { }
-    public void Clear(long? newTargetTimestamp = null) => ClearCount++;
+
+    public void Clear(long? newTargetTimestamp = null)
+    {
+        ClearCount++;
+        Record("clear");
+    }
     public void ReanchorTiming() { }
     public void ProcessAudioChunk(AudioChunk chunk) => Chunks.Add(chunk);
     public void SetVolume(int volume) { }
@@ -80,4 +160,27 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     public void SetMinBufferMilliseconds(int minBufferMs) => MinBufferMsCalls.Add(minBufferMs);
     public Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default) => Task.CompletedTask;
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+    private void Record(string call)
+    {
+        List<TaskCompletionSource>? ready = null;
+
+        lock (_callLog)
+        {
+            _callLog.Add(call);
+
+            for (int i = _callWaiters.Count - 1; i >= 0; i--)
+            {
+                if (_callLog.Count >= _callWaiters[i].Count)
+                {
+                    (ready ??= new List<TaskCompletionSource>()).Add(_callWaiters[i].Source);
+                    _callWaiters.RemoveAt(i);
+                }
+            }
+        }
+
+        // Completed outside the lock: the waiter's continuation is a test thread, and it reads
+        // CallLog under the same lock.
+        ready?.ForEach(waiter => waiter.TrySetResult());
+    }
 }

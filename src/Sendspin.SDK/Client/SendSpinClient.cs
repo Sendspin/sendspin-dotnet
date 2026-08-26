@@ -167,11 +167,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // field costs a duplicate warning and nothing else, so it needs no synchronization.
     private int _warnedUndefinedPlayerAudioTypes;
 
+    // Tail of the stream-lifecycle chain: the task the next lifecycle handler waits for. See
+    // DispatchStreamLifecycle. The lock covers the read-and-replace only.
+    private readonly object _streamLifecycleLock = new();
+    private Task _streamLifecycleChain = Task.CompletedTask;
+
     /// <summary>
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
     /// </summary>
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
+
+    /// <summary>
+    /// Serializes the two places a chunk is handed to the pipeline: the receive loop's direct
+    /// hand-off, and the <c>stream/start</c> handler draining what queued while the pipeline was
+    /// not ready.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Those are two threads by construction — the start is awaited, and the receive loop must not
+    /// wait for it — and the pipeline reports itself ready part-way through a start, as soon as it
+    /// has a decoder and a ring. So a chunk arriving mid-start went straight in while the drain was
+    /// still feeding the ones that arrived before it: the pipeline saw them out of order, and both
+    /// callers decoded through its single scratch buffer at the same time, one overwriting the
+    /// other's samples between the decode and the write.
+    /// </para>
+    /// <para>
+    /// Ordering alone cannot close this: the two calls come from different threads whatever
+    /// dispatch the lifecycle messages use, so the drain and the hand-off have to exclude each
+    /// other. The cost is one uncontended monitor per chunk — a chunk arrives every 20 ms or so,
+    /// and the drain is bounded by <see cref="MaxEarlyChunks"/> and happens once per stream start.
+    /// </para>
+    /// </remarks>
+    private readonly object _audioHandoffLock = new();
 
     /// <summary>
     /// Maximum chunks to queue before pipeline ready (~2 seconds of audio at typical rates).
@@ -1814,11 +1842,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     break;
 
                 case MessageTypes.StreamStart:
-                    HandleStreamStartAsync(json).SafeFireAndForget(_logger);
+                    DispatchStreamLifecycle(() => HandleStreamStartAsync(json));
                     break;
 
                 case MessageTypes.StreamEnd:
-                    HandleStreamEndAsync(json).SafeFireAndForget(_logger);
+                    DispatchStreamLifecycle(() => HandleStreamEndAsync(json));
                     break;
 
                 case MessageTypes.StreamClear:
@@ -4736,6 +4764,69 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
+    /// <summary>
+    /// Runs a stream-lifecycle handler after every lifecycle handler dispatched before it, without
+    /// making the receive loop wait for any of them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>stream/start</c>, <c>stream/end</c> and <c>stream/clear</c> all reach into the audio
+    /// pipeline, whose start and stop open and close an output device — which is why they are
+    /// handled off the receive loop in the first place. Dispatched independently they can also
+    /// <i>land</i> independently: a track boundary sends <c>stream/end</c> then
+    /// <c>stream/start</c> back to back, and the end's teardown finishing after the start's build
+    /// leaves the pipeline stopped for a stream the server has started — silence until the next
+    /// track. Chaining each handler onto the one before restores the wire order at the point the
+    /// handlers take effect.
+    /// </para>
+    /// <para>
+    /// The chain is only a queue, not a thread: a handler dispatched while the chain is idle still
+    /// runs inline on the receive loop up to its first real await, exactly as the bare
+    /// fire-and-forget did. The receive loop never waits for a handler already in flight.
+    /// </para>
+    /// <para>
+    /// Only the lifecycle messages take this path. Everything else — including the binary audio
+    /// chunks, which arrive at chunk rate — keeps its current dispatch.
+    /// </para>
+    /// </remarks>
+    /// <param name="handler">The handler to run once the chain reaches it.</param>
+    private void DispatchStreamLifecycle(Func<Task> handler)
+    {
+        Task predecessor;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Held for two field accesses only. Handlers run outside it, so nothing this class does
+        // under the lock can reach an application event handler.
+        lock (_streamLifecycleLock)
+        {
+            predecessor = _streamLifecycleChain;
+            _streamLifecycleChain = completion.Task;
+        }
+
+        RunStreamLifecycleAsync(predecessor, handler, completion).SafeFireAndForget(_logger);
+    }
+
+    private static async Task RunStreamLifecycleAsync(
+        Task predecessor, Func<Task> handler, TaskCompletionSource completion)
+    {
+        try
+        {
+            if (!predecessor.IsCompleted)
+            {
+                // Never faults: every link completes its own slot in the finally below, so a
+                // handler that throws stops at its own SafeFireAndForget and the next one still
+                // runs. A lifecycle message must not be skipped because the one before it failed.
+                await predecessor.ConfigureAwait(false);
+            }
+
+            await handler().ConfigureAwait(false);
+        }
+        finally
+        {
+            completion.SetResult();
+        }
+    }
+
     private async Task HandleStreamStartAsync(string json)
     {
         try
@@ -4843,31 +4934,48 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // during it belong to the new stream and are drained into it.
         var queuedForPreviousStream = _earlyChunkQueue.Count;
 
+        // The group this start reports Playing on, resolved before the start rather than after
+        // it. Creating one is what a stream/start means for a server that sends no group/update,
+        // but it must not happen on the far side of the await: DisconnectAsync drops
+        // _currentGroup, and `??=` down there republished a default Playing state for a
+        // connection that had ended — the fault #247 fixed in the scheduled metadata and colour
+        // applies. Resolving here and re-checking below keeps the create with the code that
+        // still knows a stream is being started, and makes the announcement conditional on that
+        // same group still being the client's.
+        var group = _currentGroup ??= new GroupState();
+
         // A pipeline-start failure is a local fault, not peer input: the pipeline
         // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
         // and it propagates from here so a real bug surfaces instead of being
         // collapsed into a log line (#88 item 2).
         var outcome = await _audioPipeline.StartAsync(payload.Format);
 
-        // Only a re-announced format keeps them: that stream is still running and the queued
-        // chunks are its own, so they are drained in below rather than dropped, per the spec's
-        // "without clearing buffers" (#201). Every other outcome rebuilt the decoder, which
-        // leaves anything encoded for the previous stream unreadable. Which of the two happened
-        // is the pipeline's to decide and to report — deriving it here from its state and format
-        // meant a second copy of the rule, free to drift from the one that matters.
-        if (outcome != AudioPipelineStartOutcome.FormatReannounced)
+        // Held across the drop and the drain, and taken by the receive loop's hand-off, so a
+        // chunk arriving mid-start cannot overtake the queue or decode through the pipeline's
+        // scratch buffer at the same time as one being drained (see _audioHandoffLock).
+        int drainedCount;
+        lock (_audioHandoffLock)
         {
-            for (int i = 0; i < queuedForPreviousStream && _earlyChunkQueue.TryDequeue(out _); i++)
+            // Only a re-announced format keeps them: that stream is still running and the queued
+            // chunks are its own, so they are drained in below rather than dropped, per the spec's
+            // "without clearing buffers" (#201). Every other outcome rebuilt the decoder, which
+            // leaves anything encoded for the previous stream unreadable. Which of the two happened
+            // is the pipeline's to decide and to report — deriving it here from its state and format
+            // meant a second copy of the rule, free to drift from the one that matters.
+            if (outcome != AudioPipelineStartOutcome.FormatReannounced)
             {
+                for (int i = 0; i < queuedForPreviousStream && _earlyChunkQueue.TryDequeue(out _); i++)
+                {
+                }
             }
-        }
 
-        // Drain what is left: the chunks kept above, plus any that arrived during initialization
-        var drainedCount = 0;
-        while (_earlyChunkQueue.TryDequeue(out var chunk))
-        {
-            _audioPipeline.ProcessAudioChunk(chunk);
-            drainedCount++;
+            // Drain what is left: the chunks kept above, plus any that arrived during initialization
+            drainedCount = 0;
+            while (_earlyChunkQueue.TryDequeue(out var chunk))
+            {
+                _audioPipeline.ProcessAudioChunk(chunk);
+                drainedCount++;
+            }
         }
 
         if (drainedCount > 0)
@@ -4875,10 +4983,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
         }
 
-        // Infer Playing state from stream/start for servers that don't send group/update
-        _currentGroup ??= new GroupState();
-        _currentGroup.PlaybackState = PlaybackState.Playing;
-        GroupStateChanged?.Invoke(this, _currentGroup);
+        // Infer Playing state from stream/start for servers that don't send group/update — unless
+        // a disconnect took the group while the pipeline was starting, in which case there is no
+        // longer anything for this stream to be Playing on.
+        if (!ReferenceEquals(_currentGroup, group))
+        {
+            return;
+        }
+
+        group.PlaybackState = PlaybackState.Playing;
+        GroupStateChanged?.Invoke(this, group);
     }
 
     /// <summary>
@@ -5019,9 +5133,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // after this message" — the same boundary applies to artwork still held for display.
         FlushDisplayRoles(payload.Roles);
 
-        if (ReachesPlayerRole(payload.Roles))
+        if (ReachesPlayerRole(payload.Roles) && _audioPipeline is { } pipeline)
         {
-            _audioPipeline?.Clear();
+            // Deserialization stays on the receive loop above — that is what routes a malformed
+            // payload into OnTextMessageReceived's close — but the pipeline call joins the
+            // lifecycle chain, so a seek cannot clear buffers ahead of the stream/start that
+            // creates them.
+            DispatchStreamLifecycle(() =>
+            {
+                pipeline.Clear();
+                return Task.CompletedTask;
+            });
         }
     }
 
@@ -5116,19 +5238,27 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 var audioChunk = BinaryMessageParser.ParseAudioChunk(data.Span);
                 if (audioChunk != null)
                 {
-                    if (_audioPipeline?.IsReady == true)
+                    // Excludes the stream/start handler's drain, which feeds the same pipeline
+                    // from another thread — see _audioHandoffLock. The queue must be empty as
+                    // well as the pipeline ready: a chunk handed over while earlier ones are
+                    // still queued would overtake them.
+                    lock (_audioHandoffLock)
                     {
-                        // Pipeline ready - process immediately
-                        _audioPipeline.ProcessAudioChunk(audioChunk);
+                        if (_audioPipeline?.IsReady == true && _earlyChunkQueue.IsEmpty)
+                        {
+                            // Pipeline ready - process immediately
+                            _audioPipeline.ProcessAudioChunk(audioChunk);
+                        }
+                        else if (_earlyChunkQueue.Count < MaxEarlyChunks)
+                        {
+                            // Pipeline not ready yet - queue for later processing
+                            // This prevents chunk loss during decoder/buffer initialization
+                            _earlyChunkQueue.Enqueue(audioChunk);
+                            _logger.LogTrace("Queued early chunk ({QueueSize} in queue)", _earlyChunkQueue.Count);
+                        }
+
+                        // else: queue full, drop chunk (should rarely happen)
                     }
-                    else if (_earlyChunkQueue.Count < MaxEarlyChunks)
-                    {
-                        // Pipeline not ready yet - queue for later processing
-                        // This prevents chunk loss during decoder/buffer initialization
-                        _earlyChunkQueue.Enqueue(audioChunk);
-                        _logger.LogTrace("Queued early chunk ({QueueSize} in queue)", _earlyChunkQueue.Count);
-                    }
-                    // else: queue full, drop chunk (should rarely happen)
                 }
 
                 _logger.LogTrace("Audio chunk: {Length} bytes @ {Timestamp}", payload.Length, timestamp);

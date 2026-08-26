@@ -42,6 +42,41 @@ public sealed class AudioPipeline : IAudioPipeline
     private readonly Func<ITimedAudioBuffer, Func<long>, IAudioSampleSource> _sourceFactory;
     private readonly IHighPrecisionTimer _precisionTimer;
 
+    /// <summary>
+    /// Serializes the four calls that build or tear down the decode chain: <see cref="StartAsync"/>,
+    /// <see cref="StopAsync"/>, <see cref="SwitchDeviceAsync"/> and <see cref="DisposeAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// All four yield — a real backend's <see cref="IAudioPlayer.InitializeAsync"/> and
+    /// <see cref="IAsyncDisposable.DisposeAsync"/> open and close a device — and none of their
+    /// callers take turns: <c>stream/start</c> and <c>stream/end</c> are handled off the receive
+    /// loop, and an app can dispose the client from its own thread at any moment. Interleaved,
+    /// the later call's teardown disposed the player, decoder and ring the earlier one was still
+    /// building; the earlier one then resumed onto a null player, and its catch tore down the
+    /// components the later call had just built. The pipeline ended in Error, reported
+    /// <c>available: false</c>, and stayed silent until the next <c>stream/start</c> — with both
+    /// exceptions swallowed at the fire-and-forget boundary.
+    /// </para>
+    /// <para>
+    /// It also makes the keep-vs-restart decision at the top of <see cref="StartAsync"/> mean
+    /// something: outside the gate that read could observe the transient Starting or Stopping of
+    /// a call still in flight and take the destructive branch against a stream that was in fact
+    /// about to be running.
+    /// </para>
+    /// <para>
+    /// Nothing held under this gate may call back into a gated method — <see cref="SemaphoreSlim"/>
+    /// is not reentrant — which is why the bodies live in the private <c>...CoreAsync</c> methods
+    /// that <see cref="StartAsync"/> and <see cref="DisposeAsync"/> reach directly.
+    /// </para>
+    /// </remarks>
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+
+    // Terminal once DisposeAsync has run. Read and written only under _lifecycleGate, which is
+    // also the barrier that publishes it: a start that was queued behind the dispose must build
+    // nothing rather than resurrect a decode chain nobody will ever tear down again.
+    private bool _disposed;
+
     private IAudioDecoder? _decoder;
     private ITimedAudioBuffer? _buffer;
     private IAudioPlayer? _player;
@@ -49,6 +84,11 @@ public sealed class AudioPipeline : IAudioPipeline
 
     // The decoded ring the last stream used, kept for the next one. See TakeOrCreateBuffer.
     private ITimedAudioBuffer? _retainedBuffer;
+
+    // Set by ClearCore when a seek invalidates the decoder's inter-frame state, taken by
+    // ProcessAudioChunk before the next decode. See both for why it is a request rather than
+    // a call.
+    private bool _decoderResetPending;
 
     private float[] _decodeBuffer = Array.Empty<float>();
     private AudioFormat? _currentFormat;
@@ -201,6 +241,21 @@ public sealed class AudioPipeline : IAudioPipeline
     public async Task<AudioPipelineStartOutcome> StartAsync(
         AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return await StartCoreAsync(format, targetTimestamp, cancellationToken);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task<AudioPipelineStartOutcome> StartCoreAsync(
+        AudioFormat format, long? targetTimestamp, CancellationToken cancellationToken)
+    {
         // A stream/start for a stream that is already running is an in-place configuration update,
         // not a restart: the spec has it update the configuration "without clearing buffers", and
         // the player role adds that such an update continues the existing timeline and does not
@@ -245,7 +300,9 @@ public sealed class AudioPipeline : IAudioPipeline
         {
             if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
             {
-                await StopAsync();
+                // The non-gated core: this already holds the lifecycle gate, and SemaphoreSlim
+                // is not reentrant.
+                await StopCoreAsync();
             }
 
             SetState(AudioPipelineState.Starting);
@@ -379,6 +436,22 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public async Task StopAsync()
     {
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            await StopCoreAsync();
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="StopAsync"/>'s body, for callers that already hold the lifecycle gate.
+    /// </summary>
+    private async Task StopCoreAsync()
+    {
         if (State == AudioPipelineState.Idle)
         {
             return;
@@ -408,32 +481,61 @@ public sealed class AudioPipeline : IAudioPipeline
     }
 
     /// <inheritdoc/>
-    public void Clear(long? newTargetTimestamp = null)
+    public void Clear(long? newTargetTimestamp = null) => ClearCore(resetDecoder: true);
+
+    /// <summary>
+    /// Discards everything buffered and re-arms the readiness gate.
+    /// </summary>
+    /// <param name="resetDecoder">
+    /// Whether the decoder's inter-frame state belongs to audio that is being skipped. True for a
+    /// <c>stream/clear</c>, where the next packet comes from a new position; false for a
+    /// re-anchor, which drops audio this decoder has already produced and then carries straight
+    /// on with the next packet of the same stream — see <see cref="OnReanchorRequired"/>.
+    /// </param>
+    private void ClearCore(bool resetDecoder)
     {
-        _buffer?.Clear();
-        _decoder?.Reset();
-
-        // Everything upstream of the output has just been reset, so anything the source is still
-        // holding belongs to the discarded stream: a primed resampler splices pre-seek audio into
-        // the new position, and a half-finished drop/insert interval corrects an error that no
-        // longer exists.
-        (_sampleSource as IPlaybackLifecycleAware)?.Reset();
-
-        // Reset monotonic timer state to avoid carrying over stale time tracking
-        // Only needed when MonotonicTimer is the active timing source (not when using audio clock)
-        if (!_usingAudioClock && _precisionTimer is MonotonicTimer monotonicTimer)
+        try
         {
-            monotonicTimer.Reset();
-            _logger.LogDebug("Reset MonotonicTimer state on buffer clear");
+            _buffer?.Clear();
+
+            // Everything upstream of the output has just been reset, so anything the source is
+            // still holding belongs to the discarded stream: a primed resampler splices pre-seek
+            // audio into the new position, and a half-finished drop/insert interval corrects an
+            // error that no longer exists.
+            (_sampleSource as IPlaybackLifecycleAware)?.Reset();
+
+            // Reset monotonic timer state to avoid carrying over stale time tracking
+            // Only needed when MonotonicTimer is the active timing source (not when using audio clock)
+            if (!_usingAudioClock && _precisionTimer is MonotonicTimer monotonicTimer)
+            {
+                monotonicTimer.Reset();
+                _logger.LogDebug("Reset MonotonicTimer state on buffer clear");
+            }
+
+            // Requested, not performed. This method has no thread of its own — a stream/clear
+            // arrives on the client's stream-lifecycle chain, a re-anchor is raised from a pool
+            // thread — and the receive loop may be inside the decoder at this moment. Only Opus
+            // has state to reset and Concentus documents its decoder as single-threaded, so the
+            // reset is taken in ProcessAudioChunk instead, at the one point that is provably not
+            // decoding. PCM and FLAC resets are no-ops either way.
+            if (resetDecoder)
+            {
+                Volatile.Write(ref _decoderResetPending, true);
+            }
         }
-
-        // Reset sync wait state so we wait for convergence again after clear
-        _bufferReadyTime = 0;
-        _loggedSyncWaiting = false;
-
-        if (State == AudioPipelineState.Playing)
+        finally
         {
-            SetState(AudioPipelineState.Buffering);
+            // In a finally so that nothing above — a buffer, a lifecycle-aware source the app
+            // supplied — can leave the pipeline reporting Playing over an empty ring. That state
+            // is permanent silence: the readiness gate in ProcessAudioChunk only re-starts
+            // playback from Buffering, so the pipeline would never play again this stream.
+            _bufferReadyTime = 0;
+            _loggedSyncWaiting = false;
+
+            if (State == AudioPipelineState.Playing)
+            {
+                SetState(AudioPipelineState.Buffering);
+            }
         }
 
         _logger.LogDebug("Audio buffer cleared");
@@ -466,6 +568,15 @@ public sealed class AudioPipeline : IAudioPipeline
 
         try
         {
+            // A seek asked for the decoder's inter-frame state to go; this is where it goes. See
+            // ClearCore on why the request is deferred to here rather than taken on the thread
+            // that made it.
+            if (Volatile.Read(ref _decoderResetPending))
+            {
+                Volatile.Write(ref _decoderResetPending, false);
+                _decoder.Reset();
+            }
+
             // Decode the audio frame
             var samplesDecoded = _decoder.Decode(chunk.EncodedData, _decodeBuffer);
 
@@ -550,6 +661,20 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public async Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default)
     {
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            await SwitchDeviceCoreAsync(deviceId, cancellationToken);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task SwitchDeviceCoreAsync(string? deviceId, CancellationToken cancellationToken)
+    {
         if (_player == null)
         {
             _logger.LogWarning("Cannot switch audio device - pipeline not started");
@@ -615,11 +740,32 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
-        await StopAsync();
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
 
-        // The ring the last stream left behind has nothing to be reused for now.
-        _retainedBuffer?.Dispose();
-        _retainedBuffer = null;
+            _disposed = true;
+
+            await StopCoreAsync();
+
+            // The ring the last stream left behind has nothing to be reused for now.
+            _retainedBuffer?.Dispose();
+            _retainedBuffer = null;
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+
+        // The semaphore itself is deliberately not disposed: a lifecycle call already waiting on
+        // it would then fail with an ObjectDisposedException naming SemaphoreSlim instead of this
+        // pipeline, and one arriving later would fail before the _disposed check above could give
+        // it the same answer. SemaphoreSlim only holds an unmanaged handle once its
+        // AvailableWaitHandle is read, which nothing here does.
     }
 
     /// <summary>
@@ -871,6 +1017,18 @@ public sealed class AudioPipeline : IAudioPipeline
         _currentFormat = null;
     }
 
+    /// <summary>
+    /// Handles the buffer giving up on its current anchor: everything buffered is discarded and
+    /// the pipeline goes back to buffering, so the next audio is scheduled from a fresh anchor.
+    /// </summary>
+    /// <remarks>
+    /// Unlike a <c>stream/clear</c>, this leaves the decoder alone. A re-anchor discards audio the
+    /// decoder has already produced and then carries on with the next packet of the same stream —
+    /// nothing is skipped on the encoded side — so resetting would throw away inter-frame state
+    /// that is still exactly right for the packet about to arrive, and manufacture a discontinuity
+    /// at the resume where the codec had none. (Only Opus has such state; PCM and FLAC frames are
+    /// self-contained.)
+    /// </remarks>
     private void OnReanchorRequired(object? sender, EventArgs e)
     {
         var stats = _buffer?.GetStats();
@@ -882,7 +1040,7 @@ public sealed class AudioPipeline : IAudioPipeline
             stats?.SamplesInsertedForSync ?? 0);
 
         // Clear and restart buffering
-        Clear();
+        ClearCore(resetDecoder: false);
     }
 
     private void OnPlayerStateChanged(object? sender, AudioPlayerState state)

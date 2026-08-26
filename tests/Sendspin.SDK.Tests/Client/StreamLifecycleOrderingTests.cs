@@ -1,0 +1,210 @@
+using System.Buffers.Binary;
+using Sendspin.SDK.Audio;
+using Sendspin.SDK.Client;
+using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Tests.Audio;
+
+namespace Sendspin.SDK.Tests.Client;
+
+/// <summary>
+/// <c>stream/start</c>, <c>stream/end</c> and <c>stream/clear</c> are handled off the receive
+/// loop — the pipeline calls they make open and close an output device, and the receive loop must
+/// not block on that — so the order they take effect in is not the order they arrived in unless
+/// something makes it so.
+/// </summary>
+/// <remarks>
+/// A track boundary sends <c>stream/end</c> then <c>stream/start</c> back to back. Dispatched
+/// independently, the end's teardown could land after the start's build and leave the pipeline
+/// stopped with a stream running on the server: silence until the next track. The reverse order
+/// leaves a pipeline running for a stream that has ended. Each test here drives exactly that
+/// interleaving through a held pipeline call rather than by timing.
+/// </remarks>
+public class StreamLifecycleOrderingTests
+{
+    private const string PlayerStreamStart =
+        """{"type":"stream/start","payload":{"player":{"codec":"pcm","channels":2,"sample_rate":48000,"bit_depth":16}}}""";
+
+    private const string StreamEnd =
+        """{"type":"stream/end","payload":{"server_transmitted":1000}}""";
+
+    private const string StreamClear =
+        """{"type":"stream/clear","payload":{"server_transmitted":2000}}""";
+
+    private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeAudioPipeline Pipeline)
+        PlayerClient(FakeAudioPipeline? pipeline = null)
+    {
+        var pipe = pipeline ?? new FakeAudioPipeline();
+        var (client, connection, _) = TestClient.Create(configure: options => options with
+        {
+            AudioPipeline = pipe,
+            ClockSynchronizer = new ConvergedClockSynchronizer(),
+        });
+        return (client, connection, pipe);
+    }
+
+    private static byte[] AudioFrame(long timestamp, params byte[] audio)
+    {
+        var buf = new byte[9 + audio.Length];
+        buf[0] = BinaryMessageTypes.PlayerAudio0;
+        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1, 8), timestamp);
+        audio.CopyTo(buf, 9);
+        return buf;
+    }
+
+    private static Task WithTimeout(Task task) => task.WaitAsync(TimeSpan.FromSeconds(30));
+
+    [Fact]
+    public async Task AnEndThenAStart_LeavesTheStreamRunning()
+    {
+        // The track boundary. Dispatched independently, the end's StopAsync finished after the
+        // start's StartAsync and the pipeline was left stopped for a stream the server had
+        // started — silent until the next stream/start.
+        var pipe = new FakeAudioPipeline { HoldNextStop = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        var (client, connection, _) = PlayerClient(pipe);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.CallsCompleted(1));
+
+        var held = pipe.HoldNextStop!;
+        connection.RaiseTextMessageReceived(StreamEnd);
+        await WithTimeout(pipe.StopEntered);
+
+        // Delivered while the end is still tearing the pipeline down.
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(3));
+
+        Assert.Equal(2, pipe.StartCalls.Count);
+        Assert.Equal(new[] { "start", "stop", "start" }, pipe.CallLog);
+    }
+
+    [Fact]
+    public async Task AStartThenAnEnd_LeavesTheStreamStopped()
+    {
+        var pipe = new FakeAudioPipeline { HoldNextStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        var (client, connection, _) = PlayerClient(pipe);
+        using var _c = client;
+
+        var held = pipe.HoldNextStart!;
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.StartEntered);
+
+        // Delivered while the start is still initializing the output device.
+        connection.RaiseTextMessageReceived(StreamEnd);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(2));
+
+        Assert.Equal(new[] { "start", "stop" }, pipe.CallLog);
+    }
+
+    [Fact]
+    public async Task AStartThenAClear_ClearsTheStreamItStarted()
+    {
+        // stream/clear is a seek. Reaching the pipeline before the start it follows, it cleared
+        // buffers that did not exist yet and the pre-seek audio played on regardless.
+        var pipe = new FakeAudioPipeline { HoldNextStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        var (client, connection, _) = PlayerClient(pipe);
+        using var _c = client;
+
+        var held = pipe.HoldNextStart!;
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.StartEntered);
+
+        connection.RaiseTextMessageReceived(StreamClear);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(2));
+
+        Assert.Equal(new[] { "start", "clear" }, pipe.CallLog);
+    }
+
+    [Fact]
+    public async Task AChunkArrivingDuringAStart_StaysBehindTheQueuedOnes()
+    {
+        // ProcessAudioChunk is reachable from two threads: the receive loop hands chunks straight
+        // to a ready pipeline, and the stream/start handler drains what queued before it. A chunk
+        // arriving mid-start went in front of the queue, so the pipeline saw it out of order — and
+        // both callers wrote through the pipeline's one decode scratch buffer at the same time.
+        var pipe = new FakeAudioPipeline
+        {
+            IsReady = false,
+            StartOutcome = AudioPipelineStartOutcome.FormatReannounced,
+            HoldNextStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var (client, connection, _) = PlayerClient(pipe);
+        using var _c = client;
+
+        // Queued: the pipeline is not ready yet.
+        connection.RaiseBinaryMessageReceived(AudioFrame(1_000, 0x01));
+
+        var held = pipe.HoldNextStart!;
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.StartEntered);
+
+        // The decoder and ring exist part-way through a real StartAsync, so the pipeline reports
+        // itself ready while the start is still running.
+        pipe.IsReady = true;
+        connection.RaiseBinaryMessageReceived(AudioFrame(2_000, 0x02));
+
+        // Queued behind the start handler, so its Clear landing is proof that handler — drain
+        // included — has finished, without polling for it.
+        connection.RaiseTextMessageReceived(StreamClear);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(2));
+
+        Assert.Equal(
+            new long[] { 1_000, 2_000 },
+            pipe.Chunks.Select(c => c.ServerTimestamp).ToArray());
+    }
+
+    [Fact]
+    public async Task AStreamStartCompletingAfterADisconnect_DoesNotResurrectTheGroup()
+    {
+        // The stream/start handler ended with `_currentGroup ??= new GroupState()` past its await,
+        // so a start that finished after DisconnectAsync had dropped the group republished a
+        // default Playing one for a connection that had ended — the fault #247 fixed in the
+        // scheduled metadata and color applies.
+        var pipe = new FakeAudioPipeline { HoldNextStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
+        var (client, connection, _) = PlayerClient(pipe);
+        using var _c = client;
+
+        var groupUpdates = 0;
+        client.GroupStateChanged += (_, _) => Interlocked.Increment(ref groupUpdates);
+
+        var held = pipe.HoldNextStart!;
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.StartEntered);
+
+        // Queued behind the held start while the connection is still up, so its Clear landing is
+        // proof the start handler ran to its end.
+        connection.RaiseTextMessageReceived(StreamClear);
+
+        await client.DisconnectAsync("restart");
+        Assert.Null(client.CurrentGroup);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(2));
+
+        Assert.Null(client.CurrentGroup);
+        Assert.Equal(0, Volatile.Read(ref groupUpdates));
+    }
+
+    [Fact]
+    public async Task AStreamStart_StillInfersPlayingForServersThatSendNoGroupUpdate()
+    {
+        // The boundary the bail above is defined against: with the connection up, a stream/start
+        // is still what creates the group state and reports it Playing.
+        var (client, connection, pipe) = PlayerClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.CallsCompleted(1));
+
+        Assert.Equal(PlaybackState.Playing, client.CurrentGroup?.PlaybackState);
+    }
+}
