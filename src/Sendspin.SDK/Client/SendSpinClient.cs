@@ -1492,6 +1492,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The continuous sync loop + sync correction will handle any residual drift
         if (_audioPipeline != null)
         {
+            // The group this start reports Playing on, resolved before the start rather than
+            // after it. Creating one is what a stream/start means for a server that sends no
+            // group/update, but it must not happen on the far side of the await: DisconnectAsync
+            // drops _currentGroup, and the `??=` down there republished a default Playing state
+            // for a connection that had ended. Resolving here and re-checking below keeps the
+            // create with the code that still knows a stream is being started, and makes the
+            // announcement conditional on that same group still being the client's.
+            var group = _currentGroup ??= new GroupState();
+
             try
             {
                 await _audioPipeline.StartAsync(payload.Format);
@@ -1516,10 +1525,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
                 }
 
-                // Infer Playing state from stream/start for servers that don't send group/update
-                _currentGroup ??= new GroupState();
-                _currentGroup.PlaybackState = PlaybackState.Playing;
-                GroupStateChanged?.Invoke(this, _currentGroup);
+                // Infer Playing state from stream/start for servers that don't send group/update —
+                // unless a disconnect took the group while the pipeline was starting, in which
+                // case there is no longer anything for this stream to be Playing on.
+                if (!ReferenceEquals(_currentGroup, group))
+                {
+                    return;
+                }
+
+                group.PlaybackState = PlaybackState.Playing;
+                GroupStateChanged?.Invoke(this, group);
             }
             catch (Exception ex)
             {

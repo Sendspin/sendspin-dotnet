@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -38,6 +39,14 @@ public class StreamLifecycleOrderingTests
             connection,
             audioPipeline: pipeline);
         return (client, connection);
+    }
+
+    private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeAudioPipeline Pipeline)
+        PlayerClient()
+    {
+        var pipe = new FakeAudioPipeline();
+        var (client, connection) = PlayerClient(pipe);
+        return (client, connection, pipe);
     }
 
     private static byte[] AudioFrame(long timestamp, params byte[] audio)
@@ -158,5 +167,50 @@ public class StreamLifecycleOrderingTests
         Assert.Equal(
             new long[] { 1_000, 2_000 },
             pipe.Chunks.Select(c => c.ServerTimestamp).ToArray());
+    }
+
+    [Fact]
+    public async Task AStreamStartCompletingAfterADisconnect_DoesNotResurrectTheGroup()
+    {
+        // The stream/start handler ended with `_currentGroup ??= new GroupState()` past its await,
+        // so a start that finished after DisconnectAsync had dropped the group republished a
+        // default Playing one for a connection that had ended.
+        var pipe = new FakeAudioPipeline { HoldNextStart = Hold() };
+        var (client, connection) = PlayerClient(pipe);
+        using var _c = client;
+
+        var groupUpdates = 0;
+        client.GroupStateChanged += (_, _) => Interlocked.Increment(ref groupUpdates);
+
+        var held = pipe.HoldNextStart!;
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.StartEntered);
+
+        // Queued behind the held start while the connection is still up, so its Clear landing is
+        // proof the start handler ran to its end.
+        connection.RaiseTextMessageReceived(StreamClear);
+
+        await client.DisconnectAsync("restart");
+        Assert.Null(client.CurrentGroup);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(2));
+
+        Assert.Null(client.CurrentGroup);
+        Assert.Equal(0, Volatile.Read(ref groupUpdates));
+    }
+
+    [Fact]
+    public async Task AStreamStart_StillInfersPlayingForServersThatSendNoGroupUpdate()
+    {
+        // The boundary the bail above is defined against: with the connection up, a stream/start
+        // is still what creates the group state and reports it Playing.
+        var (client, connection, pipe) = PlayerClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.CallsCompleted(1));
+
+        Assert.Equal(PlaybackState.Playing, client.CurrentGroup?.PlaybackState);
     }
 }
