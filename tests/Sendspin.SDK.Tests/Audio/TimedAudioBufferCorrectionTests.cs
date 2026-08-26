@@ -781,4 +781,27 @@ public class TimedAudioBufferCorrectionTests
             }
         }
     }
+
+    [Fact]
+    public void NotifyExternalCorrection_ReportsCorrectionsWithoutMovingTheReadCursor()
+    {
+        // ReadRaw credits every sample it hands over to the read cursor, and an external
+        // corrector must size its read to the correction — reading a fixed block instead either
+        // strands content or leaves the block short by exactly the corrections applied. So by the
+        // time it reports, the consumption is already counted; adjusting again for the same
+        // frames makes the error metric converge at twice the physical correction. The reported
+        // error then reads ~0 while the player is still half the drift out of the group.
+        using var player = new Player(rawReads: true).Settled();
+
+        var before = player.Buffer.GetStats();
+
+        player.Buffer.NotifyExternalCorrection(samplesDropped: 4 * Channels, samplesInserted: 0);
+        player.Buffer.NotifyExternalCorrection(samplesDropped: 0, samplesInserted: 3 * Channels);
+
+        var after = player.Buffer.GetStats();
+
+        Assert.Equal(before.SamplesReadSinceStart, after.SamplesReadSinceStart);
+        Assert.Equal(before.SamplesDroppedForSync + (4 * Channels), after.SamplesDroppedForSync);
+        Assert.Equal(before.SamplesInsertedForSync + (3 * Channels), after.SamplesInsertedForSync);
+    }
 }
