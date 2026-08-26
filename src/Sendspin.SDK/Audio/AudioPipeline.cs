@@ -47,10 +47,17 @@ public sealed class AudioPipeline : IAudioPipeline
     private IAudioPlayer? _player;
     private IAudioSampleSource? _sampleSource;
 
+    // The decoded ring the last stream used, kept for the next one. See TakeOrCreateBuffer.
+    private ITimedAudioBuffer? _retainedBuffer;
+
     private float[] _decodeBuffer = Array.Empty<float>();
     private AudioFormat? _currentFormat;
     private int _volume = 100;
     private bool _muted;
+
+    // The advertised min_buffer_ms, once the client has reported one. Null leaves whatever the
+    // buffer factory configured alone — see SetMinBufferMilliseconds.
+    private int? _minBufferMs;
     private long _lastSyncLogTime;
     private bool _usingAudioClock;
     private bool? _lastAudioClockAvailable; // For tracking timing source transitions
@@ -285,11 +292,18 @@ public sealed class AudioPipeline : IAudioPipeline
                 return;
             }
 
-            _buffer = _bufferFactory(format, _clockSync);
+            _buffer = TakeOrCreateBuffer(format);
 
             if (_buffer is TimedAudioBuffer timedBuffer)
             {
                 timedBuffer.ReanchorRequired += OnReanchorRequired;
+            }
+
+            // The readiness gate must not ask for more audio than the server was told to keep
+            // queued, and must not settle for less than the app said it needs.
+            if (_minBufferMs.HasValue)
+            {
+                _buffer.MinBufferMilliseconds = _minBufferMs.Value;
             }
 
             _player = _playerFactory();
@@ -381,6 +395,13 @@ public sealed class AudioPipeline : IAudioPipeline
     {
         _buffer?.NotifyReconnect();
         _player?.NotifyReconnect();
+
+        // A source that corrects (SyncCorrectedSampleSource, or anything else keeping state of
+        // its own) suppresses its corrections for the same stabilization window the buffer does.
+        // Left out, it keeps correcting against an error the re-converging clock has not
+        // finished re-measuring, and the two tiers fight over the same microseconds.
+        (_sampleSource as IPlaybackLifecycleAware)?.NotifyReconnect();
+
         _logger.LogInformation("[Correction] Pipeline notified of reconnect, stabilization period active");
     }
 
@@ -389,6 +410,12 @@ public sealed class AudioPipeline : IAudioPipeline
     {
         _buffer?.Clear();
         _decoder?.Reset();
+
+        // Everything upstream of the output has just been reset, so anything the source is still
+        // holding belongs to the discarded stream: a primed resampler splices pre-seek audio into
+        // the new position, and a half-finished drop/insert interval corrects an error that no
+        // longer exists.
+        (_sampleSource as IPlaybackLifecycleAware)?.Reset();
 
         // Reset monotonic timer state to avoid carrying over stale time tracking
         // Only needed when MonotonicTimer is the active timing source (not when using audio clock)
@@ -506,6 +533,19 @@ public sealed class AudioPipeline : IAudioPipeline
     }
 
     /// <inheritdoc/>
+    public void SetMinBufferMilliseconds(int minBufferMs)
+    {
+        _minBufferMs = Math.Max(0, minBufferMs);
+
+        if (_buffer != null)
+        {
+            _buffer.MinBufferMilliseconds = _minBufferMs.Value;
+        }
+
+        _logger.LogDebug("[Playback] Readiness gate follows min_buffer_ms={MinBufferMs}ms", _minBufferMs);
+    }
+
+    /// <inheritdoc/>
     public async Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default)
     {
         if (_player == null)
@@ -574,6 +614,60 @@ public sealed class AudioPipeline : IAudioPipeline
     public async ValueTask DisposeAsync()
     {
         await StopAsync();
+
+        // The ring the last stream left behind has nothing to be reused for now.
+        _retainedBuffer?.Dispose();
+        _retainedBuffer = null;
+    }
+
+    /// <summary>
+    /// Returns the buffer for a starting stream: the one the previous stream left behind when it
+    /// still fits, otherwise a fresh one from the factory.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A buffer's ring is sized from the sample rate and channel count alone (a 30 s default at
+    /// 48 kHz stereo is about 11.5 MB of float PCM, straight onto the large object heap), and
+    /// <see cref="ITimedAudioBuffer.Clear"/> exists precisely to return one to its
+    /// post-construction state. So a stop/start cycle at an unchanged rate and channel count —
+    /// every track change on a server that ends the stream between tracks — can keep the
+    /// allocation instead of churning it. Anything else about the format is decode-side, which
+    /// the buffer never sees: it holds decoded PCM, and the in-place update path above already
+    /// keeps the same buffer across a codec or bit-depth change for the same reason.
+    /// </para>
+    /// <para>
+    /// The trade is one ring's worth of memory held while the pipeline is idle, against an
+    /// LOH allocation and collection per restart. The buffer is released when the format
+    /// genuinely changes, and on <see cref="DisposeAsync"/>.
+    /// </para>
+    /// <para>
+    /// Cumulative counters in <see cref="ITimedAudioBuffer.GetStats"/> (underruns, overruns,
+    /// samples corrected) continue across a reuse rather than restarting at zero, matching the
+    /// pipeline's own monotonic chunk counters.
+    /// </para>
+    /// </remarks>
+    private ITimedAudioBuffer TakeOrCreateBuffer(AudioFormat format)
+    {
+        var retained = _retainedBuffer;
+        _retainedBuffer = null;
+
+        if (retained is not null)
+        {
+            if (retained.Format.SampleRate == format.SampleRate
+                && retained.Format.Channels == format.Channels)
+            {
+                retained.Clear();
+                _logger.LogDebug(
+                    "[Playback] Reusing the decoded buffer for {SampleRate}Hz {Channels}ch",
+                    format.SampleRate,
+                    format.Channels);
+                return retained;
+            }
+
+            retained.Dispose();
+        }
+
+        return _bufferFactory(format, _clockSync);
     }
 
     /// <summary>
@@ -765,7 +859,9 @@ public sealed class AudioPipeline : IAudioPipeline
         _decoder?.Dispose();
         _decoder = null;
 
-        _buffer?.Dispose();
+        // Kept rather than disposed: the next stream may be able to reuse the ring instead of
+        // allocating another. See TakeOrCreateBuffer, which decides and releases this one.
+        _retainedBuffer = _buffer;
         _buffer = null;
 
         _sampleSource = null;

@@ -122,6 +122,14 @@ public class TimedAudioBufferCorrectionTests
         /// <summary>Writes one chunk at an explicit timestamp, bypassing the producer.</summary>
         public void WriteAt(long serverTimestamp) => Buffer.Write(_chunk, serverTimestamp);
 
+        /// <summary>
+        /// Server timestamp the read cursor currently sits on, derived from the producer's
+        /// write head and the buffer depth so a test can place a chunk a known distance
+        /// behind it.
+        /// </summary>
+        public long CursorServerTimestamp =>
+            WriteServerTs - (long)(Buffer.BufferedMilliseconds * 1000);
+
         /// <summary>Runs past the 500 ms startup grace so the baseline is captured and error ~0.</summary>
         public Player Settled()
         {
@@ -408,6 +416,41 @@ public class TimedAudioBufferCorrectionTests
     }
 
     [Fact]
+    public void LateChunkAdmission_IsNotLoosenedByRaisingTheSnapThreshold()
+    {
+        // Admission is a write-side spec rule (roles/player/v1.md:145) and the snap threshold
+        // is a read-side correction size. While admission borrowed the snap knob, a client
+        // that tuned the snap silently changed which chunks it accepted.
+        var options = new SyncCorrectionOptions { HardSyncThresholdMicroseconds = 300_000 };
+        using var player = new Player(options).Settled();
+        var bufferedBefore = player.Buffer.BufferedMilliseconds;
+
+        // 100 ms behind the cursor: past the spec tolerance, but far inside the raised snap
+        // threshold that used to double as the admission window.
+        player.WriteAt(player.CursorServerTimestamp - 100_000);
+
+        Assert.Equal(1, player.Buffer.GetStats().LateChunksDropped);
+        Assert.Equal(bufferedBefore, player.Buffer.BufferedMilliseconds);
+    }
+
+    [Fact]
+    public void LateChunkAdmission_SurvivesDisablingTheSnapTier()
+    {
+        // HardSyncThresholdMicroseconds = 0 disables the snap. It used to collapse admission
+        // to the 1 ms segment-rounding tolerance too, so turning the snap off started dropping
+        // chunks that are still perfectly playable.
+        var options = new SyncCorrectionOptions { HardSyncThresholdMicroseconds = 0 };
+        using var player = new Player(options).Settled();
+        var bufferedBefore = player.Buffer.BufferedMilliseconds;
+
+        // 2 ms behind the cursor: inside the default 5 ms tolerance, so it must be enqueued.
+        player.WriteAt(player.CursorServerTimestamp - 2_000);
+
+        Assert.Equal(0, player.Buffer.GetStats().LateChunksDropped);
+        Assert.True(player.Buffer.BufferedMilliseconds > bufferedBefore);
+    }
+
+    [Fact]
     public void ChunksStillDue_AreNotMistakenForLate()
     {
         using var player = new Player().Settled();
@@ -482,6 +525,38 @@ public class TimedAudioBufferCorrectionTests
         var discardedMs = Ms(stats.DroppedSamples + stats.SamplesDroppedForSync);
         Assert.InRange(discardedMs, 45, 55);
         Assert.Equal(0, stats.ContentHolesDetected);
+    }
+
+    [Fact]
+    public void StartupSnap_CountsAsAHardSync()
+    {
+        // The startup alignment performs the same one-shot splice the hard-sync tier does, and
+        // the spec requires those to be rare (roles/player/v1.md:140). GetStats is how a
+        // deployment checks that, and a startup snap used to be invisible there: HardSyncCount
+        // read 0 while a snap had just moved the audio.
+        var clockSync = new FakeClockSynchronizer
+        {
+            OffsetMicroseconds = ServerT0 - LocalT0,
+            IsConverged = true,
+            HasMinimalSync = true,
+        };
+        using var buffer = new TimedAudioBuffer(Format, clockSync, bufferCapacityMs: 5_000);
+
+        var chunk = new float[ChunkMs * SamplesPerMs];
+        for (var i = 0; i < 300 / ChunkMs; i++)
+        {
+            buffer.Write(chunk, ServerT0 + (i * ChunkMs * 1000L));
+        }
+
+        // 5 ms late: inside the scheduled-start grace window, so nothing is discarded as stale
+        // and the residual is closed by the startup snap alone.
+        var output = new float[StepMs * SamplesPerMs];
+        buffer.Read(output, LocalT0 + 5_000);
+
+        var stats = buffer.GetStats();
+        Assert.Equal(1, stats.HardSyncCount);
+        Assert.Equal(0, stats.DroppedSamples);
+        Assert.InRange(Ms(stats.SamplesDroppedForSync), 4, 6);
     }
 
     [Fact]

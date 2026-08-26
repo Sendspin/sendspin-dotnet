@@ -36,6 +36,29 @@ public interface ITimedAudioBuffer : IDisposable
     double TargetBufferMilliseconds { get; set; }
 
     /// <summary>
+    /// Gets or sets the negotiated minimum ongoing buffer depth in milliseconds — the same
+    /// value the client reports to the server as <c>min_buffer_ms</c>. Defaults to
+    /// <see cref="PlayerBufferCapacity.DefaultMinBufferMilliseconds"/> (150 ms), matching
+    /// <c>ClientCapabilities.MinBufferMs</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This bounds <see cref="IsReadyForPlayback"/>. A live stream's first chunk is scheduled
+    /// only <c>min_buffer_ms + output_delay_ms</c> ahead (spec roles/player/v1.md:30), so the
+    /// buffer will never hold more than this before the scheduled start arrives. Gating
+    /// readiness on the (larger) target depth therefore guarantees a late start on exactly the
+    /// streams that can least afford one.
+    /// </para>
+    /// <para>
+    /// <see cref="IAudioPipeline.SetMinBufferMilliseconds"/> keeps this in step with what the
+    /// app advertises, including a mid-session change through
+    /// <c>ISendspinClient.UpdateTimingAsync</c>. Set it directly only when driving a buffer
+    /// outside a pipeline.
+    /// </para>
+    /// </remarks>
+    double MinBufferMilliseconds { get; set; }
+
+    /// <summary>
     /// Gets whether the buffer has enough data to start playback.
     /// </summary>
     bool IsReadyForPlayback { get; }

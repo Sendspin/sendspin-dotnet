@@ -48,7 +48,7 @@ namespace Sendspin.SDK.Audio;
 /// from one thread at a time, as an output callback does.
 /// </para>
 /// </remarks>
-public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
+public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IPlaybackLifecycleAware, IDisposable
 {
     private readonly ITimedAudioBuffer _buffer;
     private readonly Func<long> _nowMicroseconds;
@@ -234,10 +234,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
         return Conceal(buffer, offset, count, producedFrames * _channels);
     }
 
-    /// <summary>
-    /// Clears correction state after a buffer clear or a playback restart, so a stale rate or a
-    /// half-finished drop/insert interval cannot leak into the new stream.
-    /// </summary>
+    /// <inheritdoc/>
+    /// <remarks>
+    /// <see cref="IAudioPipeline.Clear"/> forwards here, so a <c>stream/clear</c> reaches the
+    /// resampler and the correction provider as well as the buffer.
+    /// </remarks>
     public void Reset()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -254,16 +255,11 @@ public sealed class SyncCorrectedSampleSource : IAudioSampleSource, IDisposable
         SetResamplerRate(1.0);
     }
 
-    /// <summary>
-    /// Forwards a reconnect to the correction provider, which suppresses corrections while the
-    /// clock synchronizer re-converges (see
-    /// <see cref="SyncCorrectionOptions.ReconnectStabilizationMicroseconds"/>).
-    /// </summary>
+    /// <inheritdoc/>
     /// <remarks>
-    /// <see cref="IAudioPipeline.NotifyReconnect"/> reaches the buffer and the player, not the
-    /// sample source; a player holding this source should forward from its own
-    /// <see cref="IAudioPlayer.NotifyReconnect"/>. Without it the provider keeps correcting
-    /// against an error the re-converging clock has not finished re-measuring.
+    /// Forwards to the correction provider. <see cref="IAudioPipeline.NotifyReconnect"/> reaches
+    /// here through <see cref="IPlaybackLifecycleAware"/>; without it the provider keeps
+    /// correcting against an error the re-converging clock has not finished re-measuring.
     /// </remarks>
     public void NotifyReconnect()
     {

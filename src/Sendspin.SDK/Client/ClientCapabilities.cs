@@ -142,11 +142,17 @@ public sealed class ClientCapabilities
     /// absorb network jitter and decode/playback timing variance (primarily for live streams,
     /// where the queue cannot grow after playback begins).
     /// <para>
-    /// Default (150 ms) is a conservative LAN starting point. Tune per network: larger for remote
-    /// or high-latency links, smaller for stable LAN. Do NOT include <c>static_delay_ms</c> here.
+    /// Default (<see cref="PlayerBufferCapacity.DefaultMinBufferMilliseconds"/>, 150 ms) is a
+    /// conservative LAN starting point. Tune per network: larger for remote or high-latency
+    /// links, smaller for stable LAN. Do NOT include <c>static_delay_ms</c> here.
+    /// </para>
+    /// <para>
+    /// The SDK forwards this to <see cref="IAudioPipeline.SetMinBufferMilliseconds"/>, which
+    /// bounds the buffer's readiness gate: a live stream will never hold more than this before
+    /// its scheduled start, so a client advertising a larger value must also wait for it.
     /// </para>
     /// </summary>
-    public int MinBufferMs { get; set; } = 150;
+    public int MinBufferMs { get; set; } = PlayerBufferCapacity.DefaultMinBufferMilliseconds;
 
     /// <summary>
     /// Whether this client accepts the server's output-delay command. When true, the client

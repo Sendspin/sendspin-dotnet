@@ -497,8 +497,12 @@ sourceFactory: (buffer, nowMicroseconds) => new SyncCorrectedSampleSource(buffer
 
 It drives `ReadRaw` internally and owns the whole external-correction protocol — provider updates,
 `NotifyExternalCorrection`, `ReportExternalPlaybackRate`, standing down during a hard sync — so
-there is no correction code left on your side. If your host must not carry a resampler in its
-output chain, set the new `SyncCorrectionOptions.Mechanism` to
+there is no correction code left on your side. It implements `IPlaybackLifecycleAware`, so
+`AudioPipeline` reaches it with the two events that invalidate correction state: `Clear` resets
+the resampler and the provider, and `NotifyReconnect` suppresses corrections while the clock
+re-converges. Implement that interface on your own source if it keeps state of its own; a source
+that only reads the buffer has nothing to invalidate and should not implement it. If your host
+must not carry a resampler in its output chain, set the new `SyncCorrectionOptions.Mechanism` to
 `SyncCorrectionMechanism.FrameStepping` and the same class splices frames instead, constructing no
 resampler at all. The default is `SmoothResampling`. `Mechanism` is the only addition to
 `SyncCorrectionOptions`, and it changes nothing for `TimedAudioBuffer.Read`, which always steps
@@ -534,9 +538,18 @@ passed are dropped on arrival, as `roles/player/v1.md:145` asks. Both are counte
 `TimedAudioBuffer` now anchors its sync-error reference to the first segment's *scheduled* time
 rather than to the callback that happened to start playback, and snaps the sub-callback residual
 so the first sample lands on time. It also gates readiness on `MinBufferMilliseconds` (new,
-default 150 ms — keep it equal to `ClientCapabilities.MinBufferMs`) rather than on 80% of the
+default `PlayerBufferCapacity.DefaultMinBufferMilliseconds`, 150 ms) rather than on 80% of the
 target depth, because a live stream is scheduled only `min_buffer_ms` ahead and the larger gate
 guaranteed a late start on exactly those streams.
+
+Driving the buffer through `AudioPipeline` leaves nothing to keep in step: the client forwards
+`ClientCapabilities.MinBufferMs` to `IAudioPipeline.SetMinBufferMilliseconds` at construction and
+again on every `UpdateTimingAsync`, so the gate always matches what the server was told. Set
+`MinBufferMilliseconds` yourself only when driving a buffer outside a pipeline.
+
+One-shot snaps taken at playback start now count in `AudioBufferStats.HardSyncCount`, which used
+to stay at 0 for them. They are the same splice the hard-sync tier performs, and the spec requires
+those to be rare — so if you alert on that counter, expect up to one more per stream start.
 
 ---
 
@@ -560,7 +573,12 @@ var buffer = new TimedAudioBuffer(format, clockSync, capabilities.AudioBufferCap
 
 `BufferCapacity` is derived from that duration and your advertised codecs, taking the byte rate
 of the *most compressed* one (a megabyte of Opus is minutes; a megabyte of PCM is seconds) and
-advertising four fifths of it, as the C++ reference does. Setting `BufferCapacity` explicitly
+advertising four fifths of it, as the C++ reference does. Opus is assumed to occupy no more than
+a conservative 64 kbps whatever `AudioFormat.Bitrate` says, because nothing negotiates that
+field — `client/hello`'s `supported_formats` entry is codec, channels, sample rate and bit depth
+— so a server encoding below the requested rate would otherwise fill the advertisement legally
+with audio the buffer cannot hold. A *lower* declared bitrate is still honoured, since assuming
+less can only advertise less. Setting `BufferCapacity` explicitly
 still works and still overrides the derivation — but it makes the promise yours to keep;
 `PlayerBufferCapacity.HoldableMilliseconds` will tell you whether it holds.
 
@@ -628,7 +646,8 @@ the group. Size your read to the correction and this needs no compensation.
 - [ ] No `MaxSpeedCorrection` above `SyncCorrectionOptions.SpecMaxSpeedCorrection` reaches the SDK — including from configuration; check the log for the clamp warning
 - [ ] Nothing drives a resampler from `TargetPlaybackRate` while also calling `Read`
 - [ ] `ClientCapabilities.AudioBufferCapacityMs` and `TimedAudioBuffer`'s `bufferCapacityMs` are the same number
-- [ ] `TimedAudioBuffer.MinBufferMilliseconds` matches `ClientCapabilities.MinBufferMs`
+- [ ] `TimedAudioBuffer.MinBufferMilliseconds` matches `ClientCapabilities.MinBufferMs` — automatic behind `AudioPipeline`; check it only if you drive a buffer yourself
+- [ ] A custom `IAudioSampleSource` that keeps correction state implements `IPlaybackLifecycleAware`
 - [ ] A custom `ISyncCorrectionProvider` emits its correction as `TargetPlaybackRate` — the
       `DropEveryNFrames` / `InsertEveryNFrames` members are gone
 - [ ] An external corrector stands down on `ITimedAudioBuffer.IsHardSyncPending`, not on

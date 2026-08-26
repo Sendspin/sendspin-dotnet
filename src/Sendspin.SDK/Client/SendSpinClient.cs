@@ -443,6 +443,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _minBufferMs = Math.Max(0, _capabilities.MinBufferMs);
         _unpairedAccessEnabled = _capabilities.UnpairedAccessEnabled;
 
+        // The buffer's readiness gate is the client side of the same promise min_buffer_ms makes
+        // to the server, so it follows what is advertised rather than its own default.
+        _audioPipeline?.SetMinBufferMilliseconds(_minBufferMs);
+
         // Implemented methods start enabled unless the app says otherwise. The three flags
         // exist so an app can reapply a server's set-pairing-config change on the next start
         // (#131); ANDing each with PairingCodeMethods keeps "not implemented" and "implemented
@@ -1159,6 +1163,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         _requiredLeadTimeMs = Math.Max(0, requiredLeadTimeMs);
         _minBufferMs = Math.Max(0, minBufferMs);
+
+        // Same reason as at construction: the readiness gate follows what the server is told.
+        _audioPipeline?.SetMinBufferMilliseconds(_minBufferMs);
 
         _logger.LogDebug("Updating player timing: LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
             _requiredLeadTimeMs, _minBufferMs);

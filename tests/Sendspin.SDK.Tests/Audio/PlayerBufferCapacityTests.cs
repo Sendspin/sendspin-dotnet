@@ -106,13 +106,62 @@ public class PlayerBufferCapacityTests
     }
 
     [Theory]
-    [InlineData("opus", 32_000)]     // 256 kbps
+    [InlineData("opus", 8_000)]      // the conservative 64 kbps floor, not the declared 256
     [InlineData("pcm", 192_000)]     // 48 kHz x 2ch x 16-bit
     public void CompressedBytesPerSecond_MatchesTheCodec(string codec, int expected)
     {
         var format = codec == "opus" ? Opus : Pcm;
 
         Assert.Equal(expected, PlayerBufferCapacity.CompressedBytesPerSecond(format));
+    }
+
+    [Fact]
+    public void DeclaredBitrate_NeverInflatesTheAdvertisement()
+    {
+        // The 256 kbps on this format is a request the server never agreed to: client/hello's
+        // supported_formats entry is codec / channels / sample_rate / bit_depth, with no
+        // bitrate field at all. Trusting it advertised four times what the conservative floor
+        // allows, so a server encoding below the declared rate could fill the advertisement
+        // legally and overflow the decoded buffer — content the client discards unplayed.
+        var undeclared = new AudioFormat { Codec = "opus", SampleRate = 48_000, Channels = 2 };
+
+        Assert.True(
+            PlayerBufferCapacity.AdvertisedBytes(30_000, new[] { Opus })
+                <= PlayerBufferCapacity.AdvertisedBytes(30_000, new[] { undeclared }),
+            "a declared bitrate must never advertise more than the conservative derivation");
+    }
+
+    [Fact]
+    public void DeclaredBitrateBelowTheFloor_IsStillHonoured()
+    {
+        // Safety runs one way: a lower assumed byte rate advertises less, so a caller who
+        // knows the server encodes at 32 kbps gets an advertisement matched to it.
+        var low = new AudioFormat
+        {
+            Codec = "opus", SampleRate = 48_000, Channels = 2, Bitrate = 32,
+        };
+
+        Assert.Equal(32 * 1000 / 8, PlayerBufferCapacity.CompressedBytesPerSecond(low));
+    }
+
+    [Fact]
+    public void CodecArms_UseTheSharedCodecIdentifiers()
+    {
+        // AudioDecoderFactory selects on AudioCodecs; the byte-rate derivation must select on
+        // the same identifiers, or a format could decode down one arm and be sized by another.
+        var opus = new AudioFormat { Codec = AudioCodecs.Opus, SampleRate = 48_000, Channels = 2 };
+        var flac = new AudioFormat { Codec = AudioCodecs.Flac, SampleRate = 48_000, Channels = 2 };
+        var pcm = new AudioFormat
+        {
+            Codec = AudioCodecs.Pcm, SampleRate = 48_000, Channels = 2, BitDepth = 16,
+        };
+
+        Assert.True(
+            PlayerBufferCapacity.CompressedBytesPerSecond(opus)
+                < PlayerBufferCapacity.CompressedBytesPerSecond(flac));
+        Assert.True(
+            PlayerBufferCapacity.CompressedBytesPerSecond(flac)
+                < PlayerBufferCapacity.CompressedBytesPerSecond(pcm));
     }
 
     [Fact]
