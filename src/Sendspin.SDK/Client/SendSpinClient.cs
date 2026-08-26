@@ -4934,6 +4934,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // during it belong to the new stream and are drained into it.
         var queuedForPreviousStream = _earlyChunkQueue.Count;
 
+        // The group this start reports Playing on, resolved before the start rather than after
+        // it. Creating one is what a stream/start means for a server that sends no group/update,
+        // but it must not happen on the far side of the await: DisconnectAsync drops
+        // _currentGroup, and `??=` down there republished a default Playing state for a
+        // connection that had ended — the fault #247 fixed in the scheduled metadata and colour
+        // applies. Resolving here and re-checking below keeps the create with the code that
+        // still knows a stream is being started, and makes the announcement conditional on that
+        // same group still being the client's.
+        var group = _currentGroup ??= new GroupState();
+
         // A pipeline-start failure is a local fault, not peer input: the pipeline
         // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
         // and it propagates from here so a real bug surfaces instead of being
@@ -4973,10 +4983,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogDebug("Drained {Count} early chunks into pipeline", drainedCount);
         }
 
-        // Infer Playing state from stream/start for servers that don't send group/update
-        _currentGroup ??= new GroupState();
-        _currentGroup.PlaybackState = PlaybackState.Playing;
-        GroupStateChanged?.Invoke(this, _currentGroup);
+        // Infer Playing state from stream/start for servers that don't send group/update — unless
+        // a disconnect took the group while the pipeline was starting, in which case there is no
+        // longer anything for this stream to be Playing on.
+        if (!ReferenceEquals(_currentGroup, group))
+        {
+            return;
+        }
+
+        group.PlaybackState = PlaybackState.Playing;
+        GroupStateChanged?.Invoke(this, group);
     }
 
     /// <summary>
