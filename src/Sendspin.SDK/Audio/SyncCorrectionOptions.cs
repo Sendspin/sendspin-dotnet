@@ -1,4 +1,4 @@
-// <copyright file="SyncCorrectionOptions.cs" company="Sendspin Windows Client">
+﻿// <copyright file="SyncCorrectionOptions.cs" company="Sendspin Windows Client">
 // Licensed under the MIT License. See LICENSE file in the project root.
 // </copyright>
 
@@ -11,16 +11,71 @@ namespace Sendspin.SDK.Audio;
 public sealed class SyncCorrectionOptions
 {
     /// <summary>
-    /// Sync errors below this magnitude are ignored. Default 1 ms.
+    /// The spec's hard ceiling on continuous playback-speed deviation: the effective
+    /// speed MUST stay within ±0.5% of normal, measured as a sliding average over
+    /// 150 ms (spec roles/player/v1.md:134). A larger <see cref="MaxSpeedCorrection"/> is
+    /// clamped to this rather than applied — see <see cref="EffectiveMaxSpeedCorrection"/>.
     /// </summary>
-    public long DeadbandMicroseconds { get; set; } = 1_000;
+    /// <remarks>
+    /// The cap bounds <em>steady-state</em> correction only. A one-shot
+    /// resynchronization after a disturbance is explicitly exempt, which is what
+    /// <see cref="HardSyncThresholdMicroseconds"/> implements.
+    /// </remarks>
+    /// <remarks>
+    /// Internal on the 9.x line: the published surface is frozen, so the cap is enforced
+    /// rather than exposed. <see cref="MaxSpeedCorrection"/>'s default is this value.
+    /// </remarks>
+    internal const double SpecMaxSpeedCorrection = 0.005;
 
     /// <summary>
-    /// Maximum allowed playback-rate deviation from 1.0. Human pitch-perception
-    /// threshold is roughly 3%, so values up to 0.04 are typically imperceptible.
-    /// Default 0.02 (2%); the Python CLI uses 0.04.
+    /// Sync errors below this magnitude are ignored. Default 100 µs, matching the
+    /// spec's suggested dead band (roles/player/v1.md:172) and the C++ reference's
+    /// <c>SOFT_SYNC_THRESHOLD_US</c>.
     /// </summary>
-    public double MaxSpeedCorrection { get; set; } = 0.02;
+    /// <remarks>
+    /// The spec requires steady-state error within ±1 ms (MUST) and asks for ±0.5 ms
+    /// (SHOULD). A dead band at the MUST floor makes the SHOULD target unreachable by
+    /// construction and leaves no margin, so the band sits an order of magnitude below
+    /// it. Raise it only with a measured platform-jitter justification, and record that
+    /// measurement where you set it.
+    /// </remarks>
+    public long DeadbandMicroseconds { get; set; } = 100;
+
+    /// <summary>
+    /// Maximum allowed playback-rate deviation from 1.0. Default 0.005 (0.5%), the
+    /// spec's MUST cap — see <see cref="SpecMaxSpeedCorrection"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is not a comfort setting to be traded against correction speed. The cap is
+    /// a fleet-homogeneity contract: every player in a group recovers from the same
+    /// disturbance at the same bounded rate, so they stay audibly together while
+    /// converging. Errors too large to close inside the cap are handled by the one-shot
+    /// hard-sync tier (<see cref="HardSyncThresholdMicroseconds"/>), which the spec
+    /// exempts from it — not by exceeding it.
+    /// </para>
+    /// <para>
+    /// Setting this above <see cref="SpecMaxSpeedCorrection"/> does not raise the cap: the
+    /// value is clamped where correction is applied, and the SDK logs a warning once when it
+    /// sees one. Rejecting it outright would take a client that plays today and stop it from
+    /// starting, which is a worse answer than playing it in conformance.
+    /// </para>
+    /// </remarks>
+    public double MaxSpeedCorrection { get; set; } = SpecMaxSpeedCorrection;
+
+    /// <summary>
+    /// Gets the speed cap that is actually applied: <see cref="MaxSpeedCorrection"/> limited to
+    /// <see cref="SpecMaxSpeedCorrection"/>. Every correction path uses this, so an
+    /// over-permissive configured value can never produce an out-of-spec speed.
+    /// </summary>
+    internal double EffectiveMaxSpeedCorrection =>
+        Math.Min(MaxSpeedCorrection, SpecMaxSpeedCorrection);
+
+    /// <summary>
+    /// Gets whether <see cref="MaxSpeedCorrection"/> is set above the spec's cap and is
+    /// therefore being clamped.
+    /// </summary>
+    internal bool ExceedsSpecSpeedCap => MaxSpeedCorrection > SpecMaxSpeedCorrection;
 
     /// <summary>
     /// Target time, in seconds, over which sync error should be corrected.
@@ -30,21 +85,57 @@ public sealed class SyncCorrectionOptions
     public double CorrectionTargetSeconds { get; set; } = 3.0;
 
     /// <summary>
+    /// Above this error magnitude the correction is a single discontinuity — skip or
+    /// insert the exact excess in one step — instead of a continuous speed change.
+    /// Default 5 ms, matching <c>HARD_SYNC_THRESHOLD_US</c> in the C++ reference
+    /// (sync_task.cpp). Set to 0 to disable the tier.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The spec exempts a one-shot resynchronization from the ±0.5% speed cap and
+    /// describes exactly this behaviour (roles/player/v1.md:178): when the error would
+    /// otherwise exceed the ±1 ms floor, drop a leading prefix if late or insert
+    /// silence if early. Grinding a 50 ms error out at 0.5% would take 10 s, during
+    /// which this player audibly trails every reference player in the group; the snap
+    /// closes it inside one callback.
+    /// </para>
+    /// <para>
+    /// The tier sits between the rate/drop-insert band and
+    /// <see cref="ReanchorThresholdMicroseconds"/>: errors above the re-anchor
+    /// threshold are catastrophic and clear the buffer instead. Because the default
+    /// (5 ms) is below <see cref="ResamplingThresholdMicroseconds"/>, the discrete
+    /// drop/insert band is not reached with default settings — it is used only when a
+    /// caller lowers the resampling threshold below this one.
+    /// </para>
+    /// <para>
+    /// The snap is applied by <see cref="TimedAudioBuffer"/> itself on both the
+    /// internal and the external (<c>ReadRaw</c>) correction paths, because skipping
+    /// buffered content or manufacturing silence is a buffer-timeline operation an
+    /// external corrector cannot perform on the samples it has already been handed.
+    /// </para>
+    /// </remarks>
+    internal long HardSyncThresholdMicroseconds { get; set; } = 5_000;
+
+    /// <summary>
     /// Below this error magnitude the correction is a smooth rate adjustment;
     /// above it the correction switches to frame drop/insert. Default 100 ms.
     /// </summary>
     /// <remarks>
     /// Rate adjustment is inaudible (bounded by <see cref="MaxSpeedCorrection"/>),
-    /// while frame drop/insert is audible as stutter. Moderate errors should
-    /// therefore route through resampling: at the default 2% max correction a
-    /// 100 ms error closes in ~5 s without a perceptible pitch change. Reserve
-    /// drop/insert for errors rate correction cannot close in reasonable time.
+    /// while frame drop/insert is audible as stutter, so moderate errors route through
+    /// resampling. Both are bounded by the same ±0.5% cap: the drop/insert interval is
+    /// floored at <c>ceil(1 / MaxSpeedCorrection)</c> frames, which is the per-chunk
+    /// bound <c>N ≤ floor(0.005 × samples_in_chunk)</c> from roles/player/v1.md:174
+    /// expressed as a rate. <see cref="HardSyncThresholdMicroseconds"/> takes
+    /// precedence above 5 ms by default, so this band is only reached when that tier
+    /// is disabled or this threshold is lowered below it.
     /// </remarks>
     public long ResamplingThresholdMicroseconds { get; set; } = 100_000;
 
     /// <summary>
     /// Above this error magnitude the buffer is cleared and sync is restarted.
-    /// Default 500 ms.
+    /// Default 500 ms. This is the catastrophic tier above
+    /// <see cref="HardSyncThresholdMicroseconds"/>.
     /// </summary>
     public long ReanchorThresholdMicroseconds { get; set; } = 500_000;
 
@@ -84,12 +175,12 @@ public sealed class SyncCorrectionOptions
     /// <summary>
     /// Gets the minimum playback rate (1.0 - MaxSpeedCorrection).
     /// </summary>
-    public double MinRate => 1.0 - MaxSpeedCorrection;
+    public double MinRate => 1.0 - EffectiveMaxSpeedCorrection;
 
     /// <summary>
     /// Gets the maximum playback rate (1.0 + MaxSpeedCorrection).
     /// </summary>
-    public double MaxRate => 1.0 + MaxSpeedCorrection;
+    public double MaxRate => 1.0 + EffectiveMaxSpeedCorrection;
 
     /// <summary>
     /// Validates the options and throws if invalid.
@@ -104,6 +195,10 @@ public sealed class SyncCorrectionOptions
                 nameof(DeadbandMicroseconds));
         }
 
+        // Only nonsensical values are rejected. A value above the spec cap is a real
+        // misconfiguration, but it is one the SDK can honour safely by clamping — see
+        // EffectiveMaxSpeedCorrection — and throwing would stop a client that plays today
+        // from starting at all.
         if (MaxSpeedCorrection is <= 0 or > 1.0)
         {
             throw new ArgumentException(
@@ -130,6 +225,21 @@ public sealed class SyncCorrectionOptions
             throw new ArgumentException(
                 "ReanchorThresholdMicroseconds must be greater than ResamplingThresholdMicroseconds.",
                 nameof(ReanchorThresholdMicroseconds));
+        }
+
+        if (HardSyncThresholdMicroseconds < 0)
+        {
+            throw new ArgumentException(
+                "HardSyncThresholdMicroseconds must be non-negative (0 disables the tier).",
+                nameof(HardSyncThresholdMicroseconds));
+        }
+
+        if (HardSyncThresholdMicroseconds >= ReanchorThresholdMicroseconds)
+        {
+            throw new ArgumentException(
+                "HardSyncThresholdMicroseconds must be less than ReanchorThresholdMicroseconds; " +
+                "the one-shot snap tier sits below the catastrophic re-anchor tier.",
+                nameof(HardSyncThresholdMicroseconds));
         }
 
         if (ReanchorCooldownMicroseconds < 0)
@@ -170,6 +280,7 @@ public sealed class SyncCorrectionOptions
         DeadbandMicroseconds = DeadbandMicroseconds,
         MaxSpeedCorrection = MaxSpeedCorrection,
         CorrectionTargetSeconds = CorrectionTargetSeconds,
+        HardSyncThresholdMicroseconds = HardSyncThresholdMicroseconds,
         ResamplingThresholdMicroseconds = ResamplingThresholdMicroseconds,
         ReanchorThresholdMicroseconds = ReanchorThresholdMicroseconds,
         ReanchorCooldownMicroseconds = ReanchorCooldownMicroseconds,
@@ -188,14 +299,17 @@ public sealed class SyncCorrectionOptions
     /// Gets options matching the Python CLI defaults (more aggressive).
     /// </summary>
     /// <remarks>
-    /// The CLI uses tighter tolerances and faster correction, which works well
-    /// on platforms with precise timing (hardware audio interfaces, etc.).
+    /// The CLI converges faster (shorter correction target, tighter resampling band),
+    /// which works well on platforms with precise timing (hardware audio interfaces,
+    /// etc.). It does <em>not</em> loosen the dead band or the speed cap: both are
+    /// spec conformance points, not platform tuning.
     /// </remarks>
     public static SyncCorrectionOptions CliDefaults => new()
     {
-        DeadbandMicroseconds = 1_000,
-        MaxSpeedCorrection = 0.04,        // 4% vs Windows 2%
+        DeadbandMicroseconds = 100,
+        MaxSpeedCorrection = SpecMaxSpeedCorrection,
         CorrectionTargetSeconds = 2.0,    // 2s vs Windows 3s
+        HardSyncThresholdMicroseconds = 5_000,
         ResamplingThresholdMicroseconds = 15_000,
         ReanchorThresholdMicroseconds = 500_000,
         StartupGracePeriodMicroseconds = 500_000,

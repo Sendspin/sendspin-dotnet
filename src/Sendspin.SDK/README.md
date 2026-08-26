@@ -174,17 +174,24 @@ public int Read(float[] buffer, int offset, int count)
 
 ### Configuring Sync Behavior
 
+The correction caps are spec conformance points, not tuning knobs. The effective playback speed
+must stay within ±0.5% of normal (a protocol MUST), and the steady-state error must stay within
+±1 ms, so the dead band sits an order of magnitude below that at 100 µs. Both defaults match the
+reference players this SDK shares a group with. Setting `MaxSpeedCorrection` above 0.5% does not
+raise the cap — the value is clamped where correction is applied and a warning is logged once.
+Errors too large to close inside the cap are handled by a one-shot resynchronization that the
+spec exempts from it, not by exceeding it.
+
 ```csharp
-// Use default settings (conservative: 2% max, 3s target)
+// Use default settings (spec caps: 0.5% max, 100 us dead band, 3s target)
 var options = SyncCorrectionOptions.Default;
 
-// Use CLI-compatible settings (aggressive: 4% max, 2s target)
+// Use CLI-compatible settings (faster convergence, same caps)
 var options = SyncCorrectionOptions.CliDefaults;
 
 // Custom options
 var options = new SyncCorrectionOptions
 {
-    MaxSpeedCorrection = 0.04,                    // 4% max rate adjustment
     CorrectionTargetSeconds = 2.0,                // Time to eliminate drift
     ResamplingThresholdMicroseconds = 15_000,     // Resampling vs drop/insert
     ReanchorThresholdMicroseconds = 500_000,      // Clear buffer threshold
@@ -193,6 +200,15 @@ var options = new SyncCorrectionOptions
 
 var calculator = new SyncCorrectionCalculator(options, sampleRate, channels);
 ```
+
+### Advertised buffer capacity
+
+`ClientCapabilities.BufferCapacity` is derived from the SDK's decoded-buffer duration and the
+formats you advertise, rather than defaulting to a flat 32 MB. The spec makes this a hard
+per-player byte limit the server may fill toward, so an over-advertisement is audio the server
+legally sends and the client discards before playing it. A value set explicitly is honoured only
+up to what the buffer can actually hold; anything larger is clamped and reported at
+`client/hello` time.
 
 ## Platform-Specific Audio
 

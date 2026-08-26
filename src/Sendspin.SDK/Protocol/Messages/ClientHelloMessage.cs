@@ -115,10 +115,28 @@ public sealed class PlayerSupport
     public List<AudioFormatSpec> SupportedFormats { get; init; } = new();
 
     /// <summary>
-    /// Audio buffer capacity in bytes.
+    /// Audio buffer capacity in compressed bytes — a hard limit the server may fill toward,
+    /// so it must be a figure the client's audio buffer can actually hold.
     /// </summary>
+    /// <remarks>
+    /// <c>SendspinClientService</c> always populates this from
+    /// <c>ClientCapabilities.BufferCapacity</c>, which derives it from the real decoded-buffer
+    /// duration. The default here only applies to a <see cref="PlayerSupport"/> built by hand,
+    /// and matches the SDK's default buffer.
+    /// </remarks>
     [JsonPropertyName("buffer_capacity")]
-    public int BufferCapacity { get; init; } = 32_000_000; // 32MB like reference impl
+    public int BufferCapacity { get; init; } = DefaultBufferCapacity;
+
+    private static readonly int DefaultBufferCapacity =
+        Sendspin.SDK.Audio.PlayerBufferCapacity.AdvertisedBytes(
+            Sendspin.SDK.Audio.PlayerBufferCapacity.DefaultDecodedBufferMilliseconds,
+            new[]
+            {
+                new Sendspin.SDK.Models.AudioFormat
+                {
+                    Codec = "opus", SampleRate = 48000, Channels = 2, Bitrate = 256,
+                },
+            });
 
     /// <summary>
     /// Supported player commands.

@@ -1,3 +1,4 @@
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
@@ -8,6 +9,7 @@ namespace Sendspin.SDK.Client;
 /// </summary>
 public sealed class ClientCapabilities
 {
+    private int? _bufferCapacityOverride;
     /// <summary>
     /// Unique client identifier (persisted across sessions).
     /// Format follows reference implementation: sendspin-windows-{hostname}
@@ -43,11 +45,54 @@ public sealed class ClientCapabilities
     };
 
     /// <summary>
-    /// Audio buffer capacity in compressed bytes. The server uses this to limit how much
-    /// audio it sends ahead. Should be derived from your PCM buffer duration and the
-    /// highest-bitrate codec you support. Default is 32MB (reference implementation fallback).
+    /// Audio buffer capacity in compressed bytes, advertised in <c>client/hello</c>. Derived
+    /// from the SDK's decoded-buffer duration and <see cref="AudioFormats"/> unless set
+    /// explicitly, and clamped to that derived ceiling if it is.
     /// </summary>
-    public int BufferCapacity { get; set; } = 32_000_000;
+    /// <remarks>
+    /// <para>
+    /// The spec makes this a hard per-player byte limit that servers fill toward
+    /// (roles/player/v1.md:34-35), so it is a promise about what this client can hold, not a
+    /// hint. It used to default to a flat 32 MB with no relationship to the actual buffer —
+    /// which meant a server behaving exactly as the spec allows could send minutes of Opus to
+    /// a client holding a fraction of a second of it, and everything past the buffer was
+    /// discarded before it played.
+    /// </para>
+    /// <para>
+    /// The derivation assumes <c>TimedAudioBuffer</c>'s default decoded capacity, which is
+    /// also what a caller gets from <c>new TimedAudioBuffer(format, clockSync)</c>. A value set
+    /// here is honoured only up to that ceiling: over-advertising is the bug this exists to
+    /// close, so a larger figure is clamped and reported once at <c>client/hello</c> time. A
+    /// client that really does hold more can only say so on the 10.x line, which has an
+    /// explicit decoded-capacity property; 9.x's surface is frozen.
+    /// </para>
+    /// </remarks>
+    public int BufferCapacity
+    {
+        get => _bufferCapacityOverride is { } configured
+            ? Math.Min(configured, TruthfulBufferCapacityBytes)
+            : TruthfulBufferCapacityBytes;
+        set => _bufferCapacityOverride = value;
+    }
+
+    /// <summary>
+    /// The largest <c>buffer_capacity</c> this client can honour: what the SDK's default
+    /// decoded buffer holds, for whichever of <see cref="AudioFormats"/> packs the most audio
+    /// into a byte.
+    /// </summary>
+    internal int TruthfulBufferCapacityBytes =>
+        PlayerBufferCapacity.AdvertisedBytes(
+            PlayerBufferCapacity.DefaultDecodedBufferMilliseconds, AudioFormats);
+
+    /// <summary>
+    /// Whether a caller set <see cref="BufferCapacity"/> above what the buffer can hold, and
+    /// is therefore being clamped.
+    /// </summary>
+    internal bool BufferCapacityWasClamped =>
+        _bufferCapacityOverride > TruthfulBufferCapacityBytes;
+
+    /// <summary>The value a caller set, before clamping. Null when none was set.</summary>
+    internal int? ConfiguredBufferCapacity => _bufferCapacityOverride;
 
     /// <summary>
     /// Artwork channels this client can display, advertised in <c>client/hello</c>. The Sendspin

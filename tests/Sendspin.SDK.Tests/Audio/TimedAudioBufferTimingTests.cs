@@ -1,4 +1,4 @@
-using Sendspin.SDK.Audio;
+﻿using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
 
 namespace Sendspin.SDK.Tests.Audio;
@@ -246,7 +246,7 @@ public class TimedAudioBufferTimingTests
     }
 
     [Fact]
-    public void StallAfterStabilization_IsStillCorrected_ViaResampling()
+    public void StallAfterStabilization_IsCorrected_ByOneShotSnap()
     {
         var clockSync = new FakeClockSynchronizer();
         var (buffer, wallTime) = RunPrefillStartup(clockSync);
@@ -265,12 +265,15 @@ public class TimedAudioBufferTimingTests
 
             var stats = buffer.GetStats();
 
-            // A real 60ms lag must be corrected — but inaudibly: moderate
-            // errors route through rate adjustment, not frame drop/insert.
-            Assert.Equal(SyncCorrectionMode.Resampling, stats.CurrentCorrectionMode);
-            Assert.True(
-                stats.TargetPlaybackRate > 1.0,
-                $"expected speed-up rate > 1.0, got {stats.TargetPlaybackRate}");
+            // This test used to assert the 60ms lag was ground out by rate adjustment. At the
+            // spec's ±0.5% cap that takes 12 seconds, during which this player audibly trails
+            // every reference player in the group. 60ms is past the hard-sync threshold, so it
+            // is now closed in one discontinuity instead - which the spec both describes
+            // (roles/player/v1.md:178) and exempts from the speed cap.
+            Assert.Equal(1, stats.HardSyncCount);
+            Assert.InRange(stats.SamplesDroppedForSync / (double)SamplesPerMs, 50, 70);
+            Assert.InRange(Math.Abs(stats.SyncErrorMs), 0, 5);
+            Assert.Equal(SyncCorrectionMode.None, stats.CurrentCorrectionMode);
         }
     }
 

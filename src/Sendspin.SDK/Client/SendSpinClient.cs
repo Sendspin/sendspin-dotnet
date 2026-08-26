@@ -272,6 +272,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ArtworkChannels.Count);
         }
 
+        // buffer_capacity is a hard limit the server fills toward, not a hint, so advertising
+        // more than the decoded buffer holds licenses the server to overrun it. A configured
+        // value above what it can hold is honoured only up to that ceiling.
+        if (_capabilities.BufferCapacityWasClamped)
+        {
+            _logger.LogWarning(
+                "BufferCapacity is set to {Configured} bytes, more than this client's audio buffer can " +
+                "hold for its advertised formats; advertising {Clamped} bytes instead. The spec makes " +
+                "buffer_capacity a limit the server may fill toward, so an over-advertisement is audio " +
+                "discarded before it plays.",
+                _capabilities.ConfiguredBufferCapacity,
+                _capabilities.BufferCapacity);
+        }
+
         return ClientHelloMessage.Create(
             clientId: _capabilities.ClientId,
             name: _capabilities.ClientName,

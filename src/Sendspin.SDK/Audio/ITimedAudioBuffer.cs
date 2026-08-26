@@ -1,4 +1,4 @@
-// <copyright file="ITimedAudioBuffer.cs" company="Sendspin Windows Client">
+﻿// <copyright file="ITimedAudioBuffer.cs" company="Sendspin Windows Client">
 // Licensed under the MIT License. See LICENSE file in the project root.
 // </copyright>
 
@@ -113,11 +113,14 @@ public interface ITimedAudioBuffer : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Values: 1.0 = normal speed, &gt;1.0 = speed up (behind), &lt;1.0 = slow down (ahead).
+    /// Values: 1.0 = normal speed, &gt;1.0 = speed up (behind), &lt;1.0 = slow down (ahead),
+    /// bounded by the spec's ±0.5% cap.
     /// </para>
     /// <para>
-    /// Range is typically 0.96-1.04 (±4%), but most corrections use 0.98-1.02 (±2%).
-    /// This is imperceptible to human ears unlike discrete sample dropping.
+    /// <b>Meaningful only alongside <see cref="ReadRaw"/>.</b> A rate is a request to a
+    /// resampler, and the <see cref="Read"/> path has none: it corrects by stepping frames
+    /// itself and holds this at 1.0 throughout. It used to advise a rate there that nothing
+    /// applied, which let ordinary drift accumulate until the one-shot tier spliced it.
     /// </para>
     /// </remarks>
     [Obsolete("Use SyncErrorMicroseconds with external ISyncCorrectionProvider instead. SDK no longer calculates correction rate.")]
@@ -127,6 +130,10 @@ public interface ITimedAudioBuffer : IDisposable
     /// Event raised when target playback rate changes.
     /// Subscribers should update their resampler ratio accordingly.
     /// </summary>
+    /// <remarks>
+    /// Fires only for callers driving <see cref="ReadRaw"/>; see
+    /// <see cref="TargetPlaybackRate"/> for why the <see cref="Read"/> path stays at 1.0.
+    /// </remarks>
     [Obsolete("Use SyncErrorMicroseconds with external ISyncCorrectionProvider instead. SDK no longer calculates correction rate.")]
     event Action<double>? TargetPlaybackRateChanged;
 
@@ -146,8 +153,19 @@ public interface ITimedAudioBuffer : IDisposable
     /// <param name="currentLocalTime">Current local time in microseconds.</param>
     /// <returns>Number of samples written.</returns>
     /// <remarks>
-    /// This method applies internal sync correction. For external correction control,
-    /// use <see cref="ReadRaw"/> instead and apply correction in the caller.
+    /// <para>
+    /// This path corrects end to end and needs nothing from the caller: below the dead band it
+    /// leaves the audio alone, between the dead band and the one-shot threshold (~5 ms) it
+    /// drops or duplicates
+    /// whole frames at an interval bounded by the spec's ±0.5% cap (the strategy
+    /// roles/player/v1.md:169-176 suggests, and what the C++ reference does per chunk), and
+    /// above that threshold it snaps in one discontinuity.
+    /// </para>
+    /// <para>
+    /// Because it applies the correction itself, <see cref="TargetPlaybackRate"/> stays at 1.0
+    /// here — do not also drive a resampler from it, or the same error is corrected twice. For
+    /// external correction control use <see cref="ReadRaw"/> instead.
+    /// </para>
     /// </remarks>
     [Obsolete("Use ReadRaw() with external ISyncCorrectionProvider for correction control. This method applies internal correction.")]
     int Read(Span<float> buffer, long currentLocalTime);
@@ -161,9 +179,19 @@ public interface ITimedAudioBuffer : IDisposable
     /// <returns>Number of samples written (always matches samples read from buffer).</returns>
     /// <remarks>
     /// <para>
-    /// Unlike <see cref="Read"/>, this method does NOT apply drop/insert correction.
-    /// It still calculates and updates <see cref="SyncErrorMicroseconds"/> and
-    /// <see cref="SmoothedSyncErrorMicroseconds"/>.
+    /// Unlike <see cref="Read"/>, this method does NOT apply continuous drop/insert or
+    /// rate correction. It still calculates and updates <see cref="SyncErrorMicroseconds"/>
+    /// and <see cref="SmoothedSyncErrorMicroseconds"/>.
+    /// </para>
+    /// <para>
+    /// <b>It does apply the one-shot hard sync.</b> Skipping buffered content, or emitting
+    /// silence the buffer never held, is a timeline operation no external corrector can perform
+    /// on the samples it has already been handed — so the snap belongs to the buffer on both
+    /// paths. While one is in flight a <see cref="SyncCorrectionCalculator"/> reports
+    /// <see cref="SyncCorrectionMode.None"/> with a neutral rate and no frame stepping, which
+    /// is what an external corrector must do for the duration; the tier has no mode of its own
+    /// on the 9.x line, because the enum is frozen. <see cref="AudioBufferStats"/> records the
+    /// snap instead.
     /// </para>
     /// <para>
     /// The caller is responsible for:
@@ -427,6 +455,29 @@ public record AudioBufferStats
     /// Zero until the first stats poll after pipeline start.
     /// </summary>
     public double MinBufferedMsRecent { get; init; }
+
+    /// <summary>
+    /// Gets the number of one-shot hard syncs applied since the pipeline was started.
+    /// </summary>
+    /// <remarks>
+    /// The spec requires these to be rare. A count that keeps climbing during steady playback
+    /// means the continuous corrector cannot keep up — investigate the clock or the network
+    /// rather than raising the threshold.
+    /// </remarks>
+    internal long HardSyncCount { get; init; }
+
+    /// <summary>
+    /// Gets the number of breaks detected in the delivered content timeline — a chunk boundary
+    /// whose timestamp did not continue where the previous one ended, or audio discarded
+    /// mid-play. Each is folded into the sync error so alignment is restored.
+    /// </summary>
+    internal long ContentHolesDetected { get; init; }
+
+    /// <summary>
+    /// Gets the number of incoming chunks discarded because their timestamps were already
+    /// behind the read cursor (spec roles/player/v1.md:145).
+    /// </summary>
+    internal long LateChunksDropped { get; init; }
 }
 
 /// <summary>
@@ -441,19 +492,21 @@ public enum SyncCorrectionMode
 
     /// <summary>
     /// Using playback rate adjustment via resampling (smooth, imperceptible correction).
-    /// This is the preferred mode for small errors (2-15ms).
+    /// This is the preferred mode for errors between the dead band and the one-shot
+    /// snap threshold (~5 ms).
     /// </summary>
     Resampling,
 
     /// <summary>
-    /// Dropping samples to catch up (playing too slow).
-    /// Used for larger errors (&gt;15ms) that need faster correction.
+    /// Dropping samples to catch up (playing too slow), one frame every N.
+    /// Reached only when <see cref="SyncCorrectionOptions.ResamplingThresholdMicroseconds"/>
+    /// is lowered below the one-shot snap threshold, or that tier is disabled.
     /// </summary>
     Dropping,
 
     /// <summary>
-    /// Inserting samples to slow down (playing too fast).
-    /// Used for larger errors (&gt;15ms) that need faster correction.
+    /// Inserting samples to slow down (playing too fast), one frame every N.
+    /// Reached under the same conditions as <see cref="Dropping"/>.
     /// </summary>
     Inserting,
 }
