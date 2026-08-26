@@ -42,6 +42,41 @@ public sealed class AudioPipeline : IAudioPipeline
     private readonly Func<ITimedAudioBuffer, Func<long>, IAudioSampleSource> _sourceFactory;
     private readonly IHighPrecisionTimer _precisionTimer;
 
+    /// <summary>
+    /// Serializes the four calls that build or tear down the decode chain: <see cref="StartAsync"/>,
+    /// <see cref="StopAsync"/>, <see cref="SwitchDeviceAsync"/> and <see cref="DisposeAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// All four yield — a real backend's <see cref="IAudioPlayer.InitializeAsync"/> and
+    /// <see cref="IAsyncDisposable.DisposeAsync"/> open and close a device — and none of their
+    /// callers take turns: <c>stream/start</c> and <c>stream/end</c> are handled off the receive
+    /// loop, and an app can dispose the client from its own thread at any moment. Interleaved,
+    /// the later call's teardown disposed the player, decoder and ring the earlier one was still
+    /// building; the earlier one then resumed onto a null player, and its catch tore down the
+    /// components the later call had just built. The pipeline ended in Error, reported
+    /// <c>available: false</c>, and stayed silent until the next <c>stream/start</c> — with both
+    /// exceptions swallowed at the fire-and-forget boundary.
+    /// </para>
+    /// <para>
+    /// It also makes the keep-vs-restart decision at the top of <see cref="StartAsync"/> mean
+    /// something: outside the gate that read could observe the transient Starting or Stopping of
+    /// a call still in flight and take the destructive branch against a stream that was in fact
+    /// about to be running.
+    /// </para>
+    /// <para>
+    /// Nothing held under this gate may call back into a gated method — <see cref="SemaphoreSlim"/>
+    /// is not reentrant — which is why the bodies live in the private <c>...CoreAsync</c> methods
+    /// that <see cref="StartAsync"/> and <see cref="DisposeAsync"/> reach directly.
+    /// </para>
+    /// </remarks>
+    private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+
+    // Terminal once DisposeAsync has run. Read and written only under _lifecycleGate, which is
+    // also the barrier that publishes it: a start that was queued behind the dispose must build
+    // nothing rather than resurrect a decode chain nobody will ever tear down again.
+    private bool _disposed;
+
     private IAudioDecoder? _decoder;
     private ITimedAudioBuffer? _buffer;
     private IAudioPlayer? _player;
@@ -201,6 +236,21 @@ public sealed class AudioPipeline : IAudioPipeline
     public async Task<AudioPipelineStartOutcome> StartAsync(
         AudioFormat format, long? targetTimestamp = null, CancellationToken cancellationToken = default)
     {
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return await StartCoreAsync(format, targetTimestamp, cancellationToken);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task<AudioPipelineStartOutcome> StartCoreAsync(
+        AudioFormat format, long? targetTimestamp, CancellationToken cancellationToken)
+    {
         // A stream/start for a stream that is already running is an in-place configuration update,
         // not a restart: the spec has it update the configuration "without clearing buffers", and
         // the player role adds that such an update continues the existing timeline and does not
@@ -245,7 +295,9 @@ public sealed class AudioPipeline : IAudioPipeline
         {
             if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
             {
-                await StopAsync();
+                // The non-gated core: this already holds the lifecycle gate, and SemaphoreSlim
+                // is not reentrant.
+                await StopCoreAsync();
             }
 
             SetState(AudioPipelineState.Starting);
@@ -378,6 +430,22 @@ public sealed class AudioPipeline : IAudioPipeline
 
     /// <inheritdoc/>
     public async Task StopAsync()
+    {
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            await StopCoreAsync();
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="StopAsync"/>'s body, for callers that already hold the lifecycle gate.
+    /// </summary>
+    private async Task StopCoreAsync()
     {
         if (State == AudioPipelineState.Idle)
         {
@@ -550,6 +618,20 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public async Task SwitchDeviceAsync(string? deviceId, CancellationToken cancellationToken = default)
     {
+        await _lifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            await SwitchDeviceCoreAsync(deviceId, cancellationToken);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task SwitchDeviceCoreAsync(string? deviceId, CancellationToken cancellationToken)
+    {
         if (_player == null)
         {
             _logger.LogWarning("Cannot switch audio device - pipeline not started");
@@ -615,11 +697,32 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
     {
-        await StopAsync();
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
 
-        // The ring the last stream left behind has nothing to be reused for now.
-        _retainedBuffer?.Dispose();
-        _retainedBuffer = null;
+            _disposed = true;
+
+            await StopCoreAsync();
+
+            // The ring the last stream left behind has nothing to be reused for now.
+            _retainedBuffer?.Dispose();
+            _retainedBuffer = null;
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+
+        // The semaphore itself is deliberately not disposed: a lifecycle call already waiting on
+        // it would then fail with an ObjectDisposedException naming SemaphoreSlim instead of this
+        // pipeline, and one arriving later would fail before the _disposed check above could give
+        // it the same answer. SemaphoreSlim only holds an unmanaged handle once its
+        // AvailableWaitHandle is read, which nothing here does.
     }
 
     /// <summary>
