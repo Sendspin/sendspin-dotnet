@@ -32,6 +32,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private readonly ILogger<TimedAudioBuffer> _logger;
     private readonly IClockSynchronizer _clockSync;
     private readonly SyncCorrectionOptions _syncOptions;
+
+    // Stands the one-shot snap tier down when snapping stops closing the error (issue #252).
+    private readonly HardSyncStallDetector _hardSyncStall;
+
     private readonly object _lock = new();
 
     // Rate limiting for underrun/overrun logging (microseconds)
@@ -73,6 +77,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private long _pendingHardSyncSamples;
     private bool _hardSyncCompleted;      // Re-seed the EMA from the post-snap raw error
     private long _hardSyncCount;
+    private long? _hardSyncStallWarnedAtMicroseconds;
 
     // Configuration
     private readonly int _sampleRate;
@@ -316,6 +321,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         CapacityMilliseconds = bufferCapacityMs;
         _segments = new Queue<TimestampedSegment>();
         _microsecondsPerSample = 1_000_000.0 / (_sampleRate * _channels);
+        _hardSyncStall = new HardSyncStallDetector(_syncOptions);
     }
 
     /// <summary>
@@ -484,6 +490,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// that much silence.
     /// </param>
     /// <param name="reason">Which tier asked for it, for diagnostics.</param>
+    /// <returns>
+    /// True when a snap was scheduled. An error under one frame rounds away to nothing, and the
+    /// stall detector must not score a splice that never happened.
+    /// </returns>
     /// <remarks>
     /// Both callers — <see cref="ScheduleStartupAlignment"/> and <see cref="EvaluateHardSync"/>
     /// — close the error the same way, through <see cref="ApplyPendingHardSync"/>, so both
@@ -491,13 +501,13 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// resynchronizations to be rare (roles/player/v1.md:140), and a startup snap that did not
     /// count made that impossible to check from outside the buffer.
     /// </remarks>
-    private void ScheduleSnap(long errorMicroseconds, string reason)
+    private bool ScheduleSnap(long errorMicroseconds, string reason)
     {
         var samples = (long)Math.Round(errorMicroseconds / _microsecondsPerSample);
         samples -= samples % _channels; // Whole frames only.
         if (samples == 0)
         {
-            return;
+            return false;
         }
 
         _pendingHardSyncSamples = samples;
@@ -512,6 +522,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             Math.Abs(samples) * _microsecondsPerSample / 1000.0,
             errorMicroseconds / 1000.0,
             TimingSourceName ?? "unknown");
+
+        return true;
     }
 
     /// <inheritdoc/>
@@ -772,8 +784,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && !_inReconnectStabilization)
                 {
-                    EvaluateHardSync(
-                        SyncCorrectionPolicy.Decide(_smoothedSyncErrorMicroseconds, _syncOptions));
+                    EvaluateHardSync(SyncCorrectionPolicy.Decide(
+                        _smoothedSyncErrorMicroseconds,
+                        _syncOptions,
+                        suppressHardSync: HardSyncStandingDown()));
                 }
 
                 // Check re-anchor threshold
@@ -873,6 +887,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             // whatever it had already applied is absorbed by the end-of-window baseline.
             _pendingHardSyncSamples = 0;
             _hardSyncCompleted = false;
+            ResetHardSyncStall();
 
             _logger.LogInformation("[Correction] Reconnect stabilization started (suppressing corrections for {DurationMs}ms)",
                 _syncOptions.ReconnectStabilizationMicroseconds / 1000);
@@ -945,6 +960,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _segmentGapMicroseconds = 0;
         _pendingHardSyncSamples = 0;
         _hardSyncCompleted = false;
+        ResetHardSyncStall();
 
         // Sync error tracking, reset in full — as the Python CLI's clear() does for a track
         // change.
@@ -1053,6 +1069,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 ReanchorCount = _reanchorCount,
                 MinBufferedMsRecent = _minBufferedMsRecent,
                 HardSyncCount = _hardSyncCount,
+                HardSyncStalled = _hardSyncStall.IsStalled,
                 ContentHolesDetected = _contentHolesDetected,
                 LateChunksDropped = _lateChunksDropped,
             };
@@ -1702,7 +1719,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         // One decision ladder for the whole SDK — see SyncCorrectionPolicy — and one currency,
         // the rate.
-        var decision = SyncCorrectionPolicy.Decide(_smoothedSyncErrorMicroseconds, _syncOptions);
+        var decision = SyncCorrectionPolicy.Decide(
+            _smoothedSyncErrorMicroseconds,
+            _syncOptions,
+            suppressHardSync: HardSyncStandingDown());
 
         EvaluateHardSync(decision);
 
@@ -1742,6 +1762,54 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         SetTargetPlaybackRate(1.0);
         _dropEveryNFrames = 0;
         _insertEveryNFrames = 0;
+    }
+
+    /// <summary>
+    /// Playback time since the timing anchor, i.e. output samples expressed as microseconds. This
+    /// is the clock <see cref="HardSyncStallDetector"/> times snaps against; it restarts with the
+    /// timing state it belongs to, which is why the detector is reset at the same seams.
+    /// </summary>
+    private long PlaybackTimeMicroseconds =>
+        (long)(_samplesOutputSinceStart * _microsecondsPerSample);
+
+    /// <summary>
+    /// Whether the one-shot tier must stand down for the current smoothed error, warning when it
+    /// first does and then no more than once a second for as long as it lasts. Must be called
+    /// under lock, once per correction decision.
+    /// </summary>
+    private bool HardSyncStandingDown()
+    {
+        var now = PlaybackTimeMicroseconds;
+        var standDown = _hardSyncStall.ShouldStandDown(_smoothedSyncErrorMicroseconds, now);
+
+        if (!_hardSyncStall.IsStalled)
+        {
+            _hardSyncStallWarnedAtMicroseconds = null;
+        }
+        else if (_hardSyncStallWarnedAtMicroseconds is not { } warnedAt
+            || now - warnedAt >= UnderrunLogIntervalMicroseconds)
+        {
+            _hardSyncStallWarnedAtMicroseconds = now;
+            _logger.LogWarning(
+                "[Correction] Hard sync is not closing a {ErrorMs:+0.00;-0.00}ms error — standing the "
+                + "one-shot tier down and correcting through the capped ±{Cap:P2} tier instead, so "
+                + "playback stops being spliced with silence. The residual stays visible: look for a "
+                + "misreported output latency rather than raising the threshold.",
+                _smoothedSyncErrorMicroseconds / 1000.0,
+                _syncOptions.EffectiveMaxSpeedCorrection);
+        }
+
+        return standDown;
+    }
+
+    /// <summary>
+    /// Clears the snap tier's stall state and the warning it rate-limits. Must be called under
+    /// lock.
+    /// </summary>
+    private void ResetHardSyncStall()
+    {
+        _hardSyncStall.Reset();
+        _hardSyncStallWarnedAtMicroseconds = null;
     }
 
     /// <summary>
@@ -1790,7 +1858,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             return;
         }
 
-        ScheduleSnap(_currentSyncErrorMicroseconds, "threshold");
+        if (ScheduleSnap(_currentSyncErrorMicroseconds, "threshold"))
+        {
+            _hardSyncStall.RecordSnap(_currentSyncErrorMicroseconds, PlaybackTimeMicroseconds);
+        }
     }
 
     /// <summary>
