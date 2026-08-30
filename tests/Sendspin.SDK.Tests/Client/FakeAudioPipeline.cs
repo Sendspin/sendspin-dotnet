@@ -132,7 +132,13 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
         Record("stop");
     }
 
-    public void NotifyReconnect() { }
+    /// <summary>
+    /// Calls to <see cref="NotifyReconnect"/>. Counted because a shared pipeline being told to
+    /// re-stabilize by a connection that is already closing is one half of what #253 reported.
+    /// </summary>
+    public int NotifyReconnectCount { get; private set; }
+
+    public void NotifyReconnect() => NotifyReconnectCount++;
 
     public void Clear(long? newTargetTimestamp = null)
     {

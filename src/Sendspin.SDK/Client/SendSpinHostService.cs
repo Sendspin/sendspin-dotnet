@@ -30,6 +30,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly Dictionary<string, ActiveServerConnection> _connections = new();
     private readonly object _connectionsLock = new();
 
+    // The client-initiated session the application asked this host to arbitrate on behalf of,
+    // or null. Held here rather than in _connections deliberately: everything in that
+    // dictionary is owned by this host — StopAsync disconnects it, DisconnectAllAsync says
+    // goodbye to it, arbitration displaces it — and an adopted session is owned by the
+    // application. Keeping it out makes "the host never tears down what it did not accept"
+    // structural rather than a flag every consumer has to remember to check. Guarded by
+    // _connectionsLock so arbitration reads one consistent view of both.
+    private AdoptedClientConnection? _adopted;
+
     /// <summary>
     /// Whether the host is running (listening and advertising).
     /// </summary>
@@ -201,6 +210,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <summary>
     /// Stops the host service.
     /// </summary>
+    /// <remarks>
+    /// Disconnects the connections this host accepted. A client-initiated session registered
+    /// with <see cref="AdoptClientInitiated"/> is not one of them and is left untouched — the
+    /// application owns it.
+    /// </remarks>
     public async Task StopAsync()
     {
         _logger.LogInformation("Stopping Sendspin host service");
@@ -270,6 +284,12 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// Use when switching to a client-initiated connection to ensure
     /// only one connection is using the audio pipeline at a time.
     /// </summary>
+    /// <remarks>
+    /// "All connected servers" means the ones this host accepted. A client-initiated session
+    /// registered with <see cref="AdoptClientInitiated"/> is never disconnected here — this is
+    /// the call you make to leave the other servers <em>for</em> that session, so killing it
+    /// would defeat the purpose (#253).
+    /// </remarks>
     public async Task DisconnectAllAsync(string reason = "switching_connection_mode")
     {
         List<ActiveServerConnection> connectionsToClose;
@@ -291,6 +311,164 @@ public sealed class SendspinHostService : IAsyncDisposable
                 _logger.LogWarning(ex, "Error disconnecting from {ServerId}", conn.ServerId);
             }
         }
+    }
+
+    /// <summary>
+    /// Registers a client-initiated session — one this application dialled — so that incoming
+    /// server-initiated connections are arbitrated against it instead of against nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Without this the host only ever sees the connections it accepted, so a server dialling
+    /// in while the application is playing from a session it dialled is arbitrated as "no
+    /// existing connection": accepted, registered, and announced through
+    /// <see cref="ServerConnected"/> before the application can say otherwise (#253). With it,
+    /// the incoming server loses arbitration at the door and is sent a <c>client/goodbye</c>
+    /// before it is ever registered. An adopted holder is not displaced by anything — the
+    /// protocol specifies multi-server behaviour for server-initiated connections only and
+    /// leaves the client-initiated side to the client, and <see cref="ConnectionMode.Auto"/>
+    /// already states this rule.
+    /// </para>
+    /// <para>
+    /// <b>Ownership stays with the caller.</b> This host never disconnects or disposes an
+    /// adopted client — not from <see cref="StopAsync"/>, <see cref="DisposeAsync"/>,
+    /// <see cref="DisconnectAllAsync"/>, nor from arbitration. It is not reported by
+    /// <see cref="ConnectedServers"/> and raises neither <see cref="ServerConnected"/> nor
+    /// <see cref="ServerDisconnected"/>: adoption grants arbitration visibility, nothing else.
+    /// Call <see cref="ReleaseClientInitiated"/> when the application closes the session; the
+    /// adoption also releases itself if that session reaches
+    /// <see cref="ConnectionState.Disconnected"/> on its own — including a session that was
+    /// already disconnected when it was adopted, which would otherwise hold arbitration shut
+    /// against every server with no event left to clear it. A transport-level reconnect keeps
+    /// the adoption, passing through <see cref="ConnectionState.Reconnecting"/> rather than
+    /// Disconnected.
+    /// </para>
+    /// <para>
+    /// At most one session is adopted at a time, mirroring the one-active-connection rule the
+    /// rest of arbitration works to. Adopting again — same server id or not — replaces the
+    /// previous adoption and releases it, leaving the replaced client connected. Adopting while
+    /// this host still holds server-initiated connections is allowed but logs a warning: those
+    /// connections keep running while every new one is refused on the adopted session's behalf,
+    /// which is rarely what the caller meant. Call <see cref="DisconnectAllAsync"/> first.
+    /// </para>
+    /// </remarks>
+    /// <param name="client">The dialled client.</param>
+    /// <param name="serverId">
+    /// The server id to arbitrate under — normally <see cref="SendspinClientService.ServerId"/>.
+    /// </param>
+    public void AdoptClientInitiated(SendspinClientService client, string serverId)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentException.ThrowIfNullOrEmpty(serverId);
+
+        void OnAdoptedStateChanged(object? sender, ConnectionStateChangedEventArgs e)
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+            {
+                // Matched on the instance as well as the id, so the handler of a client that has
+                // been replaced cannot release the adoption that replaced it.
+                ReleaseAdopted(serverId, client);
+            }
+        }
+
+        var adopted = new AdoptedClientConnection
+        {
+            ServerId = serverId,
+            Client = client,
+            StateChanged = OnAdoptedStateChanged,
+        };
+
+        // Subscribed before the adoption is published, so a disconnect racing this call cannot
+        // fall between the two and leave arbitration held shut by a session that has gone. The
+        // state re-read at the end covers the other half: a disconnect already complete, whose
+        // event will never arrive.
+        client.ConnectionStateChanged += OnAdoptedStateChanged;
+
+        AdoptedClientConnection? replaced;
+        int hostModeConnections;
+        lock (_connectionsLock)
+        {
+            replaced = _adopted;
+            _adopted = adopted;
+            hostModeConnections = _connections.Count;
+        }
+
+        if (replaced is not null)
+        {
+            // Unsubscribed, not disconnected: the replaced session belongs to the application,
+            // and this call says nothing about whether it is still wanted.
+            replaced.Client.ConnectionStateChanged -= replaced.StateChanged;
+            _logger.LogInformation("Replaced the adopted client-initiated {ServerId}", replaced.ServerId);
+        }
+
+        _logger.LogInformation("Arbitrating on behalf of client-initiated connection to {ServerId}", serverId);
+
+        if (hostModeConnections > 0)
+        {
+            _logger.LogWarning(
+                "Adopted client-initiated {ServerId} while {Count} server-initiated connection(s) are still "
+                + "active; they keep running while incoming servers are refused. Call DisconnectAllAsync first.",
+                serverId,
+                hostModeConnections);
+        }
+
+        if (client.ConnectionState == ConnectionState.Disconnected)
+        {
+            ReleaseAdopted(serverId, client);
+        }
+    }
+
+    /// <summary>
+    /// Stops arbitrating on behalf of a client-initiated session registered with
+    /// <see cref="AdoptClientInitiated"/>, so incoming servers are admitted again.
+    /// </summary>
+    /// <remarks>
+    /// Unsubscribes everything the adoption subscribed and leaves the client otherwise
+    /// untouched — it is <b>not</b> disconnected or disposed, the same ownership rule
+    /// <see cref="AdoptClientInitiated"/> states. A no-op when nothing is adopted, or when the
+    /// adopted session is a different server.
+    /// </remarks>
+    /// <param name="serverId">The server id passed to <see cref="AdoptClientInitiated"/>.</param>
+    public void ReleaseClientInitiated(string serverId) => ReleaseAdopted(serverId, client: null);
+
+    /// <summary>The server id of the adopted client-initiated session, or null (test-only
+    /// introspection: adoption has no other observable surface until a server dials in).</summary>
+    internal string? AdoptedClientInitiatedServerId
+    {
+        get
+        {
+            lock (_connectionsLock)
+            {
+                return _adopted?.ServerId;
+            }
+        }
+    }
+
+    /// <summary>The shared body of <see cref="ReleaseClientInitiated"/> and the adoption's own
+    /// disconnect handler.</summary>
+    /// <param name="serverId">The adopted server id to release.</param>
+    /// <param name="client">
+    /// When non-null, release only if this is still the adopted client — how the adoption's
+    /// state handler avoids releasing an adoption that has since replaced it.
+    /// </param>
+    private void ReleaseAdopted(string serverId, SendspinClientService? client)
+    {
+        AdoptedClientConnection released;
+        lock (_connectionsLock)
+        {
+            if (_adopted is not { } current
+                || !string.Equals(current.ServerId, serverId, StringComparison.Ordinal)
+                || (client is not null && !ReferenceEquals(current.Client, client)))
+            {
+                return;
+            }
+
+            released = current;
+            _adopted = null;
+        }
+
+        released.Client.ConnectionStateChanged -= released.StateChanged;
+        _logger.LogInformation("No longer arbitrating on behalf of client-initiated {ServerId}", serverId);
     }
 
     private void OnServerConnected(object? sender, WebSocketClientConnection webSocket)
@@ -529,17 +707,38 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <param name="newConnection">The new connection to disconnect if rejected.</param>
     /// <param name="newServerId">The server ID of the new connection.</param>
     /// <returns>True if the new server is accepted, false if rejected.</returns>
-    private async Task<bool> ArbitrateConnectionAsync(
+    /// <remarks>Internal rather than private so the decision can be driven directly by a test;
+    /// the only production caller is <see cref="HandleServerConnectedAsync"/>.</remarks>
+    internal async Task<bool> ArbitrateConnectionAsync(
         SendspinClientService newClient,
         IncomingConnection newConnection,
         string newServerId)
     {
         ActiveServerConnection? existingConnection = null;
+        AdoptedClientConnection? adopted;
 
         lock (_connectionsLock)
         {
             // Find the current active connection (there should be at most one)
             existingConnection = _connections.Values.FirstOrDefault();
+            adopted = _adopted;
+        }
+
+        // A session this client dialled is not displaced by a server dialling in, whatever the
+        // two declare. The protocol's ranking exists so servers can arbitrate among themselves;
+        // it leaves client-initiated server selection to the client, and letting an incoming
+        // server outrank the session an operator explicitly chose would silently override that
+        // choice with nothing to restore it. Checked before the same-server branch below: a
+        // dialled session is not a stale socket for its own server to reclaim by dialling in.
+        if (adopted is not null)
+        {
+            _logger.LogInformation(
+                "Arbitration: Rejecting {NewServerId} (client-initiated connection to {ServerId} is not displaced)",
+                newServerId,
+                adopted.ServerId);
+
+            await RejectIncomingAsync(newConnection, newServerId);
+            return false;
         }
 
         // No existing server - accept the new one unconditionally
@@ -626,16 +825,26 @@ public sealed class SendspinHostService : IAsyncDisposable
                 "Arbitration: Rejecting {NewServerId}, sending goodbye",
                 newServerId);
 
-            try
-            {
-                await newConnection.DisconnectAsync("another_server");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error disconnecting rejected server {ServerId}", newServerId);
-            }
-
+            await RejectIncomingAsync(newConnection, newServerId);
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Says goodbye to an incoming connection that lost arbitration. Shared by the two rejection
+    /// paths so both fail the same way: the decision has already been made and the caller
+    /// returns false regardless, so a goodbye that does not reach a closing socket must not
+    /// escape into HandleServerConnectedAsync's guard and be reported as a setup error.
+    /// </summary>
+    private async Task RejectIncomingAsync(IncomingConnection newConnection, string newServerId)
+    {
+        try
+        {
+            await newConnection.DisconnectAsync("another_server");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error disconnecting rejected server {ServerId}", newServerId);
         }
     }
 
@@ -754,6 +963,11 @@ public sealed class SendspinHostService : IAsyncDisposable
         }
     }
 
+    /// <remarks>
+    /// Tears down what this host accepted, via <see cref="StopAsync"/>. A client-initiated
+    /// session registered with <see cref="AdoptClientInitiated"/> is left untouched — the
+    /// application owns it, and disposing this host does not dispose it.
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         await StopAsync();
@@ -767,6 +981,20 @@ public sealed class SendspinHostService : IAsyncDisposable
         required public SendspinClientService Client { get; init; }
         required public IncomingConnection Connection { get; init; }
         public DateTime ConnectedAt { get; init; }
+    }
+
+    /// <summary>
+    /// A client-initiated session this host arbitrates on behalf of but does not own. It has no
+    /// <see cref="IncomingConnection"/> — it was dialled, not accepted — and no connected-at
+    /// stamp, because it is never reported as a connected server.
+    /// </summary>
+    private sealed class AdoptedClientConnection
+    {
+        required public string ServerId { get; init; }
+        required public SendspinClientService Client { get; init; }
+
+        /// <summary>The exact delegate the adoption subscribed, so releasing can unsubscribe it.</summary>
+        required public EventHandler<ConnectionStateChangedEventArgs> StateChanged { get; init; }
     }
 }
 
