@@ -9,7 +9,9 @@ namespace Sendspin.SDK.Tests.Client;
 /// by playback/pairing, empty-vs-empty ties gated on the last-playback server, a
 /// displaced holder told 'another_server', and a rejected incoming told
 /// 'concurrent_attempt' — except that a loser which is a pairing handshake is told
-/// pair/abort 'concurrent_attempt' instead of either (#203).
+/// pair/abort 'concurrent_attempt' instead of either (#203). Plus the one rule that is
+/// not the spec's, because the spec leaves client-initiated multi-server behaviour to
+/// the client: a client-initiated holder is not displaced by anything (#253).
 /// </summary>
 public class ServerArbitrationTests
 {
@@ -86,6 +88,78 @@ public class ServerArbitrationTests
         Assert.Equal(
             expectPairAbort ? ArbitrationFarewell.PairAbort : ArbitrationFarewell.Goodbye,
             r.LoserFarewell);
+    }
+
+    [Fact]
+    public void ClientInitiatedHolder_IsNotDisplacedByAnEquallyRankedIncomingServer()
+    {
+        // Playback against playback is exactly #253's pairing of servers, and the general rule
+        // ("higher or equal is accepted") takes the incoming one — which is what tore down the
+        // live session. A client-initiated holder is refused against instead.
+        var r = ServerArbitration.Decide(
+            "srv-new",
+            ConnectionPriority.Playback,
+            "dialled",
+            ConnectionPriority.Playback,
+            null,
+            existingIsClientInitiated: true);
+
+        Assert.False(r.AcceptNew);
+        Assert.Equal("concurrent_attempt", r.LoserReason);
+        Assert.Equal(ArbitrationFarewell.Goodbye, r.LoserFarewell);
+    }
+
+    [Fact]
+    public void ClientInitiatedHolder_IsNotDisplacedByManagementEither()
+    {
+        // The highest priority the table has, against the lowest the holder can declare: the
+        // rule is "not displaced", not "wins ties".
+        var r = ServerArbitration.Decide(
+            "srv-new",
+            ConnectionPriority.Management,
+            "dialled",
+            ConnectionPriority.Empty,
+            null,
+            existingIsClientInitiated: true);
+
+        Assert.False(r.AcceptNew);
+        Assert.Equal("concurrent_attempt", r.LoserReason);
+    }
+
+    [Fact]
+    public void ClientInitiatedHolder_IsNotDisplacedByItsOwnServerDiallingIn()
+    {
+        // The same-server branch drops the previous socket as stale. A session this client
+        // dialled is not a stale socket, so that branch must not be reached for one — which is
+        // why the client-initiated rule sits above it.
+        var r = ServerArbitration.Decide(
+            "dialled",
+            ConnectionPriority.Playback,
+            "dialled",
+            ConnectionPriority.Playback,
+            null,
+            existingIsClientInitiated: true);
+
+        Assert.False(r.AcceptNew);
+        Assert.Equal("concurrent_attempt", r.LoserReason);
+    }
+
+    [Fact]
+    public void IncomingPairing_RejectedByAClientInitiatedHolder_IsStillToldPairAbort()
+    {
+        // The new rule changes the ranking, not how a loss is delivered: a rejected incoming
+        // pairing handshake is told pair/abort, exactly as under the spec's own rules.
+        var r = ServerArbitration.Decide(
+            "srv-new",
+            ConnectionPriority.Pairing,
+            "dialled",
+            ConnectionPriority.Playback,
+            null,
+            existingIsClientInitiated: true);
+
+        Assert.False(r.AcceptNew);
+        Assert.Equal("concurrent_attempt", r.LoserReason);
+        Assert.Equal(ArbitrationFarewell.PairAbort, r.LoserFarewell);
     }
 
     [Theory]

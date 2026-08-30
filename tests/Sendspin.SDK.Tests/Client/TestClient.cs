@@ -205,9 +205,14 @@ internal sealed class ConvergedClockSynchronizer : IClockSynchronizer
     {
     }
 
-    public void Reset()
-    {
-    }
+    /// <summary>
+    /// Calls to <see cref="Reset"/>. This fake stays converged across a reset, so the count is
+    /// the only way to see one — which matters when the synchronizer is shared between
+    /// connections and a reset belonging to one of them would corrupt the other (#253).
+    /// </summary>
+    public int ResetCount { get; private set; }
+
+    public void Reset() => ResetCount++;
 
     public ClockSyncStatus GetStatus() => new() { IsConverged = true };
 }
