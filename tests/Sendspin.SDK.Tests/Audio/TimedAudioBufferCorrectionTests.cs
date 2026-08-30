@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
@@ -815,20 +817,56 @@ public class TimedAudioBufferCorrectionTests
     }
 
     [Fact]
-    public void StalledSnapTier_ClearsOnResetSyncTracking()
+    public void StalledSnapTier_ClearsAtEveryResetSeam()
     {
-        using var player = new Player().Settled();
+        // Each of these abandons the timing state — and the playback clock — the stall was
+        // measured against, so the tier has to start clean on the other side of it.
+        var seams = new (string Name, Action<TimedAudioBuffer> Apply)[]
+        {
+            ("Clear", buffer => buffer.Clear()),
+            ("ResetSyncTracking", buffer => buffer.ResetSyncTracking()),
+            ("NotifyReconnect", buffer => buffer.NotifyReconnect()),
+        };
+
+        foreach (var (name, apply) in seams)
+        {
+            using var player = new Player().Settled();
+
+            player.PinSyncErrorAt(-90_000);
+            player.Steps(60);
+            Assert.True(player.Buffer.GetStats().HardSyncStalled, name);
+
+            apply(player.Buffer);
+
+            Assert.False(player.Buffer.GetStats().HardSyncStalled, name);
+        }
+    }
+
+    [Fact]
+    public void StandingDown_IsWarnedAboutOnce_ThenRepeatedNoFasterThanOnceASecond()
+    {
+        var logger = new CapturingLogger();
+        using var player = new Player(logger: logger).Settled();
 
         player.PinSyncErrorAt(-90_000);
         player.Steps(60);
-        Assert.True(player.Buffer.GetStats().HardSyncStalled);
 
-        // Every output-device switch takes this path, and it abandons the timing state the stall
-        // was measured against.
-        player.Buffer.ResetSyncTracking();
+        // Silently giving up would leave a client with quiet, permanently misaligned playback and
+        // nothing to look at, so the residual has to be named. The tier gives up on the callback
+        // after a snap finished draining, so what it names is what that snap left behind — some
+        // way short of the ~90 ms it was sized to close, which is the whole complaint.
+        var warning = Assert.Single(StallWarnings(logger));
+        var named = Regex.Match(warning, @"([-+][\d.,]+)ms error").Groups[1].Value;
+        Assert.InRange(double.Parse(named, NumberStyles.Float, CultureInfo.CurrentCulture), -95, -70);
 
-        Assert.False(player.Buffer.GetStats().HardSyncStalled);
+        // Rate-limited rather than said once and forgotten: a stall lasting minutes should still
+        // be visible in a log captured halfway through it, but must not become the log.
+        player.Steps(300);
+        Assert.InRange(StallWarnings(logger).Count, 2, 5);
     }
+
+    private static List<string> StallWarnings(CapturingLogger logger) =>
+        logger.Warnings.FindAll(w => w.Contains("not closing", StringComparison.Ordinal));
 
     [Fact]
     public void MidSegmentResetSyncTracking_PreservesAlignment()
