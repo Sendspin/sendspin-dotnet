@@ -84,13 +84,20 @@ internal static class SyncCorrectionPolicy
     /// (roles/player/v1.md:169-176) and what the C++ reference does per chunk — instead of a
     /// rate it has nothing to apply to. False for a caller that drives a resampler.
     /// </param>
+    /// <param name="suppressHardSync">
+    /// True when the caller's <see cref="HardSyncStallDetector"/> has stood the one-shot tier
+    /// down. The error then falls through to the continuous tier below rather than being
+    /// spliced, which is the whole point: a snap that is not closing the error should give way
+    /// to a capped correction that keeps playing, not stop the ladder.
+    /// </param>
     /// <returns>The correction to apply.</returns>
     internal static SyncCorrectionDecision Decide(
         double smoothedMicroseconds,
         SyncCorrectionOptions options,
         int sampleRate,
         int channels,
-        bool selfApplied = false)
+        bool selfApplied = false,
+        bool suppressHardSync = false)
     {
         var absError = Math.Abs(smoothedMicroseconds);
 
@@ -101,7 +108,8 @@ internal static class SyncCorrectionPolicy
 
         // One-shot tier. Bounded above by the re-anchor threshold: past that the error is
         // catastrophic and the buffer restarts rather than splicing half a second of audio.
-        if (options.HardSyncThresholdMicroseconds > 0
+        if (!suppressHardSync
+            && options.HardSyncThresholdMicroseconds > 0
             && absError > options.HardSyncThresholdMicroseconds
             && absError <= options.ReanchorThresholdMicroseconds)
         {
