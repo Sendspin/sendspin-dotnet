@@ -59,7 +59,7 @@ public class SendspinClientServiceControllerTests
     }
 
     [Fact]
-    public async Task SendCommandAsync_PlaintCommand_NestsUnderController()
+    public async Task SendCommandAsync_PlainCommand_NestsUnderController()
     {
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
