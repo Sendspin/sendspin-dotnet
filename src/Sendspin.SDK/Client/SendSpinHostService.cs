@@ -474,8 +474,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// existing connection": accepted, registered, and announced through
     /// <see cref="ServerConnected"/> before the application can say otherwise (#253). With it,
     /// the incoming server loses arbitration at the door and receives <c>client/goodbye</c>
-    /// <c>concurrent_attempt</c> — an adopted holder is never displaced, which is the rule
-    /// <see cref="ConnectionMode.Auto"/> states.
+    /// <c>concurrent_attempt</c> — an adopted holder is never displaced.
     /// </para>
     /// <para>
     /// <b>Ownership stays with the caller.</b> This host never disconnects or disposes an

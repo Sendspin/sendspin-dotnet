@@ -43,8 +43,7 @@ internal enum ArbitrationFarewell
 /// connection only when it is the persisted last-playback server. Outside that table,
 /// a client-initiated holder is never displaced: connection.md specifies multi-server
 /// behaviour for server-initiated connections only and leaves the client-initiated side
-/// implementation-defined, and <see cref="ConnectionMode.Auto"/> states the rule this
-/// applies. A displaced holder
+/// implementation-defined. A displaced holder
 /// receives goodbye 'another_server'; a rejected incoming receives
 /// 'concurrent_attempt'; a loser that is a pairing handshake receives pair/abort
 /// 'concurrent_attempt' instead of either.
