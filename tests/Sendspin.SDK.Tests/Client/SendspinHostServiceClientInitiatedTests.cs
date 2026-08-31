@@ -189,7 +189,14 @@ public class SendspinHostServiceClientInitiatedTests
     [Fact]
     public async Task AdoptedClientInitiatedSession_MakesAnIncomingServerLoseArbitration()
     {
-        await using var host = await StartHostAsync();
+        // The reported scenario end to end, with both fixes in play. The shared pipeline and
+        // clock synchronizer stand in for the singletons an application runs across both
+        // connection modes — in #253 they were what the refused connection's teardown reached.
+        var pipeline = new FakeAudioPipeline();
+        var clock = new ConvergedClockSynchronizer();
+        var logs = new CapturingLoggerFactory();
+        await using var host = await StartHostAsync(pipeline, clock, logs);
+
         var (dialled, dialledConnection) = DialledSession();
         using var _d = dialled;
         host.AdoptClientInitiated(dialled, DialledServerId);
@@ -204,15 +211,24 @@ public class SendspinHostServiceClientInitiatedTests
         // is accepted") — which is exactly what #253 saw — so this passes only because an
         // adopted client-initiated holder is not displaceable.
         Assert.Equal("concurrent_attempt", await incoming.WaitForGoodbyeAsync(Timeout));
+        await incoming.WaitForReceiveLoopExitAsync(TimeSpan.FromSeconds(5));
 
         // Refused at the door: never registered, never announced.
         Assert.Empty(announced);
         Assert.DoesNotContain(host.ConnectedServers, c => c.ServerId == incoming.ServerId);
 
-        // And the session the application dialled is untouched by the whole episode.
+        // The session the application dialled is untouched by the whole episode — including the
+        // state it shares with the connection that was just refused. Arbitration refuses from
+        // inside the same synchronous dispatch an application's own refusal runs in, so the
+        // handshake guard covers the SDK's own rejection too.
         Assert.Equal(ConnectionState.Connected, dialled.ConnectionState);
         Assert.Null(dialledConnection.LastDisconnectReason);
         Assert.False(dialledConnection.WasDisposed);
+        Assert.Equal(0, clock.ResetCount);
+        Assert.Equal(0, pipeline.NotifyReconnectCount);
+        Assert.DoesNotContain(
+            logs.Messages,
+            m => m.Contains("Sending initial client/state", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -248,8 +264,19 @@ public class SendspinHostServiceClientInitiatedTests
         host.AdoptClientInitiated(dialled, DialledServerId);
 
         await host.StopAsync();
+
+        // Stop is not the end of the adoption: stop/start is a resumable pair, and an
+        // application that stops advertising while it plays from the session it dialled still
+        // wants that session arbitrated for when it starts listening again.
+        Assert.Equal(DialledServerId, host.AdoptedClientInitiatedServerId);
+
         await host.DisposeAsync();
 
+        // Disposal is terminal, so the adoption goes with it — otherwise the client would keep
+        // a state-changed handler pointing at a host that no longer exists.
+        Assert.Null(host.AdoptedClientInitiatedServerId);
+
+        // Released, never torn down: the client is the application's throughout.
         Assert.Equal(ConnectionState.Connected, dialled.ConnectionState);
         Assert.Null(dialledConnection.LastDisconnectReason);
         Assert.False(dialledConnection.WasDisposed);
@@ -328,9 +355,37 @@ public class SendspinHostServiceClientInitiatedTests
         Assert.Equal(ConnectionState.Connected, first.ConnectionState);
         Assert.Null(firstConnection.LastDisconnectReason);
 
-        // And the replaced session's own teardown does not release the adoption that replaced
-        // it — the case that makes the release match on the client instance, not just the id.
+        // And the replaced session's own teardown does not release the adoption that replaced it.
         await first.DisconnectAsync(GoodbyeReasons.UserRequest);
+
+        await using var incoming = new FakeServer(TestPsk, ["playback"]);
+        await incoming.ConnectAsync(host.ListeningPort);
+        Assert.Equal("concurrent_attempt", await incoming.WaitForGoodbyeAsync(Timeout));
+    }
+
+    [Fact]
+    public async Task AdoptingTwiceUnderTheSameServerId_KeepsTheSecondAndReleasesTheFirst()
+    {
+        // Re-adopting under the SAME id is the case the docs have to answer for: the second
+        // adoption wins, and the first client is released rather than disconnected. Its later
+        // teardown then leaves the surviving adoption alone — which it must, since both
+        // adoptions answer to the same server id.
+        await using var host = await StartHostAsync();
+        var (first, firstConnection) = DialledSession();
+        using var _f = first;
+        var (second, _) = DialledSession();
+        using var _s = second;
+
+        host.AdoptClientInitiated(first, DialledServerId);
+        host.AdoptClientInitiated(second, DialledServerId);
+
+        Assert.Equal(DialledServerId, host.AdoptedClientInitiatedServerId);
+        Assert.Equal(ConnectionState.Connected, first.ConnectionState);
+        Assert.Null(firstConnection.LastDisconnectReason);
+
+        await first.DisconnectAsync(GoodbyeReasons.UserRequest);
+
+        Assert.Equal(DialledServerId, host.AdoptedClientInitiatedServerId);
 
         await using var incoming = new FakeServer(TestPsk, ["playback"]);
         await incoming.ConnectAsync(host.ListeningPort);
