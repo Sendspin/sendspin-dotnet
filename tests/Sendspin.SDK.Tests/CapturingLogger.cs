@@ -3,6 +3,67 @@ using Microsoft.Extensions.Logging;
 namespace Sendspin.SDK.Tests;
 
 /// <summary>
+/// <see cref="ILoggerFactory"/> whose loggers all record into one list. For a subject that
+/// builds its own loggers instead of being handed one: <see cref="Client.SendspinHostService"/>
+/// creates each per-connection client's logger itself, so what that client logs is otherwise
+/// unreachable from a test.
+/// </summary>
+internal sealed class CapturingLoggerFactory : ILoggerFactory
+{
+    private readonly List<string> _messages = new();
+
+    /// <summary>Everything logged through any logger this factory made. A copy, so a caller can
+    /// enumerate it while the subject under test keeps logging on another thread.</summary>
+    public IReadOnlyList<string> Messages
+    {
+        get
+        {
+            lock (_messages)
+            {
+                return _messages.ToList();
+            }
+        }
+    }
+
+    public ILogger CreateLogger(string categoryName) => new CategoryLogger(this);
+
+    public void AddProvider(ILoggerProvider provider)
+    {
+    }
+
+    public void Dispose()
+    {
+    }
+
+    private void Add(string message)
+    {
+        lock (_messages)
+        {
+            _messages.Add(message);
+        }
+    }
+
+    private sealed class CategoryLogger : ILogger
+    {
+        private readonly CapturingLoggerFactory _owner;
+
+        internal CategoryLogger(CapturingLoggerFactory owner) => _owner = owner;
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter) => _owner.Add(formatter(state, exception));
+    }
+}
+
+/// <summary>
 /// <see cref="ILogger{TCategoryName}"/> that records what was logged, so a test can pin a
 /// diagnostic's text and level rather than only the behaviour beside it.
 /// </summary>

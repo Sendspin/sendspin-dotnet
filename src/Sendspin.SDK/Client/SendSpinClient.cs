@@ -2048,7 +2048,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // The initial activate completes the encrypted handshake; only now may the
             // client start sending (client/time, client/state).
-            FinishHandshake(pairing);
+            if (!FinishHandshake(pairing))
+            {
+                // The connection was closed from inside its own promotion to Connected, so the
+                // rest of this activate — the hello notification, the time-sync loop, the
+                // activate event — would all be raised for a session that has already gone. A
+                // waiting ConnectAsync is not stranded by returning here: the Disconnected
+                // transition that closed the connection completes its handshake wait.
+                return;
+            }
+
             if (LastServerHello is { } hello)
             {
                 ServerHelloReceived?.Invoke(this, hello);
@@ -3653,7 +3662,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// wire, so the initial client/state is then withheld — even for roles that need no
     /// clock sync — until the first non-pairing activate (see
     /// <see cref="_initialClientStateHeldForPairing"/>).</param>
-    private void FinishHandshake(bool pairing)
+    /// <returns>
+    /// True when the connection survived its own promotion to Connected, so the rest of the
+    /// activate may run. False when it was closed from inside <c>MarkConnected</c>'s state
+    /// dispatch, in which case nothing this activate implies belongs to it any more.
+    /// </returns>
+    private bool FinishHandshake(bool pairing)
     {
         // Mark connection as fully connected
         if (_connection is SendspinConnection conn)
@@ -3663,6 +3677,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         else if (_connection is IncomingConnection incoming)
         {
             incoming.MarkConnected();
+        }
+
+        // MarkConnected publishes Connected synchronously — through this client's own
+        // ConnectionStateChanged and on into whatever the embedder subscribed, which in host
+        // mode is the handshake waiter and, behind it, the ServerConnected handler that decides
+        // whether to keep this server at all (#253). An embedder that refuses it there has
+        // already closed this connection by the time MarkConnected returns: both transports
+        // publish Disconnecting before their first await, so the close is visible here even when
+        // the refusal was fire-and-forget.
+        //
+        // Everything below is connection-scoped work, but the state it touches need not be:
+        // the clock synchronizer and the audio pipeline may be shared across every connection
+        // the embedder runs, so resetting them for a connection that no longer exists corrupts
+        // the session that is still playing. Same predicate OnTextMessageReceived applies to
+        // inbound frames, and for the same reason: once we have decided to close, nothing the
+        // peer sent may still take effect.
+        if (_connection.State is ConnectionState.Disconnected or ConnectionState.Disconnecting)
+        {
+            _logger.LogInformation(
+                "Connection closed inside its own handshake completion ({State}); abandoning the rest of the activate",
+                _connection.State);
+            return false;
         }
 
         // Reset clock synchronizer for new connection
@@ -3704,6 +3740,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // waits for — is started by the caller, HandleServerActivate, not here: it runs
         // only outside a pairing activation, and only the caller knows the activate's
         // activities.
+        return true;
     }
 
     /// <summary>

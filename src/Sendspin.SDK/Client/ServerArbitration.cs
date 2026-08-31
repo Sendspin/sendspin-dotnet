@@ -40,7 +40,11 @@ internal enum ArbitrationFarewell
 /// the incoming connection is accepted when its priority is higher than or equal to
 /// the current holder's, with two exceptions — a pairing attempt is not displaced by
 /// incoming playback or pairing, and an empty-vs-empty tie admits the incoming
-/// connection only when it is the persisted last-playback server. A displaced holder
+/// connection only when it is the persisted last-playback server. Outside that table,
+/// a client-initiated holder is never displaced: connection.md specifies multi-server
+/// behaviour for server-initiated connections only and leaves the client-initiated side
+/// implementation-defined, and <see cref="ConnectionMode.Auto"/> states the rule this
+/// applies. A displaced holder
 /// receives goodbye 'another_server'; a rejected incoming receives
 /// 'concurrent_attempt'; a loser that is a pairing handshake receives pair/abort
 /// 'concurrent_attempt' instead of either.
@@ -86,14 +90,22 @@ internal static class ServerArbitration
     /// <param name="existingServerId">server_id of the current holder, or null if none.</param>
     /// <param name="existingPriority">The current holder's priority class.</param>
     /// <param name="lastPlayedServerId">Persisted last-playback server_id, or null.</param>
+    /// <param name="existingIsClientInitiated">
+    /// True when the current holder is a session this client dialled rather than one that
+    /// dialled in — see <see cref="SendspinHostService.AdoptClientInitiated"/>. Such a holder is
+    /// never displaced. Last, with a default, so the server-initiated callers that make up the
+    /// spec's own table read unchanged.
+    /// </param>
     internal static ArbitrationResult Decide(
         string newServerId,
         ConnectionPriority newPriority,
         string? existingServerId,
         ConnectionPriority existingPriority,
-        string? lastPlayedServerId)
+        string? lastPlayedServerId,
+        bool existingIsClientInitiated = false)
     {
-        var result = Rank(newServerId, newPriority, existingServerId, existingPriority, lastPlayedServerId);
+        var result = Rank(
+            newServerId, newPriority, existingServerId, existingPriority, lastPlayedServerId, existingIsClientInitiated);
 
         // connection.md: a displaced or rejected connection that is a pairing handshake is told
         // pair/abort 'concurrent_attempt' rather than client/goodbye. A goodbye is not something
@@ -123,12 +135,25 @@ internal static class ServerArbitration
         ConnectionPriority newPriority,
         string? existingServerId,
         ConnectionPriority existingPriority,
-        string? lastPlayedServerId)
+        string? lastPlayedServerId,
+        bool existingIsClientInitiated)
     {
         // No existing connection — accept unconditionally.
         if (existingServerId is null)
         {
             return new ArbitrationResult(true, null, "no existing connection");
+        }
+
+        // A session this client dialled is not displaced by a server dialling in, whatever the
+        // two declare. The spec's ranking exists so servers can arbitrate among themselves —
+        // "servers cannot reclaim clients by reconnecting", so how a client handles server
+        // selection is left to the client — and letting an incoming server outrank the session
+        // an operator explicitly chose would silently override that choice, with nothing to
+        // restore it. This sits ABOVE the same-server branch deliberately: a dialled session is
+        // not a stale socket for its own server to reclaim by dialling in.
+        if (existingIsClientInitiated)
+        {
+            return new ArbitrationResult(false, ConcurrentAttempt, "client-initiated holder is not displaced");
         }
 
         // Same server reconnecting — accept and drop the stale socket. user_request is the
