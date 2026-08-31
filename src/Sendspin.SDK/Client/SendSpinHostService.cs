@@ -326,8 +326,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// the incoming server loses arbitration at the door and is sent a <c>client/goodbye</c>
     /// before it is ever registered. An adopted holder is not displaced by anything — the
     /// protocol specifies multi-server behaviour for server-initiated connections only and
-    /// leaves the client-initiated side to the client, and <see cref="ConnectionMode.Auto"/>
-    /// already states this rule.
+    /// leaves the client-initiated side to the client.
     /// </para>
     /// <para>
     /// <b>Ownership stays with the caller.</b> This host never disconnects or disposes an
