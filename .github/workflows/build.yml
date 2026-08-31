@@ -6,10 +6,13 @@ on:
     # Those branches never merge to main, so without this they are never built by CI.
     # Only the build job runs for them: publish is gated on refs/tags/v below, which a
     # branch push cannot satisfy.
-    branches: [main, dev, 'release/**']
+    branches: [main, 'release/**']
     tags: ['v*.*.*']
   pull_request:
-    branches: [main, dev]
+    # release/** here means a PR into a release line gets CI — but only once the release
+    # branch's own copy of this file carries it, because pull_request runs the base
+    # branch's workflow definition.
+    branches: [main, 'release/**']
 
 jobs:
   build:
@@ -34,13 +37,8 @@ jobs:
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             # Release: version from tag (v7.3.0 → 7.3.0)
             VERSION="${GITHUB_REF_NAME#v}"
-          elif [ "${{ github.ref }}" == "refs/heads/dev" ]; then
-            # Dev: pre-release suffix
-            BASE_VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
-            SHORT_SHA=${GITHUB_SHA::7}
-            VERSION="${BASE_VERSION}-dev.${SHORT_SHA}"
           else
-            # Main branch push (no tag): use csproj version
+            # Branch push (no tag): use csproj version
             VERSION=$(grep -oP '<Version>\K[^<]+' src/Sendspin.SDK/Sendspin.SDK.csproj)
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT

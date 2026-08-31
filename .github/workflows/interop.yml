@@ -4,9 +4,9 @@ name: Interop
 # build so its Python/network requirements never gate the unit-test workflow.
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
