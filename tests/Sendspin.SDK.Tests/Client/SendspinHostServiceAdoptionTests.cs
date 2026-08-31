@@ -93,8 +93,19 @@ public class SendspinHostServiceAdoptionTests
         host.AdoptClientInitiated(dialled, DialledServerId);
 
         await host.StopAsync();
+
+        // Stop is not the end of the adoption: stop/start is a resumable pair, and an
+        // application that stops advertising while it plays from the session it dialled still
+        // wants that session arbitrated for when it starts listening again.
+        Assert.Equal(DialledServerId, host.AdoptedClientInitiatedServerId);
+
         await host.DisposeAsync();
 
+        // Disposal is terminal, so the adoption goes with it — otherwise the client would keep
+        // a state-changed handler pointing at a host that no longer exists.
+        Assert.Null(host.AdoptedClientInitiatedServerId);
+
+        // Released, never torn down: the client is the application's throughout.
         Assert.Equal(ConnectionState.Connected, dialled.ConnectionState);
         Assert.Equal(ConnectionState.Connected, dialledConnection.State);
     }
@@ -174,6 +185,30 @@ public class SendspinHostServiceAdoptionTests
     }
 
     [Fact]
+    public async Task AdoptingTwiceUnderTheSameServerId_KeepsTheSecondAndReleasesTheFirst()
+    {
+        // Re-adopting under the SAME id is the case the docs have to answer for: the second
+        // adoption wins, and the first client is released rather than disconnected. Its later
+        // teardown then leaves the surviving adoption alone — which it must, since both
+        // adoptions answer to the same server id.
+        await using var host = NewHost();
+        var (first, _) = DialledSession();
+        using var _f = first;
+        var (second, _) = DialledSession();
+        using var _s = second;
+
+        host.AdoptClientInitiated(first, DialledServerId);
+        host.AdoptClientInitiated(second, DialledServerId);
+
+        Assert.Equal(DialledServerId, host.AdoptedClientInitiatedServerId);
+        Assert.Equal(ConnectionState.Connected, first.ConnectionState);
+
+        await first.DisconnectAsync("user_request");
+
+        Assert.Equal(DialledServerId, host.AdoptedClientInitiatedServerId);
+    }
+
+    [Fact]
     public async Task AdoptingAgain_ReplacesThePreviousAdoptionWithoutTouchingIt()
     {
         await using var host = NewHost();
@@ -191,8 +226,7 @@ public class SendspinHostServiceAdoptionTests
         // application, and adopting another says nothing about whether it is still wanted.
         Assert.Equal(ConnectionState.Connected, first.ConnectionState);
 
-        // And its own teardown does not release the adoption that replaced it — the case that
-        // makes the release match on the client instance, not just on the id.
+        // And the replaced session's own teardown does not release the adoption that replaced it.
         await first.DisconnectAsync("user_request");
 
         Assert.Equal("second-server", host.AdoptedClientInitiatedServerId);

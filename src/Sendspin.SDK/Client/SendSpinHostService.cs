@@ -365,8 +365,11 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             if (e.NewState == ConnectionState.Disconnected)
             {
-                // Matched on the instance as well as the id, so the handler of a client that has
-                // been replaced cannot release the adoption that replaced it.
+                // Matched on the instance as well as the id. A replaced adoption is normally
+                // unsubscribed before its client can raise anything, so this only bites in the
+                // window between publishing the new adoption and unsubscribing the old one: a
+                // client that disconnects in there, under the same server id, would otherwise
+                // release the adoption that had just replaced it.
                 ReleaseAdopted(serverId, client);
             }
         }
@@ -469,6 +472,25 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         released.Client.ConnectionStateChanged -= released.StateChanged;
         _logger.LogInformation("No longer arbitrating on behalf of client-initiated {ServerId}", serverId);
+    }
+
+    /// <summary>
+    /// Releases the adoption as part of disposal, through the same path
+    /// <see cref="ReleaseClientInitiated"/> takes: unsubscribes the handler this host installed
+    /// on the application's client, and nothing else.
+    /// </summary>
+    private void ReleaseAdoptedOnDispose()
+    {
+        string? serverId;
+        lock (_connectionsLock)
+        {
+            serverId = _adopted?.ServerId;
+        }
+
+        if (serverId is not null)
+        {
+            ReleaseAdopted(serverId, client: null);
+        }
     }
 
     private void OnServerConnected(object? sender, WebSocketClientConnection webSocket)
@@ -966,10 +988,14 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <remarks>
     /// Tears down what this host accepted, via <see cref="StopAsync"/>. A client-initiated
     /// session registered with <see cref="AdoptClientInitiated"/> is left untouched — the
-    /// application owns it, and disposing this host does not dispose it.
+    /// application owns it, and disposing this host neither disconnects nor disposes it. The adoption
+    /// itself is released, though: without that the adopted client would keep a state-changed
+    /// handler pointing at a host that no longer exists. <see cref="StopAsync"/> deliberately
+    /// does not, because stop/start is a resumable pair while disposal is terminal.
     /// </remarks>
     public async ValueTask DisposeAsync()
     {
+        ReleaseAdoptedOnDispose();
         await StopAsync();
         await _listener.DisposeAsync();
         await _advertiser.DisposeAsync();
