@@ -15,6 +15,7 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
 {
     private readonly ILogger<MdnsServiceAdvertiser> _logger;
     private readonly AdvertiserOptions _options;
+    private readonly object _announceLock = new object();
     private MulticastService? _mdns;
     private ServiceDiscovery? _serviceDiscovery;
     private ServiceProfile? _serviceProfile;
@@ -54,7 +55,13 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
             // Create the multicast DNS service
             _mdns = new MulticastService();
 
-            // Log network interfaces being used
+            // Announce whenever the interface set changes. MulticastService raises this
+            // synchronously inside Start() once the send sockets exist, which is what makes it
+            // the right announce trigger twice over: at start it is the earliest moment an
+            // announcement can actually leave the machine (SendAnswer before Start is a silent
+            // no-op), and an interface appearing later — Wi-Fi associating after boot, resume
+            // from sleep — needs a fresh announcement because the one sent at start never
+            // reached it.
             _mdns.NetworkInterfaceDiscovered += (s, e) =>
             {
                 foreach (var nic in e.NetworkInterfaces)
@@ -62,6 +69,8 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
                     _logger.LogDebug("mDNS using network interface: {Name} ({Id})",
                         nic.Name, nic.Id);
                 }
+
+                HandleNetworkInterfaceDiscovered();
             };
 
             // Log when queries are received (helps debug if mDNS is working)
@@ -182,6 +191,48 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
         }
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Multicasts the service's records unsolicited. Advertise() alone only registers a passive
+    /// query responder — it sends nothing — and a server whose mDNS browser has finished its
+    /// startup queries never asks again (python-zeroconf switches to refresh-only scheduling
+    /// after four), so a client that does not announce is never discovered by a server that
+    /// started before it. The spec's discovery section opens with "Clients announce their
+    /// presence via mDNS", and RFC 6762 §8.3 requires the unsolicited responses outright.
+    /// Internal rather than private so a test can stand in for the interface-change event it is
+    /// wired to, which nothing short of real NIC churn can raise.
+    /// </summary>
+    internal void HandleNetworkInterfaceDiscovered()
+    {
+        // Snapshot: StopAsync nulls the fields, and announcing races it by design.
+        var serviceDiscovery = _serviceDiscovery;
+        var profile = _serviceProfile;
+        if (serviceDiscovery is null || profile is null)
+        {
+            return;
+        }
+
+        // Off-thread because Announce blocks for the RFC-mandated second between its two
+        // sends; serialized so overlapping triggers cannot interleave their packets inside
+        // that window.
+        Task.Run(() =>
+        {
+            lock (_announceLock)
+            {
+                try
+                {
+                    serviceDiscovery.Announce(profile);
+                    _logger.LogDebug("Announced mDNS presence for {ClientId}", _options.ClientId);
+                }
+                catch (Exception ex)
+                {
+                    // Best-effort: the query responder still works, and StopAsync tearing the
+                    // transport down under an in-flight announce lands here too.
+                    _logger.LogWarning(ex, "Failed to announce mDNS presence for {ClientId}", _options.ClientId);
+                }
+            }
+        });
     }
 
     /// <summary>
