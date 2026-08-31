@@ -82,10 +82,17 @@ internal static class SyncCorrectionPolicy
     /// ahead (slow down / insert).
     /// </param>
     /// <param name="options">Correction options (thresholds and the speed cap).</param>
+    /// <param name="suppressHardSync">
+    /// True when the caller's <see cref="HardSyncStallDetector"/> has stood the one-shot tier
+    /// down. The error then falls through to the continuous tier below rather than being
+    /// spliced, which is the whole point: a snap that is not closing the error should give way
+    /// to a capped correction that keeps playing, not stop the ladder.
+    /// </param>
     /// <returns>The correction to apply, always expressed as a playback rate.</returns>
     internal static SyncCorrectionDecision Decide(
         double smoothedMicroseconds,
-        SyncCorrectionOptions options)
+        SyncCorrectionOptions options,
+        bool suppressHardSync = false)
     {
         var absError = Math.Abs(smoothedMicroseconds);
 
@@ -96,7 +103,8 @@ internal static class SyncCorrectionPolicy
 
         // One-shot tier. Bounded above by the re-anchor threshold: past that the error is
         // catastrophic and the buffer restarts rather than splicing half a second of audio.
-        if (options.HardSyncThresholdMicroseconds > 0
+        if (!suppressHardSync
+            && options.HardSyncThresholdMicroseconds > 0
             && absError > options.HardSyncThresholdMicroseconds
             && absError <= options.ReanchorThresholdMicroseconds)
         {

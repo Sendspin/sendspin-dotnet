@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
@@ -38,6 +40,9 @@ public class TimedAudioBufferCorrectionTests
         private readonly float[] _callback = new float[StepMs * SamplesPerMs];
         private readonly bool _rawReads;
 
+        private long? _pinnedSyncErrorMicroseconds;
+        private long _pinnedOffsetMicroseconds;
+
         public FakeClockSynchronizer ClockSync { get; } = new();
 
         public TimedAudioBuffer Buffer { get; }
@@ -72,7 +77,13 @@ public class TimedAudioBufferCorrectionTests
         }
 
         /// <summary>Server position the wall clock currently corresponds to.</summary>
-        private long ServerNow => WallNow + ClockSync.OffsetMicroseconds;
+        /// <remarks>
+        /// Net of anything <see cref="PinSyncErrorAt"/> has injected. That bias models the client
+        /// mismeasuring its own position; the server's timeline is not party to it, so the
+        /// producer must keep writing at the same cadence with the same lead — otherwise the pin
+        /// would also punch holes in the content timeline and inject a second error.
+        /// </remarks>
+        private long ServerNow => WallNow + ClockSync.OffsetMicroseconds - _pinnedOffsetMicroseconds;
 
         /// <summary>Writes chunks until the producer is <see cref="LeadMicroseconds"/> ahead.</summary>
         public void PumpProducer()
@@ -90,6 +101,7 @@ public class TimedAudioBufferCorrectionTests
             WallNow += StepMs * 1000L;
             PumpProducer();
             Read();
+            HoldPinnedSyncError();
         }
 
         public void Steps(int count)
@@ -115,6 +127,32 @@ public class TimedAudioBufferCorrectionTests
 
         /// <summary>Wall clock advances with no callback: the player falls behind.</summary>
         public void Stall(long microseconds) => WallNow += microseconds;
+
+        /// <summary>
+        /// Holds the buffer's reported sync error at <paramref name="microseconds"/> from the next
+        /// callback on, whatever correction it applies in the meantime. Pass null to release it.
+        /// </summary>
+        /// <remarks>
+        /// The shape of issue #252: the host reported ~-90 ms however much silence the buffer
+        /// spliced in, because the offset was in the measurement rather than in the playback. No
+        /// ordinary disturbance models that — a stall, a lost chunk and a clock step are all
+        /// things a snap genuinely closes — so the bias is injected through the clock offset, the
+        /// one term in CalculateSyncError that no correction can move.
+        /// </remarks>
+        public void PinSyncErrorAt(long? microseconds) => _pinnedSyncErrorMicroseconds = microseconds;
+
+        /// <summary>Re-applies the pin after a callback, cancelling whatever it just achieved.</summary>
+        private void HoldPinnedSyncError()
+        {
+            if (_pinnedSyncErrorMicroseconds is not { } target)
+            {
+                return;
+            }
+
+            var correction = target - Buffer.SyncErrorMicroseconds;
+            ClockSync.OffsetMicroseconds += correction;
+            _pinnedOffsetMicroseconds += correction;
+        }
 
         /// <summary>Skips <paramref name="chunks"/> chunks of content without writing them.</summary>
         public void LoseChunks(int chunks) => WriteServerTs += chunks * ChunkMs * 1000L;
@@ -660,6 +698,175 @@ public class TimedAudioBufferCorrectionTests
             Assert.Equal(0, player.Buffer.GetStats().HardSyncCount);
         }
     }
+
+    [Fact]
+    public void UnclosableError_StopsSnappingAndCorrectsThroughTheCappedTierInstead()
+    {
+        using var player = new Player().Settled();
+
+        // Issue #252: an error the splice does not move. The tier had no cooldown and no
+        // convergence check, so it re-fired as fast as snaps drained — ~1,700 in one session,
+        // each splicing ~90 ms of silence, with buffer depth walking from 9 s to 29.6 s.
+        var depthBefore = player.Buffer.BufferedMilliseconds;
+        player.PinSyncErrorAt(-90_000);
+        player.Steps(60);
+
+        var stalled = player.Buffer.GetStats();
+        Assert.True(stalled.HardSyncStalled, "the tier should have given up on an error it cannot close");
+        Assert.InRange(stalled.HardSyncCount, 1, 4);
+
+        // Standing down is a fall-through, not a stop: the continuous tier is correcting, and
+        // within the cap, over every sliding 150 ms window the spec measures across.
+        var samples = new List<(long Net, long Output)>();
+        for (var i = 0; i < 500; i++)
+        {
+            player.Step();
+            var s = player.Buffer.GetStats();
+            samples.Add((s.SamplesDroppedForSync - s.SamplesInsertedForSync, s.SamplesOutputSinceStart));
+        }
+
+        var settled = player.Buffer.GetStats();
+        Assert.Equal(stalled.HardSyncCount, settled.HardSyncCount);
+        Assert.True(
+            samples[^1].Net != samples[0].Net,
+            "the continuous tier must actually be correcting, or the cap assertion proves nothing");
+        AssertSpeedCapRespectedOverEveryWindow(samples);
+
+        // And the depth stays where it was, give or take the few snaps it took to find out.
+        Assert.InRange(player.Buffer.BufferedMilliseconds, depthBefore - 100, depthBefore + 500);
+    }
+
+    [Fact]
+    public void UnclosableError_StopsSnappingOnTheExternalPathToo()
+    {
+        // ReadRaw is windowsSpin's path and the one issue #252 was reported from. The snap is
+        // the buffer's on both paths, so the stand-down has to be too.
+        using var player = new Player(rawReads: true).Settled();
+
+        player.PinSyncErrorAt(-90_000);
+        player.Steps(60);
+
+        var stalled = player.Buffer.GetStats();
+        Assert.True(stalled.HardSyncStalled);
+        Assert.InRange(stalled.HardSyncCount, 1, 4);
+
+        player.Steps(500);
+
+        var settled = player.Buffer.GetStats();
+        Assert.Equal(stalled.HardSyncCount, settled.HardSyncCount);
+        Assert.Equal(stalled.SamplesInsertedForSync, settled.SamplesInsertedForSync);
+    }
+
+    [Fact]
+    public void UnclosableError_StandsTheExternalCorrectorDownTooSoSomethingStillCorrects()
+    {
+        // On ReadRaw the host applies the continuous tier through ISyncCorrectionProvider, so
+        // suppressing the snap inside the buffer alone would leave the calculator still reporting
+        // the hard-sync decision — which tells the host to stand down for a snap that is no
+        // longer coming, and then nothing corrects at all.
+        using var player = new Player(rawReads: true).Settled();
+
+        var calculator = new SyncCorrectionCalculator(SyncCorrectionOptions.Default, SampleRate, Channels);
+        calculator.NotifySamplesProcessed(SampleRate * Channels); // past its own startup grace
+
+        player.PinSyncErrorAt(-90_000);
+
+        for (var i = 0; i < 60; i++)
+        {
+            player.Step();
+            calculator.UpdateFromSyncError(
+                player.Buffer.SyncErrorMicroseconds,
+                player.Buffer.SmoothedSyncErrorMicroseconds);
+            calculator.NotifySamplesProcessed(StepMs * SamplesPerMs);
+        }
+
+        Assert.True(player.Buffer.GetStats().HardSyncStalled);
+
+        // A hard-sync verdict reaches an external corrector as None at rate 1.0 — stand down and
+        // let the buffer splice. Once the tier gives up, the host must be told to correct again.
+        Assert.Equal(SyncCorrectionMode.Resampling, calculator.CurrentMode);
+        Assert.Equal(1.0 - SyncCorrectionOptions.SpecMaxSpeedCorrection, calculator.TargetPlaybackRate, 4);
+    }
+
+    [Fact]
+    public void StalledSnapTier_ClearsWhenTheErrorLeavesTheBandAndThenSnapsAgain()
+    {
+        using var player = new Player().Settled();
+
+        player.PinSyncErrorAt(-90_000);
+        player.Steps(60);
+
+        var stalled = player.Buffer.GetStats();
+        Assert.True(stalled.HardSyncStalled);
+
+        // Whatever was biasing the measurement goes away. The stall lifts once the smoothed error
+        // is back under the snap threshold, which at alpha 0.1 takes ~28 callbacks to decay to
+        // from 90 ms — the same detection latency the tier itself runs on.
+        player.PinSyncErrorAt(0);
+        player.Steps(50);
+        Assert.False(player.Buffer.GetStats().HardSyncStalled);
+
+        // And the tier is a working tier again: one genuine disturbance, one snap.
+        player.PinSyncErrorAt(null);
+        player.Stall(10_000);
+        player.Steps(20);
+
+        var recovered = player.Buffer.GetStats();
+        Assert.Equal(stalled.HardSyncCount + 1, recovered.HardSyncCount);
+        Assert.InRange(Math.Abs(recovered.SyncErrorMs), 0, 1);
+    }
+
+    [Fact]
+    public void StalledSnapTier_ClearsAtEveryResetSeam()
+    {
+        // Each of these abandons the timing state — and the playback clock — the stall was
+        // measured against, so the tier has to start clean on the other side of it.
+        var seams = new (string Name, Action<TimedAudioBuffer> Apply)[]
+        {
+            ("Clear", buffer => buffer.Clear()),
+            ("ResetSyncTracking", buffer => buffer.ResetSyncTracking()),
+            ("NotifyReconnect", buffer => buffer.NotifyReconnect()),
+        };
+
+        foreach (var (name, apply) in seams)
+        {
+            using var player = new Player().Settled();
+
+            player.PinSyncErrorAt(-90_000);
+            player.Steps(60);
+            Assert.True(player.Buffer.GetStats().HardSyncStalled, name);
+
+            apply(player.Buffer);
+
+            Assert.False(player.Buffer.GetStats().HardSyncStalled, name);
+        }
+    }
+
+    [Fact]
+    public void StandingDown_IsWarnedAboutOnce_ThenRepeatedNoFasterThanOnceASecond()
+    {
+        var logger = new CapturingLogger();
+        using var player = new Player(logger: logger).Settled();
+
+        player.PinSyncErrorAt(-90_000);
+        player.Steps(60);
+
+        // Silently giving up would leave a client with quiet, permanently misaligned playback and
+        // nothing to look at, so the residual has to be named. The tier gives up on the callback
+        // after a snap finished draining, so what it names is what that snap left behind — some
+        // way short of the ~90 ms it was sized to close, which is the whole complaint.
+        var warning = Assert.Single(StallWarnings(logger));
+        var named = Regex.Match(warning, @"([-+][\d.,]+)ms error").Groups[1].Value;
+        Assert.InRange(double.Parse(named, NumberStyles.Float, CultureInfo.CurrentCulture), -95, -70);
+
+        // Rate-limited rather than said once and forgotten: a stall lasting minutes should still
+        // be visible in a log captured halfway through it, but must not become the log.
+        player.Steps(300);
+        Assert.InRange(StallWarnings(logger).Count, 2, 5);
+    }
+
+    private static List<string> StallWarnings(CapturingLogger logger) =>
+        logger.Warnings.FindAll(w => w.Contains("not closing", StringComparison.Ordinal));
 
     [Fact]
     public void MidSegmentResetSyncTracking_PreservesAlignment()
