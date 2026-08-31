@@ -469,6 +469,17 @@ public record AudioBufferStats
     internal long HardSyncCount { get; init; }
 
     /// <summary>
+    /// Gets a value indicating whether the one-shot tier has stood down because snapping stopped
+    /// closing the error, leaving the capped continuous tier to correct (issue #252).
+    /// </summary>
+    /// <remarks>
+    /// True means the residual error is real and the SDK has decided splicing cannot remove it —
+    /// the usual cause is a host-side output latency the player reports wrongly, not a threshold
+    /// that needs raising. It clears as soon as the error leaves the snap tier's band.
+    /// </remarks>
+    internal bool HardSyncStalled { get; init; }
+
+    /// <summary>
     /// Gets the number of breaks detected in the delivered content timeline — a chunk boundary
     /// whose timestamp did not continue where the previous one ended, or audio discarded
     /// mid-play. Each is folded into the sync error so alignment is restored.

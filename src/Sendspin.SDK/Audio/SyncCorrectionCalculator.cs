@@ -25,6 +25,14 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
     private readonly SyncCorrectionOptions _options;
     private readonly int _sampleRate;
     private readonly int _channels;
+
+    // The same stand-down rule TimedAudioBuffer runs, on its own copy of the state. It has to be
+    // here as well as there: on the ReadRaw path the host drives this object, so a buffer that
+    // suppressed its snap alone would leave this one still reporting the hard-sync decision, the
+    // host would keep standing down for a snap that is no longer coming, and nothing would
+    // correct at all. See HardSyncStallDetector.
+    private readonly HardSyncStallDetector _hardSyncStall;
+
     private readonly object _lock = new();
 
     private SyncCorrectionMode _currentMode = SyncCorrectionMode.None;
@@ -121,6 +129,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         SyncCorrectionPolicy.WarnIfSpeedCapExceeded(_options, logger ?? NullLogger.Instance);
         _sampleRate = sampleRate;
         _channels = channels;
+        _hardSyncStall = new HardSyncStallDetector(_options);
     }
 
     /// <inheritdoc/>
@@ -129,7 +138,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
         bool changed;
         lock (_lock)
         {
-            changed = UpdateCorrectionInternal(smoothedMicroseconds);
+            changed = UpdateCorrectionInternal(rawMicroseconds, smoothedMicroseconds);
         }
 
         // Fire event outside lock to prevent deadlocks
@@ -158,6 +167,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             _inStartupGracePeriod = true;
             _inReconnectStabilization = false;
             _reconnectSamplesProcessed = 0;
+            _hardSyncStall.Reset();
         }
 
         if (changed)
@@ -197,6 +207,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             _dropEveryNFrames = 0;
             _insertEveryNFrames = 0;
             _targetPlaybackRate = 1.0;
+            _hardSyncStall.Reset();
         }
 
         if (changed)
@@ -246,7 +257,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
     /// Must be called under lock.
     /// </summary>
     /// <returns>True if correction parameters changed.</returns>
-    private bool UpdateCorrectionInternal(double smoothedMicroseconds)
+    private bool UpdateCorrectionInternal(long rawMicroseconds, double smoothedMicroseconds)
     {
         var previousMode = _currentMode;
         var previousDrop = _dropEveryNFrames;
@@ -274,9 +285,23 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
             return HasChanged(previousMode, previousDrop, previousInsert, previousRate);
         }
 
-        // One decision ladder, shared with TimedAudioBuffer's internal corrector.
+        // One decision ladder, shared with TimedAudioBuffer's internal corrector — including the
+        // stand-down, which is timed against playback rather than wall clock so both copies of
+        // the detector score the same error stream the same way.
+        var now = (long)(_totalSamplesProcessed * (1_000_000.0 / (_sampleRate * _channels)));
         var decision = SyncCorrectionPolicy.Decide(
-            smoothedMicroseconds, _options, _sampleRate, _channels);
+            smoothedMicroseconds,
+            _options,
+            _sampleRate,
+            _channels,
+            suppressHardSync: _hardSyncStall.ShouldStandDown(smoothedMicroseconds, now));
+
+        if (decision.IsHardSync)
+        {
+            // The buffer sizes its snap from the raw error, so the cooldown and the convergence
+            // score are measured against the same figure.
+            _hardSyncStall.RecordSnap(rawMicroseconds, now);
+        }
 
         _currentMode = decision.Mode;
         _targetPlaybackRate = decision.TargetPlaybackRate;
