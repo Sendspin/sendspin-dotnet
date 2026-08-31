@@ -41,6 +41,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
 | Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |
 | Audio pipeline | `IAudioPipeline.StartAsync` returns `Task<AudioPipelineStartOutcome>` instead of `Task` | Low — compiler error, and only for a custom pipeline; see §14 |
+| Connection mode | `ConnectionMode.Auto` removed; `AdvertiseOnly` is now the zero value | Medium — compiler error where it is named, but a **persisted** mode is the real risk: a stored `"Auto"` no longer parses and stored ordinals shift; see §16 |
 
 ---
 
@@ -690,7 +691,33 @@ transient the codec did not have.
 
 ---
 
-## 16. Checklist
+## 16. `ConnectionMode.Auto` is gone
+
+`ConnectionMode.Auto` has been removed, and `AdvertiseOnly` takes its place as the first member — so `default(ConnectionMode)` is now a spec-valid mode.
+
+`Auto` meant "both discover servers and advertise as a player". connection.md requires a client to use exactly one connection method at a time, so `Auto` named a combination the spec forbids — and because it sat at ordinal 0, it was what `default(ConnectionMode)`, an unset field, and an absent deserialized value all resolved to.
+
+```csharp
+// ConnectionMode.Auto has no replacement — it was never a legal mode.
+ConnectionMode mode = ConnectionMode.AdvertiseOnly;    // listen + advertise (the default)
+// or:
+// ConnectionMode mode = ConnectionMode.DiscoverOnly;  // discover + dial
+```
+
+Nothing in the SDK reads this enum, so removing a member changes no behaviour. The connection method is chosen structurally, by the service you run: `SendspinHostService` advertises and accepts server-initiated connections, `SendspinClientService` dials a server that discovery found. Pick whichever matches the mode you were recording.
+
+### If you persist the mode
+
+This is the part that is not a compiler error. `Auto` was ordinal 0, so removing it shifts what is left: `AdvertiseOnly` moves 1 → 0, and `DiscoverOnly` 2 → 1.
+
+- **Stored as a string** — a config file carrying `Connection:Mode = "Auto"`, say — now fails to bind, because `Auto` is no longer a member. Map the old value before you upgrade: a client that was really listening becomes `AdvertiseOnly`, one that was really dialling becomes `DiscoverOnly`.
+- **Stored as an integer** silently repoints. A stored `1` meant `AdvertiseOnly` and now reads as `DiscoverOnly`; a stored `2` is no longer a defined value at all. Migrate the stored ordinals once, or switch to persisting the name.
+
+If you need the 9.x line, `Auto` is still present there but `[Obsolete]` as of 9.3.1 — the ordinals are deliberately left alone on that branch, so it is not a cherry-pick of this change.
+
+---
+
+## 17. Checklist
 
 - [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
 - [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
@@ -714,6 +741,8 @@ transient the codec did not have.
       `SyncCorrectionMode.HardSync`
 - [ ] Nothing expects `NotifyExternalCorrection` to move the read cursor — it feeds the stats,
       and `ReadRaw` has already credited what it handed you
+- [ ] Any persisted `ConnectionMode` is migrated — a stored `"Auto"` no longer parses, and the
+      remaining members' ordinals have shifted
 
 ---
 
