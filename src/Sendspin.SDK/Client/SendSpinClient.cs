@@ -699,13 +699,41 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             message.ServerId, message.Name, ConnectionReason ?? "none", string.Join(", ", message.ActiveRoles));
 
         // Mark connection as fully connected
+        bool promoted = false;
         if (_connection is SendspinConnection conn)
         {
             conn.MarkConnected();
+            promoted = true;
         }
         else if (_connection is IncomingConnection incoming)
         {
             incoming.MarkConnected();
+            promoted = true;
+        }
+
+        // MarkConnected publishes Connected synchronously — through this client's own
+        // ConnectionStateChanged and on into whatever the embedder subscribed, which in host
+        // mode is the handshake waiter and, behind it, the ServerConnected handler that decides
+        // whether to keep this server at all (#253). An embedder that refuses it there has
+        // already closed this connection by the time MarkConnected returns: both transports
+        // publish Disconnecting before their first await, so the close is visible here even when
+        // the refusal was fire-and-forget.
+        //
+        // Everything below is connection-scoped work, but the state it touches need not be: the
+        // clock synchronizer and the audio pipeline may be shared across every connection the
+        // embedder runs, so resetting them for a connection that no longer exists corrupts the
+        // session that is still playing. Skipping the rest does not strand a waiting
+        // ConnectAsync — the Disconnected transition that closed the connection completes its
+        // handshake wait.
+        //
+        // Scoped to a transport this method actually promoted: one it never moved to Connected
+        // cannot have been closed by that move, so there is nothing to guard.
+        if (promoted && _connection.State is ConnectionState.Disconnected or ConnectionState.Disconnecting)
+        {
+            _logger.LogInformation(
+                "Connection closed inside its own handshake completion ({State}); abandoning the rest of the handshake",
+                _connection.State);
+            return;
         }
 
         // Reset clock synchronizer for new connection
