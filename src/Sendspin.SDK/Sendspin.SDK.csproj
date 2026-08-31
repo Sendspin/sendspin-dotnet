@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Sendspin.SDK</PackageId>
-    <Version>9.3.1</Version>
+    <Version>9.3.2</Version>
     <Authors>Sendspin Contributors</Authors>
     <Company>Sendspin</Company>
     <Product>Sendspin SDK</Product>
@@ -20,32 +20,26 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
-v9.3.1 - Playback Stability (9.x legacy line):
+v9.3.2 - Discovery (9.x legacy line):
 
-Two fixes for defects that could stop or degrade playback. One additive public
-API: SendspinHostService gains AdoptClientInitiated/ReleaseClientInitiated,
-which the second fix requires. Everything else is internal.
+One fix: players are now reliably discoverable by servers. No API changes.
 
-- The one-shot hard-sync tier stands down when snapping is not closing the
-  error (#252). The tier gains the cooldown and convergence check its
-  neighbours already had: a snap is not eligible again until its own duration
-  has elapsed, and three consecutive snaps that leave the error where they
-  found it stand the tier down in favour of the capped +/-0.5% continuous
-  tier. Previously a constant error the splice could not move - the usual
-  cause is a misreported output latency - re-fired the tier as fast as snaps
-  drained, splicing silence indefinitely while buffer depth grew without
-  bound. AudioBufferStats reports the stand-down, and it lifts as soon as the
-  error leaves the snap tier's band.
-- A rejected server-initiated connection no longer tears down the active
-  client-initiated session (#253). The handshake tail stops when the
-  application refuses the connection inside its own completion, so the shared
-  clock synchronizer and audio pipeline are no longer reset against the
-  session that is still playing. SendspinHostService.AdoptClientInitiated
-  lets the application register the session it dialled, so an incoming server
-  now loses arbitration at the door - previously it was accepted as "no
-  existing connection" because a dialled session was invisible to the host.
-  An adopted session is owned by the application: the host never disconnects,
-  reports, or displaces it.
+- The mDNS advertiser announces its presence instead of only answering
+  queries. Advertising registered the records with a passive query responder
+  and multicast nothing, while a server's mDNS browser stops broadcasting
+  the service type once its startup queries are done - so a player that
+  started after the server was never discovered at all, and discovery only
+  appeared to work when the player was already running when the server came
+  up. The advertiser now multicasts its records unsolicited (RFC 6762
+  section 8.3) when advertising starts, and again whenever a network
+  interface appears - resume from sleep, a late-associating Wi-Fi - since
+  the announcement sent before that interface existed never reached it. The
+  announcement carries the full PTR/SRV/TXT/A set, so a server can connect
+  from its cache alone.
+
+Note: staying visible past the records' TTL still requires the player to
+hear the server's refresh queries, so allow inbound UDP 5353 through any
+host firewall.
 
 ----
 
