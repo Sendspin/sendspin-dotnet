@@ -118,7 +118,7 @@ var client = SendspinClientService.CreateForDial(
 
 ## 3. Pairing
 
-An unpaired client connects under the published **Sentinel PSK**, which authenticates nothing — the session's trust level is `none`. To reach trust `user` (and therefore playback on most servers, plus any management operation), the client must pair.
+An unpaired client connects under the published **Sentinel PSK**, which authenticates nothing — the session's trust level is `none`. To reach trust `user` (and therefore playback on most servers), the client must pair.
 
 Three methods, all optional to offer except the first:
 
@@ -161,7 +161,7 @@ pairingButton.Pressed += (_, _) => window.Open();
 
 **Leaving `PairingWindow` null does not fail loudly.** It defaults to null and a null window reads as permanently closed, which is the fail-closed direction: the client answers a gated activation with `client/pair-pending` and then waits. Nothing throws and nothing times out — pairing simply never completes. Subscribe to `ISendspinClient.PairingGestureRequested` to prompt the operator, and pass the same window to `SendspinHostService` (which forwards it to every connection it accepts).
 
-An already-paired server can also open the window remotely with `management/open-pairing-window`.
+The window is opened locally only: there is no remote message that opens it.
 
 Once an attempt has started it is bounded by `SendspinClientOptions.PairingAttemptTimeout` (2 minutes by default, the spec's recommendation), after which the client sends `pair/abort` with `attempt_timeout`. The wait for a gesture is not bounded by it.
 
@@ -169,11 +169,12 @@ Once an attempt has started it is bounded by `SendspinClientOptions.PairingAttem
 
 `ClientCapabilities.UnpairedAccessEnabled` lets a server play to the client with no pairing record at all. It defaults to off, and it should stay off unless you have a reason: the Sentinel PSK is a published constant, so an unpaired session offers confidentiality against passive observers but **no protection against an active man-in-the-middle** — neither peer's identity is bound to anything.
 
-### Persist what `PairingConfigChanged` reports
+### Pairing configuration is local
 
-A paired server can read and change the client's pairing configuration through `management/*`. The SDK applies those changes to its own state and raises `PairingConfigChanged` — it deliberately does **not** write to the `ClientCapabilities` instance your app owns.
-
-If you do not persist what that event reports and reapply it at startup, a server's configuration changes silently revert on the next launch. Every setting the event reports has a `ClientCapabilities` property to reapply it to; see `ISendspinClient.PairingConfigChanged`'s documentation for the full list.
+The client's pairing configuration — which methods it offers, their enablement, the static
+pairing code, the minimum dynamic pairing code length, unpaired access, and the `locations`
+hints — is manufacturer-defined and set through `ClientCapabilities`. No server can read or
+change it, and the pairing window is opened only by a local operator gesture.
 
 ---
 
@@ -727,7 +728,6 @@ If you need the 9.x line, `Auto` is still present there but `[Obsolete]` as of 9
 - [ ] A pairing UX exists — at minimum, surfacing the token from `EnsurePairingPsk()`
 - [ ] If any PIN method is offered: a `PairingWindow` is supplied and opened by a real operator gesture — verify by pairing with a static PIN and confirming it only succeeds after the gesture
 - [ ] `UnpairedAccessEnabled` is a deliberate decision, not a default you inherited
-- [ ] `PairingConfigChanged` is persisted and reapplied at startup
 - [ ] Identity and PSK files are in a user-scoped location
 - [ ] No `MaxSpeedCorrection` above `SyncCorrectionOptions.SpecMaxSpeedCorrection` reaches the SDK — including from configuration; check the log for the clamp warning
 - [ ] Nothing drives a resampler from `TargetPlaybackRate` while also calling `Read`

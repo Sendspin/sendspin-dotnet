@@ -58,10 +58,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly SendspinIdentity _identity;
     private bool _markedPskUsed;
 
-    // Set when a management/remove-record targets the requester's own record, so the session
-    // is closed once the result has been sent. Declared here with the rest of the per-client
-    // state rather than beside its use site further down the file (#93).
-    private bool _pendingSelfRemoval;
     private byte[]? _pendingPairingPsk;
     private readonly IPairingCodeLockoutStore? _pairingCodeLockoutStore;
     private readonly Func<PairingCodePresentation, CancellationToken, ValueTask>? _presentPairingCodeAsync;
@@ -70,8 +66,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly TimeSpan _attemptTimeout;
 
     // Covers _attemptTimeoutCts and _pendingGatedMethod. Both are touched from the receive
-    // loop AND from whatever thread raises PairingWindow.StateChanged — an operator gesture,
-    // or another connection's management/open-pairing-window — so neither is safe to
+    // loop AND from whatever thread raises PairingWindow.StateChanged — an operator gesture —
+    // so neither is safe to
     // read-modify-write unsynchronized: an unsynchronized arm leaks a CancellationTokenSource
     // that fires attempt_timeout minutes later on a connection with no attempt in flight, and
     // an unsynchronized clear can Cancel() a source another thread has already disposed, whose
@@ -122,33 +118,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _requiredLeadTimeMs;
     private int _minBufferMs;
 
-    // The effective unpaired-access setting: seeded from capabilities at construction and
-    // updated when a server changes it via management/set-pairing-config. Held here rather
-    // than written into the app-owned capabilities object, which the SDK does not mutate.
-    // PairingConfigChanged tells the app to persist the new value.
-    private bool _unpairedAccessEnabled;
+    // The effective unpaired-access setting, seeded from capabilities at construction. Held
+    // here rather than read straight off the app-owned capabilities object so the admissibility
+    // check and client/hello cannot drift apart.
+    private readonly bool _unpairedAccessEnabled;
 
-    // Effective pairing-method configuration: seeded from capabilities at construction and
-    // updated only by management/set-pairing-config. Held here rather than in the app-owned
-    // capabilities object, which the SDK does not mutate; PairingConfigChanged tells the app
-    // to persist the new values. client/hello, CanOffer, and get-pairing-config all read
-    // these, so the advertisement and the management answer cannot drift apart.
-    private bool _pairingPskEnabled;
-    private bool _dynamicPairingCodeEnabled;
-    private bool _staticPairingCodeEnabled;
-    private int _effectiveMinPairingCodeLength;
-    private string? _effectiveStaticPairingCode;
+    // Effective pairing-method configuration, seeded from capabilities at construction. Pairing
+    // config is local and manufacturer-defined: nothing on the wire changes it. client/hello
+    // and CanOffer both read these.
+    private readonly bool _pairingPskEnabled;
+    private readonly bool _dynamicPairingCodeEnabled;
+    private readonly bool _staticPairingCodeEnabled;
+    private readonly int _effectiveMinPairingCodeLength;
+    private readonly string? _effectiveStaticPairingCode;
 
-    // locations hints for the two methods that carry one. Held as effective state rather than
-    // read straight off _capabilities because a server that sets the secret makes the app's
-    // declared hint wrong, and the spec requires the client to follow the secret (#129).
-    private List<string> _staticPairingCodeLocations;
-    private List<string> _pairingPskLocations;
-
-    // record_mode.psk_id: the shared-PSK record admitted as the storage-exhaustion fallback.
-    // Null until a server sets one; the spec's default is a pre-provisioned shared-PSK
-    // record, which for an SDK is the app's to provision.
-    private string? _recordModePskId;
+    // locations hints for the two methods that carry one. Copied from _capabilities rather than
+    // aliased, so the SDK never writes to the list the app owns (#129).
+    private readonly List<string> _staticPairingCodeLocations;
+    private readonly List<string> _pairingPskLocations;
 
     // Bounds for any value written to the clock synchronizer's output delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
@@ -318,8 +305,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     internal INoiseSessionInfo Session => _session;
 
     /// <summary>
-    /// The <c>pairing_psk</c> method's effective enablement, as set by
-    /// <c>management/set-pairing-config</c>. Read live by this connection's
+    /// The <c>pairing_psk</c> method's effective enablement. Read live by this connection's
     /// <see cref="RecordPskResolver"/>, which excludes Pairing-category records from the
     /// handshake candidate set while the method is off (#202).
     /// </summary>
@@ -404,9 +390,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public event EventHandler<StreamClearPayload>? StreamClearReceived;
 
     /// <inheritdoc />
-    public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
-
-    /// <inheritdoc />
     public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 
     /// <summary>
@@ -475,12 +458,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // to the server, so it follows what is advertised rather than its own default.
         _audioPipeline?.SetMinBufferMilliseconds(_minBufferMs);
 
-        // Implemented methods start enabled unless the app says otherwise. The three flags
-        // exist so an app can reapply a server's set-pairing-config change on the next start
-        // (#131); ANDing each with PairingCodeMethods keeps "not implemented" and "implemented
-        // but disabled" distinct, which is what the spec keys different behaviour off, and
-        // keeps a default-constructed ClientCapabilities reporting exactly what it did before
-        // these members existed.
+        // Implemented methods start enabled unless the app says otherwise. ANDing each with
+        // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
+        // which is what the spec keys different behaviour off, and keeps a default-constructed
+        // ClientCapabilities reporting exactly what it did before these members existed.
         _pairingPskEnabled = _capabilities.PairingPskEnabled;
         _dynamicPairingCodeEnabled = _capabilities.DynamicPairingCodeEnabled && _capabilities.PairingCodeMethods.Contains("dynamic_pin");
         _staticPairingCodeEnabled = _capabilities.StaticPairingCodeEnabled && _capabilities.PairingCodeMethods.Contains("static_pin");
@@ -494,18 +475,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         _effectiveStaticPairingCode = _capabilities.StaticPairingCode;
 
-        // Copied, not aliased: these are mutated when a server rotates a secret, and the SDK
-        // does not write to the ClientCapabilities instance the app owns (see
-        // PairingConfigChangedEventArgs).
+        // Copied, not aliased: the SDK does not write to the ClientCapabilities instance the
+        // app owns.
         _staticPairingCodeLocations = [.. _capabilities.StaticPairingCodeLocations];
         _pairingPskLocations = [.. _capabilities.PairingPskLocations];
-        _recordModePskId = SeedRecordModePskId();
 
-        // Usability of static_pin is evaluated live via HasUsableStaticPairingCode, not snapshotted
-        // here, so a server that later supplies a valid pairing code via set-pairing-config makes the
-        // method usable again without also having to resend enabled: true. This warning is
-        // still worth logging once, at construction, so the app sees why the method it asked
-        // for is not being offered.
+        // A static_pin the app never set, or set to something unusable, is not offered.
+        // The method stays advertised as disabled rather than vanishing, so an operator
+        // can tell a missing PIN from an unimplemented method.
         if (_capabilities.StaticPairingCodeEnabled
             && _capabilities.PairingCodeMethods.Contains("static_pin")
             && !IsValidStaticPairingCode(_capabilities.StaticPairingCode))
@@ -591,9 +568,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _markedPskUsed = false;
 
         // A new handshake is a new session, and an activate authorises the session it arrived
-        // on — not the next one. Left standing, it permitted management/* in the window
-        // between this handshake completing and this session's first server/activate, with no
-        // admissibility check for the new session's PSK. Cleared here rather than on
+        // on — not the next one. Cleared here rather than on
         // disconnect because SendHandshakeAsync is private to the dial path (ConnectAsync and
         // the reconnect handshake): this particular clear does not reach the listen path's
         // arbitration, SendspinHostService.PriorityOf, which also reads LastServerActivate.
@@ -674,8 +649,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </para>
     /// <para>
     /// Gating by message type rather than at each call site is the point. A dozen senders can
-    /// speak during the window — app-driven volume and format requests, a pipeline recovery ack,
-    /// a management reply — and any new one would otherwise have to know the rule. It also
+    /// speak during the window — app-driven volume and format requests, a pipeline recovery ack
+    /// — and any new one would otherwise have to know the rule. It also
     /// subsumes the in-flight cases without cancellation plumbing: a sync burst already running
     /// when the activation lands drains into this check instead of onto the wire.
     /// </para>
@@ -834,10 +809,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Creates the ClientHello message from current capabilities.
     /// Extracted for reuse between initial connection and reconnection handshakes.
-    /// Unpaired access is advertised from the effective value rather than the app's
-    /// capabilities, since a server may have changed it via
-    /// <c>management/set-pairing-config</c>: the hello reports what this client will
-    /// actually do.
     /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
@@ -1544,9 +1515,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc />
     /// <remarks>
     /// Per spec #122 the Pairing PSK is per-client and long-lived: a successful pairing does
-    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/>, a
-    /// server's <c>management/set-pairing-config</c>, or a server removing the record via
-    /// <c>management/remove-record</c> replaces or drops the stored record.
+    /// not consume it, and nothing here rotates it. Only <see cref="RotatePairingPsk"/>
+    /// replaces the stored record.
     /// </remarks>
     public string EnsurePairingPsk()
     {
@@ -1704,16 +1674,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // An activate authorises the Noise session it arrived on. A re-key replaces that
         // session — including downward, since the spec has the server re-handshake to the
         // Pairing PSK before a pairing_psk flow — so the grant does not carry over. Without
-        // this, a management grant from the retired session was honoured on the new one until
-        // its first activate, on a PSK that could never have been granted management.
+        // this, a grant from the retired session was honoured on the new one until
+        // its first activate, on a PSK that could never have been granted it.
         //
         // Unlike SendHandshakeAsync's clear of the same field, this one reaches both the dial
         // and listen paths — DetectSessionRekey runs from OnTextMessageReceived, which both
         // share — so it also reaches SendspinHostService.PriorityOf's read of this field. In
         // the window between a re-key and this session's next activate, PriorityOf reports
-        // ConnectionPriority.Empty, which changes two ServerArbitration.Decide rules: a
-        // Management-priority holder becomes displaceable by incoming Playback, and Exception
-        // 1 ("a pairing attempt is not displaced") stops applying — during a pairing.md:63
+        // ConnectionPriority.Empty, which stops Exception
+        // 1 ("a pairing attempt is not displaced") applying — during a pairing.md:63
         // re-handshake, which is exactly when a pairing attempt is in flight. Whether
         // PriorityOf should tolerate this transient is filed separately; this comment records
         // that the gap exists, not that it is fine.
@@ -1820,15 +1789,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandleServerPairConfirm(json);
                     break;
 
-                case MessageTypes.ManagementListRecords:
-                case MessageTypes.ManagementAddRecord:
-                case MessageTypes.ManagementRemoveRecord:
-                case MessageTypes.ManagementGetPairingConfig:
-                case MessageTypes.ManagementSetPairingConfig:
-                case MessageTypes.ManagementOpenPairingWindow:
-                    HandleManagement(messageType, json);
-                    break;
-
                 case MessageTypes.ServerUnpair:
                     HandleServerUnpair();
                     break;
@@ -1875,7 +1835,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // malformed payload produces: JsonException from typed deserialization,
             // FormatException from base64url fields (pairing nonces/shares/tags),
             // InvalidOperationException from JsonElement.GetString()/GetBoolean() on a
-            // wrong-kind element (type routing and the management fields), and
+            // wrong-kind element (type routing), and
             // CPaceException from a hostile or mis-sequenced PAKE share. The goodbye
             // reason list is closed with no protocol-error value, so the close reuses
             // 'unauthorized' — the reason this client already sends for peer-violation
@@ -1918,13 +1878,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// with a stored long-term record for this very server means the server referenced a
     /// credential this client could not use, and the client answered with the published Sentinel
     /// PSK (connection.md § Sentinel Fallback). The connection works, but at trust level 'none'
-    /// — no playback, no management — until someone re-pairs.
+    /// — no playback until someone re-pairs.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Reports and nothing else. The spec is explicit that the signal alone MUST NOT cause
     /// either side to remove or replace a record; records change only through pairing or
-    /// management.
+    /// <c>server/unpair</c>.
     /// </para>
     /// <para>
     /// Only a stored-pubkey record can answer "am I paired with the server I am talking to".
@@ -2006,7 +1966,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         // Recorded only once the activation is admitted: this property is what the
-        // management gate and the host's arbitration read, so a refused activate must
+        // host's arbitration reads, so a refused activate must
         // not leave its activities behind. 'Last accepted activation' is the only
         // defensible meaning for a value other code grants permission from.
         LastServerActivate = payload;
@@ -2170,7 +2130,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             PskCategory.Pairing => set.Count == 1 && set.Contains(Activities.Pairing),
             PskCategory.LongTerm => (set.Count == 1 && set.Contains(Activities.Pairing))
-                || set.All(a => a is Activities.Playback or Activities.Management),
+                || set.All(a => a is Activities.Playback),
             PskCategory.Sentinel => set.Count == 0
                 || (set.Count == 1 && set.Contains(Activities.Pairing))
                 || (set.Count == 1 && set.Contains(Activities.Playback) && unpairedAccessEnabled),
@@ -2197,9 +2157,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Whether the app built this client with the method's implementation. Distinct from
-    /// <see cref="IsMethodEnabled"/>: the spec omits a method object from
-    /// get-pairing-config only when it is not implemented, while a merely disabled method
-    /// still reports itself with enabled: false.
+    /// <see cref="IsMethodEnabled"/>: a method the app never listed is not implemented, while
+    /// a listed method the app switched off is implemented but disabled.
     /// </summary>
     private bool IsMethodImplemented(string method) => method switch
     {
@@ -2207,7 +2166,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _ => _capabilities.PairingCodeMethods.Contains(method),
     };
 
-    /// <summary>The method's effective enablement, as set by management/set-pairing-config.</summary>
+    /// <summary>The method's effective enablement, as the app configured it.</summary>
     private bool IsMethodEnabled(string method) => method switch
     {
         "pairing_psk" => _pairingPskEnabled,
@@ -2224,78 +2183,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         pin is { Length: 8 } && pin.All(char.IsAsciiDigit);
 
     /// <summary>
-    /// Whether a static pairing code good enough to run the method is configured. The spec forbids
-    /// enabling static_pin with no secret behind it (management.md:98) and set-pairing-config
-    /// enforces that, but nothing validated what the app supplied at construction — so a
-    /// client could advertise the method with a null pairing code and run CPace with an empty password.
+    /// Whether a static pairing code good enough to run the method is configured. Nothing
+    /// validates what the app supplies at construction, so without this a client could
+    /// advertise the method with a null pairing code and run CPace with an empty password.
     /// </summary>
-    /// <remarks>
-    /// Evaluated live rather than snapshotted at construction, so a server that supplies a
-    /// valid pairing code through set-pairing-config makes the method usable again without also having
-    /// to resend <c>enabled: true</c>.
-    /// </remarks>
     private bool HasUsableStaticPairingCode => IsValidStaticPairingCode(_effectiveStaticPairingCode);
-
-    /// <summary>
-    /// Snapshots every effective pairing-config value into a <see cref="PairingConfigChangedEventArgs"/>.
-    /// Every PairingConfigChanged raise site goes through this one builder, so a field added
-    /// to the effective state later cannot reach one raise site and be missed by another.
-    /// </summary>
-    private PairingConfigChangedEventArgs CurrentPairingConfig(bool pairingPskReplaced) => new()
-    {
-        UnpairedAccessEnabled = _unpairedAccessEnabled,
-        PairingPskReplaced = pairingPskReplaced,
-        PairingPskEnabled = _pairingPskEnabled,
-        DynamicPairingCodeEnabled = _dynamicPairingCodeEnabled,
-        StaticPairingCodeEnabled = _staticPairingCodeEnabled,
-        MinPairingCodeLength = _effectiveMinPairingCodeLength,
-        StaticPairingCode = _effectiveStaticPairingCode,
-        RecordModePskId = _recordModePskId,
-        StaticPairingCodeLocations = [.. _staticPairingCodeLocations],
-        PairingPskLocations = [.. _pairingPskLocations],
-    };
-
-    /// <summary>
-    /// A shared-PSK record: a long-term record with no bound server_id, so the same PSK may
-    /// authenticate any server holding it. record_mode's fallback target must be one of
-    /// these (management.md:111).
-    /// </summary>
-    private static bool IsSharedPskRecord(PairingRecord record)
-        => record.Category == PskCategory.LongTerm && record.ServerId is null;
-
-    /// <summary>
-    /// Restores the record-mode fallback target the app persisted from
-    /// <see cref="PairingConfigChangedEventArgs.RecordModePskId"/>, but only while it still
-    /// names a shared-PSK record — the same constraint <c>set-pairing-config</c> validates
-    /// against (management.md:111). A server can remove that record with
-    /// <c>management/remove-record</c> while the app is down, and reporting a
-    /// <c>psk_id</c> no record backs would tell the next server a fallback exists that
-    /// cannot be used.
-    /// </summary>
-    private string? SeedRecordModePskId()
-    {
-        string? seeded = _capabilities.RecordModePskId;
-        if (seeded is null)
-        {
-            return null;
-        }
-
-        bool valid;
-        lock (_pairingStoreLock)
-        {
-            valid = _pairingStore?.List().Any(r => r.PskId == seeded && IsSharedPskRecord(r)) == true;
-        }
-
-        if (valid)
-        {
-            return seeded;
-        }
-
-        _logger.LogWarning(
-            "ClientCapabilities.RecordModePskId '{PskId}' names no shared-PSK record; record-mode fallback starts unset",
-            seeded);
-        return null;
-    }
 
     /// <summary>
     /// Builds the supported_pair_methods list for the encrypted client/hello: every
@@ -2341,39 +2233,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// nowhere; absence is the spec's way of saying "no hint" (#129).
     /// </summary>
     /// <remarks>
-    /// A defensive copy, because the descriptor is handed to the serializer while the source
-    /// list can still be rewritten by a concurrent <c>set-pairing-config</c>.
+    /// A defensive copy, because the descriptor is handed to the serializer while the app may
+    /// still hold the list it passed in through <see cref="ClientCapabilities"/>.
     /// </remarks>
     private static List<string>? LocationsHint(List<string> locations) =>
         locations.Count == 0 ? null : [.. locations];
 
     /// <summary>
-    /// Replaces a method's locations hint with <c>["operator"]</c> because a server just set
-    /// that method's secret. Returns whether it changed, so the caller can fold it into the
-    /// single PairingConfigChanged raise.
-    /// </summary>
-    /// <remarks>
-    /// A fresh list rather than a mutation in place: <see cref="LocationsHint"/> hands copies
-    /// to descriptors, but the app may also be holding the list it passed in through
-    /// <see cref="ClientCapabilities"/>, and the SDK does not write to that.
-    /// </remarks>
-    private static bool SetLocationsToOperator(ref List<string> locations)
-    {
-        if (locations is [PairMethodLocations.Operator])
-        {
-            return false;
-        }
-
-        locations = [PairMethodLocations.Operator];
-        return true;
-    }
-
-    /// <summary>
     /// Whether this client is configured to run <paramref name="method"/> to completion:
     /// implemented, enabled, and holding every dependency the method needs. A method that
-    /// fails this must not be advertised in client/hello or reported enabled by
-    /// get-pairing-config, or the server is told an offer exists that every attempt will
-    /// refuse (#132).
+    /// fails this must not be advertised in client/hello, or the server is told an offer
+    /// exists that every attempt will refuse (#132).
     /// </summary>
     /// <remarks>
     /// Deliberately excludes session-scoped conditions. Which PSK keyed the current session
@@ -3024,588 +2894,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
         PairingCompleted?.Invoke(this, ServerId);
-    }
-
-    /// <summary>
-    /// Handles a management/* request. Management is scoped to connections whose
-    /// current activities include 'management'; outside that, every request answers
-    /// permission_denied.
-    /// </summary>
-    /// <remarks>
-    /// Every request is answered by exactly one management/result, with no exceptions — which
-    /// management.md requires of all management/* requests, and which this handler did not do
-    /// until #132: a wrong-kind field (e.g. "psk":123, or a non-boolean enabled) threw
-    /// InvalidOperationException past the filter below and the dispatch catch closed the
-    /// connection with no result at all. The management reads are kind-checked now and raise
-    /// JsonException instead, so a malformed payload is answered 'invalid' as the spec defines.
-    /// See ReadBool/ReadString/ReadInt32 for why the fix is there rather than in this filter.
-    /// </remarks>
-    private void HandleManagement(string type, string json)
-    {
-        var result = new ManagementResultPayload();
-
-        if (LastServerActivate?.ActivitiesList.Contains(Activities.Management) != true)
-        {
-            result.Result = "permission_denied";
-        }
-        else
-        {
-            try
-            {
-                using var doc = System.Text.Json.JsonDocument.Parse(json);
-                var payload = doc.RootElement.GetProperty("payload");
-                result = ExecuteManagementOperation(type, payload);
-            }
-            catch (Exception ex) when (ex is System.Text.Json.JsonException or KeyNotFoundException or FormatException)
-            {
-                result.Result = "invalid";
-            }
-        }
-
-        SendAsync(new ManagementResultMessage { Payload = result })
-            .SafeFireAndForget(_logger);
-
-        if (result.Result == "ok" && _pendingSelfRemoval)
-        {
-            // Removing the requester's own record closes the management session.
-            _pendingSelfRemoval = false;
-            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
-        }
-    }
-
-    /// <summary>
-    /// Reads a management payload field of an expected JSON kind, so a peer that sends the
-    /// wrong kind is answered rather than disconnected.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <see cref="System.Text.Json.JsonElement"/>'s typed getters throw
-    /// <see cref="InvalidOperationException"/> on a kind mismatch, and the dispatch catch
-    /// treats that as a malformed message and closes the connection. That is right for the
-    /// rest of the protocol and wrong here: management.md opens by saying <b>all</b>
-    /// <c>management/*</c> requests are answered by a single <c>management/result</c>, and
-    /// defines <c>invalid</c> as covering a malformed payload — so a wrong-kind field owes the
-    /// server an answer, not a dropped socket (#132).
-    /// </para>
-    /// <para>
-    /// These throw <see cref="System.Text.Json.JsonException"/>, which
-    /// <see cref="HandleManagement"/>'s own filter already turns into that answer. Widening
-    /// that filter to <see cref="InvalidOperationException"/> instead would have been one line,
-    /// but it would also swallow a genuine invalid-operation bug in our own handling and report
-    /// it to the server as the peer's fault. Narrowing the read keeps the two distinguishable.
-    /// </para>
-    /// </remarks>
-    private static bool ReadBool(System.Text.Json.JsonElement element, string field) => element.ValueKind switch
-    {
-        System.Text.Json.JsonValueKind.True => true,
-        System.Text.Json.JsonValueKind.False => false,
-        _ => throw new System.Text.Json.JsonException($"{field} must be a boolean, got {element.ValueKind}"),
-    };
-
-    /// <inheritdoc cref="ReadBool"/>
-    private static string ReadString(System.Text.Json.JsonElement element, string field) =>
-        element.ValueKind == System.Text.Json.JsonValueKind.String
-            ? element.GetString()!
-            : throw new System.Text.Json.JsonException($"{field} must be a string, got {element.ValueKind}");
-
-    /// <inheritdoc cref="ReadBool"/>
-    private static int ReadInt32(System.Text.Json.JsonElement element, string field) =>
-        element.ValueKind == System.Text.Json.JsonValueKind.Number && element.TryGetInt32(out int value)
-            ? value
-            : throw new System.Text.Json.JsonException($"{field} must be an integer, got {element.ValueKind}");
-
-    private ManagementResultPayload ExecuteManagementOperation(
-        string type, System.Text.Json.JsonElement payload)
-    {
-        var result = new ManagementResultPayload();
-        switch (type)
-        {
-            case MessageTypes.ManagementListRecords:
-            {
-                List<ManagementRecordEntry> records;
-                lock (_pairingStoreLock)
-                {
-                    records = (_pairingStore?.List() ?? [])
-                        .Select(r => new ManagementRecordEntry(r.PskId, r.ServerId, r.Used))
-                        .ToList();
-                }
-                result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
-                    new ManagementRecordsData(records),
-                    MessageSerializerContext.Default.ManagementRecordsData);
-                break;
-            }
-
-            case MessageTypes.ManagementAddRecord:
-            {
-                byte[] psk;
-                try
-                {
-                    psk = Connection.Noise.SendspinIdentity.DecodePsk(
-                        ReadString(payload.GetProperty("psk"), "psk"));
-                }
-                catch (FormatException ex)
-                {
-                    // The decoder's message is the only thing that distinguishes a malformed
-                    // PSK from a malformed peer id here -- management/result carries "invalid"
-                    // either way. Swallowing it left DecodePsk (#105) emitting a better message
-                    // that reached nobody, and the call site unpinnable by any test (#110).
-                    _logger.LogWarning("Rejecting management/add-record: {Reason}", ex.Message);
-                    result.Result = "invalid";
-                    break;
-                }
-
-                // An explicit JSON null keeps meaning "no server id" — a shared-PSK record —
-                // exactly as an absent field does; only a wrong kind is rejected.
-                string? serverId =
-                    payload.TryGetProperty("server_id", out var sid)
-                    && sid.ValueKind != System.Text.Json.JsonValueKind.Null
-                        ? ReadString(sid, "server_id")
-                        : null;
-                if (serverId is not null && !IsValidServerId(serverId))
-                {
-                    result.Result = "invalid";
-                    break;
-                }
-
-                if (_pairingStore is null)
-                {
-                    result.Result = "storage_exhausted";
-                    break;
-                }
-
-                // The Sentinel PSK is a published constant, and RecordPskResolver searches records
-                // before falling back to it — so a record holding it would shadow Sentinel resolution
-                // and admit every anonymous peer at trust 'user'. The store query below covers records
-                // (including the Pairing record); this covers the candidate that is not in the store.
-                if (NoiseConstants.DerivePskId(psk) == NoiseConstants.SentinelPskId)
-                {
-                    result.Result = "already_exists";
-                    break;
-                }
-
-                lock (_pairingStoreLock)
-                {
-                    if (_pairingStore.List().Any(r => r.PskId == NoiseConstants.DerivePskId(psk)))
-                    {
-                        result.Result = "already_exists";
-                    }
-                    else if (!_pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, serverId)))
-                    {
-                        result.Result = "storage_exhausted";
-                    }
-                }
-
-                break;
-            }
-
-            case MessageTypes.ManagementRemoveRecord:
-            {
-                string pskId = ReadString(payload.GetProperty("psk_id"), "psk_id");
-
-                // A record referenced by record_mode.psk_id cannot be removed while the
-                // reference exists (management.md:111); both halves of that constraint are
-                // rejected as invalid.
-                if (pskId == _recordModePskId)
-                {
-                    result.Result = "invalid";
-                    break;
-                }
-
-                bool removed = false;
-                bool removedPairing = false;
-                if (_pairingStore is not null)
-                {
-                    lock (_pairingStoreLock)
-                    {
-                        var record = _pairingStore.List().FirstOrDefault(r => r.PskId == pskId);
-                        if (record is not null)
-                        {
-                            _pairingStore.Remove(pskId);
-                            removed = true;
-                            removedPairing = record.Category == PskCategory.Pairing;
-                        }
-                    }
-                }
-
-                if (!removed)
-                {
-                    result.Result = "not_found";
-                    break;
-                }
-
-                if (_session.MatchedPsk is { } current && NoiseConstants.DerivePskId(current.Key.Span) == pskId)
-                {
-                    _pendingSelfRemoval = true;
-                }
-
-                if (removedPairing)
-                {
-                    // The server just invalidated any token EnsurePairingPsk handed out (the
-                    // next call mints a fresh PSK), which is the same staleness
-                    // set-pairing-config's psk replacement causes — report it the same way.
-                    // Raised outside _pairingStoreLock for the same reason as there:
-                    // subscribers run arbitrary app code and must not run under the lock.
-                    PairingConfigChanged?.Invoke(this, CurrentPairingConfig(pairingPskReplaced: true));
-                }
-
-                break;
-            }
-
-            case MessageTypes.ManagementGetPairingConfig:
-            {
-                PairingMethodState? staticPairingCodeState = IsMethodImplemented("static_pin")
-                    ? new PairingMethodState(CanRun("static_pin"))
-                    : null;
-                DynamicPairingCodeConfigState? dynamicPairingCodeState = IsMethodImplemented("dynamic_pin")
-                    ? new DynamicPairingCodeConfigState(
-                        CanRun("dynamic_pin"),
-                        _effectiveMinPairingCodeLength,
-                        IsMethodEscalated("dynamic_pin"))
-                    : null;
-                result.Data = System.Text.Json.JsonSerializer.SerializeToElement(
-                    new PairingConfigData(
-                        new PairingMethodState(IsMethodEnabled("pairing_psk")),
-                        staticPairingCodeState,
-                        dynamicPairingCodeState,
-                        new RecordModeState(_recordModePskId),
-                        new PairingMethodState(_unpairedAccessEnabled)),
-                    MessageSerializerContext.Default.PairingConfigData);
-                break;
-            }
-
-            case MessageTypes.ManagementSetPairingConfig:
-            {
-                // Patch semantics: only fields present are applied. Setting fields on an
-                // unimplemented pairing code method returns invalid.
-
-                // Parse every field before applying any, so a request refused partway
-                // (no store, undecodable psk, unimplemented method, out-of-range value)
-                // changes nothing, and the single change event below always describes a
-                // fully applied request.
-                bool? requestedUnpairedAccess = null;
-                if (payload.TryGetProperty("unpaired_access", out var ua)
-                    && ua.TryGetProperty("enabled", out var uaEnabled))
-                {
-                    requestedUnpairedAccess = ReadBool(uaEnabled, "unpaired_access.enabled");
-                }
-
-                // dynamic_pin. Parsed here with the other fields so a request refused partway
-                // changes nothing and the single change event below always describes a fully
-                // applied request.
-                bool? requestedDynamicPairingCodeEnabled = null;
-                int? requestedMinPairingCodeLength = null;
-                if (payload.TryGetProperty("dynamic_pin", out var dp))
-                {
-                    if (!IsMethodImplemented("dynamic_pin"))
-                    {
-                        result.Result = "invalid";
-                        break;
-                    }
-
-                    if (dp.TryGetProperty("enabled", out var dpEnabled))
-                    {
-                        requestedDynamicPairingCodeEnabled = ReadBool(dpEnabled, "dynamic_pin.enabled");
-                    }
-
-                    if (dp.TryGetProperty("min_pin_length", out var minLen))
-                    {
-                        int value = ReadInt32(minLen, "dynamic_pin.min_pin_length");
-                        if (value < 4 || value > 12)
-                        {
-                            result.Result = "invalid";
-                            break;
-                        }
-
-                        requestedMinPairingCodeLength = value;
-                    }
-
-                    // A server can supply a missing pairing code but not a missing IPairingCodeLockoutStore or
-                    // PresentPairingCodeAsync -- those are app configuration. Answering ok and then
-                    // continuing to report enabled: false would leave the server unable to
-                    // tell why its change did not take.
-                    if (requestedDynamicPairingCodeEnabled == true
-                        && (_pairingCodeLockoutStore is null || _presentPairingCodeAsync is null))
-                    {
-                        result.Result = "invalid";
-                        break;
-                    }
-                }
-
-                // static_pin. The spec fixes the static pairing code at 8 decimal digits (pairing.md:186) and
-                // rejects enabling the method with no secret behind it (management.md:98).
-                bool? requestedStaticPairingCodeEnabled = null;
-                string? requestedStaticPairingCode = null;
-                if (payload.TryGetProperty("static_pin", out var sp))
-                {
-                    if (!IsMethodImplemented("static_pin"))
-                    {
-                        result.Result = "invalid";
-                        break;
-                    }
-
-                    if (sp.TryGetProperty("pin", out var pairingCodeEl))
-                    {
-                        string pairingCode = ReadString(pairingCodeEl, "static_pin.pin");
-                        if (!IsValidStaticPairingCode(pairingCode))
-                        {
-                            result.Result = "invalid";
-                            break;
-                        }
-
-                        requestedStaticPairingCode = pairingCode;
-                    }
-
-                    if (sp.TryGetProperty("enabled", out var spEnabled))
-                    {
-                        requestedStaticPairingCodeEnabled = ReadBool(spEnabled, "static_pin.enabled");
-                    }
-
-                    if (requestedStaticPairingCodeEnabled == true
-                        && requestedStaticPairingCode is null
-                        && !IsValidStaticPairingCode(_effectiveStaticPairingCode))
-                    {
-                        result.Result = "invalid";
-                        break;
-                    }
-
-                    // A server can supply a missing static pairing code, but not a missing
-                    // IPairingCodeLockoutStore -- that's app configuration. Answering ok and then
-                    // continuing to report enabled: false would leave the server unable to
-                    // tell why its change did not take.
-                    if (requestedStaticPairingCodeEnabled == true && _pairingCodeLockoutStore is null)
-                    {
-                        result.Result = "invalid";
-                        break;
-                    }
-                }
-
-                byte[]? newPairingPsk = null;
-                bool? requestedPairingPskEnabled = null;
-                if (payload.TryGetProperty("pairing_psk", out var pp))
-                {
-                    if (pp.TryGetProperty("psk", out var pskEl))
-                    {
-                        if (_pairingStore is null)
-                        {
-                            result.Result = "storage_exhausted";
-                            break;
-                        }
-
-                        newPairingPsk = Connection.Noise.SendspinIdentity.DecodePsk(ReadString(pskEl, "pairing_psk.psk"));
-
-                        // A psk_id that already identifies a candidate in another category would make
-                        // one id resolve to two trust levels at handshake time (management.md:98).
-                        // Rotating to the value the Pairing record already holds is excluded from this
-                        // check — that is a no-op re-rotation, not a conflict, so only the Sentinel PSK
-                        // and stored records in a category other than Pairing count as collisions.
-                        string newPskId = NoiseConstants.DerivePskId(newPairingPsk);
-                        bool collides = newPskId == NoiseConstants.SentinelPskId;
-                        if (!collides)
-                        {
-                            lock (_pairingStoreLock)
-                            {
-                                collides = _pairingStore.List()
-                                    .Any(r => r.Category != PskCategory.Pairing && r.PskId == newPskId);
-                            }
-                        }
-
-                        if (collides)
-                        {
-                            result.Result = "already_exists";
-                            break;
-                        }
-                    }
-
-                    if (pp.TryGetProperty("enabled", out var ppEnabled))
-                    {
-                        requestedPairingPskEnabled = ReadBool(ppEnabled, "pairing_psk.enabled");
-                    }
-                }
-
-                // record_mode.psk_id names the shared-PSK record the client falls back to
-                // when its stored-pubkey record space is exhausted. The spec constrains it
-                // in both directions (management.md:111): it must reference a shared-PSK
-                // record here, and that record is protected from removal for as long as the
-                // reference exists (see ManagementRemoveRecord below).
-                string? requestedRecordModePskId = null;
-                if (payload.TryGetProperty("record_mode", out var rm)
-                    && rm.TryGetProperty("psk_id", out var rmPskId))
-                {
-                    string target = ReadString(rmPskId, "record_mode.psk_id");
-                    bool valid;
-                    lock (_pairingStoreLock)
-                    {
-                        valid = _pairingStore?.List().Any(r => r.PskId == target && IsSharedPskRecord(r)) == true;
-                    }
-
-                    if (!valid)
-                    {
-                        result.Result = "invalid";
-                        break;
-                    }
-
-                    requestedRecordModePskId = target;
-                }
-
-                // The spec permits the server to make these changes, so the SDK honours
-                // them — against its own effective state, never the app's capabilities.
-                //
-                // The pairing_psk store write runs first, before any other field is applied:
-                // it is the only fallible step in this section (a full store), and parse-before-
-                // apply requires that a refusal changes nothing and raises no event. Applying it
-                // after even one other field would leave that field's mutation stuck on a
-                // request this handler ultimately refused.
-                if (newPairingPsk is not null)
-                {
-                    lock (_pairingStoreLock)
-                    {
-                        // _pairingStore (readonly) was verified non-null when the psk parsed.
-                        // Upsert before removing the old record: removing it first and then
-                        // finding the store full would destroy the client's only Pairing PSK
-                        // while answering storage_exhausted, and do so silently — the app keeps
-                        // handing out a token for a record that no longer exists, with no
-                        // PairingConfigChanged to say so. Upserting first means a refusal here
-                        // leaves the old record intact.
-                        //
-                        // The cost: a new record has a different psk_id than the one it replaces
-                        // (it is derived from the PSK), so this needs transient capacity for N+1
-                        // records, not N. A legitimate rotation can therefore be refused on a
-                        // store already at capacity, where remove-then-upsert would have
-                        // succeeded. That trade is intentional — a full store genuinely cannot
-                        // hold another record, storage_exhausted is an honest answer to that, and
-                        // it is recoverable: the server can free a slot with management/
-                        // remove-record and retry. See PairingPskOperations.Rotate for the
-                        // opposite ordering and why it differs.
-                        if (!_pairingStore!.Upsert(new PairingRecord(newPairingPsk, PskCategory.Pairing)))
-                        {
-                            result.Result = "storage_exhausted";
-                            break;
-                        }
-
-                        string newPskId = NoiseConstants.DerivePskId(newPairingPsk);
-                        foreach (var old in _pairingStore.List()
-                            .Where(r => r.Category == PskCategory.Pairing && r.PskId != newPskId))
-                        {
-                            _pairingStore.Remove(old.PskId);
-                        }
-                    }
-                }
-
-                bool unpairedAccessChanged = false;
-                if (requestedUnpairedAccess is { } enabled)
-                {
-                    unpairedAccessChanged = enabled != _unpairedAccessEnabled;
-                    _unpairedAccessEnabled = enabled;
-                }
-
-                bool dynamicPairingCodeChanged = false;
-                if (requestedDynamicPairingCodeEnabled is { } dpe)
-                {
-                    dynamicPairingCodeChanged |= dpe != _dynamicPairingCodeEnabled;
-                    _dynamicPairingCodeEnabled = dpe;
-                }
-
-                if (requestedMinPairingCodeLength is { } minPairingCode)
-                {
-                    dynamicPairingCodeChanged |= minPairingCode != _effectiveMinPairingCodeLength;
-                    _effectiveMinPairingCodeLength = minPairingCode;
-                }
-
-                bool staticPairingCodeChanged = false;
-                if (requestedStaticPairingCode is not null)
-                {
-                    staticPairingCodeChanged |= requestedStaticPairingCode != _effectiveStaticPairingCode;
-                    _effectiveStaticPairingCode = requestedStaticPairingCode;
-
-                    // The spec's "when the secret is rotated, the client updates the hint
-                    // accordingly": the operator chose this pairing code, so whatever the app declared
-                    // about a printed label no longer describes where to find it, and a server
-                    // still rendering "check the device" would send them to a stale number
-                    // (#129). Applied on every set, not only when the value differs — a server
-                    // re-sending the pairing code it already set is still the operator owning it.
-                    staticPairingCodeChanged |= SetLocationsToOperator(ref _staticPairingCodeLocations);
-                }
-
-                if (requestedStaticPairingCodeEnabled is { } spe)
-                {
-                    staticPairingCodeChanged |= spe != _staticPairingCodeEnabled;
-                    _staticPairingCodeEnabled = spe;
-                }
-
-                bool pairingPskEnabledChanged = false;
-                if (requestedPairingPskEnabled is { } ppe)
-                {
-                    pairingPskEnabledChanged = ppe != _pairingPskEnabled;
-                    _pairingPskEnabled = ppe;
-                }
-
-                // Same rule for the Pairing PSK, and only here: a PSK this client minted for
-                // itself (EnsurePairingPsk/RotatePairingPsk) is still found wherever the app
-                // renders it, so those paths deliberately leave the hint alone.
-                if (newPairingPsk is not null)
-                {
-                    pairingPskEnabledChanged |= SetLocationsToOperator(ref _pairingPskLocations);
-                }
-
-                bool recordModeChanged = false;
-                if (requestedRecordModePskId is not null)
-                {
-                    recordModeChanged = requestedRecordModePskId != _recordModePskId;
-                    _recordModePskId = requestedRecordModePskId;
-                }
-
-                if (unpairedAccessChanged || dynamicPairingCodeChanged || staticPairingCodeChanged || newPairingPsk is not null
-                    || pairingPskEnabledChanged || recordModeChanged)
-                {
-                    // One event per request, after every change is applied, and outside
-                    // _pairingStoreLock: subscribers run arbitrary app code, and raising
-                    // under the lock would let that code block against other threads
-                    // contending for it (same-thread re-entry is safe; cross-thread
-                    // waits under the lock are the deadlock hazard).
-                    PairingConfigChanged?.Invoke(this, CurrentPairingConfig(pairingPskReplaced: newPairingPsk is not null));
-                }
-
-                break;
-            }
-
-            case MessageTypes.ManagementOpenPairingWindow:
-            {
-                // Opens the window in place of the operator gesture. Rejected when no pairing code
-                // method is enabled, since there would be nothing for the window to admit.
-                bool anyPairingCodeMethod = CanRun("static_pin") || CanRun("dynamic_pin");
-                if (!anyPairingCodeMethod || _pairingWindow is null)
-                {
-                    result.Result = "invalid";
-                    break;
-                }
-
-                // A no-op ok when a window is already open.
-                _pairingWindow.Open();
-                break;
-            }
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// A server_id is a base64url Curve25519 public key: exactly 43 characters, no padding,
-    /// decoding to <see cref="NoiseConstants.KeySize"/> bytes. Anything else is rejected on
-    /// ingest so the record store never holds a value that is not a server id.
-    /// </summary>
-    private static bool IsValidServerId(string serverId)
-    {
-        if (serverId.Length != 43)
-            return false;
-
-        try
-        {
-            return Base64UrlText.Decode(serverId).Length == NoiseConstants.KeySize;
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
     }
 
     /// <summary>

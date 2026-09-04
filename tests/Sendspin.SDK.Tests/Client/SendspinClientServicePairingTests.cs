@@ -187,8 +187,7 @@ public class SendspinClientServicePairingTests
         // clear the same way that test isolates SendHandshakeAsync's: no reconnect here —
         // just a fresh handshake hash on the same connection, with no server/hello or any
         // other bounding message in between. pairing.md:63's down-re-handshake to the
-        // Pairing PSK (the scenario ManagementGrantedBeforeAnInBandRekey_IsNotHonouredAfterIt
-        // in SendspinClientServiceManagementTests.cs names explicitly) is exactly this
+        // Pairing PSK is exactly this
         // shape. Unlike the reconnect test, there is no SendHandshakeAsync call at all here,
         // so there is no 30s handshake-timeout wait to avoid; and HandleServerPairFinalize's
         // store write is fully synchronous (no SafeFireAndForget in its path), so the

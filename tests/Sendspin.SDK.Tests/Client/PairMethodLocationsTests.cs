@@ -16,22 +16,16 @@ public class PairMethodLocationsTests
 {
     private static readonly byte[] SessionPsk = Enumerable.Repeat((byte)7, 32).ToArray();
 
-    private static string ToBase64Url(byte[] bytes) =>
-        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-
-    private static ManagementResultPayload LastResult(FakeSendspinConnection connection) =>
-        connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-
     private static PairMethodDescriptor? Descriptor(FakeSendspinConnection connection, string method) =>
         connection.SentMessages.OfType<ClientHelloMessage>().Last()
             .Payload.SupportedPairMethods?.FirstOrDefault(d => d.Method == method);
 
     /// <summary>
-    /// A paired, management-activated client built around the caller's capabilities, with the
+    /// A paired, playback-activated client built around the caller's capabilities, with the
     /// dependencies <c>CanRun</c> needs so the pairing code methods are actually advertised (#132).
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection)
-        CreateManagementClient(ClientCapabilities capabilities)
+        CreatePairedClient(ClientCapabilities capabilities)
     {
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId));
@@ -48,14 +42,14 @@ public class PairMethodLocationsTests
         session.MatchedPsk = new NoisePsk(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId);
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["playback","management"],"active_roles":[]}}""");
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":[]}}""");
         return (client, connection);
     }
 
     [Fact]
     public void DeclaredLocations_AreAdvertisedOnTheirMethods()
     {
-        var (client, connection) = CreateManagementClient(new ClientCapabilities
+        var (client, connection) = CreatePairedClient(new ClientCapabilities
         {
             PairingCodeMethods = { "static_pin" },
             StaticPairingCode = "12345678",
@@ -77,7 +71,7 @@ public class PairMethodLocationsTests
     [Fact]
     public void UndeclaredLocations_OmitTheFieldRatherThanSendingAnEmptyArray()
     {
-        var (client, connection) = CreateManagementClient(new ClientCapabilities
+        var (client, connection) = CreatePairedClient(new ClientCapabilities
         {
             PairingCodeMethods = { "static_pin" },
             StaticPairingCode = "12345678",
@@ -103,7 +97,7 @@ public class PairMethodLocationsTests
     [Fact]
     public void DynamicPairingCode_NeverCarriesALocationsHint()
     {
-        var (client, connection) = CreateManagementClient(new ClientCapabilities
+        var (client, connection) = CreatePairedClient(new ClientCapabilities
         {
             PairingCodeMethods = { "dynamic_pin" },
             StaticPairingCodeLocations = { PairMethodLocations.Device },
@@ -121,66 +115,6 @@ public class PairMethodLocationsTests
     }
 
     /// <summary>
-    /// The spec's "when the secret is rotated, the client updates the hint accordingly".
-    /// </summary>
-    [Fact]
-    public void ServerSettingTheStaticPairingCode_MovesTheHintToOperator()
-    {
-        var capabilities = new ClientCapabilities
-        {
-            PairingCodeMethods = { "static_pin" },
-            StaticPairingCode = "12345678",
-            StaticPairingCodeLocations = { PairMethodLocations.Device },
-        };
-        var (client, connection) = CreateManagementClient(capabilities);
-        using var _c = client;
-        var events = new List<PairingConfigChangedEventArgs>();
-        client.PairingConfigChanged += (_, e) => events.Add(e);
-
-        Assert.Equal(new[] { "device" }, Descriptor(connection, "static_pin")!.Locations);
-
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"87654321"}}}""");
-        Assert.Equal("ok", LastResult(connection).Result);
-
-        // The app is told, so it can persist the hint beside the pairing code it also has to persist.
-        var change = Assert.Single(events);
-        Assert.Equal(new[] { "operator" }, change.StaticPairingCodeLocations);
-        Assert.Equal("87654321", change.StaticPairingCode);
-
-        // And it is in effect: the next handshake advertises the new hint.
-        connection.SimulateReconnected();
-        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
-        Assert.Equal(new[] { "operator" }, Descriptor(connection, "static_pin")!.Locations);
-
-        // The SDK does not write to the capabilities instance the app owns.
-        Assert.Equal(new[] { "device" }, capabilities.StaticPairingCodeLocations);
-    }
-
-    [Fact]
-    public void ServerSettingThePairingPsk_MovesTheHintToOperator()
-    {
-        var capabilities = new ClientCapabilities
-        {
-            PairingPskLocations = { PairMethodLocations.Leaflet },
-        };
-        var (client, connection) = CreateManagementClient(capabilities);
-        using var _c = client;
-        var events = new List<PairingConfigChangedEventArgs>();
-        client.PairingConfigChanged += (_, e) => events.Add(e);
-
-        byte[] newPsk = Enumerable.Repeat((byte)0x5A, 32).ToArray();
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"pairing_psk":{"psk":"NEWPSK"}}}"""
-                .Replace("NEWPSK", ToBase64Url(newPsk)));
-        Assert.Equal("ok", LastResult(connection).Result);
-
-        var change = Assert.Single(events);
-        Assert.Equal(new[] { "operator" }, change.PairingPskLocations);
-        Assert.Equal(new[] { "leaflet" }, capabilities.PairingPskLocations);
-    }
-
-    /// <summary>
     /// The negative half of the rule, and the one worth pinning: a PSK the <em>client</em>
     /// mints is still found wherever the app renders it, so rotating one must not claim the
     /// operator chose it. Without this, "the secret changed" and "the operator set the secret"
@@ -189,7 +123,7 @@ public class PairMethodLocationsTests
     [Fact]
     public void ClientRotatingItsOwnPairingPsk_LeavesTheHintAlone()
     {
-        var (client, connection) = CreateManagementClient(new ClientCapabilities
+        var (client, connection) = CreatePairedClient(new ClientCapabilities
         {
             PairingPskLocations = { PairMethodLocations.Device },
         });

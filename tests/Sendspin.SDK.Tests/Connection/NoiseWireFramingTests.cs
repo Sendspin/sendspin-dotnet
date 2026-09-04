@@ -170,7 +170,7 @@ public class NoiseWireFramingTests
 
     /// <summary>
     /// connection.md § Sentinel Fallback: "The signal alone MUST NOT cause either side to remove
-    /// or replace a record - records change only through pairing or management." Falling back is
+    /// or replace a record - records change only through pairing." Falling back is
     /// a decision about one handshake, so every record the client held before it survives it.
     /// </summary>
     [Fact]
@@ -327,7 +327,7 @@ public class NoiseWireFramingTests
         var (framing, server) = CompleteHandshake();
 
         // Application content whose value happens to equal the literal "noise/handshake"
-        // (e.g. a management record field) and which has no root "type" member at all.
+        // (e.g. a free-text metadata field) and which has no root "type" member at all.
         // Routing by substring sniff sends this into HandleRehandshakeMessage, which does
         // doc.RootElement.GetProperty("type") and throws KeyNotFoundException -- fatal to
         // the connection under the current (pre-fix) code.

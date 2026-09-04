@@ -45,6 +45,6 @@ Use a different Python via `PYTHON=/path/to/python bash tools/interop/run.sh …
 
 ## Not yet covered
 
-PIN pairing (dynamic/static) and the management family have full unit + KAT coverage;
-adding them here is tracked in the interop follow-ups. PIN pairing needs a `PinProvider`
-on the server side to feed the operator-entered PIN.
+Pairing-code pairing (dynamic/static) has full unit + KAT coverage;
+adding it here is tracked in the interop follow-ups. It needs a `PinProvider`
+on the server side to feed the operator-entered pairing code.
