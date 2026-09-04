@@ -128,7 +128,6 @@ public class MessageSerializerTests
             ["server/pair-init"] = typeof(ServerPairInitMessage),
             ["server/pair-auth"] = typeof(ServerPairAuthMessage),
             ["server/pair-confirm"] = typeof(ServerPairConfirmMessage),
-            ["management/result"] = typeof(ManagementResultMessage),
         };
 
         foreach (var (type, expectedType) in testCases)
@@ -173,29 +172,6 @@ public class MessageSerializerTests
         foreach (var (json, expectedType) in testCases)
         {
             Assert.IsType(expectedType, MessageSerializer.Deserialize(json));
-        }
-    }
-
-    [Fact]
-    public void Deserialize_ManagementRequests_ReturnNull_TheOneDocumentedGap()
-    {
-        // The management/* requests are the only Sendspin types the switch deliberately omits:
-        // their payloads differ per operation and the client reads them as raw JSON rather than
-        // through a message class. Pinned so the entry point's doc stays true — if one of these
-        // ever gains a model, this test is what says the doc needs updating too.
-        string[] requests =
-        [
-            MessageTypes.ManagementListRecords,
-            MessageTypes.ManagementAddRecord,
-            MessageTypes.ManagementRemoveRecord,
-            MessageTypes.ManagementGetPairingConfig,
-            MessageTypes.ManagementSetPairingConfig,
-            MessageTypes.ManagementOpenPairingWindow,
-        ];
-
-        foreach (var type in requests)
-        {
-            Assert.Null(MessageSerializer.Deserialize($$"""{ "type": "{{type}}", "payload": {} }"""));
         }
     }
 

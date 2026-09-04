@@ -66,8 +66,7 @@ public sealed record SendspinClientOptions
     /// <see cref="ClientCapabilities.PairingCodeMethods"/> is non-empty: without a store the
     /// counter cannot survive a restart, so a method could never escalate to gesture-gating.
     /// Rather than grant unlimited, ungated attempts, the SDK withholds the method — it is
-    /// absent from <c>supported_pair_methods</c> in <c>client/hello</c>, reported
-    /// <c>enabled: false</c> by <c>management/get-pairing-config</c>, and any activation naming
+    /// absent from <c>supported_pair_methods</c> in <c>client/hello</c>, and any activation naming
     /// it is answered with <c>pair/abort</c> <c>method_not_supported</c>.
     /// <see cref="Connection.Noise.Pairing.FilePairingCodeLockoutStore"/> is provided, and takes an
     /// optional <c>ILogger</c> so a corrupt counter file is not discarded silently.

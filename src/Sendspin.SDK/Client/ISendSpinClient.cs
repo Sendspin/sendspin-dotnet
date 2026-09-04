@@ -307,10 +307,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Returns this client's pairing token, generating and persisting a Pairing PSK if none is
     /// stored. Idempotent: repeated calls return the same token until the PSK is replaced by
-    /// <see cref="RotatePairingPsk"/>, by a server's <c>management/set-pairing-config</c>, or
-    /// by a server removing the Pairing record via <c>management/remove-record</c>. Each of
-    /// those raises <see cref="PairingConfigChanged"/> with
-    /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> set.
+    /// <see cref="RotatePairingPsk"/>.
     /// Hand the string to your UI to render as a QR code or to display for pasting.
     /// </summary>
     /// <exception cref="InvalidOperationException">
@@ -493,31 +490,6 @@ public interface ISendspinClient : IAsyncDisposable
     /// passed through for the consumer to clear itself.
     /// </summary>
     event EventHandler<StreamClearPayload>? StreamClearReceived;
-
-    /// <summary>
-    /// Raised when a server changes this client's pairing configuration via
-    /// <c>management/set-pairing-config</c> — any pairing method enabled, disabled, or
-    /// reconfigured (min pairing code length, static pairing code, record-mode fallback), unpaired access
-    /// changed, the stored Pairing PSK replaced, or any combination of these — or removes
-    /// the stored Pairing record via <c>management/remove-record</c>. The SDK applies the
-    /// change to its own effective state — never to the <see cref="ClientCapabilities"/>
-    /// instance the app owns — so this state lives in memory only. Every setting the event
-    /// reports has a <see cref="ClientCapabilities"/> property to reapply on the next startup:
-    /// <see cref="ClientCapabilities.UnpairedAccessEnabled"/>,
-    /// <see cref="ClientCapabilities.MinPairingCodeLength"/>, <see cref="ClientCapabilities.StaticPairingCode"/>,
-    /// <see cref="ClientCapabilities.PairingPskEnabled"/>,
-    /// <see cref="ClientCapabilities.DynamicPairingCodeEnabled"/>,
-    /// <see cref="ClientCapabilities.StaticPairingCodeEnabled"/> and
-    /// <see cref="ClientCapabilities.RecordModePskId"/>. Persist them and reapply them at
-    /// construction, and the server's change survives a restart.
-    /// <see cref="PairingConfigChangedEventArgs.PairingPskReplaced"/> is not one of those
-    /// settings — it is a staleness signal, not a value to reapply. When it is true, any
-    /// token previously returned by <see cref="EnsurePairingPsk"/> has stopped being
-    /// current; the replaced Pairing PSK itself round-trips through
-    /// <see cref="Sendspin.SDK.Connection.Noise.IPairingRecordStore"/>, not through
-    /// <see cref="ClientCapabilities"/>.
-    /// </summary>
-    event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
 
     /// <summary>
     /// Raised when a Pairing PSK or pairing code exchange completes, with the paired

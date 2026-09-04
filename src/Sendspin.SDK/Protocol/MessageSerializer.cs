@@ -56,9 +56,7 @@ public static class MessageSerializer
     /// <returns>
     /// The message, or <see langword="null"/> when the SDK models no message for that
     /// <c>type</c> — a well-formed message the caller may ignore. Every type in
-    /// <see cref="MessageTypes"/> maps to a model here except the six <c>management/*</c>
-    /// requests, whose payloads differ per operation and which the client reads as raw JSON
-    /// rather than through a message class. Before #207 the switch also dropped
+    /// <see cref="MessageTypes"/> maps to a model here. Before #207 the switch dropped
     /// <c>server/state</c>, <c>server/unpair</c> and every client-authored type, so a consumer
     /// dispatching on this entry point silently lost them with nothing to distinguish that from
     /// a genuinely unknown message.
@@ -84,9 +82,7 @@ public static class MessageSerializer
     /// </summary>
     /// <remarks>
     /// Grouped and ordered to match <see cref="MessageTypes"/>, so "is a type missing an arm?"
-    /// is a side-by-side read of the two files rather than a search. The six
-    /// <c>management/*</c> requests are the only deliberate omission — see
-    /// <see cref="Deserialize(string)"/>.
+    /// is a side-by-side read of the two files rather than a search.
     /// </remarks>
     private static IMessage? DeserializeCore(string json)
     {
@@ -111,8 +107,7 @@ public static class MessageSerializer
             MessageTypes.ServerPairConfirm => JsonSerializer.Deserialize(json, s_context.ServerPairConfirmMessage),
             MessageTypes.ClientPairConfirm => JsonSerializer.Deserialize(json, s_context.ClientPairConfirmMessage),
 
-            // Management (the management/* requests themselves are read as raw JSON, not modelled)
-            MessageTypes.ManagementResult => JsonSerializer.Deserialize(json, s_context.ManagementResultMessage),
+            // Unpairing
             MessageTypes.ServerUnpair => JsonSerializer.Deserialize(json, s_context.ServerUnpairMessage),
 
             // Clock synchronization

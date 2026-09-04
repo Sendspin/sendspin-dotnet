@@ -204,7 +204,7 @@ public class SendspinClientServiceEncryptedFlowTests
     }
 
     [Fact]
-    public void SentinelPsk_ManagementActivity_ClosesUnauthorized()
+    public void SentinelPsk_UnknownActivity_ClosesUnauthorized()
     {
         var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
@@ -217,13 +217,14 @@ public class SendspinClientServiceEncryptedFlowTests
             {"type":"server/activate","payload":{"activities":["management"],"active_roles":[]}}
             """);
 
-        // Management is never admissible on the sentinel PSK, regardless of unpaired access.
+        // 'management' is not an activity any more (#183), and an activity outside the
+        // vocabulary is never admissible, regardless of unpaired access.
         Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
         Assert.Equal("unauthorized", connection.LastDisconnectReason);
     }
 
     [Fact]
-    public void LongTermPsk_PlaybackAndManagement_IsAdmissible()
+    public void LongTermPsk_Playback_IsAdmissible()
     {
         var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
         using var _c = client;
@@ -233,7 +234,7 @@ public class SendspinClientServiceEncryptedFlowTests
             {"type":"server/hello","payload":{"name":"srv"}}
             """);
         connection.RaiseTextMessageReceived("""
-            {"type":"server/activate","payload":{"activities":["playback","management"],"active_roles":["player@v1"]}}
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
             """);
 
         Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Connected, connection.State);
