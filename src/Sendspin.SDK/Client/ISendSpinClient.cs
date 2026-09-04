@@ -163,44 +163,73 @@ public interface ISendspinClient : IAsyncDisposable
     Task SeekRelativeAsync(int offsetMs);
 
     /// <summary>
-    /// Requests a different player audio format via <c>stream/request-format</c> — use this to adapt
-    /// to changing network or CPU conditions (e.g. downgrade codec/sample rate). Omitted parameters
-    /// are left to the server, which responds with a <c>stream/start</c> for the player role.
+    /// Sets the audio format this player prefers and reports it in the player's
+    /// <c>client/state</c> object. Use it to adapt to changing network or CPU conditions (e.g.
+    /// downgrade codec or sample rate).
     /// </summary>
-    /// <param name="codec">Requested codec ("opus", "flac", "pcm"), or null to leave unchanged.</param>
-    /// <param name="sampleRate">Requested sample rate in Hz, or null to leave unchanged.</param>
-    /// <param name="channels">Requested channel count, or null to leave unchanged.</param>
-    /// <param name="bitDepth">Requested bit depth, or null to leave unchanged.</param>
-    Task RequestPlayerFormatAsync(string? codec = null, int? sampleRate = null, int? channels = null, int? bitDepth = null);
+    /// <param name="format">
+    /// The preferred format, which MUST be one of the entries in
+    /// <see cref="ClientCapabilities.AudioFormats"/> — the spec closed the previously undefined
+    /// partial-request case, so a preference is a whole <c>supported_formats</c> entry or nothing.
+    /// Pass null to clear the preference and let the server select by priority order.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// Replaces the <c>stream/request-format</c> message, which spec PR #195 removed: the "request"
+    /// was a request in name only (a decline was invisible), so the preference became state. When
+    /// it changes while a player stream is active the server re-derives the format and sends a new
+    /// <c>stream/start</c> if it changed; with no active stream it applies to the next one. The
+    /// server MAY still deviate, for example to match a track's native sample rate.
+    /// </para>
+    /// <para>
+    /// A format that matches no <see cref="ClientCapabilities.AudioFormats"/> entry is rejected
+    /// rather than sent: the server would be entitled to close the connection over it.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">The format is not one of the client's supported formats.</exception>
+    Task SetPlayerFormatPreferenceAsync(AudioFormat? format);
 
     /// <summary>
-    /// Requests a format/source change for a single artwork channel via <c>stream/request-format</c>.
-    /// Omitted parameters are left unchanged by the server. Set <paramref name="source"/> to
-    /// <c>"none"</c> to disable the channel, or back to <c>"album"</c>/<c>"artist"</c> to re-enable it,
-    /// without reconnecting. The server responds with a <c>stream/start</c> for the artwork role.
+    /// Reconfigures a single artwork channel and reports the artwork role's full
+    /// <c>client/state</c> object. Set <paramref name="source"/> to <c>"none"</c> to disable the
+    /// channel, or back to <c>"album"</c>/<c>"artist"</c> to re-enable it, without reconnecting.
     /// </summary>
     /// <param name="channel">Artwork channel number (0-3).</param>
     /// <param name="source">Artwork source ("album", "artist", "none"), or null to leave unchanged.</param>
-    /// <param name="format">Image format ("jpeg", "png", "bmp"), or null to leave unchanged.</param>
-    /// <param name="mediaWidth">Maximum width in pixels, or null to leave unchanged.</param>
-    /// <param name="mediaHeight">Maximum height in pixels, or null to leave unchanged.</param>
-    Task RequestArtworkFormatAsync(int channel, string? source = null, string? format = null, int? mediaWidth = null, int? mediaHeight = null);
+    /// <param name="format">Image format ("jpeg" or "png"), or null to leave unchanged.</param>
+    /// <param name="width">Delivered image width in pixels, or null to leave unchanged.</param>
+    /// <param name="height">Delivered image height in pixels, or null to leave unchanged.</param>
+    /// <remarks>
+    /// The change is held by this client and re-reported by its own reconnects. It is
+    /// <em>not</em> written back to <see cref="ClientCapabilities.ArtworkChannels"/>: that object
+    /// belongs to the app, and a host shares one instance across every connection it accepts, so
+    /// a sibling connection keeps whatever configuration it started from. Channels between the
+    /// last configured one and <paramref name="channel"/> are filled in as <c>source: "none"</c>,
+    /// since the wire array is positional from channel 0; a filler keeps the default format and
+    /// size, so enabling it later with a source alone still declares them. The server answers a
+    /// change on an active artwork stream with a new <c>stream/start</c> followed by fresh images
+    /// for the channels that changed.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The channel is outside 0-3.</exception>
+    Task SetArtworkChannelAsync(
+        int channel, string? source = null, string? format = null, int? width = null, int? height = null);
 
     /// <summary>
-    /// Renegotiates the visualizer stream via <c>stream/request-format</c> (the <c>visualizer@v1</c>
-    /// role). Omitted parameters keep their prior value. The server responds with a
-    /// <c>stream/start</c> carrying the new visualizer config.
+    /// Sets the visualizer feature types, frame-rate cap and spectrum layout, and reports the
+    /// visualizer role's full <c>client/state</c> object.
     /// </summary>
-    /// <param name="types">Requested feature types (subset of loudness/f_peak/spectrum/beat/peak), or null to leave unchanged.</param>
-    /// <param name="rateMax">Requested maximum frame rate, or null to leave unchanged.</param>
-    /// <param name="spectrum">Requested spectrum configuration, or null to leave unchanged.</param>
+    /// <param name="types">Feature types wanted (subset of loudness/f_peak/spectrum/beat/peak).</param>
+    /// <param name="rateMax">Maximum periodic frames per second.</param>
+    /// <param name="spectrum">Spectrum configuration; required when <paramref name="types"/> includes 'spectrum'.</param>
     /// <remarks>
-    /// Buffer capacity is not renegotiable: it is a <c>visualizer@v1_support</c> field of
-    /// <c>client/hello</c>, and the spec's <c>stream/request-format</c> visualizer object carries
-    /// only types, rate_max and spectrum. Set it via
-    /// <see cref="ClientCapabilities.VisualizerSupport"/> before connecting.
+    /// The change is held by this client and re-reported by its own reconnects, rather than
+    /// written back to <see cref="ClientCapabilities.VisualizerRoleSupport"/>, which the app owns
+    /// and a host shares across connections. Buffer capacity is not part of this: it is a
+    /// constant of the client, advertised once in <c>client/hello</c>, and the spec's visualizer
+    /// state object is exactly types/rate_max/spectrum.
     /// </remarks>
-    Task RequestVisualizerFormatAsync(List<string>? types = null, int? rateMax = null, VisualizerSpectrum? spectrum = null);
+    /// <exception cref="ArgumentException">'spectrum' is requested without a spectrum configuration.</exception>
+    Task SetVisualizerConfigurationAsync(List<string> types, int rateMax, VisualizerSpectrum? spectrum = null);
 
     /// <summary>
     /// Sends the current player state (volume, muted) to the server.

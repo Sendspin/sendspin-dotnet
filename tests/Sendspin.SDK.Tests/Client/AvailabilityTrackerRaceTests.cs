@@ -31,7 +31,7 @@ public class AvailabilityTrackerRaceTests
 
     private static IReadOnlyList<bool?> AvailableValuesSent(FakeSendspinConnection connection) =>
         connection.SnapshotSentMessages().OfType<ClientStateMessage>()
-            .Select(m => m.Payload.Available).ToList();
+            .Select(m => (bool?)m.Payload.Available).ToList();
 
     [Fact]
     public async Task PublishWhileAnotherIsInFlight_IsNotSuppressedByTheStaleTracker()

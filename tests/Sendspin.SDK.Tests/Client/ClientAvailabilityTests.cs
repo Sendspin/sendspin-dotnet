@@ -31,7 +31,7 @@ public class ClientAvailabilityTests
     }
 
     private static IReadOnlyList<bool?> AvailableValuesSent(FakeSendspinConnection connection) =>
-        connection.SentMessages.OfType<ClientStateMessage>().Select(m => m.Payload.Available).ToList();
+        connection.SentMessages.OfType<ClientStateMessage>().Select(m => (bool?)m.Payload.Available).ToList();
 
     [Fact]
     public async Task EnterThenExitExternalSource_SendsFalseThenTrue()
@@ -54,10 +54,13 @@ public class ClientAvailabilityTests
         pipe.RaiseError();
         pipe.SetState(AudioPipelineState.Playing);
 
-        // Filter out the player-state ack the Playing recovery also sends (Available: null) —
-        // only the availability deltas matter here.
-        var availabilityDeltas = AvailableValuesSent(connection).Where(a => a.HasValue).ToList();
-        Assert.Equal(new bool?[] { false, true }, availabilityDeltas);
+        // Every client/state carries available since spec PR #175, and the Playing recovery also
+        // sends a player-state acknowledgement — so collapse consecutive repeats rather than
+        // filtering on a null that no longer occurs. What matters is the sequence of values the
+        // server is told, not how many messages carried them.
+        var transitions = AvailableValuesSent(connection)
+            .Aggregate(new List<bool?>(), (acc, a) => { if (acc.Count == 0 || acc[^1] != a) acc.Add(a); return acc; });
+        Assert.Equal(new bool?[] { false, true }, transitions);
     }
 
     [Fact]
@@ -122,8 +125,12 @@ public class ClientAvailabilityTests
     }
 
     [Fact]
-    public async Task VolumeChangeWhileExternalSource_DeltaOmitsAvailable()
+    public async Task VolumeChangeWhileExternalSource_ReportsTheComposedAvailability_NotTrue()
     {
+        // Since spec PR #175 every client/state carries available, so a volume change can no
+        // longer stay silent about it — but it must report the composed value. Asserting true
+        // here would be the §4 defect in its new form: a volume change silently telling the
+        // server the output is free while an external source holds it.
         var (client, connection, _) = SyncedClient();
         using var _c = client;
 
@@ -132,6 +139,7 @@ public class ClientAvailabilityTests
 
         var last = connection.SentMessages.OfType<ClientStateMessage>().Last();
         Assert.NotNull(last.Payload.Player);
-        Assert.Null(last.Payload.Available);
+        Assert.Equal(42, last.Payload.Player.Volume);
+        Assert.False(last.Payload.Available);
     }
 }

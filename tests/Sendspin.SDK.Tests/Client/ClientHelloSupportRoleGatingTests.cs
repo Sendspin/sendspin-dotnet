@@ -23,8 +23,9 @@ public class ClientHelloSupportRoleGatingTests
                 Capabilities = new ClientCapabilities
                 {
                     Roles = roles.ToList(),
-                    VisualizerSupport = new VisualizerSupport
+                    VisualizerRoleSupport = new VisualizerRoleSupport
                     {
+                        BufferCapacity = 65536,
                         Types = new List<string> { VisualizerTypes.Beat },
                     },
                 },
@@ -44,12 +45,14 @@ public class ClientHelloSupportRoleGatingTests
     }
 
     [Fact]
-    public void ArtworkSupport_OmittedWhenArtworkRoleIsNotAdvertised()
+    public void ArtworkSupport_NoLongerExists()
     {
-        // ClientCapabilities documents "remove artwork@v1 from Roles to opt out of artwork
-        // entirely", so this is the shape our own guidance produces.
-        Assert.Null(HelloFor("player@v1").ArtworkV1Support);
-        Assert.NotNull(HelloFor("player@v1", "artwork@v1").ArtworkV1Support);
+        // Spec PR #195 deleted artwork@v1_support outright: the channel declaration is dynamic
+        // configuration and lives in the client/state artwork object instead.
+        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(
+            new ClientHelloMessage { Payload = HelloFor("player@v1", "artwork@v1") });
+
+        Assert.DoesNotContain("artwork@v1_support", json);
     }
 
     [Fact]
@@ -86,7 +89,6 @@ public class ClientHelloSupportRoleGatingTests
             new (string Role, object? Support)[]
             {
                 ("player@v1", hello.PlayerV1Support),
-                ("artwork@v1", hello.ArtworkV1Support),
                 ("visualizer@v1", hello.VisualizerV1Support),
                 ("source@v1", hello.SourceV1Support),
             },

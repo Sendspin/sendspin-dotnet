@@ -5,8 +5,9 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Coverage for the artwork role: multi-channel hello advertisement, per-channel binary dispatch
-/// (image + clear) with channel/timestamp, and the stream/request-format artwork send path.
+/// Coverage for the artwork role: multi-channel client/state declaration, per-channel binary
+/// dispatch (image + clear) with channel/timestamp, and the dynamic channel reconfiguration path
+/// that spec PR #195 moved out of stream/request-format.
 /// </summary>
 public class SendspinClientServiceArtworkTests
 {
@@ -19,74 +20,114 @@ public class SendspinClientServiceArtworkTests
         return buf;
     }
 
-    [Fact]
-    public void ClientHello_AdvertisesAllConfiguredArtworkChannels()
+    private static List<ArtworkChannelState> StateChannels(FakeSendspinConnection connection)
+    {
+        var state = connection.SentMessages.OfType<ClientStateMessage>().Last();
+        Assert.NotNull(state.Payload.Artwork);
+        return state.Payload.Artwork.Channels;
+    }
+
+    /// <summary>
+    /// An artwork-only client. Deliberately without the player role: a player defers its initial
+    /// client/state until the clock converges, which would leave these tests with no state
+    /// message to read rather than with the artwork object they are about.
+    /// </summary>
+    private static (SendspinClientService Client, FakeSendspinConnection Connection) ArtworkClient(
+        List<ArtworkChannelState>? channels = null)
     {
         var (client, connection, _) = TestClient.Create(configure: options =>
             options with
             {
-                Capabilities = new ClientCapabilities
-                {
-                    ArtworkChannels = new List<ArtworkChannelSpec>
-                    {
-                        new() { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = 512, MediaHeight = 512 },
-                        new() { Source = ArtworkSources.Artist, Format = "png", MediaWidth = 256, MediaHeight = 256 },
-                    },
-                },
+                Capabilities = channels is null
+                    ? new ClientCapabilities { Roles = new List<string> { "artwork@v1" } }
+                    : new ClientCapabilities { Roles = new List<string> { "artwork@v1" }, ArtworkChannels = channels },
             });
+        return (client, connection);
+    }
+
+    [Fact]
+    public void ClientState_DeclaresAllConfiguredArtworkChannels()
+    {
+        // Spec PR #195 deleted artwork@v1_support: the channel declaration lives in the
+        // client/state artwork object, and the wire names are width/height, not media_*.
+        var (client, connection) = ArtworkClient(new List<ArtworkChannelState>
+        {
+            new() { Source = ArtworkSources.Album, Format = "jpeg", Width = 512, Height = 512 },
+            new() { Source = ArtworkSources.Artist, Format = "png", Width = 256, Height = 256 },
+        });
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "artwork@v1");
 
-        var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
-        var channels = hello.Payload.ArtworkV1Support?.Channels;
-        Assert.NotNull(channels);
+        var channels = StateChannels(connection);
         Assert.Equal(2, channels.Count);
         Assert.Equal(ArtworkSources.Artist, channels[1].Source);
         Assert.Equal("png", channels[1].Format);
-        Assert.Equal(256, channels[1].MediaWidth);
+        Assert.Equal(256, channels[1].Width);
+
+        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(
+            connection.SentMessages.OfType<ClientStateMessage>().Last());
+        Assert.Contains("\"width\":512", json);
+        Assert.DoesNotContain("media_width", json);
     }
 
     [Fact]
-    public void ClientHello_DefaultCapabilities_AdvertisesSingleAlbumChannel()
+    public void ClientHello_NoLongerCarriesArtworkSupport()
     {
-        var (client, connection, _) = TestClient.Create(); // default capabilities
+        var (client, connection) = ArtworkClient();
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "artwork@v1");
 
-        var channels = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.ArtworkV1Support?.Channels;
-        Assert.NotNull(channels);
-        var only = Assert.Single(channels);
+        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(
+            connection.SentMessages.OfType<ClientHelloMessage>().Single());
+        Assert.DoesNotContain("artwork@v1_support", json);
+    }
+
+    [Fact]
+    public void ClientState_DefaultCapabilities_DeclaresSingleAlbumChannel()
+    {
+        var (client, connection) = ArtworkClient(); // default channel configuration
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+
+        var only = Assert.Single(StateChannels(connection));
         Assert.Equal(ArtworkSources.Album, only.Source);
         Assert.Equal("jpeg", only.Format);
-        Assert.Equal(512, only.MediaWidth);
-        Assert.Equal(512, only.MediaHeight);
+        Assert.Equal(512, only.Width);
+        Assert.Equal(512, only.Height);
     }
 
     [Fact]
-    public void ClientHello_CapsAdvertisedChannelsAtFour()
+    public void ClientState_CapsDeclaredChannelsAtFour()
     {
-        var (client, connection, _) = TestClient.Create(configure: options =>
-            options with
-            {
-                Capabilities = new ClientCapabilities
-                {
-                    ArtworkChannels = Enumerable.Range(0, 6)
-                        .Select(i => new ArtworkChannelSpec { Source = ArtworkSources.Album, Format = "jpeg", MediaWidth = i, MediaHeight = i })
-                        .ToList(),
-                },
-            });
+        // An array longer than four is a protocol error the server closes the connection over,
+        // so an over-configured client is truncated rather than allowed to trip it.
+        var (client, connection) = ArtworkClient(Enumerable.Range(0, 6)
+            .Select(i => new ArtworkChannelState { Source = ArtworkSources.Album, Format = "jpeg", Width = i, Height = i })
+            .ToList());
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "artwork@v1");
 
-        var channels = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.ArtworkV1Support?.Channels;
-        Assert.NotNull(channels);
+        var channels = StateChannels(connection);
         Assert.Equal(4, channels.Count);
         // The first four are kept, in order.
-        Assert.Equal(0, channels[0].MediaWidth);
-        Assert.Equal(3, channels[3].MediaWidth);
+        Assert.Equal(0, channels[0].Width);
+        Assert.Equal(3, channels[3].Width);
+    }
+
+    [Fact]
+    public void ClientState_OmitsArtworkObject_WhenArtworkIsNotAnActiveRole()
+    {
+        var (client, connection) = ArtworkClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "metadata@v1");
+
+        var state = connection.SentMessages.OfType<ClientStateMessage>().Last();
+        Assert.Null(state.Payload.Artwork);
     }
 
     [Theory]
@@ -156,37 +197,134 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
-    public async Task RequestArtworkFormatAsync_SendsArtworkRequestFormat()
+    public async Task SetArtworkChannelAsync_ReannouncesTheFullArtworkObject()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = ArtworkClient();
         using var _c = client;
 
-        await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.None, format: "png", mediaWidth: 128, mediaHeight: 128);
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+        int before = connection.SentMessages.OfType<ClientStateMessage>().Count();
 
-        var msg = Assert.IsType<StreamRequestFormatMessage>(connection.SentMessages.Single());
-        var artwork = msg.Payload.Artwork;
-        Assert.NotNull(artwork);
-        Assert.Equal(1, artwork.Channel);
-        Assert.Equal(ArtworkSources.None, artwork.Source);
-        Assert.Equal("png", artwork.Format);
-        Assert.Equal(128, artwork.MediaWidth);
-        Assert.Equal(128, artwork.MediaHeight);
+        await client.SetArtworkChannelAsync(channel: 1, source: ArtworkSources.Artist, format: "png", width: 128, height: 128);
+
+        var states = connection.SentMessages.OfType<ClientStateMessage>().ToList();
+        Assert.Equal(before + 1, states.Count);
+
+        var channels = states[^1].Payload.Artwork!.Channels;
+        Assert.Equal(2, channels.Count);
+        // Channel 0 is re-sent unchanged: the object is full state, not a per-channel delta.
+        Assert.Equal(ArtworkSources.Album, channels[0].Source);
+        Assert.Equal(ArtworkSources.Artist, channels[1].Source);
+        Assert.Equal("png", channels[1].Format);
+        Assert.Equal(128, channels[1].Width);
+        Assert.Equal(128, channels[1].Height);
     }
 
     [Fact]
-    public async Task RequestArtworkFormatAsync_OmitsUnsetFields()
+    public async Task SetArtworkChannelAsync_DisabledChannel_CarriesSourceAlone()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = ArtworkClient();
         using var _c = client;
 
-        await client.RequestArtworkFormatAsync(channel: 0, source: ArtworkSources.None);
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+        await client.SetArtworkChannelAsync(channel: 0, source: ArtworkSources.None);
 
-        var msg = Assert.IsType<StreamRequestFormatMessage>(connection.SentMessages.Single());
-        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(msg);
-        Assert.Contains("\"channel\":0", json);
+        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(
+            connection.SentMessages.OfType<ClientStateMessage>().Last());
         Assert.Contains("\"source\":\"none\"", json);
-        // Note: "format" also appears in the type "stream/request-format", so match the JSON key.
+        // format/width/height are required only when the source is not 'none'; sending them for
+        // a disabled channel declares a size the client is not asking for.
         Assert.DoesNotContain("\"format\":", json);
-        Assert.DoesNotContain("\"media_width\":", json);
+        Assert.DoesNotContain("\"width\":", json);
+        Assert.DoesNotContain("\"height\":", json);
+    }
+
+    [Fact]
+    public async Task SetArtworkChannelAsync_FillsTheGapWithDisabledChannels()
+    {
+        // The wire array is positional from channel 0, so configuring channel 2 first cannot
+        // silently renumber it to 1.
+        var (client, connection) = ArtworkClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+        await client.SetArtworkChannelAsync(channel: 2, source: ArtworkSources.Artist, format: "png", width: 64, height: 64);
+
+        var channels = StateChannels(connection);
+        Assert.Equal(3, channels.Count);
+        Assert.Equal(ArtworkSources.None, channels[1].Source);
+        Assert.Equal(ArtworkSources.Artist, channels[2].Source);
+    }
+
+    [Fact]
+    public async Task SetArtworkChannelAsync_EnablingAGapFilledChannel_CarriesFormatAndSize()
+    {
+        // The documented way to turn a channel on is a source alone. The gap filler the SDK
+        // inserts for the skipped channel used to null format/width/height, so this call put
+        // source=album on the wire with the three fields the spec requires of an active channel
+        // missing — a protocol error from an API call that looks entirely reasonable.
+        var (client, connection) = ArtworkClient(); // the single default album channel
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+        await client.SetArtworkChannelAsync(channel: 1, source: ArtworkSources.Album);
+
+        var channels = StateChannels(connection);
+        Assert.Equal(2, channels.Count);
+
+        var enabled = channels[1];
+        Assert.Equal(ArtworkSources.Album, enabled.Source);
+        Assert.Equal("jpeg", enabled.Format);
+        Assert.Equal(512, enabled.Width);
+        Assert.Equal(512, enabled.Height);
+
+        // ...and the same on the wire, which is what the server reads.
+        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(
+            connection.SentMessages.OfType<ClientStateMessage>().Last());
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var wire = doc.RootElement.GetProperty("payload").GetProperty("artwork")
+            .GetProperty("channels")[1];
+
+        Assert.Equal(ArtworkSources.Album, wire.GetProperty("source").GetString());
+        Assert.Equal("jpeg", wire.GetProperty("format").GetString());
+        Assert.Equal(512, wire.GetProperty("width").GetInt32());
+        Assert.Equal(512, wire.GetProperty("height").GetInt32());
+    }
+
+    [Fact]
+    public async Task GapFiller_StaysSourceOnlyOnTheWire_WhileItIsDisabled()
+    {
+        // The counterpart of the test above: a filler carries the defaults so it can be enabled
+        // with a source alone, but ForWire must still omit them for as long as it is 'none'.
+        var (client, connection) = ArtworkClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+        await client.SetArtworkChannelAsync(channel: 2, source: ArtworkSources.Artist, format: "png", width: 64, height: 64);
+
+        var json = Sendspin.SDK.Protocol.MessageSerializer.Serialize(
+            connection.SentMessages.OfType<ClientStateMessage>().Last());
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        var filler = doc.RootElement.GetProperty("payload").GetProperty("artwork")
+            .GetProperty("channels")[1];
+
+        Assert.Equal(ArtworkSources.None, filler.GetProperty("source").GetString());
+        Assert.False(filler.TryGetProperty("format", out _));
+        Assert.False(filler.TryGetProperty("width", out _));
+        Assert.False(filler.TryGetProperty("height", out _));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(4)]
+    public async Task SetArtworkChannelAsync_RejectsChannelOutsideZeroToThree(int channel)
+    {
+        var (client, connection) = ArtworkClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => client.SetArtworkChannelAsync(channel, source: ArtworkSources.Album, format: "jpeg", width: 64, height: 64));
     }
 }
