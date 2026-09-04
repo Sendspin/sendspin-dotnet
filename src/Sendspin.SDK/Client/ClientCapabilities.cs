@@ -77,29 +77,44 @@ public sealed class ClientCapabilities
     }
 
     /// <summary>
-    /// Artwork channels this client can display, advertised in <c>client/hello</c>. The Sendspin
-    /// spec allows 1-4 independent channels (array index = channel number), each with its own
-    /// source, format, and maximum dimensions. The default is a single album/jpeg channel at
-    /// 512x512. Set a channel's <see cref="ArtworkChannelSpec.Source"/> to <c>"none"</c> to advertise
-    /// a channel the client does not currently want streamed. Entries beyond the first four are
-    /// ignored. Remove <c>"artwork@v1"</c> from <see cref="Roles"/> to opt out of artwork entirely.
+    /// Artwork channels this client wants streamed, reported in the <c>client/state</c> artwork
+    /// object. The Sendspin spec allows 1-4 independent channels (array index = channel number),
+    /// each with its own source, format, and delivered dimensions. The default is a single
+    /// album/jpeg channel at 512x512. Set a channel's <see cref="ArtworkChannelState.Source"/> to
+    /// <c>"none"</c> to declare a channel the client does not currently want streamed. Entries
+    /// beyond the first four are ignored. Remove <c>"artwork@v1"</c> from <see cref="Roles"/> to
+    /// opt out of artwork entirely.
     /// </summary>
     /// <remarks>
-    /// Deliberately reuses the wire type <see cref="ArtworkChannelSpec"/> as config: the capability
-    /// and hello shapes are identical today. Introduce a separate config type only if they diverge.
+    /// This is the connection's starting configuration only. Spec PR #195 made the channel
+    /// declaration dynamic state rather than a <c>client/hello</c> capability, so change it at
+    /// runtime through <see cref="ISendspinClient.SetArtworkChannelAsync"/> — which reconfigures
+    /// the client's own copy of this list and re-reports the full client state — rather than by
+    /// mutating it directly. The SDK never writes back here: each client copies the list at
+    /// construction, so a host sharing one <see cref="ClientCapabilities"/> across connections
+    /// does not let one connection's reconfiguration reach another.
     /// </remarks>
-    public List<ArtworkChannelSpec> ArtworkChannels { get; set; } = new()
+    public List<ArtworkChannelState> ArtworkChannels { get; set; } = new()
     {
-        new ArtworkChannelSpec { Source = "album", Format = "jpeg", MediaWidth = 512, MediaHeight = 512 }
+        new ArtworkChannelState { Source = "album", Format = "jpeg", Width = 512, Height = 512 }
     };
 
     /// <summary>
-    /// Visualizer support advertised in <c>client/hello</c> (types, rate, spectrum config). Opt-in:
-    /// null by default, and the <c>visualizer@v1</c> role is not advertised unless this is set. To
-    /// enable, set this AND add <c>"visualizer@v1"</c> to <see cref="Roles"/>. The client must be
-    /// able to render the feature types it lists; subscribe to visualization frames to consume them.
+    /// Visualizer configuration: buffer capacity for <c>client/hello</c>, plus the types, frame
+    /// rate and spectrum layout reported in <c>client/state</c>. Opt-in: null by default, and the
+    /// <c>visualizer@v1</c> role is not advertised unless this is set. To enable, set this AND add
+    /// <c>"visualizer@v1"</c> to <see cref="Roles"/>. The client must be able to render the
+    /// feature types it lists; subscribe to visualization frames to consume them.
     /// </summary>
-    public VisualizerSupport? VisualizerSupport { get; set; }
+    /// <remarks>
+    /// Named for its type, not for either wire object, and for the same reason as
+    /// <see cref="SourceRoleSupport"/>: a property called <c>VisualizerSupport</c> bound
+    /// <see cref="Protocol.Messages.VisualizerSupport"/> — now the hello object alone — when both
+    /// namespaces were imported. Change the dynamic half at runtime through
+    /// <see cref="ISendspinClient.SetVisualizerConfigurationAsync"/>, which reconfigures the
+    /// client's own copy of this object rather than writing back here.
+    /// </remarks>
+    public VisualizerRoleSupport? VisualizerRoleSupport { get; set; }
 
     /// <summary>
     /// Product name reported to the server (e.g., "Sendspin Windows Client", "My Custom Player").

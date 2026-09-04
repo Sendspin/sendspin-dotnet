@@ -8,9 +8,10 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Client-level coverage for the visualizer role: hello advertisement, stream/start config caching,
-/// binary frame dispatch through VisualizationReceived (incl. spectrum bin-count validation), and
-/// the request-format send path.
+/// Client-level coverage for the visualizer role: hello buffer_capacity advertisement, the
+/// client/state visualizer object that spec PR #195 moved types/rate_max/spectrum into,
+/// stream/start config caching, binary frame dispatch through VisualizationReceived (incl.
+/// spectrum bin-count validation), and the reconfiguration send path.
 /// </summary>
 public class SendspinClientServiceVisualizerTests
 {
@@ -47,7 +48,7 @@ public class SendspinClientServiceVisualizerTests
                 Capabilities = new ClientCapabilities
                 {
                     Roles = new List<string> { "visualizer@v1" },
-                    VisualizerSupport = new VisualizerSupport
+                    VisualizerRoleSupport = new VisualizerRoleSupport
                     {
                         BufferCapacity = 65536,
                         RateMax = 30,
@@ -60,19 +61,45 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
-    public void ClientHello_AdvertisesVisualizerSupport()
+    public void ClientHello_AdvertisesBufferCapacityOnly()
+    {
+        // Spec PR #195 reduced visualizer@v1_support to buffer_capacity; types, rate_max and
+        // spectrum are dynamic configuration and belong in client/state.
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
+
+        var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
+        Assert.NotNull(hello.Payload.VisualizerV1Support);
+        Assert.Equal(65536, hello.Payload.VisualizerV1Support.BufferCapacity);
+
+        var json = MessageSerializer.Serialize(hello);
+        Assert.Contains("\"buffer_capacity\":65536", json);
+        Assert.DoesNotContain("\"rate_max\"", json);
+        Assert.DoesNotContain("\"n_disp_bins\"", json);
+    }
+
+    [Fact]
+    public void ClientState_CarriesTypesRateMaxAndSpectrum()
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "visualizer@v1");
 
-        var support = connection.SentMessages.OfType<ClientHelloMessage>().Single().Payload.VisualizerV1Support;
-        Assert.NotNull(support);
-        Assert.Equal(30, support.RateMax);
-        Assert.Contains(VisualizerTypes.Spectrum, support.Types);
-        Assert.Equal(4, support.Spectrum!.NDispBins);
-        Assert.Equal("log", support.Spectrum.Scale);
+        var visualizer = connection.SentMessages.OfType<ClientStateMessage>().Last().Payload.Visualizer;
+        Assert.NotNull(visualizer);
+        Assert.Equal(30, visualizer.RateMax);
+        Assert.Contains(VisualizerTypes.Spectrum, visualizer.Types);
+        Assert.Equal(4, visualizer.Spectrum!.NDispBins);
+        Assert.Equal("log", visualizer.Spectrum.Scale);
+
+        // The state object is exactly types/rate_max/spectrum: buffer_capacity is a constant of
+        // the client and stays in hello.
+        var json = MessageSerializer.Serialize(
+            connection.SentMessages.OfType<ClientStateMessage>().Last());
+        Assert.DoesNotContain("buffer_capacity", json);
     }
 
     [Fact]
@@ -246,18 +273,23 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
-    public async Task RequestVisualizerFormatAsync_SendsRequestFormat()
+    public async Task SetVisualizerConfigurationAsync_ReannouncesTheVisualizerObject()
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
 
-        await client.RequestVisualizerFormatAsync(
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
+        int before = connection.SentMessages.OfType<ClientStateMessage>().Count();
+
+        await client.SetVisualizerConfigurationAsync(
             types: new List<string> { VisualizerTypes.Loudness },
             rateMax: 15,
             spectrum: new VisualizerSpectrum { NDispBins = 16, Scale = "mel", FMin = 30, FMax = 20000 });
 
-        var msg = Assert.IsType<StreamRequestFormatMessage>(connection.SentMessages.Last());
-        var vis = msg.Payload.Visualizer;
+        var states = connection.SentMessages.OfType<ClientStateMessage>().ToList();
+        Assert.Equal(before + 1, states.Count);
+
+        var vis = states[^1].Payload.Visualizer;
         Assert.NotNull(vis);
         Assert.Equal(new[] { VisualizerTypes.Loudness }, vis.Types);
         Assert.Equal(15, vis.RateMax);
@@ -265,22 +297,24 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
-    public async Task RequestVisualizerFormat_EmitsOnlyTheSpecsVisualizerKeys()
+    public async Task VisualizerStateObject_EmitsOnlyTheSpecsVisualizerKeys()
     {
-        // The spec's stream/request-format visualizer object is exactly types/rate_max/spectrum.
+        // The spec's client/state visualizer object is exactly types/rate_max/spectrum.
         // buffer_capacity belongs to visualizer@v1_support in client/hello, and aiosendspin
         // rejects a client that sends it here when run with allow_noncompliant_clients=False.
         // Asserted on the wire JSON rather than the object, since that is what the server reads.
         var (client, connection) = VisualizerClient();
         using var _c = client;
 
-        await client.RequestVisualizerFormatAsync(
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
+
+        await client.SetVisualizerConfigurationAsync(
             types: new List<string> { VisualizerTypes.Loudness },
             rateMax: 15,
             spectrum: new VisualizerSpectrum { NDispBins = 16, Scale = "mel", FMin = 30, FMax = 20000 });
 
         string json = MessageSerializer.Serialize(
-            Assert.IsType<StreamRequestFormatMessage>(connection.SentMessages.Last()));
+            connection.SentMessages.OfType<ClientStateMessage>().Last());
 
         using var doc = JsonDocument.Parse(json);
         var visualizer = doc.RootElement.GetProperty("payload").GetProperty("visualizer");
@@ -288,5 +322,19 @@ public class SendspinClientServiceVisualizerTests
         Assert.Equal(
             new[] { "rate_max", "spectrum", "types" },
             visualizer.EnumerateObject().Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public async Task SetVisualizerConfigurationAsync_SpectrumTypeWithoutSpectrumConfig_Throws()
+    {
+        // A visualizer object listing 'spectrum' with no spectrum object is a protocol error the
+        // server SHOULD close the connection over, so it never reaches the wire.
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SetVisualizerConfigurationAsync(
+            types: new List<string> { VisualizerTypes.Spectrum }, rateMax: 15, spectrum: null));
     }
 }

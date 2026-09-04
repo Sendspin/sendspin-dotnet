@@ -118,7 +118,6 @@ public static class MessageSerializer
             MessageTypes.StreamStart => JsonSerializer.Deserialize(json, s_context.StreamStartMessage),
             MessageTypes.StreamEnd => JsonSerializer.Deserialize(json, s_context.StreamEndMessage),
             MessageTypes.StreamClear => JsonSerializer.Deserialize(json, s_context.StreamClearMessage),
-            MessageTypes.StreamRequestFormat => JsonSerializer.Deserialize(json, s_context.StreamRequestFormatMessage),
 
             // Group state
             MessageTypes.GroupUpdate => JsonSerializer.Deserialize(json, s_context.GroupUpdateMessage),

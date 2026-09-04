@@ -603,9 +603,10 @@ loads on connect (before the first `client/state`) and saves whenever the delay 
 
 To change the delay from the app (a calibration measurement, or a new audio output), pass it to
 `SendPlayerStateAsync(volume, muted, outputDelayMs)` — that applies it, persists it through the
-store, and reports it. Leave the argument off for ordinary volume and mute changes: the server
-merges each `client/state` and retains fields you omit, so the delay it already knows about
-survives.
+store, and reports it. Leave the argument off for ordinary volume and mute changes: spec PR #175
+removed merging, so every `client/state` carries the **full** state of each role object it
+includes and the SDK rebuilds the player object from its current values on every send. Nothing
+you omit from a call is dropped from the message.
 
 A server changes it with the `set_static_delay` command, which the SDK advertises in
 `client/state`'s player `supported_commands` (never in `client/hello` — the spec restricts
@@ -643,6 +644,45 @@ await using var client = SendspinClientService.CreateForDial(
 ```
 
 When no store is supplied, behavior is unchanged: the embedder re-supplies the delay on each connect.
+
+## Player format preference
+
+Spec PR #195 removed `stream/request-format` from the protocol. A player that wants the server to
+pick a particular format now reports it in the `format` field of the `client/state` player object,
+which must match one of the entries the client advertised in `player@v1_support.supported_formats`:
+
+```csharp
+// Ask for a specific format; the server replies with a new stream/start.
+await client.SetPlayerFormatPreferenceAsync(new AudioFormat
+{
+    Codec = "flac", Channels = 2, SampleRate = 48000, BitDepth = 24,
+});
+
+// Withdraw the preference and let the server choose:
+await client.SetPlayerFormatPreferenceAsync(null);
+```
+
+All four fields are required by the spec, so a preference is reported only when it matches a
+supported format; otherwise the call throws rather than putting an unusable object on the wire.
+
+## Client state is always full state
+
+Spec PR #175 removed server-side merging of `client/state`. Every message the SDK sends carries
+`available` plus the **complete** state of each role object it includes, and it includes an object
+for every currently active role that defines one. Omitting a role object means "this role is
+unchanged", never "clear these fields" — so the SDK never sends a partial object. All state sends
+(initial state, availability changes, player/source updates, command acknowledgements, artwork and
+visualizer reconfiguration, role reactivation and the post-pairing resend) go through one
+construction path, so the shape cannot drift between them.
+
+Two consequences worth knowing:
+
+- A client whose `active_roles` are non-empty still sends its initial `client/state` even when
+  none of its roles defines a state object (spec PR #181) — `available` alone is what opens the
+  server's streams for it.
+- A role's binary data is only in play once the server has received that role's state object
+  (spec PR #204). When `server/activate` adds a role mid-connection, the SDK reannounces the full
+  state — now carrying the new role's object — before that role's streams can be used.
 
 ## Multi-server arbitration & last-played persistence
 
@@ -692,13 +732,16 @@ Artwork clients support **1–4 independent channels** (e.g. album art on one di
 ```csharp
 var capabilities = new ClientCapabilities
 {
+    Roles = { "artwork@v1" },
     ArtworkChannels = new()
     {
-        new() { Source = ArtworkSources.Album,  Format = "jpeg", MediaWidth = 512, MediaHeight = 512 }, // channel 0
-        new() { Source = ArtworkSources.Artist, Format = "png",  MediaWidth = 256, MediaHeight = 256 }, // channel 1
+        new() { Source = ArtworkSources.Album,  Format = "jpeg", Width = 512, Height = 512 }, // channel 0
+        new() { Source = ArtworkSources.Artist, Format = "png",  Width = 256, Height = 256 }, // channel 1
     }
 };
 ```
+
+The channels are reported in the `artwork` object of `client/state` — spec PR #195 removed `artwork@v1_support` from `client/hello` and `stream/request-format` from the wire entirely, so the state object is the only place the channel configuration lives. The list is positional from channel 0, holds 1–4 entries, and any channel you do not cover is reported as `ArtworkSources.None`.
 
 Images arrive per channel, with the display timestamp and channel number:
 
@@ -712,15 +755,17 @@ client.ArtworkReceived += (_, e) =>
 client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // empty binary message = clear that channel
 ```
 
-Change or disable a channel at runtime without reconnecting (server replies with a new `stream/start`):
+Change or disable a channel at runtime without reconnecting. The SDK updates that connection's own channel configuration — `ClientCapabilities` is yours and is left untouched, so a host sharing one across connections keeps them independent — and resends the whole `client/state` (the server replies with a new `stream/start`):
 
 ```csharp
 // Switch channel 1 to artist art at a new size:
-await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.Artist, mediaWidth: 400, mediaHeight: 400);
+await client.SetArtworkChannelAsync(channel: 1, source: ArtworkSources.Artist, width: 400, height: 400);
 
-// Disable channel 1 (server stops sending it); re-enable later by requesting a real source again:
-await client.RequestArtworkFormatAsync(channel: 1, source: ArtworkSources.None);
+// Disable channel 1 (server stops sending it); re-enable later by setting a real source again:
+await client.SetArtworkChannelAsync(channel: 1, source: ArtworkSources.None);
 ```
+
+> The server MUST NOT send a role's binary data until it has received that role's `client/state` object (spec PR #204). The SDK enforces the same gate on the receive side, so artwork frames that arrive before the `artwork` object has gone out are dropped with a single warning per role.
 
 ## Color
 
@@ -741,22 +786,24 @@ Updates are deltas: a color absent from an update is left unchanged, an explicit
 
 ## Visualizer
 
-Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Five feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, and **`peak`** (energy onsets). The role is **opt-in** — set `VisualizerSupport` *and* add `visualizer@v1` to `Roles`:
+Clients with the `visualizer@v1` role receive real-time audio features for music visualization. Five feature types are available: **`loudness`**, **`f_peak`** (dominant frequency + amplitude), **`spectrum`** (display-binned FFT), **`beat`**, and **`peak`** (energy onsets). The role is **opt-in** — set `VisualizerRoleSupport` *and* add `visualizer@v1` to `Roles`:
 
 ```csharp
 var capabilities = new ClientCapabilities
 {
     Roles = { "player@v1", "visualizer@v1" },
-    VisualizerSupport = new VisualizerSupport
+    VisualizerRoleSupport = new VisualizerRoleSupport
     {
-        BufferCapacity = 65536,
-        RateMax = 30, // max frames/sec
+        BufferCapacity = 65536,           // client/hello: visualizer@v1_support
+        RateMax = 30,                     // client/state: max frames/sec
         Types = new() { VisualizerTypes.Loudness, VisualizerTypes.Spectrum, VisualizerTypes.Beat },
         // Required when Spectrum is requested:
         Spectrum = new VisualizerSpectrum { NDispBins = 32, Scale = "log", FMin = 20, FMax = 16000 },
     },
 };
 ```
+
+`buffer_capacity` is the only field left in the `visualizer@v1_support` object of `client/hello`; `types`, `rate_max` and `spectrum` are reported in the `visualizer` object of `client/state` (spec PR #195).
 
 Each binary message carries one feature type; subscribe to `VisualizationReceived` and read the populated field:
 
@@ -770,7 +817,7 @@ client.VisualizationReceived += (_, frame) =>
 };
 ```
 
-`Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Renegotiate at runtime with `RequestVisualizerFormatAsync(...)`.
+`Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Reconfigure at runtime with `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`, which updates that connection's own visualizer configuration (not the `ClientCapabilities` you supplied) and resends the full `client/state`.
 
 > **Note:** `visualizer@v1` follows the [aiosendspin](https://github.com/Sendspin/aiosendspin) reference implementation, which is ahead of the formal protocol spec. The wire format may still evolve. The role degrades gracefully while it matures: it is **opt-in** (off by default), frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
 

@@ -19,12 +19,12 @@ namespace Sendspin.SDK.Tests.Client;
 /// </para>
 /// <para>
 /// Two kinds of message are blocked and they fare differently. <em>State</em> —
-/// <c>SendPlayerStateAsync</c>, <c>UpdateTimingAsync</c>, availability — is last-write-wins, so
+/// <c>SendPlayerStateAsync</c>, <c>UpdateTimingAsync</c>, availability, and the artwork/visualizer
+/// stream configuration that spec PR #195 folded into <c>client/state</c> — is last-write-wins, so
 /// the full <c>client/state</c> sent on leaving the window restores it exactly. <em>Requests</em>
-/// — <c>SetVolumeAsync</c> and <c>SetMuteAsync</c> (which ask the server to change volume, via
-/// <c>client/command</c>), and the <c>stream/request-format</c> calls — are genuinely lost, and
-/// the app reissues them if it still wants them. That distinction is why dropping is sound
-/// without a queue.
+/// — <c>SetVolumeAsync</c> and <c>SetMuteAsync</c>, which ask the server to change volume via
+/// <c>client/command</c> — are genuinely lost, and the app reissues them if it still wants them.
+/// That distinction is why dropping is sound without a queue.
 /// </para>
 /// </remarks>
 public class PairingQuiescenceTests
@@ -92,8 +92,8 @@ public class PairingQuiescenceTests
             case "mute": await client.SetMuteAsync(true); break;
             case "player-state": await client.SendPlayerStateAsync(volume: 42, muted: false); break;
             case "timing": await client.UpdateTimingAsync(300, 200); break;
-            case "artwork-format": await client.RequestArtworkFormatAsync(0, source: "album"); break;
-            case "visualizer-format": await client.RequestVisualizerFormatAsync(rateMax: 15); break;
+            case "artwork-format": await client.SetArtworkChannelAsync(0, source: "album"); break;
+            case "visualizer-format": await client.SetVisualizerConfigurationAsync(types: [], rateMax: 15); break;
             default: throw new ArgumentOutOfRangeException(nameof(kind));
         }
 

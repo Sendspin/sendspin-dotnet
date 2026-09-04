@@ -142,6 +142,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly List<string> _staticPairingCodeLocations;
     private readonly List<string> _pairingPskLocations;
 
+    // Guards the two pieces of role configuration that change during a connection: the artwork
+    // channel declaration and the visualizer configuration. Both are written by the app calling
+    // SetArtworkChannelAsync/SetVisualizerConfigurationAsync and read by the client/hello and
+    // client/state builders, which run on the send and receive paths — different threads by
+    // construction.
+    private readonly object _roleConfigLock = new();
+
+    // This client's effective artwork channel declaration, copied from the capabilities at
+    // construction rather than aliased. ClientCapabilities belongs to the app, and a host shares
+    // one instance across every connection it accepts: writing a connection's runtime
+    // reconfiguration back through it would leak that connection's channels into its siblings
+    // and race whatever state builder was reading the same list. Guarded by _roleConfigLock.
+    private readonly List<ArtworkChannelState> _artworkChannels;
+
+    // This client's effective visualizer configuration, seeded from the capabilities at
+    // construction for the same reason and under the same lock. Replaced wholesale rather than
+    // mutated, so a reader that has taken the reference sees a complete configuration.
+    private VisualizerRoleSupport? _visualizerRoleSupport;
+
     // Bounds for any value written to the clock synchronizer's output delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
     private const double MinOutputDelayMs = -5000.0;
@@ -154,6 +173,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // Last line-sense signal the app reported, or null if it never has. Survives reconnects on
     // purpose: it describes the device's input, not the session (#114).
     private bool? _lastSourceSignal;
+
+    // The player's current format preference, reported in the client/state player object since
+    // spec PR #195 removed stream/request-format. Null means no override: the server selects per
+    // the supported_formats priority order. Survives reconnects, so the preference an app set
+    // once is re-reported by the next connection's initial state rather than silently reverting.
+    private PlayerFormatPreference? _playerFormatPreference;
+
+    // Role families whose client/state object has gone out on this connection, which is what
+    // opens each role's inbound binary channel (spec PR #204). Reset per connection in
+    // FinishHandshake. Guarded because it is written from the send paths and read from the
+    // receive loop.
+    private readonly HashSet<string> _roleStateSent = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _warnedUngatedRoles = new(StringComparer.Ordinal);
+    private readonly object _roleStateSentLock = new();
+
+    // The spec's artwork channel maximum: the client/state channels array is positional from
+    // channel 0 and one longer than this is a protocol error the server closes the connection over.
+    private const int MaxArtworkChannels = 4;
 
     // One bit per undefined player-audio type (5-7) already warned about. A lost race on this
     // field costs a duplicate warning and nothing else, so it needs no synchronization.
@@ -432,10 +469,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _sourceEncoderFactory = options.SourceEncoderFactory;
         _clockSynchronizer = options.ClockSynchronizer ?? new KalmanClockSynchronizer();
 
+        // Copied, not aliased: these two are the only capability values the SDK itself changes
+        // during a connection, and ClientCapabilities is app-owned — shared, in a host, by every
+        // connection it accepts. See the field comments.
+        _artworkChannels = [.. _capabilities.ArtworkChannels];
+        _visualizerRoleSupport = CopyVisualizerRoleSupport(_capabilities.VisualizerRoleSupport);
+
         _displayScheduler = new MediaDisplayScheduler(
             _clockSynchronizer,
             options.PrecisionTimer ?? HighPrecisionTimer.Shared,
-            _capabilities.VisualizerSupport?.BufferCapacity ?? 0,
+            _visualizerRoleSupport?.BufferCapacity ?? 0,
             _logger,
             frame => VisualizationReceived?.Invoke(this, frame),
             args => ArtworkReceived?.Invoke(this, args),
@@ -517,6 +560,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _pairingWindow.StateChanged += OnPairingWindowStateChanged;
         }
     }
+
+    /// <summary>
+    /// A private copy of an app-supplied visualizer configuration, including its mutable
+    /// <see cref="VisualizerRoleSupport.Types"/> list, so nothing this client reports can be
+    /// changed under it by the app (or by a sibling connection sharing the same
+    /// <see cref="ClientCapabilities"/>) after construction.
+    /// </summary>
+    private static VisualizerRoleSupport? CopyVisualizerRoleSupport(VisualizerRoleSupport? support)
+        => support is null
+            ? null
+            : new VisualizerRoleSupport
+            {
+                BufferCapacity = support.BufferCapacity,
+                Types = [.. support.Types],
+                RateMax = support.RateMax,
+
+                // VisualizerSpectrum is immutable (init-only scalars), so the reference is safe
+                // to share.
+                Spectrum = support.Spectrum,
+            };
 
     /// <summary>
     /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
@@ -775,19 +838,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (!_initialClientStateSent)
         {
-            // The initial message carries it instead. Sending a source-only delta here would
-            // make it the server's "initial" client/state, which MUST carry all state fields.
+            // The initial message carries it instead: it reads _lastSourceSignal live.
             return;
         }
 
-        var message = new ClientStateMessage
-        {
-            Payload = new ClientStatePayload
-            {
-                Source = BuildSourceState(),
-            },
-        };
-        await SendAsync(message);
+        await SendClientStateAsync();
     }
 
     /// <summary>
@@ -812,15 +867,232 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
+    /// The <c>player</c> object for a client/state, or null when player is not an active role.
+    /// Always the client's complete player state: spec PR #175 removed merging, so a field this
+    /// object leaves out is dropped by the server rather than retained.
+    /// </summary>
+    private PlayerStatePayload? BuildPlayerState()
+    {
+        if (!MayReportRoleState("player"))
+        {
+            return null;
+        }
+
+        return new PlayerStatePayload
+        {
+            Volume = _playerState.Volume,
+            Muted = _playerState.Muted,
+
+            // Always the applied delay, never a caller's parameter: the server takes what is on
+            // the wire as the player's delay, so reporting one the client is not applying leaves
+            // its group calibration working from a different number than playback.
+            OutputDelayMs = ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
+            RequiredLeadTimeMs = _requiredLeadTimeMs,
+            MinBufferMs = _minBufferMs,
+            SupportedCommands = GetPlayerSupportedCommands(),
+            Format = _playerFormatPreference,
+        };
+    }
+
+    /// <summary>
+    /// The <c>artwork</c> object for a client/state, or null when artwork is not an active role.
+    /// Carries the client's channel declaration, which spec PR #195 moved here from the
+    /// (now deleted) <c>artwork@v1_support</c> object in <c>client/hello</c>.
+    /// </summary>
+    /// <remarks>
+    /// Truncated to the spec's four channels: the array is positional from channel 0, and one
+    /// longer than four is a protocol error the server SHOULD close the connection over.
+    /// <para>
+    /// Reads this client's own channel list (see <see cref="_artworkChannels"/>) under
+    /// <see cref="_roleConfigLock"/>: <see cref="SetArtworkChannelAsync"/> may be adding a
+    /// channel from an app thread while this runs on the send path, and enumerating the list
+    /// through that would throw rather than merely read a stale value.
+    /// </para>
+    /// </remarks>
+    private ArtworkStatePayload? BuildArtworkState()
+    {
+        if (!MayReportRoleState("artwork"))
+        {
+            return null;
+        }
+
+        lock (_roleConfigLock)
+        {
+            return new ArtworkStatePayload
+            {
+                Channels = _artworkChannels.Take(MaxArtworkChannels).Select(c => c.ForWire()).ToList(),
+            };
+        }
+    }
+
+    /// <summary>
+    /// The <c>visualizer</c> object for a client/state, or null when visualizer is not an active
+    /// role or the app configured no visualizer support. Carries types/rate_max/spectrum, which
+    /// spec PR #195 moved here from <c>visualizer@v1_support</c>.
+    /// </summary>
+    private VisualizerStatePayload? BuildVisualizerState()
+    {
+        if (!MayReportRoleState("visualizer"))
+        {
+            return null;
+        }
+
+        // The configuration is replaced wholesale, never mutated in place, so taking the
+        // reference under the lock is enough to read a consistent one.
+        VisualizerRoleSupport? support;
+        lock (_roleConfigLock)
+        {
+            support = _visualizerRoleSupport;
+        }
+
+        if (support is null)
+        {
+            return null;
+        }
+
+        return new VisualizerStatePayload
+        {
+            Types = new List<string>(support.Types),
+            RateMax = support.RateMax,
+            Spectrum = support.Spectrum,
+        };
+    }
+
+    /// <summary>
+    /// The single place a <c>client/state</c> is built and sent. Composes <c>available</c> plus
+    /// the full state object of every active role from this client's live state, so the initial
+    /// message, an availability flip, a player/source/artwork/visualizer update, a command
+    /// acknowledgement, a role (re)activation and the post-pairing resend all put the same
+    /// complete picture on the wire and cannot drift apart one call site at a time.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Spec PR #175 removed merging: every message carries <c>available</c> and the full state of
+    /// each role object it includes, and an omitted object leaves that role unchanged. Sending
+    /// every active role's object every time is therefore not merely permitted but the only shape
+    /// that cannot silently drop a field, and it is what spec PR #204's binary gate needs — the
+    /// server may not stream a role's binary data until it has seen that role's object.
+    /// </para>
+    /// <para>
+    /// Marks each role whose object went out as reported for this connection (see
+    /// <see cref="_roleStateSent"/>) <em>before</em> the await, for the same reason the
+    /// availability tracker is seeded before its send: a message in flight has already left this
+    /// client's hands as far as ordering goes.
+    /// </para>
+    /// </remarks>
+    private async Task SendClientStateAsync(bool initial = false)
+    {
+        bool available = CurrentAvailability;
+        var message = ClientStateMessage.Create(
+            available: available,
+            player: BuildPlayerState(),
+            source: BuildSourceState(),
+            artwork: BuildArtworkState(),
+            visualizer: BuildVisualizerState());
+
+        if (initial)
+        {
+            _logger.LogInformation("Sending initial client/state:\n{Json}", MessageSerializer.Serialize(message));
+        }
+
+        MarkRoleStateSent(message.Payload);
+
+        // Keep the availability publisher's tracker in step with what the server is being told,
+        // so the next genuine change is neither a spurious repeat nor swallowed as one.
+        lock (_availabilityLock)
+        {
+            _lastAvailabilitySent = available;
+        }
+
+        await SendAsync(message);
+    }
+
+    /// <summary>
+    /// Records which roles a client/state just reported an object for, which is what opens each
+    /// role's inbound binary channel (spec PR #204).
+    /// </summary>
+    private void MarkRoleStateSent(ClientStatePayload payload)
+    {
+        lock (_roleStateSentLock)
+        {
+            if (payload.Player is not null) _roleStateSent.Add("player");
+            if (payload.Source is not null) _roleStateSent.Add("source");
+            if (payload.Artwork is not null) _roleStateSent.Add("artwork");
+            if (payload.Visualizer is not null) _roleStateSent.Add("visualizer");
+        }
+    }
+
+    /// <summary>
+    /// Whether this connection has sent the <c>client/state</c> object for
+    /// <paramref name="family"/>, which spec PR #204 makes the gate on that role's binary data:
+    /// "The server MUST NOT send a role's binary data until it has received that object."
+    /// </summary>
+    /// <remarks>
+    /// A conformant server never gets ahead of this, so a frame the gate drops is a server
+    /// deviation — and dropping it is the safe reading: the player object is where
+    /// <c>static_delay_ms</c>, <c>required_lead_time_ms</c> and <c>min_buffer_ms</c> live, so
+    /// audio that arrives before it was scheduled against timings the server had to guess.
+    /// <para>
+    /// Before any <c>server/hello</c> there is no statement about active roles at all and
+    /// production never receives binary data in that window (the encrypted handshake has to
+    /// complete first), so the gate opens rather than silently swallowing every frame in the test
+    /// harnesses that drive binary dispatch without a handshake. Same tolerance, and same reason,
+    /// as <see cref="MayReportRoleState"/>.
+    /// </para>
+    /// </remarks>
+    private bool IsRoleBinaryPermitted(string family)
+    {
+        if (LastServerHello is null)
+        {
+            return true;
+        }
+
+        lock (_roleStateSentLock)
+        {
+            return _roleStateSent.Contains(family);
+        }
+    }
+
+    /// <summary>
+    /// Logs the first binary frame dropped for each role whose client/state object has yet to go
+    /// out, so a server streaming ahead of the gate produces one line per role rather than one
+    /// per frame.
+    /// </summary>
+    private void WarnOnceOnUngatedRoleBinary(string family)
+    {
+        lock (_roleStateSentLock)
+        {
+            if (!_warnedUngatedRoles.Add(family))
+            {
+                return;
+            }
+        }
+
+        _logger.LogWarning(
+            "Dropping {Role} binary data: this connection has not yet sent its {Role} client/state "
+            + "object, which the server must receive before streaming the role's binary data",
+            family,
+            family);
+    }
+
+    /// <summary>
     /// Creates the ClientHello message from current capabilities.
     /// Extracted for reuse between initial connection and reconnection handshakes.
     /// </summary>
     private ClientHelloMessage CreateClientHelloMessage()
     {
-        if (_capabilities.ArtworkChannels.Count > 4)
+        int artworkChannelCount;
+        VisualizerRoleSupport? visualizerConfiguration;
+        lock (_roleConfigLock)
         {
-            _logger.LogWarning("ArtworkChannels has {Count} entries; only the first 4 are advertised (spec maximum).",
-                _capabilities.ArtworkChannels.Count);
+            artworkChannelCount = _artworkChannels.Count;
+            visualizerConfiguration = _visualizerRoleSupport;
+        }
+
+        if (artworkChannelCount > MaxArtworkChannels)
+        {
+            _logger.LogWarning("ArtworkChannels has {Count} entries; only the first 4 are reported (spec maximum).",
+                artworkChannelCount);
         }
 
         return ClientHelloMessage.Create(
@@ -836,6 +1108,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // running allow_noncompliant_clients=False rejects outright rather than tolerating.
             // Roles is public and ClientCapabilities tells consumers to drop artwork@v1 from it
             // to opt out, so this was reachable straight from our own documented advice.
+            //
+            // There is no artwork object at all: spec PR #195 deleted artwork@v1_support, and the
+            // channel declaration now travels in client/state where it can change mid-connection.
             playerSupport: HasRole("player")
                 ? new PlayerSupport
                 {
@@ -852,13 +1127,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     SupportedCommands = new List<string> { "volume", "mute" }
                 }
                 : null,
-            artworkSupport: HasRole("artwork")
-                ? new ArtworkSupport
-                {
-                    // Spec allows 1-4 channels (array index = channel number).
-                    Channels = _capabilities.ArtworkChannels.Take(4).ToList()
-                }
-                : null,
             deviceInfo: new DeviceInfo
             {
                 ProductName = _capabilities.ProductName,
@@ -866,7 +1134,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 SoftwareVersion = _capabilities.SoftwareVersion,
                 MacAddress = _capabilities.MacAddress
             },
-            visualizerSupport: HasRole("visualizer") ? _capabilities.VisualizerSupport : null,
+
+            // Only buffer_capacity since spec PR #195: types, rate_max and spectrum are dynamic
+            // and belong to the client/state visualizer object.
+            visualizerSupport: HasRole("visualizer") && visualizerConfiguration is { } visualizer
+                ? new VisualizerSupport { BufferCapacity = visualizer.BufferCapacity }
+                : null,
             sourceSupport: HasSourceRole()
                 ? new SourceSupport
                 {
@@ -1045,55 +1318,136 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <inheritdoc/>
-    public async Task RequestPlayerFormatAsync(
-        string? codec = null, int? sampleRate = null, int? channels = null, int? bitDepth = null)
+    public async Task SetPlayerFormatPreferenceAsync(AudioFormat? format)
     {
-        var message = StreamRequestFormatMessage.ForPlayer(new PlayerRequestFormat
-        {
-            Codec = codec,
-            SampleRate = sampleRate,
-            Channels = channels,
-            BitDepth = bitDepth
-        });
+        PlayerFormatPreference? preference = null;
 
-        _logger.LogDebug("Requesting player format change (codec={Codec}, sample_rate={SampleRate}, channels={Channels}, bit_depth={BitDepth})",
-            codec ?? "unchanged", sampleRate, channels, bitDepth);
-        await SendAsync(message);
+        if (format is not null)
+        {
+            // The spec closed the partial-request case: a preference is one whole
+            // supported_formats entry or nothing, and a server MAY close the connection over one
+            // it never advertised. Rejecting here is a configuration error the app can fix;
+            // sending it would be a wire deviation it cannot see.
+            int bitDepth = format.BitDepth ?? 16;
+            bool supported = _capabilities.AudioFormats.Any(f =>
+                string.Equals(f.Codec, format.Codec, StringComparison.Ordinal)
+                && f.Channels == format.Channels
+                && f.SampleRate == format.SampleRate
+                && (f.BitDepth ?? 16) == bitDepth);
+
+            if (!supported)
+            {
+                throw new ArgumentException(
+                    $"Format {format.Codec}/{format.SampleRate}Hz/{format.Channels}ch/{bitDepth}-bit is not one of "
+                    + "ClientCapabilities.AudioFormats. The spec requires a player's format preference to be one of "
+                    + "the entries it advertised in supported_formats.",
+                    nameof(format));
+            }
+
+            preference = new PlayerFormatPreference
+            {
+                Codec = format.Codec,
+                Channels = format.Channels,
+                SampleRate = format.SampleRate,
+                BitDepth = bitDepth,
+            };
+        }
+
+        _playerFormatPreference = preference;
+
+        _logger.LogDebug("Player format preference set to {Format}",
+            preference is null
+                ? "none (server selects by priority)"
+                : $"{preference.Codec}/{preference.SampleRate}Hz/{preference.Channels}ch/{preference.BitDepth}-bit");
+
+        await ReportStateChangeAsync();
     }
 
     /// <inheritdoc/>
-    public async Task RequestArtworkFormatAsync(
-        int channel, string? source = null, string? format = null, int? mediaWidth = null, int? mediaHeight = null)
+    public async Task SetArtworkChannelAsync(
+        int channel, string? source = null, string? format = null, int? width = null, int? height = null)
     {
-        var message = StreamRequestFormatMessage.ForArtwork(new ArtworkRequestFormat
+        if (channel is < 0 or >= MaxArtworkChannels)
         {
-            Channel = channel,
-            Source = source,
-            Format = format,
-            MediaWidth = mediaWidth,
-            MediaHeight = mediaHeight
-        });
+            throw new ArgumentOutOfRangeException(
+                nameof(channel), channel, $"Artwork channel must be 0-{MaxArtworkChannels - 1}.");
+        }
 
-        _logger.LogDebug("Requesting artwork format for channel {Channel} (source={Source}, format={Format})",
-            channel, source ?? "unchanged", format ?? "unchanged");
-        await SendAsync(message);
+        ArtworkChannelState configured;
+        lock (_roleConfigLock)
+        {
+            // The wire array is positional from channel 0, so a gap has to be filled rather than
+            // skipped; an uncovered index means source 'none', which is exactly what the filler
+            // says. It keeps ArtworkChannelState's own format/size defaults instead of nulling
+            // them: a filler is a real channel that happens to be off, so enabling it later with
+            // a source alone still declares the format/width/height the spec requires of an
+            // active channel. ForWire drops them again for as long as the source is 'none'.
+            while (_artworkChannels.Count <= channel)
+            {
+                _artworkChannels.Add(new ArtworkChannelState { Source = ArtworkSources.None });
+            }
+
+            var existing = _artworkChannels[channel];
+            configured = new ArtworkChannelState
+            {
+                Source = source ?? existing.Source,
+                Format = format ?? existing.Format,
+                Width = width ?? existing.Width,
+                Height = height ?? existing.Height,
+            };
+            _artworkChannels[channel] = configured;
+        }
+
+        _logger.LogDebug("Artwork channel {Channel} configured (source={Source}, format={Format}, {Width}x{Height})",
+            channel, configured.Source, configured.Format, configured.Width, configured.Height);
+
+        await ReportStateChangeAsync();
     }
 
     /// <inheritdoc/>
-    public async Task RequestVisualizerFormatAsync(
-        List<string>? types = null, int? rateMax = null, VisualizerSpectrum? spectrum = null)
+    public async Task SetVisualizerConfigurationAsync(
+        List<string> types, int rateMax, VisualizerSpectrum? spectrum = null)
     {
-        var message = StreamRequestFormatMessage.ForVisualizer(new VisualizerRequestFormat
-        {
-            Types = types,
-            RateMax = rateMax,
-            Spectrum = spectrum
-        });
+        ArgumentNullException.ThrowIfNull(types);
 
-        _logger.LogDebug("Requesting visualizer format change (types={Types}, rate_max={RateMax})",
-            types is null ? "unchanged" : string.Join(",", types), rateMax);
-        await SendAsync(message);
+        // A visualizer object listing 'spectrum' without a spectrum config is a protocol error
+        // the server SHOULD close the connection over, so it never reaches the wire from here.
+        if (types.Contains(VisualizerTypes.Spectrum, StringComparer.Ordinal) && spectrum is null)
+        {
+            throw new ArgumentException(
+                "A visualizer configuration that requests 'spectrum' must also carry a spectrum object; "
+                + "the server closes the connection over one that does not.",
+                nameof(spectrum));
+        }
+
+        lock (_roleConfigLock)
+        {
+            // Buffer capacity is a constant of the device advertised once in client/hello, so it
+            // carries over from whatever this client was constructed with.
+            _visualizerRoleSupport = new VisualizerRoleSupport
+            {
+                BufferCapacity = _visualizerRoleSupport?.BufferCapacity ?? 0,
+                Types = [.. types],
+                RateMax = rateMax,
+                Spectrum = spectrum,
+            };
+        }
+
+        _logger.LogDebug("Visualizer configuration set (types={Types}, rate_max={RateMax})",
+            string.Join(",", types), rateMax);
+
+        await ReportStateChangeAsync();
     }
+
+    /// <summary>
+    /// Puts a stream-configuration change onto the wire once the connection is in a state that
+    /// permits it. Before the connection's initial client/state has gone out there is nothing to
+    /// send yet: that message reads every field live, so it carries the change when it goes.
+    /// </summary>
+    private Task ReportStateChangeAsync()
+        => _connection.State == ConnectionState.Connected && _initialClientStateSent
+            ? SendClientStateAsync()
+            : Task.CompletedTask;
 
     /// <inheritdoc/>
     public async Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null)
@@ -1120,14 +1474,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _playerState.Volume = clampedVolume;
         _playerState.Muted = muted;
 
-        // Before the connection's initial client/state has gone out, a player-only delta must
-        // not hit the wire: the server treats the first client/state it receives as the
-        // initial one, which per spec MUST carry all state fields. Promote to the full
-        // initial message — it reads the values persisted above — unless sync is not yet
-        // established and nothing is genuinely wrong, in which case stay silent like
-        // UpdateTimingAsync does: an initial sent now would carry exactly the spurious
-        // available: false the deferral exists to prevent, and the deferred initial reads the
-        // persisted values live, so nothing is lost.
+        // Before the connection's initial client/state has gone out, nothing may hit the wire
+        // yet: the server treats the first client/state it receives as the initial one. Send the
+        // full state — it reads the values persisted above — unless sync is not yet established
+        // and nothing is genuinely wrong, in which case stay silent like UpdateTimingAsync does:
+        // a message sent now would carry exactly the spurious available: false the deferral
+        // exists to prevent, and the deferred initial reads the persisted values live, so nothing
+        // is lost.
         if (!_initialClientStateSent)
         {
             if (!InitialStateStillDeferredForClockSync)
@@ -1149,17 +1502,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        // Always the applied delay, never the caller's parameter. The server MUST merge each
-        // update into existing state, so a field that is present overwrites -- reporting a
-        // defaulted 0 here wiped a delay the server had set, on the next volume change.
-        var stateMessage = ClientStateMessage.CreatePlayerState(
-            clampedVolume, muted, ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
-            _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
-
         _logger.LogDebug(
             "Sending player state: Volume={Volume}, Muted={Muted}, OutputDelay={OutputDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
             clampedVolume, muted, _clockSynchronizer.OutputDelayMs, _requiredLeadTimeMs, _minBufferMs);
-        await SendAsync(stateMessage);
+
+        // The full state of every active role, not a player-only fragment: spec PR #175 removed
+        // merging, so a message's included role objects are read as that role's whole state.
+        await SendClientStateAsync();
     }
 
     /// <inheritdoc/>
@@ -1272,14 +1621,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool _initialClientStateHeldForPairing;
 
     /// <summary>
-    /// Publishes <see cref="CurrentAvailability"/> as a client/state delta when it differs from
-    /// the last value sent, and no-ops otherwise. This is the only place that sends
-    /// <see cref="ClientStateMessage.CreateAvailability"/> — <see cref="EnterExternalSourceAsync"/>,
+    /// Publishes <see cref="CurrentAvailability"/> as a client/state message when it differs from
+    /// the last value sent, and no-ops otherwise. This is the only place availability changes
+    /// reach the wire — <see cref="EnterExternalSourceAsync"/>,
     /// <see cref="ExitExternalSourceAsync"/>, and the pipeline error/recovery handlers all set
     /// their input and call this, so availability cannot again drift out of sync one call site at
-    /// a time. Before the connection's initial client/state has gone out, the publish is
-    /// promoted to the full initial message instead of a bare delta (see below).
+    /// a time. Before the connection's initial client/state has gone out, the publish becomes
+    /// that initial message instead (see below).
     /// </summary>
+    /// <remarks>
+    /// The message it sends is a full one: spec PR #175 removed merging from client/state, so
+    /// there is no availability-only delta any more — every message carries <c>available</c> plus
+    /// the complete state of each active role, which <see cref="SendClientStateAsync"/> composes.
+    /// </remarks>
     private async Task PublishAvailabilityAsync()
     {
         // Guard on connection state: a publish that lands mid-reconnect would hit a closed socket.
@@ -1300,19 +1654,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var current = CurrentAvailability;
 
         // An availability input flipped while the initial client/state is still deferred (e.g. a
-        // pipeline error or external-source enter inside the converging window). A bare delta
-        // must not hit the wire here: the server treats the first client/state it receives as
-        // the initial one, which per spec MUST carry all state fields. Promote the publish to
-        // the full initial message — it reads CurrentAvailability and every player field live —
-        // and the latch then routes the eventual convergence through the delta path. Decided
-        // BEFORE the compare-to-last-sent below: pre-latch, the tracker can only hold another
-        // connection's stale value (or null), and comparing against that once let a stale
-        // false suppress the promotion entirely, leaving a later player delta to become the
+        // pipeline error or external-source enter inside the converging window). Send the
+        // connection's initial message instead — it reads CurrentAvailability and every role's
+        // fields live — and the latch then routes the eventual convergence through the ordinary
+        // path. Decided BEFORE the compare-to-last-sent below: pre-latch, the tracker can only
+        // hold another connection's stale value (or null), and comparing against that once let a
+        // stale false suppress the send entirely, leaving a later update to become the
         // connection's first client/state.
         if (!_initialClientStateSent)
         {
             // ...unless sync is not yet established and nothing else is wrong (e.g. a
-            // pipeline recovery landed inside the converging window). An initial promoted
+            // pipeline recovery landed inside the converging window). An initial sent
             // now would carry the spurious available: false the deferral exists to prevent —
             // the server would solo-group the client and never auto-rejoin it — so stay
             // silent and let the first convergence release the initial state.
@@ -1353,7 +1705,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         try
         {
             await EndSourceStreamIfUnavailableAsync(current);
-            await SendAsync(ClientStateMessage.CreateAvailability(current));
+            await SendClientStateAsync();
         }
         catch
         {
@@ -1443,11 +1795,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Builds the player <c>supported_commands</c> list reported in client/state, or null when
-    /// none apply. Currently advertises 'set_static_delay' when the client accepts that command.
+    /// Builds the player <c>supported_commands</c> list reported in client/state. Currently
+    /// advertises 'set_static_delay' when the client accepts that command.
     /// </summary>
-    private List<string>? GetPlayerSupportedCommands()
-        => _capabilities.SupportsSetOutputDelay ? new List<string> { Commands.SetStaticDelay } : null;
+    /// <remarks>
+    /// Empty, never absent: spec PR #175 made the field required, and an empty array is its
+    /// explicit "accepts no commands". Omitting it once merging was removed would have left the
+    /// server unable to tell "no commands" from "unchanged".
+    /// </remarks>
+    private List<string> GetPlayerSupportedCommands()
+        => _capabilities.SupportsSetOutputDelay ? new List<string> { Commands.SetStaticDelay } : new List<string>();
 
     /// <summary>
     /// Projects a scheduler-side output delay onto the wire type: an integer millisecond value
@@ -1998,6 +2355,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Mirror roles where legacy consumers look. active_roles persists across
         // activates that omit it, so only overwrite when present.
+        bool activeRolesChanged = false;
         if (payload.ActiveRoles is not null && LastServerHello is not null)
         {
             // When the source role is dropped from active_roles, stop streaming (spec:
@@ -2008,6 +2366,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             {
                 _sourcePipeline.StopStreamingAsync().SafeFireAndForget(_logger);
             }
+
+            // Noted before the overwrite: an activation that changes the active set changes
+            // which role objects belong in client/state, and the server may not stream a newly
+            // activated role's binary data until it has received that role's object (spec PR
+            // #204). The reaction is deferred to the non-pairing branch below, after the
+            // handshake and pairing decisions have run.
+            activeRolesChanged = !LastServerHello.ActiveRoles.ToHashSet(StringComparer.Ordinal)
+                .SetEquals(payload.ActiveRoles);
 
             LastServerHello.ActiveRoles = payload.ActiveRoles;
         }
@@ -2091,13 +2457,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
             else if (leavingPairing && _initialClientStateSent)
             {
-                // Recovers everything the window dropped. State is last-write-wins and the
-                // server merges each update, so one full report of the current values restores
-                // its view — a volume the app changed mid-window, an output delay, an
-                // availability flip — without a queue. Skipped when the initial state has yet
-                // to go out: the branch above owns that case, and a delta before it would
-                // become the connection's "initial" message.
+                // Recovers everything the window dropped. State is last-write-wins, so one full
+                // report of the current values restores the server's view — a volume the app
+                // changed mid-window, an output delay, an availability flip — without a queue.
+                // Skipped when the initial state has yet to go out: the branch above owns that
+                // case, and a state message before it would become the connection's "initial".
                 ResendClientStateAfterPairingAsync().SafeFireAndForget(_logger);
+            }
+            else if (activeRolesChanged && !first && _initialClientStateSent)
+            {
+                // The active set changed, so the set of role objects that belongs in
+                // client/state changed with it. Report it now, before the server starts the
+                // streams the activation just authorized: a newly activated role's binary data
+                // may not flow until the server has received that role's state object (spec PR
+                // #204), and a newly deactivated role's object must stop being reported.
+                // Excluded on the connection's first activate — the initial client/state, sent
+                // or deferred by FinishHandshake above, already carries the activated set, and
+                // sending here too would simply double it.
+                SendClientStateAsync().SafeFireAndForget(_logger);
             }
 
             StartTimeSyncLoop();
@@ -3110,6 +3487,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
 
+        // Role-state readiness is per connection too (spec PR #204): the new server has received
+        // nothing yet, so every role's binary channel starts closed until this connection sends
+        // that role's client/state object. The one-shot warnings reset with it, so a server that
+        // streams ahead of the gate says so once per connection rather than once per process.
+        lock (_roleStateSentLock)
+        {
+            _roleStateSent.Clear();
+            _warnedUngatedRoles.Clear();
+        }
+
+        // The availability tracker belongs to the connection that seeded it: left set, a
+        // reconnect whose composed availability happens to match the old value would find
+        // "already sent" and never tell the new server anything.
+        lock (_availabilityLock)
+        {
+            _lastAvailabilitySent = null;
+        }
+
         // Connection-scoped work started from here on belongs to this connection and dies with
         // it — see the field's remarks for the orphan this replaced.
         BeginConnectionLifetime();
@@ -3177,38 +3572,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // which resets the latch with the rest of the per-connection state.
         _initialClientStateSent = true;
 
-        // Role objects follow active_roles, not capabilities. A player object used to go out
-        // unconditionally, so a source-only or artwork-only client reported player state for a
-        // role the server never activated — the deviation aiosendspin rejects when strict. The
-        // source object was never built at all, which is why an in-window line-sense signal had
-        // nowhere to go (#114).
-        bool available = CurrentAvailability;
-        var stateMessage = ClientStateMessage.CreateInitial(
-            available: available,
-            player: MayReportRoleState("player")
-                ? new PlayerStatePayload
-                {
-                    Volume = _playerState.Volume,
-                    Muted = _playerState.Muted,
-                    OutputDelayMs = ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
-                    RequiredLeadTimeMs = _requiredLeadTimeMs,
-                    MinBufferMs = _minBufferMs,
-                    SupportedCommands = GetPlayerSupportedCommands(),
-                }
-                : null,
-            source: BuildSourceState());
-
-        // Seed the availability publisher's "last sent" tracker from the value this message
-        // carries, so the first delta PublishAvailabilityAsync sends afterward is neither a
-        // spurious repeat nor a swallowed change. Seeded before the send, not after: written
-        // after the await, it would overwrite — with a by-then stale value — a tracker that a
-        // delta publishing while this send was in flight has already advanced, and the next
-        // genuine change would be suppressed as a repeat while the server believes otherwise.
-        _lastAvailabilitySent = available;
-
-        var stateJson = MessageSerializer.Serialize(stateMessage);
-        _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
-        await SendAsync(stateMessage);
+        // Role objects follow active_roles, not capabilities, and every active role's object is
+        // included — SendClientStateAsync composes both rules. A client whose active_roles are
+        // non-empty still sends this message when none of its roles defines a state object
+        // (spec PR #181): available alone is what opens the server's streams for those roles.
+        await SendClientStateAsync(initial: true);
 
         // Also apply to audio pipeline to ensure consistency
         _audioPipeline?.SetVolume(_playerState.Volume);
@@ -4065,11 +4433,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// view of anything the window dropped.
     /// </summary>
     /// <remarks>
-    /// Deliberately the full state rather than a delta: the client cannot know which of its
-    /// values the server last saw, because it does not track what the gate discarded. Resending
-    /// unchanged fields is explicitly permitted — "A client MAY instead resend unchanged fields,
-    /// up to its full state" — so the complete picture is both correct and the only thing that
-    /// is knowably correct here.
+    /// Deliberately the full state rather than a fragment: the client cannot know which of its
+    /// values the server last saw, because it does not track what the gate discarded. Since spec
+    /// PR #175 every client/state is full state anyway, so this is simply the ordinary send —
+    /// the only thing pairing-specific left here is when it happens.
     /// </remarks>
     private async Task ResendClientStateAfterPairingAsync()
     {
@@ -4078,27 +4445,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        await SendAsync(ClientStateMessage.CreateInitial(
-            available: CurrentAvailability,
-            player: MayReportRoleState("player")
-                ? new PlayerStatePayload
-                {
-                    Volume = _playerState.Volume,
-                    Muted = _playerState.Muted,
-                    OutputDelayMs = ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
-                    RequiredLeadTimeMs = _requiredLeadTimeMs,
-                    MinBufferMs = _minBufferMs,
-                    SupportedCommands = GetPlayerSupportedCommands(),
-                }
-                : null,
-            source: BuildSourceState()));
-
-        // Keep the availability publisher's tracker in step with what the server was just told,
-        // so the next genuine change is neither a spurious repeat nor swallowed as one.
-        lock (_availabilityLock)
-        {
-            _lastAvailabilitySent = CurrentAvailability;
-        }
+        await SendClientStateAsync();
     }
 
     /// <summary>
@@ -4648,6 +4995,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private void DispatchBinaryMessage(
         BinaryMessageCategory category, byte type, long timestamp, ReadOnlySpan<byte> payload, ReadOnlyMemory<byte> data)
     {
+        // Spec PR #204: a role's binary data is only in play once the server has received that
+        // role's client/state object. Enforcing it on the receive side keeps a server that
+        // streams ahead of the gate from being treated as authoritative — its frames were
+        // scheduled against timings and a channel configuration this client never sent.
+        if (RoleFamilyForBinary(category) is { } family && !IsRoleBinaryPermitted(family))
+        {
+            WarnOnceOnUngatedRoleBinary(family);
+            return;
+        }
+
         switch (category)
         {
             case BinaryMessageCategory.PlayerAudio:
@@ -4726,6 +5083,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 break;
         }
     }
+
+    /// <summary>
+    /// The role family whose client/state object gates a binary category, or null for a category
+    /// no role owns.
+    /// </summary>
+    private static string? RoleFamilyForBinary(BinaryMessageCategory category) => category switch
+    {
+        BinaryMessageCategory.PlayerAudio => "player",
+        BinaryMessageCategory.Artwork => "artwork",
+        BinaryMessageCategory.Visualizer => "visualizer",
+        _ => null,
+    };
 
     /// <summary>
     /// Logs the first chunk seen on each undefined player-audio type, so a server emitting them at
