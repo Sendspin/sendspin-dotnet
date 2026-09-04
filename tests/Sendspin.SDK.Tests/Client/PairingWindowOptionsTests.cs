@@ -45,18 +45,23 @@ public class PairingWindowOptionsTests
     }
 
     [Fact]
-    public async Task BuildClientOptions_WithAConfiguredSynchronizer_HandsBackTheStoredOptions()
+    public async Task BuildClientOptions_WithAConfiguredSynchronizer_PassesItThroughUnchanged()
     {
         // The passthrough branch: a synchronizer the app configured is shared across
-        // connections on purpose, and nothing is rebuilt.
+        // connections on purpose, and nothing is rebuilt. The options record is still copied,
+        // because every connection gets the host's live-record callback attached (#183).
+        var synchronizer = new KalmanClockSynchronizer();
         var hostOptions = new SendspinClientOptions
         {
             Identity = SendspinIdentity.Generate(),
-            ClockSynchronizer = new KalmanClockSynchronizer(),
+            ClockSynchronizer = synchronizer,
         };
 
         await using var host = CreateHost(hostOptions);
+        var built = host.BuildClientOptions();
 
-        Assert.Same(hostOptions, host.BuildClientOptions());
+        Assert.Same(synchronizer, built.ClockSynchronizer);
+        Assert.Same(hostOptions.Identity, built.Identity);
+        Assert.NotNull(built.LiveRecordPskIds);
     }
 }

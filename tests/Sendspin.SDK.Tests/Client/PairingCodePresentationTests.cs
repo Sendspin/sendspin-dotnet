@@ -9,7 +9,7 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// Covers <c>SendspinClientOptions.PresentPairingCodeAsync</c>: the derived dynamic pairing code reaches the
-/// app through an awaited delegate whose completion gates client/pair-auth, dynamic_pin is
+/// app through an awaited delegate whose completion gates client/pair-auth, dynamic_pairing_code is
 /// refused (fail closed) when no presenter is configured, and the delegate receives the
 /// client's own cancellation token rather than a defaulted one.
 /// </summary>
@@ -26,7 +26,7 @@ public class PairingCodePresentationTests
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pairing_code"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
                 PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
                 PresentPairingCodeAsync = presentPairingCode,
@@ -41,7 +41,7 @@ public class PairingCodePresentationTests
 
     private static void ActivateDynamicPairingCode(FakeSendspinConnection conn) =>
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
 
     private static void SendServerPairInit(FakeSendspinConnection conn, byte[] nonceA, int pairingCodeLength) =>
         conn.RaiseTextMessageReceived(
@@ -127,7 +127,7 @@ public class PairingCodePresentationTests
     [Fact]
     public void DynamicPairingCode_OfferedWithoutPresenter_IsRefused()
     {
-        // Fail closed: dynamic_pin is configured and a lockout store is present, but there is
+        // Fail closed: dynamic_pairing_code is configured and a lockout store is present, but there is
         // no PresentPairingCodeAsync, so the derived pairing code could never reach the operator. The client
         // must refuse the method — pair/abort method_not_supported with the connection left
         // open, the same shape as the missing-lockout-store refusal — rather than running an

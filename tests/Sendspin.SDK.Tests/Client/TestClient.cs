@@ -7,29 +7,42 @@ using Sendspin.SDK.Synchronization;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Store double that reports full for any psk_id it does not already hold, exercising the
-/// storage-exhausted paths (#128) without needing to fill a real store to capacity. Backed by
-/// a real dictionary rather than always returning <c>false</c>, so a replace of an existing
-/// record still succeeds — per the interface's contract — and a test can seed a record, then
-/// assert it survives a refused <see cref="Upsert"/> for something new.
+/// Store double with a fixed capacity, for exercising the eviction paths of spec #183 without
+/// filling a real store. Delegates the eviction policy itself to the shipped helper by simply
+/// honouring <see cref="Capacity"/>; the SDK is what must make room before it writes.
 /// </summary>
-internal sealed class FullPairingRecordStore : IPairingRecordStore
+internal sealed class BoundedPairingRecordStore : IPairingRecordStore
 {
     private readonly Dictionary<string, PairingRecord> _records;
 
-    /// <param name="seed">Records the store starts out holding — "full" from here on.</param>
-    public FullPairingRecordStore(params PairingRecord[] seed) =>
+    /// <param name="capacity">The number of records the store holds.</param>
+    /// <param name="seed">Records the store starts out holding.</param>
+    public BoundedPairingRecordStore(int capacity, params PairingRecord[] seed)
+    {
+        Capacity = capacity;
         _records = seed.ToDictionary(r => r.PskId);
+    }
+
+    public int Capacity { get; }
+
+    /// <summary>Every <c>psk_id</c> ever passed to <see cref="Upsert"/>, in order.</summary>
+    public List<string> UpsertedPskIds { get; } = new();
 
     public IReadOnlyList<PairingRecord> List() => _records.Values.ToList();
 
-    public bool Upsert(PairingRecord record)
+    public void Upsert(PairingRecord record)
     {
-        if (!_records.ContainsKey(record.PskId))
-            return false;
+        UpsertedPskIds.Add(record.PskId);
+
+        // Deliberately throws rather than silently overflowing: the SDK is required to make
+        // room first, and a test that stopped exercising that should fail loudly.
+        if (!_records.ContainsKey(record.PskId) && _records.Count >= Capacity)
+        {
+            throw new InvalidOperationException(
+                $"Upsert of a new record at capacity {Capacity}; the caller did not evict first.");
+        }
 
         _records[record.PskId] = record;
-        return true;
     }
 
     public void Remove(string pskId) => _records.Remove(pskId);

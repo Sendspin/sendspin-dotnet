@@ -20,7 +20,7 @@ public class TimeSyncPairingGatingTests
         """{"type":"server/hello","payload":{"name":"srv"}}""";
 
     private const string PairingActivate =
-        """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""";
+        """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""";
 
     private const string PlaybackActivate =
         """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""";
@@ -47,7 +47,7 @@ public class TimeSyncPairingGatingTests
             unpairedAccess,
             configure: options =>
             {
-                var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } };
+                var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pairing_code" } };
                 if (roles is not null)
                 {
                     caps.Roles = [.. roles];
@@ -57,7 +57,7 @@ public class TimeSyncPairingGatingTests
                 {
                     Capabilities = caps,
                     ClockSynchronizer = clock,
-                    // dynamic_pin needs a record store to be runnable at all (#158); without
+                    // dynamic_pairing_code needs a record store to be runnable at all (#158); without
                     // one the activation aborts and there is no pairing attempt to gate.
                     PairingRecordStore = new InMemoryPairingRecordStore(),
                     PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
@@ -107,7 +107,10 @@ public class TimeSyncPairingGatingTests
         // playback activation — when the server sends server/activate
         // {activities:["pairing"], active_roles:[]} to start a pairing code attempt. The already-
         // running loop must STOP; declining to start one is not enough.
-        var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.LongTerm);
+        //
+        // Sentinel-keyed with unpaired access: since spec #183 a long-term (paired) PSK admits
+        // no pairing activity, so an unpaired session is where this mid-session shape lives.
+        var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
         connection.RespondToTimeSync = true; // bursts complete, so probes flow continuously
 
@@ -181,7 +184,7 @@ public class TimeSyncPairingGatingTests
         // crossing a mid-session pairing activate must stay silent — but the same
         // stream/start outside a pairing window must still burst, because that burst is
         // what lets playback start before full convergence.
-        var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.LongTerm);
+        var (client, connection, clock) = CreatePairingCodePairableClient(PskCategory.Sentinel, unpairedAccess: true);
         using var _c = client;
         connection.RespondToTimeSync = true;
         clock.ConvergeOnMeasurement = false;  // HasMinimalSync stays false: burst-eligible

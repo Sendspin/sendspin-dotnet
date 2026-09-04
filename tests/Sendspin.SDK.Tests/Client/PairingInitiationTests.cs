@@ -126,7 +126,7 @@ public class PairingInitiationTests
 
         var pairing = Assert.Single(store.List(), r => r.Category == PskCategory.Pairing);
         Assert.Equal(pairingPskId, pairing.PskId);
-        Assert.True(pairing.Used, "the matched Pairing record is marked used — retained, not retired");
+        Assert.NotNull(pairing.LastUsedUtc);
         Assert.Equal(token, client.EnsurePairingPsk());
     }
 

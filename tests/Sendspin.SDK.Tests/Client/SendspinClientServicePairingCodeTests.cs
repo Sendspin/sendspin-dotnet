@@ -29,7 +29,7 @@ public class SendspinClientServicePinPairingTests
         var lockout = new InMemoryPairingCodeLockoutStore();
         var records = new InMemoryPairingRecordStore();
 
-        // Pre-opened so a static_pin attempt (always gesture-gated now) proceeds immediately,
+        // Pre-opened so a static_pairing_code attempt (always gesture-gated now) proceeds immediately,
         // exactly as it did before gating existed -- these tests are not about gating.
         var window = new PairingWindow();
         window.Open();
@@ -60,8 +60,8 @@ public class SendspinClientServicePinPairingTests
 
     private static T Last<T>(FakeSendspinConnection c) where T : class => c.SentMessages.OfType<T>().Last();
 
-    private static string ServerPairInit(string nonceA, int pairingCodeLength) =>
-        $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{nonceA}}}","pin_length":{{{pairingCodeLength}}}}}""";
+    private static string ServerPairInit(string nonceA) =>
+        $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{nonceA}}}"}}""";
 
     private static string ServerPairAuth(string pakeMsg1) =>
         $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{pakeMsg1}}}"}}""";
@@ -77,12 +77,12 @@ public class SendspinClientServicePinPairingTests
         // null here and Encoding.ASCII.GetBytes(null) threw ArgumentNullException, which the
         // dispatch catch does not name -- so the connection died as an unexplained receive-loop
         // failure rather than a deliberate close (#106).
-        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 6 };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pairing_code" } };
         var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
         Assert.NotEmpty(conn.SentMessages.OfType<ClientPairInitMessage>());
 
         // server/pair-auth without the server/pair-init that derives the pairing code.
@@ -98,8 +98,7 @@ public class SendspinClientServicePinPairingTests
         string? emittedPairingCode = null;
         var caps = new ClientCapabilities
         {
-            PairingCodeMethods = { "dynamic_pin" },
-            MinPairingCodeLength = 6,
+            PairingCodeMethods = { "dynamic_pairing_code" }
         };
         var (client, conn, _, _) = CreateClient(caps, (p, _) =>
         {
@@ -108,20 +107,20 @@ public class SendspinClientServicePinPairingTests
         });
         using var _c = client;
 
-        // Pairing activate selects dynamic_pin and carries the session's pin_length.
-        const int length = 6;
+        // Pairing activate selects dynamic_pairing_code and names the emission format.
+        const int length = PairingCodes.DynamicPairingCodeLength;
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
 
         // Client sends pair-init with commit_B.
         var init = Last<ClientPairInitMessage>(conn);
         Assert.NotNull(init.Payload.CommitB);
         byte[] commitB = B64(init.Payload.CommitB!);
 
-        // Server picks nonce_A, derives the same pairing code using the activation's pin_length.
+        // Server picks nonce_A, derives the same pairing code (always 6 digits).
         byte[] nonceA = Enumerable.Repeat((byte)0x42, 32).ToArray();
         conn.RaiseTextMessageReceived(
-            ServerPairInit(B64(nonceA), length));
+            ServerPairInit(B64(nonceA)));
 
         Assert.NotNull(emittedPairingCode);
         Assert.Equal(length, emittedPairingCode!.Length);
@@ -160,30 +159,31 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
-    public void DynamicPairingCode_PairingCodeLengthBelowMinimum_Aborts()
+    public void DynamicPairingCode_UnrecognizedFormat_Aborts()
     {
-        // pin_length now arrives on the activation, not server/pair-init (that field no
-        // longer exists), so a too-short session length is caught there, before any
-        // attempt starts.
-        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 8 };
+        // The activation's format names how the client must emit the code. This SDK only
+        // advertises (and only implements) digits, so any other format selects a flow it
+        // cannot run -- caught at the activation, before any attempt starts.
+        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pairing_code" } };
         var (client, conn, _, _) = CreateClient(caps, (_, _) => ValueTask.CompletedTask);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"qr_code"}}}""");
 
-        Assert.Equal("pin_length_unacceptable", Last<PairAbortMessage>(conn).Payload.Reason);
+        Assert.Equal("method_not_supported", Last<PairAbortMessage>(conn).Payload.Reason);
+        Assert.Empty(conn.SentMessages.OfType<ClientPairInitMessage>());
     }
 
     [Fact]
     public void StaticPairingCode_FullFlow_UsesConfiguredPairingCode()
     {
-        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "12345678" };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pairing_code" }, StaticPairingCode = "12345678" };
         var (client, conn, _, _) = CreateClient(caps);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pairing_code"}}}""");
 
         // Static pairing code: no commit_B in pair-init.
         var init = Last<ClientPairInitMessage>(conn);
@@ -213,12 +213,12 @@ public class SendspinClientServicePinPairingTests
         // suite". The call site hardcoded ChaCha20-Poly1305, so on an AES-GCM session -- chosen
         // explicitly, or by the automatic fallback on a platform without ChaCha20-Poly1305 --
         // the server's unwrap failed at the last step of every code-based pairing (#192).
-        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "12345678" };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pairing_code" }, StaticPairingCode = "12345678" };
         var (client, conn, _, _) = CreateClient(caps, suite: suite);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pairing_code"}}}""");
 
         byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("12345678"), sid, ad: PairingCodes.AdServer);
@@ -261,12 +261,12 @@ public class SendspinClientServicePinPairingTests
     [Fact]
     public void WrongServerTag_AbortsWithPairingCodeMismatch_AndCountsFailure()
     {
-        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "12345678" };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "static_pairing_code" }, StaticPairingCode = "12345678" };
         var (client, conn, lockout, _) = CreateClient(caps);
         using var _c = client;
 
         conn.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pairing_code"}}}""");
         // Server runs CPace with the WRONG pin, so its confirmation tag won't verify.
         byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("00000000"), sid, ad: PairingCodes.AdServer);
@@ -277,8 +277,8 @@ public class SendspinClientServicePinPairingTests
         conn.RaiseTextMessageReceived(
             ServerPairConfirm(B64(server.Tag())));
 
-        Assert.Equal("pin_mismatch", Last<PairAbortMessage>(conn).Payload.Reason);
-        Assert.Equal(1, lockout.GetFailures("static_pin"));
+        Assert.Equal("pairing_code_mismatch", Last<PairAbortMessage>(conn).Payload.Reason);
+        Assert.Equal(1, lockout.GetFailures("static_pairing_code"));
         Assert.DoesNotContain(conn.SentMessages, m => m is ClientPairFinalizeMessage);
     }
 
@@ -289,12 +289,12 @@ public class SendspinClientServicePinPairingTests
         // it only shows up as a gesture gate once the server actually selects the escalated
         // method. Escalation is signalled that way, not by hiding the method: an escalated
         // method stays advertised, so the descriptor must still be there. Dynamic pairing code with a
-        // session pin_length >= 6 isolates escalation as the gating cause -- static_pin is
+        // The dynamic method isolates escalation as the gating cause -- static_pairing_code is
         // gated regardless of its failure count, so it cannot tell escalation apart from the
         // method's own baseline policy.
-        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" }, MinPairingCodeLength = 6 };
+        var caps = new ClientCapabilities { PairingCodeMethods = { "dynamic_pairing_code" } };
         var lockout = new InMemoryPairingCodeLockoutStore();
-        lockout.SetFailures("dynamic_pin", 10);
+        lockout.SetFailures("dynamic_pairing_code", 10);
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,
             configure: options => options with
@@ -310,10 +310,10 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
-        Assert.Contains(hello.Payload.SupportedPairMethods!, m => m.Method == "dynamic_pin");
+        Assert.Contains("dynamic_pairing_code", hello.Payload.SupportedPairMethods!.Keys);
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":8}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
 
         // Gated, not refused: a pending signal, no abort of any kind, and no init -- gating
         // that signalled pending and then proceeded ungated anyway must fail this too.
@@ -332,7 +332,7 @@ public class SendspinClientServicePinPairingTests
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pairing_code"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
                 PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
                 PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
@@ -342,7 +342,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
@@ -352,7 +352,7 @@ public class SendspinClientServicePinPairingTests
                                                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(1, second.Payload.PairingIndex);
@@ -371,7 +371,7 @@ public class SendspinClientServicePinPairingTests
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pairing_code"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
                 PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
                 PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
@@ -381,13 +381,13 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
         var first = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
         Assert.Equal(1, first.Payload.PairingIndex);
 
         // No mutation of session.HandshakeHash here — that is the point of this test.
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
         var second = connection.SentMessages.OfType<ClientPairInitMessage>().Last();
 
         Assert.Equal(2, second.Payload.PairingIndex);
@@ -403,7 +403,7 @@ public class SendspinClientServicePinPairingTests
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pairing_code"] },
 
                 // A presenter IS configured, so the refusal below is attributable to the
                 // missing lockout store alone.
@@ -414,7 +414,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pairing_code"}}}""");
 
         Assert.DoesNotContain(connection.SentMessages, m => m is ClientPairInitMessage);
         var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
@@ -432,7 +432,7 @@ public class SendspinClientServicePinPairingTests
             PskCategory.Sentinel,
             configure: options => options with
             {
-                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pin"] },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = ["dynamic_pairing_code"] },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
                 PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
                 PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
@@ -442,7 +442,7 @@ public class SendspinClientServicePinPairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pin","pin_length":6}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
 
         Assert.Single(connection.SentMessages.OfType<ClientPairInitMessage>());
         Assert.DoesNotContain(connection.SentMessages, m => m is PairAbortMessage);
@@ -455,9 +455,9 @@ public class SendspinClientServicePinPairingTests
         string path = Path.Combine(dir, "lockout.json");
         try
         {
-            new FilePairingCodeLockoutStore(path).SetFailures("dynamic_pin", 3);
+            new FilePairingCodeLockoutStore(path).SetFailures("dynamic_pairing_code", 3);
 
-            Assert.Equal(3, new FilePairingCodeLockoutStore(path).GetFailures("dynamic_pin"));
+            Assert.Equal(3, new FilePairingCodeLockoutStore(path).GetFailures("dynamic_pairing_code"));
         }
         finally
         {
@@ -477,11 +477,11 @@ public class SendspinClientServicePinPairingTests
         try
         {
             Directory.CreateDirectory(dir);
-            File.WriteAllText(path, """{"dynamic_pin":2}""");
+            File.WriteAllText(path, """{"dynamic_pairing_code":2}""");
 
             if (OperatingSystem.IsWindows())
             {
-                Assert.Equal(2, new FilePairingCodeLockoutStore(path).GetFailures("dynamic_pin"));
+                Assert.Equal(2, new FilePairingCodeLockoutStore(path).GetFailures("dynamic_pairing_code"));
             }
             else
             {
@@ -492,7 +492,7 @@ public class SendspinClientServicePinPairingTests
                 var store = new FilePairingCodeLockoutStore(path);
 
                 Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
-                Assert.Equal(2, store.GetFailures("dynamic_pin"));
+                Assert.Equal(2, store.GetFailures("dynamic_pairing_code"));
             }
         }
         finally

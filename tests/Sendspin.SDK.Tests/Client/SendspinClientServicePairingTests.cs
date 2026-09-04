@@ -71,13 +71,14 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
-    public void ServerPairFinalize_StoreFull_DoesNotRaiseEvent_AndDoesNotClaimPersisted()
+    public void ServerPairFinalize_AtCapacity_EvictsAndPersists()
     {
-        // #128: a store that cannot hold the fresh long-term record must not leave the client
-        // claiming a pairing it cannot authenticate. See the positive control immediately
-        // above — without it, an implementation that never raised PairingCompleted at all
-        // would also pass this assertion, for the wrong reason.
-        var store = new FullPairingRecordStore();
+        // #183: "a pairing never fails for lack of record storage". A store already holding
+        // its capacity must give up a non-live record rather than refuse the new one — the
+        // client would otherwise announce a pairing it cannot authenticate next time.
+        var stale = new PairingRecord(
+            new byte[32], PskCategory.LongTerm, "old-server", DateTimeOffset.UnixEpoch);
+        var store = new BoundedPairingRecordStore(1, stale);
         var (client, connection, _) = TestClient.Create(
             PskCategory.Pairing,
             configure: options => options with { PairingRecordStore = store });
@@ -92,21 +93,22 @@ public class SendspinClientServicePairingTests
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
 
-        Assert.False(paired, "PairingCompleted must not fire when the store is full");
-        Assert.Empty(store.List());
+        Assert.True(paired, "PairingCompleted must fire: a full store evicts rather than refusing");
+        var record = Assert.Single(store.List());
+        Assert.Equal(ServerId, record.ServerId);
     }
 
     [Fact]
     public void KnownButUnconfiguredPairMethod_SendsAbort()
     {
-        // dynamic_pin is a method the SDK implements but this client has not enabled, so
+        // dynamic_pairing_code is a method the SDK implements but this client has not enabled, so
         // CanOffer refuses it. The unknown-method case is covered separately, at
         // UnsupportedPairMethod_AbortsWithoutClosingTheConnection.
         var (client, connection, store) = Create();
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""");
 
         var abort = Assert.Single(connection.SentMessages.OfType<PairAbortMessage>());
         Assert.Equal("method_not_supported", abort.Payload.Reason);
@@ -237,7 +239,7 @@ public class SendspinClientServicePairingTests
 
         var hello = connection.SentMessages.OfType<ClientHelloMessage>().Single();
         var method = Assert.Single(hello.Payload.SupportedPairMethods!);
-        Assert.Equal("pairing_psk", method.Method);
+        Assert.Equal("pairing_psk", method.Key);
     }
 
     /// <summary>
@@ -353,17 +355,18 @@ public class SendspinClientServicePairingTests
         var resolved = resolver.Resolve(NoiseConstants.DerivePskId(psk));
 
         Assert.NotNull(resolved);
-        Assert.False(Assert.Single(store.List()).Used, "Resolve must not mark the record used");
+        Assert.Null(Assert.Single(store.List()).LastUsedUtc);
     }
 
     [Fact]
-    public void PostPairingPromotion_MarksTheRotatedRecordUsed_OnANonPairingActivate()
+    public void PostPairingPromotion_RefreshesTheRotatedRecordsLastUse_OnANonPairingActivate()
     {
-        // The flow HandleServerPairFinalize documents: the record is persisted with
-        // used=false, the server re-handshakes onto it, and the activate that follows
-        // carries 'playback' — not 'pairing'. The used-marking is per session, so the
-        // re-handshake has to restart it here too, or this record reports used=false to
-        // the server forever and every PSK after the first is misreported.
+        // The flow HandleServerPairFinalize documents: the record is persisted stamped with
+        // the moment it was created (so a brand-new record is never the LRU eviction victim),
+        // the server re-handshakes onto it, and the activate that follows carries 'playback' —
+        // not 'pairing'. The last-use marking is per session, so the re-handshake has to
+        // restart it here too, or the record's last-use never advances and eviction picks the
+        // wrong victim.
         var store = new InMemoryPairingRecordStore();
         var (client, connection, session) = TestClient.Create(
             PskCategory.Pairing,
@@ -376,7 +379,8 @@ public class SendspinClientServicePairingTests
         connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
 
         var promoted = Assert.Single(store.List());
-        Assert.False(promoted.Used, "the new record starts unused");
+        Assert.NotNull(promoted.LastUsedUtc);
+        var persistedAt = promoted.LastUsedUtc!.Value;
 
         // The server rotates onto the new PSK in band; the framing installs a fresh hash.
         session.MatchedPsk = new NoisePsk(promoted.Psk.ToArray(), PskCategory.LongTerm, ServerId);
@@ -385,9 +389,9 @@ public class SendspinClientServicePairingTests
         connection.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""");
 
-        Assert.True(
-            Assert.Single(store.List()).Used,
-            "the rotated-to record must be marked used once a message decrypts under it");
+        var refreshed = Assert.Single(store.List());
+        Assert.NotNull(refreshed.LastUsedUtc);
+        Assert.True(refreshed.LastUsedUtc >= persistedAt);
     }
 
     [Fact]
@@ -405,11 +409,11 @@ public class SendspinClientServicePairingTests
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
 
-        Assert.False(Assert.Single(store.List()).Used, "not used before any message arrives");
+        Assert.Null(Assert.Single(store.List()).LastUsedUtc);
 
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
 
-        Assert.True(Assert.Single(store.List()).Used, "used once a decrypted message arrives");
+        Assert.NotNull(Assert.Single(store.List()).LastUsedUtc);
     }
 
     /// <summary>

@@ -75,7 +75,8 @@ public sealed record SendspinClientOptions
 
     /// <summary>
     /// Presents a derived dynamic pairing code to the operator through the app's out-channel (display,
-    /// speaker) so it can be entered into the server. Required when <c>"dynamic_pin"</c> is
+    /// speaker) so it can be entered into the server. Required when
+    /// <see cref="Protocol.Messages.PairMethods.DynamicPairingCode"/> is
     /// offered in <see cref="ClientCapabilities.PairingCodeMethods"/>; pairing fails closed
     /// without it. Awaited before the client proceeds, so a slow presenter delays pairing
     /// rather than racing it.
@@ -91,11 +92,30 @@ public sealed record SendspinClientOptions
     /// <summary>
     /// The device's pairing window, shared by every connection this application runs.
     /// <b>Required</b> to complete any gesture-gated pairing attempt: static pairing code always, and
-    /// dynamic pairing code once the method is escalated or the session's pairing code is shorter than 6 digits.
+    /// dynamic pairing code once the method is escalated.
     /// A null window is treated as permanently closed, so gated attempts stay pending — the
     /// fail-closed direction. Open it from the application's operator gesture.
     /// </summary>
     public PairingWindow? PairingWindow { get; init; }
+
+    /// <summary>
+    /// The <c>psk_id</c>s of pairing records backing connections other than this one, consulted
+    /// before a pairing at capacity evicts a record.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The spec forbids evicting the record a currently-open connection authenticated with —
+    /// doing so would unpair a server that is still talking to this client. A single
+    /// <see cref="SendspinClientService"/> knows only its own matched record, so the host that
+    /// owns the sibling connections supplies the rest through this hook. Internal because it is
+    /// a composition detail between the host and its clients, not application configuration.
+    /// </para>
+    /// <para>
+    /// Invoked while the record store lock is held; it must return promptly and must not call
+    /// back into the client.
+    /// </para>
+    /// </remarks>
+    internal Func<IReadOnlyCollection<string>>? LiveRecordPskIds { get; init; }
 
     /// <summary>
     /// How long a pairing attempt may run before the client aborts it with

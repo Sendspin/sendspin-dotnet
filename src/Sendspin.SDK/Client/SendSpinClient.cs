@@ -63,6 +63,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly Func<PairingCodePresentation, CancellationToken, ValueTask>? _presentPairingCodeAsync;
     private readonly PairingWindow? _pairingWindow;
 
+    // Supplied by the host when this client is one of several sharing a record store, so an
+    // eviction here cannot take out a record a sibling connection is authenticated by. Null
+    // for a standalone client, which has no siblings.
+    private readonly Func<IReadOnlyCollection<string>>? _liveRecordPskIds;
+
     private readonly TimeSpan _attemptTimeout;
 
     // Covers _attemptTimeoutCts and _pendingGatedMethod. Both are touched from the receive
@@ -87,13 +92,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
 
-    // pin_length from the current pairing activation, validated on receipt. 0 when the
-    // activation is not dynamic_pin. The gating policy reads it before client/pair-init.
-    private int _activationPairingCodeLength;
+    // format from the current pairing activation, validated on receipt. Null when the
+    // activation is not dynamic_pairing_code.
+    private string? _activationPairingCodeFormat;
 
-    // languages from the current pairing activation, handed to the pairing code presenter. Null when
-    // the server sent none.
-    private List<string>? _activationLanguages;
+    // languages advertised by the server in server/hello, handed to the pairing code presenter.
+    // Null when the server sent none. Spec #178 moved this hint off the pairing activation
+    // (where it was per-attempt) onto server/hello, so it is now connection-scoped.
+    private List<string>? _serverLanguages;
 
     // _handshakeTcs is published by the handshake waiter and completed by the connection's
     // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
@@ -129,7 +135,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly bool _pairingPskEnabled;
     private readonly bool _dynamicPairingCodeEnabled;
     private readonly bool _staticPairingCodeEnabled;
-    private readonly int _effectiveMinPairingCodeLength;
     private readonly string? _effectiveStaticPairingCode;
 
     // locations hints for the two methods that carry one. Copied from _capabilities rather than
@@ -421,6 +426,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _pairingCodeLockoutStore = options.PairingCodeLockoutStore;
         _presentPairingCodeAsync = options.PresentPairingCodeAsync;
         _pairingWindow = options.PairingWindow;
+        _liveRecordPskIds = options.LiveRecordPskIds;
         _attemptTimeout = options.PairingAttemptTimeout;
         _captureDevice = options.CaptureDevice;
         _sourceEncoderFactory = options.SourceEncoderFactory;
@@ -458,21 +464,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // to the server, so it follows what is advertised rather than its own default.
         _audioPipeline?.SetMinBufferMilliseconds(_minBufferMs);
 
+        // At most one pairing-code method may be offered (spec #189). Checked before anything
+        // is derived from the list, so a contradictory configuration cannot reach the wire.
+        _capabilities.ValidatePairingCodeMethods();
+
         // Implemented methods start enabled unless the app says otherwise. ANDing each with
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
         // which is what the spec keys different behaviour off, and keeps a default-constructed
         // ClientCapabilities reporting exactly what it did before these members existed.
         _pairingPskEnabled = _capabilities.PairingPskEnabled;
-        _dynamicPairingCodeEnabled = _capabilities.DynamicPairingCodeEnabled && _capabilities.PairingCodeMethods.Contains("dynamic_pin");
-        _staticPairingCodeEnabled = _capabilities.StaticPairingCodeEnabled && _capabilities.PairingCodeMethods.Contains("static_pin");
-        _effectiveMinPairingCodeLength = Math.Clamp(_capabilities.MinPairingCodeLength, 4, 12);
-        if (_effectiveMinPairingCodeLength != _capabilities.MinPairingCodeLength)
-        {
-            _logger.LogWarning(
-                "ClientCapabilities.MinPairingCodeLength {Value} is outside [4, 12]; clamped to {Clamped}",
-                _capabilities.MinPairingCodeLength,
-                _effectiveMinPairingCodeLength);
-        }
+        _dynamicPairingCodeEnabled = _capabilities.DynamicPairingCodeEnabled
+            && _capabilities.PairingCodeMethods.Contains(PairMethods.DynamicPairingCode);
+        _staticPairingCodeEnabled = _capabilities.StaticPairingCodeEnabled
+            && _capabilities.PairingCodeMethods.Contains(PairMethods.StaticPairingCode);
         _effectiveStaticPairingCode = _capabilities.StaticPairingCode;
 
         // Copied, not aliased: the SDK does not write to the ClientCapabilities instance the
@@ -480,15 +484,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _staticPairingCodeLocations = [.. _capabilities.StaticPairingCodeLocations];
         _pairingPskLocations = [.. _capabilities.PairingPskLocations];
 
-        // A static_pin the app never set, or set to something unusable, is not offered.
-        // The method stays advertised as disabled rather than vanishing, so an operator
-        // can tell a missing PIN from an unimplemented method.
+        // Usability of static_pairing_code is evaluated live via HasUsableStaticPairingCode, not
+        // snapshotted here. This warning is still worth logging once, at construction, so the app
+        // sees why the method it asked for is not being offered.
         if (_capabilities.StaticPairingCodeEnabled
-            && _capabilities.PairingCodeMethods.Contains("static_pin")
+            && _capabilities.PairingCodeMethods.Contains(PairMethods.StaticPairingCode)
             && !IsValidStaticPairingCode(_capabilities.StaticPairingCode))
         {
             _logger.LogWarning(
-                "ClientCapabilities.StaticPairingCode is not a valid 8-digit pairing code; static_pin will not be offered until a valid pairing code is configured");
+                "ClientCapabilities.StaticPairingCode is not a valid 8-digit pairing code; {Method} will not be offered until a valid pairing code is configured",
+                PairMethods.StaticPairingCode);
         }
 
         _playerState = new PlayerState
@@ -1705,10 +1710,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Marks the session's matched PSK used, once per session. Called on the first decrypted
+    /// Stamps the session's matched PSK as used, once per session. Called on the first decrypted
     /// application message, which is the first proof the AEAD verified — the record
-    /// must not be marked on a merely attempted connection.
+    /// must not be stamped on a merely attempted connection.
     /// </summary>
+    /// <remarks>
+    /// The timestamp is what makes least-recently-used eviction possible when a pairing
+    /// arrives at a full store (spec #183). It is local bookkeeping: nothing on the wire
+    /// carries it, and a store is free to ignore it and evict by some other policy.
+    /// </remarks>
     private void MarkMatchedPskUsed()
     {
         if (_markedPskUsed || _pairingStore is null)
@@ -1721,9 +1731,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             foreach (var record in _pairingStore.List())
             {
-                if (record.PskId == pskId && !record.Used)
+                if (record.PskId == pskId)
                 {
-                    _pairingStore.Upsert(record with { Used = true });
+                    _pairingStore.Upsert(record with { LastUsedUtc = DateTimeOffset.UtcNow });
                     break;
                 }
             }
@@ -1731,6 +1741,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _markedPskUsed = true;
     }
+
+    /// <summary>
+    /// The <c>psk_id</c> of the pairing record this connection's Noise session matched, or null
+    /// when the session is unkeyed (Sentinel) or not yet handshaken.
+    /// </summary>
+    /// <remarks>
+    /// Read by the host to protect live records from eviction (spec #183). Internal: the record
+    /// identifier is an implementation detail of the store, not part of the app-facing surface.
+    /// </remarks>
+    internal string? MatchedRecordPskId =>
+        _session.MatchedPsk is { } matched ? NoiseConstants.DerivePskId(matched.Key.Span) : null;
 
     private void OnTextMessageReceived(object? sender, TextMessageReceivedEventArgs e)
     {
@@ -1860,6 +1881,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var payload = message.Payload;
         LastServerHello = payload;
         ServerName = payload.Name;
+
+        // Connection-scoped since spec #178 moved the hint here from the pairing activation.
+        // Copied so a later hello cannot mutate a list already handed to a presenter.
+        _serverLanguages = payload.Languages is { Count: > 0 } languages ? [.. languages] : null;
 
         // Encrypted flow: server/hello carries only the name. The server identity
         // came from server/init, and roles arrive in the initial server/activate,
@@ -2129,8 +2154,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         bool AllowedSet(IReadOnlyCollection<string> set) => category switch
         {
             PskCategory.Pairing => set.Count == 1 && set.Contains(Activities.Pairing),
-            PskCategory.LongTerm => (set.Count == 1 && set.Contains(Activities.Pairing))
-                || set.All(a => a is Activities.Playback),
+
+            // A paired session never carries a pairing activity: pairing runs on the Pairing
+            // PSK (or, unpaired, on the Sentinel PSK), so a server declaring it on a long-term
+            // session is asking this client to re-pair over a credential it already holds.
+            PskCategory.LongTerm => set.All(a => a is Activities.Playback),
             PskCategory.Sentinel => set.Count == 0
                 || (set.Count == 1 && set.Contains(Activities.Pairing))
                 || (set.Count == 1 && set.Contains(Activities.Playback) && unpairedAccessEnabled),
@@ -2162,16 +2190,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private bool IsMethodImplemented(string method) => method switch
     {
-        "pairing_psk" => true, // every client implements it (pairing.md:65)
+        PairMethods.PairingPsk => true, // every client implements it (pairing.md:65)
         _ => _capabilities.PairingCodeMethods.Contains(method),
     };
 
     /// <summary>The method's effective enablement, as the app configured it.</summary>
     private bool IsMethodEnabled(string method) => method switch
     {
-        "pairing_psk" => _pairingPskEnabled,
-        "dynamic_pin" => _dynamicPairingCodeEnabled,
-        "static_pin" => _staticPairingCodeEnabled,
+        PairMethods.PairingPsk => _pairingPskEnabled,
+        PairMethods.DynamicPairingCode => _dynamicPairingCodeEnabled,
+        PairMethods.StaticPairingCode => _staticPairingCodeEnabled,
         _ => false,
     };
 
@@ -2190,38 +2218,67 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool HasUsableStaticPairingCode => IsValidStaticPairingCode(_effectiveStaticPairingCode);
 
     /// <summary>
-    /// Builds the supported_pair_methods list for the encrypted client/hello: every
-    /// implemented method that is currently enabled, with its descriptor.
+    /// Builds the supported_pair_methods object for the encrypted client/hello: every
+    /// implemented method that is currently enabled, keyed by its method identifier (spec #179).
     /// </summary>
-    private List<PairMethodDescriptor> BuildPairMethods()
+    private Dictionary<string, PairMethodDescriptor> BuildPairMethods()
     {
-        var methods = new List<PairMethodDescriptor>();
-        if (IsMethodEnabled("pairing_psk"))
+        var methods = new Dictionary<string, PairMethodDescriptor>(StringComparer.Ordinal);
+        if (IsMethodEnabled(PairMethods.PairingPsk))
         {
-            methods.Add(new PairMethodDescriptor
+            methods[PairMethods.PairingPsk] = new PairMethodDescriptor
             {
-                Method = "pairing_psk",
                 Locations = LocationsHint(_pairingPskLocations),
-            });
+            };
         }
 
-        if (CanRun("dynamic_pin"))
+        if (CanRun(PairMethods.DynamicPairingCode))
         {
-            methods.Add(new PairMethodDescriptor
+            // 'speaker' is filtered out rather than passed through: a client advertising it
+            // must also advertise a digit_audio object and be able to play the server's digit
+            // audio pack, neither of which this SDK implements. Advertising it would invite a
+            // server to pick a flow that reaches nobody. If that leaves no channel at all, the
+            // method is withheld entirely — an empty out_channels is not a usable offer.
+            var outChannels = _capabilities.PairingCodeOutChannels
+                .Where(c => !string.Equals(c, "speaker", StringComparison.Ordinal))
+                .ToList();
+            if (outChannels.Count != _capabilities.PairingCodeOutChannels.Count)
             {
-                Method = "dynamic_pin",
-                OutChannels = _capabilities.PairingCodeOutChannels,
-                MinPairingCodeLength = _effectiveMinPairingCodeLength,
-            });
+                _logger.LogWarning(
+                    "ClientCapabilities.PairingCodeOutChannels lists 'speaker', which requires the "
+                    + "digit-audio flow this SDK does not implement; it is omitted from the "
+                    + "{Method} descriptor",
+                    PairMethods.DynamicPairingCode);
+            }
+
+            if (outChannels.Count == 0)
+            {
+                _logger.LogWarning(
+                    "{Method} will not be offered: no usable entry remains in "
+                    + "ClientCapabilities.PairingCodeOutChannels",
+                    PairMethods.DynamicPairingCode);
+            }
+            else
+            {
+                methods[PairMethods.DynamicPairingCode] = new PairMethodDescriptor
+                {
+                    OutChannels = outChannels,
+
+                    // Only 'digits' is emitted. A descriptor whose formats name nothing the
+                    // server recognizes is treated as though the method were not offered, so
+                    // this list is what makes the offer real — and qr_code would need the
+                    // per-session pairing token this SDK does not produce.
+                    Formats = [PairingCodeFormats.Digits],
+                };
+            }
         }
 
-        if (CanRun("static_pin"))
+        if (CanRun(PairMethods.StaticPairingCode))
         {
-            methods.Add(new PairMethodDescriptor
+            methods[PairMethods.StaticPairingCode] = new PairMethodDescriptor
             {
-                Method = "static_pin",
                 Locations = LocationsHint(_staticPairingCodeLocations),
-            });
+            };
         }
 
         return methods;
@@ -2262,10 +2319,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // stores nothing -- so it fails to authenticate on the very next connection while the
         // app has been told pairing succeeded. pairing_psk has required a store since the
         // trust-and-pairing work; the pairing code methods were never given the same treatment.
-        "dynamic_pin" => IsMethodImplemented("dynamic_pin") && IsMethodEnabled("dynamic_pin")
+        PairMethods.DynamicPairingCode => IsMethodImplemented(PairMethods.DynamicPairingCode)
+                         && IsMethodEnabled(PairMethods.DynamicPairingCode)
                          && _pairingCodeLockoutStore is not null && _presentPairingCodeAsync is not null
                          && _pairingStore is not null,
-        "static_pin" => IsMethodImplemented("static_pin") && IsMethodEnabled("static_pin")
+        PairMethods.StaticPairingCode => IsMethodImplemented(PairMethods.StaticPairingCode)
+                        && IsMethodEnabled(PairMethods.StaticPairingCode)
                         && HasUsableStaticPairingCode && _pairingCodeLockoutStore is not null
                         && _pairingStore is not null,
         // pairing_psk is deliberately not covered here: it stays on BuildPairMethods's
@@ -2287,11 +2346,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // pairing_psk is admissible only when the method is enabled, on a session already
         // keyed by the Pairing PSK, and only when the resulting long-term record can
         // actually be persisted.
-        "pairing_psk" => _pairingPskEnabled
+        PairMethods.PairingPsk => _pairingPskEnabled
                          && _session.MatchedPsk?.Category == PskCategory.Pairing
                          && _pairingStore is not null,
-        "dynamic_pin" => CanRun("dynamic_pin"),
-        "static_pin" => CanRun("static_pin"),
+        PairMethods.DynamicPairingCode => CanRun(PairMethods.DynamicPairingCode),
+        PairMethods.StaticPairingCode => CanRun(PairMethods.StaticPairingCode),
         _ => false,
     };
 
@@ -2322,39 +2381,39 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 payload.Pairing?.Method);
             SendAsync(new PairAbortMessage
             {
-                Payload = new PairAbortPayload { Reason = "method_not_supported" },
+                Payload = new PairAbortPayload { Reason = PairAbortReasons.MethodNotSupported },
             }).SafeFireAndForget(_logger);
             return;
         }
 
-        _activationPairingCodeLength = 0;
-        _activationLanguages = payload.Pairing?.Languages;
-        if (payload.Pairing?.Method == "dynamic_pin")
+        _activationPairingCodeFormat = null;
+        if (payload.Pairing?.Method == PairMethods.DynamicPairingCode)
         {
-            // Validated here, not at server/pair-init: the spec moved pin_length into the
-            // activation (pairing.md:149) precisely because the gating decision needs it
-            // before client/pair-init is sent.
-            int? length = payload.Pairing.PairingCodeLength;
-            if (length is null || length < _effectiveMinPairingCodeLength || length > 12)
+            // The activation names the emission format the server picked from the descriptor's
+            // formats (spec #178). It is required for this method and must be one this client
+            // advertised; anything else is a method this client cannot run, which is exactly
+            // what method_not_supported says. pin_length is gone — a digits code is 6 digits.
+            string? format = payload.Pairing.Format;
+            if (!string.Equals(format, PairingCodeFormats.Digits, StringComparison.Ordinal))
             {
                 _logger.LogWarning(
-                    "Activation pin_length {Length} is outside [{Min}, 12]; aborting the attempt",
-                    length,
-                    _effectiveMinPairingCodeLength);
+                    "Activation format {Format} is not one this client offers for {Method}; aborting the attempt",
+                    format ?? "(none)",
+                    PairMethods.DynamicPairingCode);
                 SendAsync(new PairAbortMessage
                 {
-                    Payload = new PairAbortPayload { Reason = "pin_length_unacceptable" },
+                    Payload = new PairAbortPayload { Reason = PairAbortReasons.MethodNotSupported },
                 }).SafeFireAndForget(_logger);
                 return;
             }
 
-            _activationPairingCodeLength = length.Value;
+            _activationPairingCodeFormat = format;
         }
 
         switch (payload.Pairing?.Method)
         {
-            case "pairing_psk":
-                _pendingPairingPsk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+            case PairMethods.PairingPsk:
+                _pendingPairingPsk = PairingRecords.GenerateUniquePsk(_pairingStore!);
                 _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
                 SendAsync(new ClientPairFinalizeMessage
                 {
@@ -2363,8 +2422,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 ArmAttemptTimeout();
                 break;
 
-            case "dynamic_pin":
-            case "static_pin":
+            case PairMethods.DynamicPairingCode:
+            case PairMethods.StaticPairingCode:
                 BeginOrDeferPairingCodeAttempt(payload.Pairing!.Method);
                 break;
 
@@ -2381,15 +2440,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Starts a pairing code attempt, or defers it until an operator gesture opens the pairing window.
     /// </summary>
     /// <remarks>
-    /// Gating policy (pairing.md:227-230): static_pin gates every attempt; dynamic_pin gates
-    /// only when the method is escalated or the session's pairing code is shorter than 6 digits —
-    /// short codes are bought with a gesture. pairing_psk is never gated and does not reach here.
+    /// Gating policy: static_pairing_code gates every attempt; dynamic_pairing_code gates only
+    /// when the method is escalated. The old "or the session's pairing code is shorter than 6
+    /// digits" clause is gone with pin_length — a digits code is always 6 digits.
+    /// pairing_psk is never gated and does not reach here.
     /// </remarks>
     private void BeginOrDeferPairingCodeAttempt(string method)
     {
-        bool gated = method == "static_pin"
-                     || IsMethodEscalated(method)
-                     || _activationPairingCodeLength < 6;
+        bool gated = method == PairMethods.StaticPairingCode
+                     || IsMethodEscalated(method);
 
         bool deferred = false;
         if (gated)
@@ -2433,7 +2492,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        StartPairingCodeAttempt(dynamic: method == "dynamic_pin");
+        StartPairingCodeAttempt(dynamic: method == PairMethods.DynamicPairingCode);
     }
 
     /// <summary>
@@ -2473,7 +2532,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 method = pending;
             }
 
-            StartPairingCodeAttempt(dynamic: method == "dynamic_pin");
+            StartPairingCodeAttempt(dynamic: method == PairMethods.DynamicPairingCode);
         }
         catch (Exception ex)
         {
@@ -2522,7 +2581,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private void StartPairingCodeAttempt(bool dynamic)
     {
-        var method = dynamic ? "dynamic_pin" : "static_pin";
+        var method = dynamic ? PairMethods.DynamicPairingCode : PairMethods.StaticPairingCode;
         var state = new PairingCodeState { Dynamic = dynamic, Method = method };
         var init = new ClientPairInitMessage
         {
@@ -2575,7 +2634,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
 
                 _logger.LogWarning("Pairing attempt timed out; aborting");
-                AbortPairingCode("attempt_timeout");
+                AbortPairingCode(PairAbortReasons.AttemptTimeout);
                 _pairingWindow?.Close();
             },
             CancellationToken.None,
@@ -2591,7 +2650,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
         var h = _session.HandshakeHash!.Value.ToArray();
-        string pin = PairingCodes.DerivePairingCode(h, state.NonceA, state.NonceB!, _activationPairingCodeLength);
+        string pin = PairingCodes.DerivePairingCode(
+            h, state.NonceA, state.NonceB!, PairingCodes.DynamicPairingCodeLength);
         state.PairingCode = pin;
 
         // Present the pairing code through the app's out-channel. Started here (this method runs on
@@ -2612,9 +2672,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private async Task InvokePairingCodePresenterAsync(string pin, CancellationToken cancellationToken)
     {
         // Non-null on every path that reaches a dynamic pair-init: CanOffer refuses
-        // dynamic_pin without a presenter, and without StartPairingCodeAttempt(dynamic: true)
+        // dynamic_pairing_code without a presenter, and without StartPairingCodeAttempt(dynamic: true)
         // there is no { Dynamic: true } state for HandleServerPairInit to act on.
-        await _presentPairingCodeAsync!(new PairingCodePresentation(pin, _activationLanguages), cancellationToken);
+        await _presentPairingCodeAsync!(new PairingCodePresentation(pin, _serverLanguages), cancellationToken);
     }
 
     private void HandleServerPairAuth(string json)
@@ -2687,7 +2747,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         _logger.LogError(ex, "PresentPairingCodeAsync failed; aborting the pairing code attempt");
                     }
 
-                    AbortPairingCode("user_cancelled");
+                    AbortPairingCode(PairAbortReasons.UserCancelled);
                 }
 
                 return;
@@ -2716,7 +2776,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (!cpace.Verify(Base64UrlText.Decode(msg.Payload.ServerKc)))
         {
             RecordPairingCodeFailure(state.Method);
-            AbortPairingCode("pin_mismatch");
+            AbortPairingCode(PairAbortReasons.PairingCodeMismatch);
             return;
         }
 
@@ -2815,11 +2875,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // long-term PSK. The buffer is unreachable after this either way (#102).
         _pendingPairingPsk = null;
 
-        // Read only inside an attempt, and every attempt re-reads them from its activation —
-        // but they are cleared with the rest of the attempt state so no read can ever see a
-        // value from an attempt that has already ended.
-        _activationPairingCodeLength = 0;
-        _activationLanguages = null;
+        // Read only inside an attempt, and every attempt re-reads it from its activation —
+        // but it is cleared with the rest of the attempt state so no read can ever see a
+        // value from an attempt that has already ended. (The presenter's language hint is
+        // connection-scoped since spec #178 and deliberately survives an attempt.)
+        _activationPairingCodeFormat = null;
 
         // Clears the attempt's derived secrets (ISK, confirmation MAC key, or the unused
         // scalar if it never got that far). Every ending routes through here — success,
@@ -2876,20 +2936,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        bool stored;
+        // A pairing never fails for lack of record storage (spec #183): if the store is at
+        // capacity, a non-live long-term record is evicted to make room. Replacing this
+        // server's own previous record — the one-record-per-server rule — happens in here too,
+        // so a re-pair does not consume a second slot.
         lock (_pairingStoreLock)
         {
-            stored = _pairingStore.Upsert(new PairingRecord(psk, PskCategory.LongTerm, ServerId));
-        }
-
-        if (!stored)
-        {
-            // The store is full: nothing was persisted, so this client cannot authenticate
-            // the server on a future connection.
-            _logger.LogError(
-                "Pairing complete but the record store is full; record NOT persisted for {ServerId}",
-                ServerId);
-            return;
+            PairingRecords.PersistLongTerm(
+                _pairingStore,
+                psk,
+                ServerId,
+                LiveRecordPskIds(),
+                _logger);
         }
 
         _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
@@ -2897,9 +2955,38 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// A paired server dropped its own pairing record: remove the matched stored-pubkey
-    /// record (shared records are kept per spec), say goodbye with reason 'unpaired',
-    /// and close. Ignored at trust level 'none'.
+    /// The <c>psk_id</c>s that back a currently-open connection and therefore must never be
+    /// evicted to make room for a new pairing.
+    /// </summary>
+    /// <remarks>
+    /// Always includes this connection's own matched record, whose entry in the host's registry
+    /// is not guaranteed to be visible yet on a connection still being admitted. The rest comes
+    /// from the host, which is the only object that knows about sibling connections; a
+    /// standalone client has no siblings and contributes nothing.
+    /// </remarks>
+    private IReadOnlyCollection<string> LiveRecordPskIds()
+    {
+        var live = new HashSet<string>(StringComparer.Ordinal);
+        if (_session.MatchedPsk is { } matched)
+        {
+            live.Add(NoiseConstants.DerivePskId(matched.Key.Span));
+        }
+
+        if (_liveRecordPskIds is not null)
+        {
+            foreach (string id in _liveRecordPskIds())
+            {
+                live.Add(id);
+            }
+        }
+
+        return live;
+    }
+
+    /// <summary>
+    /// A paired server dropped its own pairing record: remove this server's long-term record —
+    /// there is exactly one per server (spec #183) — say goodbye with reason 'unpaired', and
+    /// close. Ignored on a session not keyed by a long-term record.
     /// </summary>
     private void HandleServerUnpair()
     {
@@ -2916,11 +3003,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             lock (_pairingStoreLock)
             {
+                // A long-term record is bound to the server the pairing created it for, so
+                // only that server may retire it — one record per server (spec #183), and a
+                // server cannot unpair another's. A record migrated from the pre-#183 on-disk
+                // format has no server_id to check against; the matched psk_id is then the
+                // only binding there is, and the message still means what it says.
                 var record = _pairingStore.List().FirstOrDefault(r => r.PskId == pskId);
-                if (record is not null && record.ServerId is not null)
+                if (record is not null
+                    && (record.ServerId is null
+                        || string.Equals(record.ServerId, _session.ServerId, StringComparison.Ordinal)))
                 {
                     _pairingStore.Remove(pskId);
                     removed = true;
+                }
+                else if (record is not null)
+                {
+                    _logger.LogWarning(
+                        "server/unpair from {ServerId} names a record bound to {RecordServerId}; "
+                        + "ignoring the removal.", _session.ServerId, record.ServerId);
                 }
             }
         }

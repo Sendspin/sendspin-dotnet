@@ -241,6 +241,25 @@ public class SendspinClientServiceEncryptedFlowTests
     }
 
     [Fact]
+    public void LongTermPsk_PairingActivity_ClosesUnauthorized()
+    {
+        // Spec #183: a long-term PSK is a paired credential, so it admits no pairing activity.
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        using var _c = client;
+        connection.ConnectAsync(ServerUri).GetAwaiter().GetResult();
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}
+            """);
+
+        Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void SentinelPsk_EmptyActivitiesWithRoles_WithoutUnpairedAccess_Closes()
     {
         var (client, connection, _) = TestClient.Create(PskCategory.Sentinel);
