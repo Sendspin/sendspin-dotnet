@@ -8,7 +8,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 **Server requirement**: a 10.x client requires a server speaking the encrypted protocol — `aiosendspin >= 7.0.0`. There is no negotiation and no fallback: against an older server the handshake fails. **The 9.x line remains maintained** for deployments that need to talk to those servers.
 
-**Pairing requires `aiosendspin >= 9.0.0`**, a higher floor than connecting. 9.0.0 is the first release carrying the current pairing wire shape: `server/activate` names the chosen method inside a `pairing` object, with `pin_length` alongside it, rather than in a flat `selected_pair_method` field. 7.0.0 and 8.0.0 still send the old shape, so a 10.x client reads the offered method as absent and refuses every pairing attempt with `pair/abort` reason `method_not_supported`. Connecting and playback — including unpaired access — are unaffected and still work against `>= 7.0.0`.
+**Pairing requires `aiosendspin >= 9.0.0`**, a higher floor than connecting. 9.0.0 is the first release carrying the current pairing wire shape: `server/activate` names the chosen method inside a `pairing` object (with the emission `format` alongside it) rather than in a flat `selected_pair_method` field. 7.0.0 and 8.0.0 still send the old shape, so a 10.x client reads the offered method as absent and refuses every pairing attempt with `pair/abort` reason `method_not_supported`. Connecting and playback — including unpaired access — are unaffected and still work against `>= 7.0.0`.
 
 ---
 
@@ -19,11 +19,11 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin >= 7.0.0`, and `>= 9.0.0` to pair |
 | Client identity | New required persistent Curve25519 identity | **High** — silent data loss if unpersisted |
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
-| Pairing | New: Pairing PSK, dynamic PIN, static PIN | Medium — new UX surface |
-| Pairing gestures | PIN pairing can require an open `PairingWindow` | **High** if a PIN method is offered — silently never pairs without one |
+| Pairing | New: Pairing PSK, dynamic pairing code, static pairing code (at most one code method) | Medium — new UX surface |
+| Pairing gestures | Pairing-code pairing can require an open `PairingWindow` | **High** if a code method is offered — silently never pairs without one |
 | `client/state` | `available` is a boolean, not a state string | Medium |
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
-| Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
+| Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 | Output delay | "Static delay" renamed to "output delay" across the C# surface (spec PR #164); the wire is unchanged | Medium — compiler errors only, see §8 for the full table |
 | Output delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
@@ -71,9 +71,16 @@ On Windows the shipped file store inherits its parent directory's ACL, so place 
 
 If your app both dials servers and listens for server-initiated connections, both paths must be given the **same** identity and the **same** `IPairingRecordStore`. Giving each mode its own means a pairing completed in one mode is invisible to the other, and the user re-pairs every time they switch.
 
-### A custom `IPairingRecordStore` implementation needs a one-line update
+### A custom `IPairingRecordStore` implementation needs a small update
 
-`Upsert` now returns `bool` instead of `void`, so a 9.x implementation fails with a compiler error (CS0535). Return `true` unless your store enforces a capacity limit: `false` means "refused because the store is full," which the SDK uses to answer `storage_exhausted` instead of silently claiming a pairing that was never persisted. A failure of the underlying medium (disk full, permission revoked) is a fault, not exhaustion — throw for that, as before.
+`Upsert` returns `void` rather than 9.x's `bool`, so a 9.x implementation fails with a compiler error (CS0535). "The store is full" is no longer an outcome the SDK can be told about: the spec requires a pairing that completes at capacity to **succeed**, by evicting an existing record. The SDK now does that eviction itself, before it calls `Upsert`, so by the time your store is called there is room.
+
+To take part, override the new `Capacity` property (default `int.MaxValue`, meaning unbounded) with the number of records your store holds. The SDK evicts the least recently used record — never the client's own Pairing PSK, and never a record backing a connection that is currently open — whenever a pairing would otherwise exceed it. The spec requires room for at least 5 pairing records; a smaller `Capacity` is logged as a warning.
+
+`PairingRecord` also changed:
+
+- `ServerId` (new, required for a long-term record) — the `server_id` the record pairs with. There is exactly one record per server: re-pairing with a server replaces its record instead of adding a second.
+- `Used` (`bool`) became `LastUsedUtc` (`DateTimeOffset?`) — when a server last authenticated with the record, or `null` if it never has. It orders the eviction choice. `FilePairingRecordStore` reads the 9.x `Used` field and maps `true` to `DateTimeOffset.MinValue`, so an existing file keeps working; it only ever writes the new field.
 
 ---
 
@@ -111,7 +118,7 @@ var client = SendspinClientService.CreateForDial(
 | `AudioPipeline` | for playback | Unchanged from 9.x |
 | `Suite` | no | Noise cipher suite; defaults to ChaCha20-Poly1305 |
 | `ClockSynchronizer`, `OutputDelayStore` | no | Unchanged from 9.x |
-| `PinLockoutStore`, `PresentPinAsync` | for PIN pairing | See §3 |
+| `PairingCodeLockoutStore`, `PresentPairingCodeAsync` | for pairing-code pairing | See §3 |
 | `CaptureDevice`, `SourceEncoderFactory` | for `source@v1` | See §5 |
 
 ---
@@ -123,24 +130,23 @@ An unpaired client connects under the published **Sentinel PSK**, which authenti
 Three methods, all optional to offer except the first:
 
 - **Pairing PSK** — every client implements it. The client surfaces a *pairing token* (an `SP:`-prefixed string) that the operator transfers to the server. Get it from `EnsurePairingPsk()`.
-- **Dynamic PIN** — the client derives a per-session PIN and displays it; the operator types it into the server. Requires `PinLockoutStore`, `PresentPinAsync`, and a `PairingRecordStore`; without any of them, the SDK refuses to offer the method rather than fail open.
-- **Static PIN** — a fixed 8-digit device PIN. Requires `PinLockoutStore`, a `PairingRecordStore`, **and a `PairingWindow`** (below).
+- **Dynamic pairing code** — the client derives a per-session 6-digit code and displays it; the operator types it into the server. Requires `PairingCodeLockoutStore`, `PresentPairingCodeAsync`, and a `PairingRecordStore`; without any of them, the SDK refuses to offer the method rather than fail open.
+- **Static pairing code** — a fixed 8-digit device code. Requires `PairingCodeLockoutStore`, a `PairingRecordStore`, **and a `PairingWindow`** (below).
 
-Enable the PIN methods through `ClientCapabilities.PinPairingMethods`.
+Enable a pairing-code method through `ClientCapabilities.PairingCodeMethods`.
 
-**Every pair method needs a `PairingRecordStore`, including the PIN methods.** Without one the exchange runs to completion and the *server* writes a long-term record while the client stores nothing — so the client fails to authenticate on its very next connection, having told your app that pairing succeeded. The SDK therefore withholds a method it cannot complete: an unrunnable method is absent from `supported_pair_methods` in `client/hello`, is reported `enabled: false` by `management/get-pairing-config`, and any activation for it is answered `method_not_supported` with the connection left open.
+**Every pair method needs a `PairingRecordStore`, including the pairing-code methods.** Without one the exchange runs to completion and the *server* writes a long-term record while the client stores nothing — so the client fails to authenticate on its very next connection, having told your app that pairing succeeded. The SDK therefore withholds a method it cannot complete: an unrunnable method is absent from `supported_pair_methods` in `client/hello`, and any activation for it is answered `method_not_supported` with the connection left open.
 
-This is the same discipline `pairing_psk` has always had. **It is silent when you get it wrong** — nothing throws; the method simply never appears. If a PIN method you configured is not being offered, check that `PairingRecordStore`, `PinLockoutStore`, and (for `dynamic_pin`) `PresentPinAsync` are all set.
+This is the same discipline `pairing_psk` has always had. **It is silent when you get it wrong** — nothing throws; the method simply never appears. If a pairing-code method you configured is not being offered, check that `PairingRecordStore`, `PairingCodeLockoutStore`, and (for `dynamic_pairing_code`) `PresentPairingCodeAsync` are all set.
 
-`PresentPinAsync` is `Func<PinPresentation, CancellationToken, ValueTask>`: the argument carries the derived `Pin` **and** the server's `Languages` hint, rather than being a bare PIN string. Read `presentation.Pin` for the digits; match `presentation.Languages` (BCP 47, most-preferred first, possibly null) against the languages your app can actually speak when you announce the PIN aloud. The hint is informational — emitting in another language is never a protocol error.
+`PresentPairingCodeAsync` is `Func<PairingCodePresentation, CancellationToken, ValueTask>`: the argument carries the derived `PairingCode` **and** the server's `Languages` hint (from `server/hello`), rather than being a bare code string. Read `presentation.PairingCode` for the digits; match `presentation.Languages` (BCP 47, most-preferred first, possibly null) against the languages your app can actually speak when you announce the code aloud. The hint is informational — emitting in another language is never a protocol error.
 
 ### A `PairingWindow` is required for the gesture-gated methods
 
-The spec gates some PIN attempts on a deliberate operator gesture, and the SDK will not complete those attempts without one. Gated attempts are:
+The spec gates some pairing-code attempts on a deliberate operator gesture, and the SDK will not complete those attempts without one. Gated attempts are:
 
-- **every `static_pin` attempt**;
-- a `dynamic_pin` attempt once the method has **escalated** (10 recorded failures) — escalation replaces the terminal lockout earlier 10.0.0 pre-releases applied, so a method that used to become permanently unusable now becomes gesture-gated instead, and a success resets it;
-- a `dynamic_pin` attempt whose session PIN is **shorter than 6 digits** — short PINs are bought with a gesture.
+- **every `static_pairing_code` attempt**;
+- a `dynamic_pairing_code` attempt once the method has **escalated** (10 recorded failures) — escalation replaces the terminal lockout earlier 10.0.0 pre-releases applied, so a method that used to become permanently unusable now becomes gesture-gated instead, and a success resets it;
 
 The window is a property of the **device**, not of a connection: one instance is shared by every connection, and it admits exactly one attempt per opening no matter how many servers are connected.
 
@@ -214,21 +220,21 @@ Callers using named arguments — the shape the docs have always shown — are u
 
 ---
 
-## 7. PIN presentation grouping
+## 7. Pairing code presentation grouping
 
-New: `PinPresentation.Groups` splits the PIN into the groups the spec recommends for display and for spoken emission (`123456` → `123 456`; an 8-digit static PIN → `1234 5678`). `Pin` is unchanged and remains the contiguous digits.
+New: `PairingCodePresentation.Groups` splits the code into the groups the spec recommends for display and for spoken emission (`123456` → `123 456`; an 8-digit static code → `1234 5678`). `PairingCode` is the contiguous digits.
 
-Grouping is presentation-only. Separators never enter PIN derivation, operator entry, or the `PRS` transcript, so join `Groups` with whatever separator suits the surface, and strip separators from anything typed back in.
+Grouping is presentation-only. Separators never enter pairing code derivation, operator entry, or the `PRS` transcript, so join `Groups` with whatever separator suits the surface, and strip separators from anything typed back in.
 
 ```csharp
 PresentPinAsync = (presentation, ct) =>
 {
-    ShowPin(string.Join(" ", presentation.Groups));   // was: presentation.Pin
+    ShowPairingCode(string.Join(" ", presentation.Groups));   // was: presentation.PairingCode
     return ValueTask.CompletedTask;
 };
 ```
 
-Optional — existing code reading `presentation.Pin` keeps working and simply shows an ungrouped PIN.
+Optional — existing code reading `presentation.PairingCode` keeps working and simply shows an ungrouped code.
 
 ---
 
@@ -726,7 +732,7 @@ If you need the 9.x line, `Auto` is still present there but `[Obsolete]` as of 9
 - [ ] The same identity and pairing store are shared across dial and listen modes
 - [ ] `PairingRecordStore` is configured and writes somewhere durable
 - [ ] A pairing UX exists — at minimum, surfacing the token from `EnsurePairingPsk()`
-- [ ] If any PIN method is offered: a `PairingWindow` is supplied and opened by a real operator gesture — verify by pairing with a static PIN and confirming it only succeeds after the gesture
+- [ ] If any pairing-code method is offered: a `PairingWindow` is supplied and opened by a real operator gesture — verify by pairing with a static pairing code and confirming it only succeeds after the gesture
 - [ ] `UnpairedAccessEnabled` is a deliberate decision, not a default you inherited
 - [ ] Identity and PSK files are in a user-scoped location
 - [ ] No `MaxSpeedCorrection` above `SyncCorrectionOptions.SpecMaxSpeedCorrection` reaches the SDK — including from configuration; check the log for the clamp warning

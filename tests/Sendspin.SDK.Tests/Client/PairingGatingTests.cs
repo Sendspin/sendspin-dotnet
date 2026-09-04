@@ -10,67 +10,70 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Spec 5b0e6469 moved pin_length out of server/pair-init and into the activation, to be
-/// validated on receipt (pairing.md:149). The gesture-gating policy turns on it before
+/// The pairing activation carries the method and — for the dynamic method — the emission
+/// format, validated on receipt. The gesture-gating policy turns on the method before
 /// client/pair-init is sent, so reading it later is not an option.
 /// </summary>
 public class PairingGatingTests
 {
     [Fact]
-    public async Task DynamicPairingCodeActivation_WithPairingCodeLengthBelowClientMinimum_AbortsAtTheActivation()
+    public async Task DynamicPairingCodeActivation_WithAnUnofferedFormat_AbortsAtTheActivation()
     {
-        await using var h = await PairingHarness.StartAsync(minPairingCodeLength: 6);
+        // qr_code is a format the spec defines but this SDK never advertises, so an activation
+        // naming it selects a flow the client cannot run — method_not_supported, at the
+        // activation, before any attempt starts.
+        await using var h = await PairingHarness.StartAsync();
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 4);
+        h.SendPairingActivate(method: "dynamic_pairing_code", format: "qr_code");
 
         var abort = await h.NextMessageAsync<PairAbortMessage>();
-        Assert.Equal("pin_length_unacceptable", abort.Payload.Reason);
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
         // Aborted at the activation: no attempt was ever started.
         Assert.Empty(h.SentOfType<ClientPairInitMessage>());
     }
 
     [Fact]
-    public async Task DynamicPairingCodeActivation_WithMissingPairingCodeLength_AbortsAtTheActivation()
+    public async Task DynamicPairingCodeActivation_WithNoFormat_AbortsAtTheActivation()
     {
-        await using var h = await PairingHarness.StartAsync(minPairingCodeLength: 6);
+        // format is required for dynamic_pairing_code. Absent, there is nothing to emit.
+        await using var h = await PairingHarness.StartAsync();
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: null);
-
-        var abort = await h.NextMessageAsync<PairAbortMessage>();
-        Assert.Equal("pin_length_unacceptable", abort.Payload.Reason);
-    }
-
-    [Fact]
-    public async Task UnofferableMethod_WithBadPairingCodeLength_ReportsMethodNotSupportedFirst()
-    {
-        // Ordering is ours, not the spec's: a method the client does not offer is not a
-        // pairing code-length question. Pinned so the two reasons cannot silently swap.
-        await using var h = await PairingHarness.StartAsync(minPairingCodeLength: 6, dynamicPairingCode: false);
-
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 4);
+        h.SendPairingActivate(method: "dynamic_pairing_code", omitFormat: true);
 
         var abort = await h.NextMessageAsync<PairAbortMessage>();
         Assert.Equal("method_not_supported", abort.Payload.Reason);
     }
 
     [Fact]
-    public async Task DynamicPairingCodePresenter_ReceivesTheActivationLanguages()
+    public async Task UnofferableMethod_WithBadFormat_ReportsMethodNotSupported()
+    {
+        await using var h = await PairingHarness.StartAsync(dynamicPairingCode: false);
+
+        h.SendPairingActivate(method: "dynamic_pairing_code", format: "qr_code");
+
+        var abort = await h.NextMessageAsync<PairAbortMessage>();
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+    }
+
+    [Fact]
+    public async Task DynamicPairingCodePresenter_ReceivesTheServerHelloLanguages()
     {
         // The hint is informational and never grounds for abort, but the spec asks the client
         // to emit in the best-matching language it supports. It cannot do that if the SDK
         // never hands the hint over. Matching itself stays with the app, which alone knows
-        // which languages it can speak.
+        // which languages it can speak. Spec #178 moved the hint to server/hello, so it is
+        // connection-scoped rather than per-activation.
         PairingCodePresentation? seen = null;
         await using var h = await PairingHarness.StartAsync(
-            minPairingCodeLength: 6,
+            serverLanguages: ["ca", "es"],
             presentPairingCode: (p, _) => { seen = p; return ValueTask.CompletedTask; });
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 8, languages: ["ca", "es"]);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
         await h.CompleteDynamicPairingCodeToPresentationAsync();
 
         Assert.NotNull(seen);
         Assert.Equal(new[] { "ca", "es" }, seen!.Languages);
-        Assert.Equal(8, seen.PairingCode.Length);
+        Assert.Equal(6, seen.PairingCode.Length);
     }
 
     [Fact]
@@ -79,7 +82,7 @@ public class PairingGatingTests
         var window = new PairingWindow();
         await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
 
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
 
         var pending = await h.NextMessageAsync<ClientPairPendingMessage>();
         Assert.Equal(1, pending.Payload.PairingIndex);
@@ -91,7 +94,7 @@ public class PairingGatingTests
     {
         var window = new PairingWindow();
         await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
         await h.NextMessageAsync<ClientPairPendingMessage>();
 
         window.Open();
@@ -108,7 +111,7 @@ public class PairingGatingTests
         window.Open();
         await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
 
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
 
         await h.NextMessageAsync<ClientPairInitMessage>();
         Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
@@ -123,7 +126,7 @@ public class PairingGatingTests
         // whichever connection is still legitimately pending.
         var window = new PairingWindow();
         await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
         await h.NextMessageAsync<ClientPairPendingMessage>();
 
         h.SendNonPairingActivate();
@@ -140,9 +143,9 @@ public class PairingGatingTests
     public async Task DynamicPairingCodeActivation_WithLongPairingCodeAndNoEscalation_IsNotGated()
     {
         var window = new PairingWindow();
-        await using var h = await PairingHarness.StartAsync(minPairingCodeLength: 6, window: window);
+        await using var h = await PairingHarness.StartAsync(window: window);
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 8);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
 
         await h.NextMessageAsync<ClientPairInitMessage>();
         Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
@@ -156,36 +159,23 @@ public class PairingGatingTests
         // doing so would silently swallow the gesture another connection is waiting for.
         var window = new PairingWindow();
         window.Open();
-        await using var h = await PairingHarness.StartAsync(minPairingCodeLength: 6, window: window);
+        await using var h = await PairingHarness.StartAsync(window: window);
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 8);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
 
         await h.NextMessageAsync<ClientPairInitMessage>();
         Assert.True(window.IsOpen, "an ungated attempt must leave the opening for a gated one");
     }
 
-    [Theory]
-    [InlineData(4)]
-    [InlineData(5)]
-    public async Task DynamicPairingCodeActivation_WithShortPairingCode_IsGated(int pairingCodeLength)
-    {
-        // "short pairing codes are bought with a gesture" -- the boundary is below 6.
-        var window = new PairingWindow();
-        await using var h = await PairingHarness.StartAsync(minPairingCodeLength: 4, window: window);
-
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: pairingCodeLength);
-
-        await h.NextMessageAsync<ClientPairPendingMessage>();
-        Assert.Empty(h.SentOfType<ClientPairInitMessage>());
-    }
-
     [Fact]
-    public async Task DynamicPairingCodeActivation_AtSixDigits_IsNotGated()
+    public async Task DynamicPairingCodeActivation_WithNoEscalation_IsNotGated()
     {
+        // The old "or the code is shorter than 6 digits" gating clause went with pin_length:
+        // a digits code is always 6, so escalation is the only thing that gates this method.
         var window = new PairingWindow();
-        await using var h = await PairingHarness.StartAsync(minPairingCodeLength: 4, window: window);
+        await using var h = await PairingHarness.StartAsync(window: window);
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 6);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
 
         await h.NextMessageAsync<ClientPairInitMessage>();
         Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
@@ -198,12 +188,12 @@ public class PairingGatingTests
         // non-spec pair/abort reason, and the counter could only reset inside an attempt -- so
         // it never could. Escalation gates the attempt instead of refusing it.
         var lockouts = new InMemoryPairingCodeLockoutStore();
-        lockouts.SetFailures("dynamic_pin", 10);
+        lockouts.SetFailures("dynamic_pairing_code", 10);
         var window = new PairingWindow();
         await using var h = await PairingHarness.StartAsync(
-            minPairingCodeLength: 6, window: window, lockouts: lockouts);
+            window: window, lockouts: lockouts);
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 8);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
 
         // Gated, not refused: a pending signal and no abort.
         await h.NextMessageAsync<ClientPairPendingMessage>();
@@ -218,11 +208,11 @@ public class PairingGatingTests
     {
         // "Escalation is not an error state - the method stays offered."
         var lockouts = new InMemoryPairingCodeLockoutStore();
-        lockouts.SetFailures("dynamic_pin", 10);
+        lockouts.SetFailures("dynamic_pairing_code", 10);
         await using var h = await PairingHarness.StartAsync(
-            minPairingCodeLength: 6, window: new PairingWindow(), lockouts: lockouts);
+            window: new PairingWindow(), lockouts: lockouts);
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 8);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
         await h.NextMessageAsync<ClientPairPendingMessage>();
 
         Assert.DoesNotContain(h.AllSentJson(), j => j.Contains("locked_out", StringComparison.Ordinal));
@@ -247,11 +237,11 @@ public class PairingGatingTests
         var raised = new List<PairingGestureRequestedEventArgs>();
         h.Client.PairingGestureRequested += (_, e) => raised.Add(e);
 
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
         await h.NextMessageAsync<ClientPairPendingMessage>();
 
         Assert.Single(raised);
-        Assert.Equal("static_pin", raised[0].Method);
+        Assert.Equal("static_pairing_code", raised[0].Method);
         Assert.Equal(1, raised[0].PairingIndex);
     }
 
@@ -262,18 +252,18 @@ public class PairingGatingTests
         // instead of refusing it -- a success once the gate opens must also de-escalate the
         // method, or it stays gesture-gated forever even after nothing is failing anymore.
         var lockouts = new InMemoryPairingCodeLockoutStore();
-        lockouts.SetFailures("dynamic_pin", 10);
+        lockouts.SetFailures("dynamic_pairing_code", 10);
         var window = new PairingWindow();
         await using var h = await PairingHarness.StartAsync(
-            minPairingCodeLength: 6, window: window, lockouts: lockouts);
+            window: window, lockouts: lockouts);
 
-        h.SendPairingActivate(method: "dynamic_pin", pairingCodeLength: 8);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
         await h.NextMessageAsync<ClientPairPendingMessage>();
 
         window.Open();
         await h.CompleteDynamicPairingCodeAsync();
 
-        Assert.Equal(0, lockouts.GetFailures("dynamic_pin"));
+        Assert.Equal(0, lockouts.GetFailures("dynamic_pairing_code"));
     }
 
 }
@@ -321,12 +311,11 @@ internal sealed class PairingHarness : IAsyncDisposable
     public ISendspinClient Client { get; }
 
     /// <summary>
-    /// All parameters optional. <paramref name="minPairingCodeLength"/> seeds
-    /// <see cref="ClientCapabilities.MinPairingCodeLength"/>. <paramref name="dynamicPairingCode"/>/
+    /// All parameters optional. <paramref name="dynamicPairingCode"/>/
     /// <paramref name="staticPairingCode"/>/<paramref name="pairingPsk"/> control which methods are
-    /// implemented and enabled: dynamic_pin whenever <paramref name="dynamicPairingCode"/> is true (the
+    /// implemented and enabled: dynamic_pairing_code whenever <paramref name="dynamicPairingCode"/> is true (the
     /// default), with a no-op presenter substituted when <paramref name="presentPairingCode"/> is
-    /// omitted so <c>CanOffer</c> can still admit it; static_pin whenever
+    /// omitted so <c>CanOffer</c> can still admit it; static_pairing_code whenever
     /// <paramref name="staticPairingCode"/> is non-null; pairing_psk only when
     /// <paramref name="pairingPsk"/> is true, which also keys the session on the Pairing PSK
     /// (instead of Sentinel) and supplies a pairing record store — <paramref name="pairingStore"/>
@@ -336,8 +325,11 @@ internal sealed class PairingHarness : IAsyncDisposable
     /// passed straight to <c>SendspinClientOptions.PairingWindow</c>; omitted, gated attempts
     /// stay pending forever (the fail-closed default).
     /// </summary>
+    /// <remarks>
+    /// The two pairing-code methods are mutually exclusive (spec #189), so a caller that passes
+    /// a static pairing code must also pass <c>dynamicPairingCode: false</c>.
+    /// </remarks>
     public static Task<PairingHarness> StartAsync(
-        int minPairingCodeLength = 6,
         bool dynamicPairingCode = true,
         string? staticPairingCode = null,
         bool pairingPsk = false,
@@ -345,18 +337,18 @@ internal sealed class PairingHarness : IAsyncDisposable
         PairingWindow? window = null,
         IPairingCodeLockoutStore? lockouts = null,
         TimeSpan? attemptTimeout = null,
-        Func<PairingCodePresentation, CancellationToken, ValueTask>? presentPairingCode = null,
-        bool management = false)
+        IReadOnlyList<string>? serverLanguages = null,
+        Func<PairingCodePresentation, CancellationToken, ValueTask>? presentPairingCode = null)
     {
-        var caps = new ClientCapabilities { MinPairingCodeLength = minPairingCodeLength };
-        if (dynamicPairingCode)
+        var caps = new ClientCapabilities();
+        if (dynamicPairingCode && staticPairingCode is null)
         {
-            caps.PairingCodeMethods.Add("dynamic_pin");
+            caps.PairingCodeMethods.Add("dynamic_pairing_code");
         }
 
         if (staticPairingCode is not null)
         {
-            caps.PairingCodeMethods.Add("static_pin");
+            caps.PairingCodeMethods.Add("static_pairing_code");
             caps.StaticPairingCode = staticPairingCode;
         }
 
@@ -404,14 +396,28 @@ internal sealed class PairingHarness : IAsyncDisposable
                 return options;
             });
 
-        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            MessageSerializer.Serialize(new ServerHelloMessage
+            {
+                Payload = new ServerHelloPayload
+                {
+                    Name = "srv",
+                    Languages = serverLanguages?.ToList(),
+                },
+            }));
 
         harness = new PairingHarness(client, connection, session, staticPairingCode);
         return Task.FromResult(harness);
     }
 
     /// <summary>Feeds a pairing server/activate with the nested pairing object.</summary>
-    public void SendPairingActivate(string method, int? pairingCodeLength = null, IReadOnlyList<string>? languages = null)
+    /// <param name="method">The pair method the server selected.</param>
+    /// <param name="format">
+    /// The emission format, defaulted to <c>digits</c> for the dynamic method (the spec requires
+    /// one there) and omitted otherwise. Pass an explicit value to exercise rejection.
+    /// </param>
+    /// <param name="omitFormat">Omits <c>format</c> entirely, whatever the method.</param>
+    public void SendPairingActivate(string method, string? format = null, bool omitFormat = false)
     {
         var activities = new List<string> { Activities.Pairing };
 
@@ -424,8 +430,11 @@ internal sealed class PairingHarness : IAsyncDisposable
                 Pairing = new PairingActivation
                 {
                     Method = method,
-                    PairingCodeLength = pairingCodeLength,
-                    Languages = languages?.ToList(),
+                    Format = omitFormat
+                        ? null
+                        : format ?? (method == PairMethods.DynamicPairingCode
+                            ? PairingCodeFormats.Digits
+                            : null),
                 },
             },
         };

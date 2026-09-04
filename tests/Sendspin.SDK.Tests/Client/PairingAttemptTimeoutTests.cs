@@ -21,7 +21,7 @@ public class PairingAttemptTimeoutTests
         await using var h = await PairingHarness.StartAsync(
             staticPairingCode: "12345678", window: window, attemptTimeout: Short);
 
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
         await h.NextMessageAsync<ClientPairInitMessage>();
 
         // Server never replies. The attempt must not hang forever.
@@ -37,7 +37,7 @@ public class PairingAttemptTimeoutTests
         await using var h = await PairingHarness.StartAsync(
             staticPairingCode: "12345678", window: new PairingWindow(), attemptTimeout: Short);
 
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
         await h.NextMessageAsync<ClientPairPendingMessage>();
 
         await Task.Delay(Short + Short);
@@ -75,7 +75,7 @@ public class PairingAttemptTimeoutTests
         await using var h = await PairingHarness.StartAsync(
             staticPairingCode: "12345678", window: window, attemptTimeout: Short);
 
-        h.SendPairingActivate(method: "static_pin");
+        h.SendPairingActivate(method: "static_pairing_code");
         await h.CompleteStaticPairingCodeAsync();
 
         await Task.Delay(Short + Short);

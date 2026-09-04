@@ -10,7 +10,7 @@ and drives one scenario against it:
                took on both sides and the re-handshake to it succeeded).
   static-pin:  run a static-PIN attempt with a PIN both sides already know. Exercises the
                CPace round and PSK wrapping, and asserts the client gesture-gated the
-               attempt first — every static_pin attempt must wait for a pairing window.
+               attempt first — every static_pairing_code attempt must wait for a pairing window.
   source:      ask the client to stream its source@v1 input, and decode the chunks that
                arrive — the server's start command, the client's client_stream/start, and
                real audio over the wire.
@@ -182,7 +182,7 @@ async def main() -> int:
                 return 1
 
             if scenario == "static-pin":
-                # The spec gates every static_pin attempt: the client must have reported
+                # The spec gates every static_pairing_code attempt: the client must have reported
                 # client/pair-pending and withheld client/pair-init until a window opened.
                 # Pairing succeeding without that means the gate is not being applied.
                 if not gated.is_set():

@@ -183,7 +183,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// <see cref="ISendspinClient.PairingGestureRequested"/>. Prompt the operator, then call
     /// <see cref="PairingWindow.Open"/> on the window supplied in
     /// <see cref="SendspinClientOptions.PairingWindow"/>. Without a subscriber, a
-    /// <c>static_pin</c> attempt — which is gated every time — never proceeds.
+    /// <c>static_pairing_code</c> attempt — which is gated every time — never proceeds.
     /// </summary>
     public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 
@@ -270,6 +270,11 @@ public sealed class SendspinHostService : IAsyncDisposable
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
         _options = options;
         _lastPlayedServerStore = lastPlayedServerStore;
+
+        // Fail here rather than on the first inbound connection: a misconfigured pairing-code
+        // offer is a static app mistake, and surfacing it at construction puts the exception
+        // where the app can still see which call built the options (#189).
+        _options.Capabilities.ValidatePairingCodeMethods();
 
         // Explicit seed wins; otherwise fall back to the store (best-effort).
         LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();
@@ -685,12 +690,37 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// </remarks>
     internal SendspinClientOptions BuildClientOptions()
     {
-        return _options.ClockSynchronizer is null
+        var options = _options.ClockSynchronizer is null
             ? _options with
             {
                 ClockSynchronizer = new KalmanClockSynchronizer(_loggerFactory.CreateLogger<KalmanClockSynchronizer>()),
             }
             : _options;
+
+        // Every connection this host runs shares one record store, so a pairing on one of them
+        // could otherwise evict the record another is authenticated by — which the spec forbids
+        // and which would unpair a server mid-session. Only the host can see the sibling set.
+        return options with { LiveRecordPskIds = CollectLiveRecordPskIds };
+    }
+
+    /// <summary>
+    /// The <c>psk_id</c>s of pairing records backing connections this host currently holds.
+    /// </summary>
+    private IReadOnlyCollection<string> CollectLiveRecordPskIds()
+    {
+        lock (_connectionsLock)
+        {
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var entry in _connections.Values)
+            {
+                if (entry.Client.MatchedRecordPskId is { } id)
+                {
+                    ids.Add(id);
+                }
+            }
+
+            return ids;
+        }
     }
 
     private void OnServerConnected(object? sender, WebSocketClientConnection webSocket)

@@ -184,36 +184,53 @@ public sealed class ClientCapabilities
     public SourceRoleSupport? SourceRoleSupport { get; set; }
 
     /// <summary>
-    /// Pairing code methods this client offers in addition to the mandatory Pairing PSK
-    /// method, in the encrypted protocol. Empty by default (Pairing PSK only). Add
-    /// "dynamic_pin" and/or "static_pin". Dynamic pairing code requires
-    /// <see cref="SendspinClientOptions.PresentPairingCodeAsync"/>; without it the method is refused.
+    /// The pairing-code method this client offers in addition to the mandatory Pairing PSK
+    /// method, in the encrypted protocol. Empty by default (Pairing PSK only).
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A client may offer <b>at most one</b> pairing-code method (spec #189): either
+    /// <see cref="PairMethods.DynamicPairingCode"/> or
+    /// <see cref="PairMethods.StaticPairingCode"/>, never both. Listing both is a
+    /// configuration error and is rejected when the client is constructed rather than
+    /// silently resolved — which of two deliberately configured methods the app meant is not
+    /// the SDK's to guess, and the two have very different security properties.
+    /// </para>
+    /// <para>
+    /// Dynamic pairing code requires <see cref="SendspinClientOptions.PresentPairingCodeAsync"/>;
+    /// without it the method is withheld.
+    /// </para>
+    /// </remarks>
     public List<string> PairingCodeMethods { get; set; } = new();
-
-    /// <summary>Shortest dynamic pairing code length in digits this client accepts (4-12). Default 6.</summary>
-    public int MinPairingCodeLength { get; set; } = 6;
 
     /// <summary>
     /// Out-channels through which the dynamic pairing code is conveyed to the operator
     /// (informational hint: "display" or "speaker"). Default ["display"].
     /// </summary>
     /// <remarks>
+    /// <para>
     /// "other" was a third permitted value until spec commit <c>3f8528a9</c> removed it. The
     /// hint is informational and never grounds for <c>pair/abort</c>, so an out-of-vocabulary
     /// entry does not break pairing — but it is no longer a value the spec defines.
+    /// </para>
+    /// <para>
+    /// <c>"speaker"</c> is dropped from the advertised descriptor: the spec requires a speaker
+    /// client to also advertise a <c>digit_audio</c> object and to consume the server's digit
+    /// audio pack, which this SDK does not implement. Advertising it would invite a server to
+    /// pick a flow the client cannot run.
+    /// </para>
     /// </remarks>
     public List<string> PairingCodeOutChannels { get; set; } = new() { "display" };
 
     /// <summary>
     /// For static pairing code: the device-specific fixed pairing code (8 digits). Required if
-    /// "static_pin" is offered.
+    /// <see cref="PairMethods.StaticPairingCode"/> is offered.
     /// </summary>
     public string? StaticPairingCode { get; set; }
 
     /// <summary>
     /// Where an operator can find this device's static pairing code, advertised as the <c>locations</c>
-    /// hint on the <c>static_pin</c> pair-method descriptor. Values are <c>"device"</c>
+    /// hint on the <c>static_pairing_code</c> pair-method descriptor. Values are <c>"device"</c>
     /// (printed on it), <c>"leaflet"</c> (in the box), and <c>"operator"</c> (they set it).
     /// Empty by default, which omits the hint — the SDK cannot know where your secret is
     /// printed, and a wrong hint is worse than none.
@@ -244,8 +261,8 @@ public sealed class ClientCapabilities
     public bool PairingPskEnabled { get; set; } = true;
 
     /// <summary>
-    /// Whether <c>"dynamic_pin"</c> starts enabled, when it is listed in
-    /// <see cref="PairingCodeMethods"/>. Default true, so listing the method is enough to
+    /// Whether <see cref="PairMethods.DynamicPairingCode"/> starts enabled, when it is listed
+    /// in <see cref="PairingCodeMethods"/>. Default true, so listing the method is enough to
     /// offer it. Ignored when the method is not listed.
     /// </summary>
     /// <remarks>
@@ -256,11 +273,37 @@ public sealed class ClientCapabilities
     public bool DynamicPairingCodeEnabled { get; set; } = true;
 
     /// <summary>
-    /// Whether <c>"static_pin"</c> starts enabled, when it is listed in
-    /// <see cref="PairingCodeMethods"/>. Default true. See
+    /// Whether <see cref="PairMethods.StaticPairingCode"/> starts enabled, when it is listed
+    /// in <see cref="PairingCodeMethods"/>. Default true. See
     /// <see cref="DynamicPairingCodeEnabled"/> for why this is not the same as omitting the method.
     /// </summary>
     public bool StaticPairingCodeEnabled { get; set; } = true;
+
+    /// <summary>
+    /// Rejects a <see cref="PairingCodeMethods"/> list that offers both pairing-code methods.
+    /// </summary>
+    /// <remarks>
+    /// The spec lets a client implement at most one of them, and requires a server that
+    /// nevertheless sees both to disregard <c>static_pairing_code</c>. That server-side
+    /// tolerance is a safety net for a non-conformant peer, not a licence to emit one: an app
+    /// that configured both said two contradictory things, and picking one for it would ship
+    /// whichever the SDK guessed. Nothing on the wire can reach this — it is local
+    /// configuration, checked once, where the app can still fix it.
+    /// </remarks>
+    /// <exception cref="ArgumentException">Both pairing-code methods are listed.</exception>
+    internal void ValidatePairingCodeMethods()
+    {
+        bool dynamicListed = PairingCodeMethods.Contains(PairMethods.DynamicPairingCode, StringComparer.Ordinal);
+        bool staticListed = PairingCodeMethods.Contains(PairMethods.StaticPairingCode, StringComparer.Ordinal);
+        if (dynamicListed && staticListed)
+        {
+            throw new ArgumentException(
+                $"ClientCapabilities.PairingCodeMethods lists both '{PairMethods.DynamicPairingCode}' "
+                + $"and '{PairMethods.StaticPairingCode}'. A client may offer at most one "
+                + "pairing-code method; remove one of them.",
+                nameof(PairingCodeMethods));
+        }
+    }
 
     /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.

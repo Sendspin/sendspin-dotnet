@@ -246,7 +246,7 @@ the failure counter cannot survive a restart, so a method could never escalate t
 gesture-gating; the SDK refuses to offer the pairing code methods rather than granting unlimited,
 ungated attempts. They equally need an `IPairingRecordStore`: without one the pairing code exchange
 completes, the server writes a long-term record, and the client stores nothing — so it fails
-to authenticate on the next connection having reported success. Offering `dynamic_pin`
+to authenticate on the next connection having reported success. Offering `dynamic_pairing_code`
 additionally requires `SendspinClientOptions.PresentPairingCodeAsync` (the callback that shows the
 derived pairing code to the operator, taking a `PairingCodePresentation` — the derived pairing code plus the server's
 language hint); without it the SDK refuses that method with `method_not_supported` rather than
@@ -254,9 +254,8 @@ pairing with a pairing code nobody can see. Show `PairingCodePresentation.Groups
 the pairing code in the spec's recommended grouping (`123456` → `123 456`); grouping is presentation-only
 and separators never enter derivation or operator entry.
 
-**A `PairingWindow` is required to complete a gesture-gated attempt** — every `static_pin`
-attempt, and a `dynamic_pin` attempt once the method has escalated or its pairing code is shorter than
-6 digits. The window is device-level: construct one, share it across every connection (pass it
+**A `PairingWindow` is required to complete a gesture-gated attempt** — every `static_pairing_code`
+attempt, and a `dynamic_pairing_code` attempt once the method has escalated. The window is device-level: construct one, share it across every connection (pass it
 to `SendspinClientOptions.PairingWindow`, which `SendspinHostService` forwards to each
 connection it accepts), and `Open()` it from a deliberate operator gesture. Leaving it null is
 the fail-closed default and does not fail loudly: the client answers with `client/pair-pending`
@@ -265,9 +264,13 @@ and waits forever, so pairing simply never completes. Subscribe to
 [MIGRATION-10.0.0.md](MIGRATION-10.0.0.md#a-pairingwindow-is-required-for-the-gesture-gated-methods)
 for the full migration note.
 
-**Pairing configuration is local.** Which pair methods a client offers, the dynamic
-pairing code minimum length, and whether a method is enabled are all decided by the
-app through `ClientCapabilities` — no server can read or change any of it.
+**Pairing configuration is local.** `ClientCapabilities` is the whole of it: which pair
+methods the client offers, the static pairing code's value, unpaired access, and the two
+`locations` hints below. A client offers **at most one** pairing-code method — listing both
+`dynamic_pairing_code` and `static_pairing_code` throws at construction rather than silently
+picking one for you. No server can read or change any of it —
+pairing config and the pairing window are manufacturer-defined, so the values you construct the
+client with are the values it advertises and enforces for the life of the process.
 
 Note that `DynamicPairingCodeEnabled`/`StaticPairingCodeEnabled` are not the same as listing the method in
 `PairingCodeMethods`. That list means *implemented*: a method omitted from it is reported to
@@ -285,7 +288,7 @@ depends on it.
 ```csharp
 var caps = new ClientCapabilities
 {
-    PairingCodeMethods = { "static_pin" },
+    PairingCodeMethods = { "static_pairing_code" },
     StaticPairingCode = "12345678",
     StaticPairingCodeLocations = { PairMethodLocations.Device },
 };

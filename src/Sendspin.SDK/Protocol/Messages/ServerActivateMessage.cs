@@ -50,26 +50,27 @@ public sealed class ServerActivatePayload
 /// </summary>
 public sealed class PairingActivation
 {
-    /// <summary>Pairing method the server picked: dynamic_pin, pairing_psk, or static_pin.</summary>
+    /// <summary>
+    /// The pairing method the server picked, drawn from the client's
+    /// <c>supported_pair_methods</c>. One of <see cref="PairMethods"/>.
+    /// </summary>
     [JsonPropertyName("method")]
     public string Method { get; set; } = string.Empty;
 
     /// <summary>
-    /// The dynamic pairing code length for this session. Required when <see cref="Method"/> is
-    /// 'dynamic_pin'; absent otherwise. Validated on receipt of the activation, because the
-    /// gesture-gating policy turns on it before client/pair-init is sent.
+    /// The dynamic emission format for this attempt, drawn from the client's
+    /// <c>dynamic_pairing_code</c> descriptor. Required when <see cref="Method"/> is
+    /// <c>dynamic_pairing_code</c>; absent otherwise. See <see cref="PairingCodeFormats"/>.
     /// </summary>
-    [JsonPropertyName("pin_length")]
+    /// <remarks>
+    /// Validated on receipt of the activation rather than at <c>server/pair-init</c>: a format
+    /// the client does not offer is <c>pair/abort</c> <c>method_not_supported</c>, which the
+    /// spec expects before <c>client/pair-init</c> is sent. This replaces the earlier
+    /// <c>pin_length</c> field — the dynamic pairing code is now a fixed 6 digits.
+    /// </remarks>
+    [JsonPropertyName("format")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? PairingCodeLength { get; set; }
-
-    /// <summary>
-    /// BCP 47 language tags in descending operator preference, for spoken pairing code emission.
-    /// Informational: never grounds for pair/abort.
-    /// </summary>
-    [JsonPropertyName("languages")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public List<string>? Languages { get; set; }
+    public string? Format { get; set; }
 }
 
 /// <summary>

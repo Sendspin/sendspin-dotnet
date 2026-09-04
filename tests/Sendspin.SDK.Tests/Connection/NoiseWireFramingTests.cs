@@ -522,13 +522,13 @@ public class NoiseWireFramingTests
 
     /// <summary>
     /// The store's contents by value, ordered, for an equality check that a later Upsert of the
-    /// same record under a new <c>Used</c> flag would fail — record instances alone compare equal
-    /// whenever the store handed back the ones it was given.
+    /// same record under a new <c>LastUsed</c> stamp would fail — record instances alone compare
+    /// equal whenever the store handed back the ones it was given.
     /// </summary>
-    private static List<(string PskId, PskCategory Category, string? ServerId, bool Used)> Snapshot(
+    private static List<(string PskId, PskCategory Category, string? ServerId, DateTimeOffset? LastUsed)> Snapshot(
         IPairingRecordStore store) =>
         [.. store.List()
-            .Select(r => (r.PskId, r.Category, r.ServerId, r.Used))
+            .Select(r => (r.PskId, r.Category, r.ServerId, r.LastUsedUtc))
             .OrderBy(r => r.PskId, StringComparer.Ordinal)];
 
     private sealed class BoundResolver(string serverId) : INoisePskResolver
