@@ -42,6 +42,12 @@ jobs:
       - name: Install aiosendspin reference server
         run: pip install "aiosendspin[server]==9.1.1"
 
+      # 9.1.1 predates spec PR #179 and only parses the old list-shaped
+      # supported_pair_methods. Keep the SDK on the current object-shaped wire and
+      # normalize it at this pinned reference server's compatibility boundary.
+      - name: Bridge aiosendspin pair-method schema
+        run: python tools/interop/patch_aiosendspin_pair_methods.py
+
       - name: Build interop client
         run: dotnet build tools/interop/InteropClient -c Release
 
