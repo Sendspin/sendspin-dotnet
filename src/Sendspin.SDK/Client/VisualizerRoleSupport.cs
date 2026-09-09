@@ -41,4 +41,22 @@ public sealed class VisualizerRoleSupport
     /// protocol error the server closes the connection over. Reported in <c>client/state</c>.
     /// </summary>
     public VisualizerSpectrum? Spectrum { get; init; }
+
+    /// <summary>
+    /// Validates the configuration against the visualizer role's wire rules.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <see cref="Types"/> contains <c>spectrum</c> but <see cref="Spectrum"/> is null.
+    /// </exception>
+    internal void Validate()
+    {
+        if (Types.Contains(VisualizerTypes.Spectrum, StringComparer.Ordinal) && Spectrum is null)
+        {
+            throw new ArgumentException(
+                "ClientCapabilities.VisualizerRoleSupport requests 'spectrum' but supplies no "
+                + "Spectrum configuration. A visualizer client/state object that lists "
+                + "'spectrum' must also carry the spectrum object.",
+                nameof(Spectrum));
+        }
+    }
 }

@@ -737,7 +737,7 @@ Spec PR #195 removed `stream/request-format` from the protocol, and spec PR #175
 | `RequestArtworkFormatAsync(channel, source, format, mediaWidth, mediaHeight)` | `SetArtworkChannelAsync(channel, source, format, width, height)` |
 | `RequestVisualizerFormatAsync(types, rateMax, spectrum)` | `SetVisualizerConfigurationAsync(types, rateMax, spectrum)` |
 
-Each new method updates the corresponding `ClientCapabilities` values and resends the whole `client/state`, so the role's configuration and the message describing it can no longer disagree. The server still replies with a new `stream/start`.
+Each new method updates the connection's own copied role configuration and resends the whole `client/state`, so the role's configuration and the message describing it can no longer disagree. The app-owned `ClientCapabilities` object is left unchanged, which matters when one host shares it across multiple connections. The server still replies with a new `stream/start`.
 
 ### Player format preference
 

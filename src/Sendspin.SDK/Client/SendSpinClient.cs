@@ -180,11 +180,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // once is re-reported by the next connection's initial state rather than silently reverting.
     private PlayerFormatPreference? _playerFormatPreference;
 
-    // Role families whose client/state object has gone out on this connection, which is what
-    // opens each role's inbound binary channel (spec PR #204). Reset per connection in
-    // FinishHandshake. Guarded because it is written from the send paths and read from the
-    // receive loop.
-    private readonly HashSet<string> _roleStateSent = new(StringComparer.Ordinal);
+    // Role families whose client/state object has gone out on this connection, counted rather
+    // than tracked as a set so a send that claimed the gate before its await can roll back on
+    // failure without trampling the same family's claim from another successful or still
+    // in-flight state send. Positive count = the role's inbound binary channel is open on this
+    // connection (spec PR #204). Reset per connection in FinishHandshake. Guarded because it is
+    // written from the send paths and read from the receive loop.
+    private readonly Dictionary<string, int> _roleStateSent = new(StringComparer.Ordinal);
     private readonly HashSet<string> _warnedUngatedRoles = new(StringComparer.Ordinal);
     private readonly object _roleStateSentLock = new();
 
@@ -472,7 +474,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Copied, not aliased: these two are the only capability values the SDK itself changes
         // during a connection, and ClientCapabilities is app-owned — shared, in a host, by every
         // connection it accepts. See the field comments.
-        _artworkChannels = [.. _capabilities.ArtworkChannels];
+        _artworkChannels = CopyArtworkChannels(_capabilities.ArtworkChannels);
         _visualizerRoleSupport = CopyVisualizerRoleSupport(_capabilities.VisualizerRoleSupport);
 
         _displayScheduler = new MediaDisplayScheduler(
@@ -510,6 +512,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // At most one pairing-code method may be offered (spec #189). Checked before anything
         // is derived from the list, so a contradictory configuration cannot reach the wire.
         _capabilities.ValidatePairingCodeMethods();
+
+        // The runtime reconfiguration path validates spectrum-vs-spectrum-config already; the
+        // initial configuration needs the same guard before the first client/state is built.
+        _capabilities.ValidateVisualizerRoleSupport();
 
         // Implemented methods start enabled unless the app says otherwise. ANDing each with
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
@@ -580,6 +586,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 // to share.
                 Spectrum = support.Spectrum,
             };
+
+    /// <summary>
+    /// Copies the app-supplied starting artwork declaration into this client's private state.
+    /// </summary>
+    /// <remarks>
+    /// The wire requires 1-4 positional entries. An app-owned empty list therefore means "the
+    /// artwork role is present but channel 0 is disabled", not "emit an invalid empty array".
+    /// </remarks>
+    private static List<ArtworkChannelState> CopyArtworkChannels(List<ArtworkChannelState> channels)
+        => channels.Count == 0
+            ? new List<ArtworkChannelState> { new() { Source = ArtworkSources.None } }
+            : [.. channels];
 
     /// <summary>
     /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
@@ -816,6 +834,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private bool MayReportRoleState(string family)
         => LastServerHello is null || IsRoleActive(family);
 
+    private static bool MayReportRoleState(string family, IReadOnlySet<string>? activeRoleFamilies)
+        => activeRoleFamilies is null || activeRoleFamilies.Contains(family);
+
+    private static HashSet<string> ToRoleFamilies(IEnumerable<string> activeRoles)
+    {
+        var families = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var role in activeRoles)
+        {
+            int at = role.IndexOf('@');
+            families.Add(at > 0 ? role[..at] : role);
+        }
+
+        return families;
+    }
+
+    /// <summary>
+    /// A stable snapshot of the families currently active for this connection's client/state
+    /// builders. Built once per send so every role object decision is made from one activate.
+    /// </summary>
+    internal IReadOnlySet<string>? SnapshotActiveRoleFamilies()
+        => LastServerHello?.ActiveRoles is { } activeRoles
+            ? ToRoleFamilies(activeRoles)
+            : null;
+
     /// <summary>
     /// Whether this client's clock must be synchronized with the server before it can claim
     /// availability. True for the two roles the spec names: player and source.
@@ -854,9 +896,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// so with no reported signal there is nothing truthful to put in the object — inventing
     /// 'absent' would assert something the app never said.
     /// </remarks>
-    private SourceStatePayload? BuildSourceState()
+    private SourceStatePayload? BuildSourceState(IReadOnlySet<string>? activeRoleFamilies)
     {
-        if (!MayReportRoleState("source")
+        if (!MayReportRoleState("source", activeRoleFamilies)
             || _capabilities.SourceRoleSupport?.LineSense != true
             || _lastSourceSignal is not { } signal)
         {
@@ -871,9 +913,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Always the client's complete player state: spec PR #175 removed merging, so a field this
     /// object leaves out is dropped by the server rather than retained.
     /// </summary>
-    private PlayerStatePayload? BuildPlayerState()
+    private PlayerStatePayload? BuildPlayerState(IReadOnlySet<string>? activeRoleFamilies)
     {
-        if (!MayReportRoleState("player"))
+        if (!MayReportRoleState("player", activeRoleFamilies))
         {
             return null;
         }
@@ -909,9 +951,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// through that would throw rather than merely read a stale value.
     /// </para>
     /// </remarks>
-    private ArtworkStatePayload? BuildArtworkState()
+    private ArtworkStatePayload? BuildArtworkState(IReadOnlySet<string>? activeRoleFamilies)
     {
-        if (!MayReportRoleState("artwork"))
+        if (!MayReportRoleState("artwork", activeRoleFamilies))
         {
             return null;
         }
@@ -930,9 +972,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// role or the app configured no visualizer support. Carries types/rate_max/spectrum, which
     /// spec PR #195 moved here from <c>visualizer@v1_support</c>.
     /// </summary>
-    private VisualizerStatePayload? BuildVisualizerState()
+    private VisualizerStatePayload? BuildVisualizerState(IReadOnlySet<string>? activeRoleFamilies)
     {
-        if (!MayReportRoleState("visualizer"))
+        if (!MayReportRoleState("visualizer", activeRoleFamilies))
         {
             return null;
         }
@@ -974,28 +1016,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// server may not stream a role's binary data until it has seen that role's object.
     /// </para>
     /// <para>
-    /// Marks each role whose object went out as reported for this connection (see
+    /// Claims each role whose object is on this message as reported for this connection (see
     /// <see cref="_roleStateSent"/>) <em>before</em> the await, for the same reason the
-    /// availability tracker is seeded before its send: a message in flight has already left this
-    /// client's hands as far as ordering goes.
+    /// availability tracker is seeded before its send: a later frame on the same session must
+    /// not be treated as outracing a state message that is already queued to write. If the send
+    /// itself fails, the claim is rolled back.
     /// </para>
     /// </remarks>
     private async Task SendClientStateAsync(bool initial = false)
     {
         bool available = CurrentAvailability;
-        var message = ClientStateMessage.Create(
-            available: available,
-            player: BuildPlayerState(),
-            source: BuildSourceState(),
-            artwork: BuildArtworkState(),
-            visualizer: BuildVisualizerState());
+        var activeRoleFamilies = SnapshotActiveRoleFamilies();
+        var message = CreateClientStateMessage(available, activeRoleFamilies);
 
         if (initial)
         {
             _logger.LogInformation("Sending initial client/state:\n{Json}", MessageSerializer.Serialize(message));
         }
 
-        MarkRoleStateSent(message.Payload);
+        var claimedFamilies = MarkRoleStateSent(message.Payload);
 
         // Keep the availability publisher's tracker in step with what the server is being told,
         // so the next genuine change is neither a spurious repeat nor swallowed as one.
@@ -1004,21 +1043,90 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _lastAvailabilitySent = available;
         }
 
-        await SendAsync(message);
+        try
+        {
+            await SendAsync(message);
+        }
+        catch
+        {
+            RollBackClaimedRoleState(claimedFamilies);
+            throw;
+        }
     }
+
+    internal ClientStateMessage CreateClientStateMessage(bool available, IReadOnlySet<string>? activeRoleFamilies)
+        => ClientStateMessage.Create(
+            available: available,
+            player: BuildPlayerState(activeRoleFamilies),
+            source: BuildSourceState(activeRoleFamilies),
+            artwork: BuildArtworkState(activeRoleFamilies),
+            visualizer: BuildVisualizerState(activeRoleFamilies));
 
     /// <summary>
     /// Records which roles a client/state just reported an object for, which is what opens each
     /// role's inbound binary channel (spec PR #204).
     /// </summary>
-    private void MarkRoleStateSent(ClientStatePayload payload)
+    private List<string> MarkRoleStateSent(ClientStatePayload payload)
+    {
+        var claimedFamilies = new List<string>(capacity: 4);
+        lock (_roleStateSentLock)
+        {
+            Claim("player", payload.Player);
+            Claim("source", payload.Source);
+            Claim("artwork", payload.Artwork);
+            Claim("visualizer", payload.Visualizer);
+        }
+
+        return claimedFamilies;
+
+        void Claim(string family, object? stateObject)
+        {
+            if (stateObject is null)
+            {
+                return;
+            }
+
+            claimedFamilies.Add(family);
+            _roleStateSent[family] = _roleStateSent.GetValueOrDefault(family) + 1;
+        }
+    }
+
+    private void RollBackClaimedRoleState(IReadOnlyList<string> claimedFamilies)
+    {
+        if (claimedFamilies.Count == 0)
+        {
+            return;
+        }
+
+        lock (_roleStateSentLock)
+        {
+            foreach (var family in claimedFamilies)
+            {
+                if (!_roleStateSent.TryGetValue(family, out int claims))
+                {
+                    continue;
+                }
+
+                if (claims <= 1)
+                {
+                    _roleStateSent.Remove(family);
+                }
+                else
+                {
+                    _roleStateSent[family] = claims - 1;
+                }
+            }
+        }
+    }
+
+    private void RemoveRoleStateClaimsForInactiveFamilies(IReadOnlySet<string> activeRoleFamilies)
     {
         lock (_roleStateSentLock)
         {
-            if (payload.Player is not null) _roleStateSent.Add("player");
-            if (payload.Source is not null) _roleStateSent.Add("source");
-            if (payload.Artwork is not null) _roleStateSent.Add("artwork");
-            if (payload.Visualizer is not null) _roleStateSent.Add("visualizer");
+            _roleStateSent.Keys
+                .Where(family => !activeRoleFamilies.Contains(family))
+                .ToList()
+                .ForEach(family => _roleStateSent.Remove(family));
         }
     }
 
@@ -1049,7 +1157,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         lock (_roleStateSentLock)
         {
-            return _roleStateSent.Contains(family);
+            return _roleStateSent.ContainsKey(family);
         }
     }
 
@@ -2358,6 +2466,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         bool activeRolesChanged = false;
         if (payload.ActiveRoles is not null && LastServerHello is not null)
         {
+            var previousActiveRoleFamilies = ToRoleFamilies(LastServerHello.ActiveRoles);
+            var currentActiveRoleFamilies = ToRoleFamilies(payload.ActiveRoles);
+
             // When the source role is dropped from active_roles, stop streaming (spec:
             // the client ends its input stream on deactivation).
             bool wasSourceActive = LastServerHello.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
@@ -2372,10 +2483,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // activated role's binary data until it has received that role's object (spec PR
             // #204). The reaction is deferred to the non-pairing branch below, after the
             // handshake and pairing decisions have run.
-            activeRolesChanged = !LastServerHello.ActiveRoles.ToHashSet(StringComparer.Ordinal)
-                .SetEquals(payload.ActiveRoles);
+            activeRolesChanged = !previousActiveRoleFamilies.SetEquals(currentActiveRoleFamilies);
 
-            LastServerHello.ActiveRoles = payload.ActiveRoles;
+            LastServerHello.ActiveRoles = [.. payload.ActiveRoles];
+
+            if (activeRolesChanged)
+            {
+                RemoveRoleStateClaimsForInactiveFamilies(currentActiveRoleFamilies);
+            }
         }
 
         _logger.LogInformation("Server activate: activities [{Activities}], roles [{Roles}]",

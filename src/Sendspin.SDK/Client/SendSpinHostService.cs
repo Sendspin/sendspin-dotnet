@@ -275,6 +275,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         // offer is a static app mistake, and surfacing it at construction puts the exception
         // where the app can still see which call built the options (#189).
         _options.Capabilities.ValidatePairingCodeMethods();
+        _options.Capabilities.ValidateVisualizerRoleSupport();
 
         // Explicit seed wins; otherwise fall back to the store (best-effort).
         LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();

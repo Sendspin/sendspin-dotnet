@@ -218,6 +218,24 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
+    public void InvalidInitialVisualizerConfiguration_ThrowsAtConstruction()
+    {
+        Assert.Throws<ArgumentException>(() => TestClient.Create(configure: options => options with
+        {
+            Capabilities = new ClientCapabilities
+            {
+                Roles = new List<string> { "visualizer@v1" },
+                VisualizerRoleSupport = new VisualizerRoleSupport
+                {
+                    BufferCapacity = 65536,
+                    RateMax = 30,
+                    Types = new List<string> { VisualizerTypes.Spectrum },
+                },
+            },
+        }));
+    }
+
+    [Fact]
     public void SpectrumFrame_BeforeStreamStart_IsDropped()
     {
         var (client, connection) = VisualizerClient();

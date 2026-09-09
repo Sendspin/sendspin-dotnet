@@ -100,6 +100,21 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
+    public void ClientState_EmptyCapabilitiesList_IsNormalizedToOneDisabledChannel()
+    {
+        var (client, connection) = ArtworkClient(new List<ArtworkChannelState>());
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+
+        var only = Assert.Single(StateChannels(connection));
+        Assert.Equal(ArtworkSources.None, only.Source);
+        Assert.Null(only.Format);
+        Assert.Null(only.Width);
+        Assert.Null(only.Height);
+    }
+
+    [Fact]
     public void ClientState_CapsDeclaredChannelsAtFour()
     {
         // An array longer than four is a protocol error the server closes the connection over,

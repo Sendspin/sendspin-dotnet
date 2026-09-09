@@ -92,7 +92,9 @@ public sealed class ClientCapabilities
     /// the client's own copy of this list and re-reports the full client state — rather than by
     /// mutating it directly. The SDK never writes back here: each client copies the list at
     /// construction, so a host sharing one <see cref="ClientCapabilities"/> across connections
-    /// does not let one connection's reconfiguration reach another.
+    /// does not let one connection's reconfiguration reach another. An empty starting list is
+    /// normalized to a single disabled channel (<c>source: "none"</c>) so the wire still
+    /// satisfies the spec's 1-4 entry requirement.
     /// </remarks>
     public List<ArtworkChannelState> ArtworkChannels { get; set; } = new()
     {
@@ -319,6 +321,21 @@ public sealed class ClientCapabilities
                 nameof(PairingCodeMethods));
         }
     }
+
+    /// <summary>
+    /// Rejects an initial visualizer configuration that requests spectrum frames without the
+    /// required spectrum layout.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ISendspinClient.SetVisualizerConfigurationAsync"/> already validates the
+    /// runtime reconfiguration path; this is the matching construction-time check so the same
+    /// invalid state cannot slip onto the initial <c>client/state</c>.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <see cref="VisualizerRoleSupport.Types"/> contains <c>spectrum</c> but
+    /// <see cref="VisualizerRoleSupport.Spectrum"/> is null.
+    /// </exception>
+    internal void ValidateVisualizerRoleSupport() => VisualizerRoleSupport?.Validate();
 
     /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.

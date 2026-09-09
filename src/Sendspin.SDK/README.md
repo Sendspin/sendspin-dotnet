@@ -655,7 +655,7 @@ which must match one of the entries the client advertised in `player@v1_support.
 // Ask for a specific format; the server replies with a new stream/start.
 await client.SetPlayerFormatPreferenceAsync(new AudioFormat
 {
-    Codec = "flac", Channels = 2, SampleRate = 48000, BitDepth = 24,
+    Codec = "flac", Channels = 2, SampleRate = 48000, BitDepth = 16,
 });
 
 // Withdraw the preference and let the server choose:
@@ -732,7 +732,7 @@ Artwork clients support **1–4 independent channels** (e.g. album art on one di
 ```csharp
 var capabilities = new ClientCapabilities
 {
-    Roles = { "artwork@v1" },
+    Roles = new() { "artwork@v1" },
     ArtworkChannels = new()
     {
         new() { Source = ArtworkSources.Album,  Format = "jpeg", Width = 512, Height = 512 }, // channel 0

@@ -203,6 +203,30 @@ public class RoleStateBinaryGatingTests
     }
 
     [Fact]
+    public async Task FailedReannounce_DoesNotOpenTheAddedRolesBinaryGate()
+    {
+        var (client, connection, _) = GatingClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+        int beforeReactivation = ClientStates(connection).Count;
+
+        ArtworkReceivedEventArgs? received = null;
+        client.ArtworkReceived += (_, e) => received = e;
+
+        connection.ThrowOnNextSend = true;
+        Activate(connection, "player@v1", "artwork@v1");
+
+        await Task.Yield();
+
+        Assert.Equal(beforeReactivation, ClientStates(connection).Count);
+
+        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.Artwork0, 1, 4, 5, 6));
+
+        Assert.Null(received);
+    }
+
+    [Fact]
     public void UnchangedActiveRoles_DoNotReannounceOnEveryActivate()
     {
         var (client, connection, _) = GatingClient();
@@ -232,5 +256,12 @@ public class RoleStateBinaryGatingTests
         var latest = ClientStates(connection)[^1].Payload;
         Assert.Null(latest.Artwork);
         Assert.NotNull(latest.Player);
+
+        ArtworkReceivedEventArgs? received = null;
+        client.ArtworkReceived += (_, e) => received = e;
+
+        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.Artwork0, 1, 4, 5, 6));
+
+        Assert.Null(received);
     }
 }
