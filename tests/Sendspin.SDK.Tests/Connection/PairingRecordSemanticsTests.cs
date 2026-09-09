@@ -85,6 +85,24 @@ public class PairingRecordSemanticsTests
     }
 
     [Fact]
+    public void PairingBelowLongTermCapacity_DoesNotCountTheClientsOwnPairingPsk()
+    {
+        // Capacity counts long-term pairing records only. Treating the bootstrap Pairing PSK as
+        // one of them would evict here even though there is still one long-term slot free.
+        var store = new BoundedPairingRecordStore(
+            2,
+            new PairingRecord(Psk(0x11), PskCategory.Pairing),
+            LongTerm(0x22, "srv-existing", DateTimeOffset.UnixEpoch));
+
+        Persist(store, Psk(0x33), "srv-fresh");
+
+        Assert.Equal(3, store.List().Count);
+        Assert.Contains(store.List(), r => r.Category == PskCategory.Pairing);
+        Assert.Contains(store.List(), r => r.ServerId == "srv-existing");
+        Assert.Contains(store.List(), r => r.ServerId == "srv-fresh");
+    }
+
+    [Fact]
     public void PairingAtCapacity_StampsTheNewRecordsLastUse_SoItIsNotTheNextVictim()
     {
         var store = new BoundedPairingRecordStore(2, LongTerm(0x11, "srv-A", DateTimeOffset.UnixEpoch));
@@ -125,12 +143,15 @@ public class PairingRecordSemanticsTests
         var store = new BoundedPairingRecordStore(
             2,
             pairingPsk,
-            LongTerm(0x22, "srv-idle", DateTimeOffset.UnixEpoch.AddDays(1)));
+            LongTerm(0x22, "srv-old", DateTimeOffset.UnixEpoch),
+            LongTerm(0x33, "srv-newer", DateTimeOffset.UnixEpoch.AddDays(1)));
 
         Persist(store, Psk(0x44), "srv-fresh");
 
         Assert.Contains(store.List(), r => r.Category == PskCategory.Pairing);
-        Assert.DoesNotContain(store.List(), r => r.ServerId == "srv-idle");
+        Assert.DoesNotContain(store.List(), r => r.ServerId == "srv-old");
+        Assert.Contains(store.List(), r => r.ServerId == "srv-newer");
+        Assert.Contains(store.List(), r => r.ServerId == "srv-fresh");
     }
 
     [Fact]

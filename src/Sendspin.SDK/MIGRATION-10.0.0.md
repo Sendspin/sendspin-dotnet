@@ -75,7 +75,7 @@ If your app both dials servers and listens for server-initiated connections, bot
 
 `Upsert` returns `void` rather than 9.x's `bool`, so a 9.x implementation fails with a compiler error (CS0535). "The store is full" is no longer an outcome the SDK can be told about: the spec requires a pairing that completes at capacity to **succeed**, by evicting an existing record. The SDK now does that eviction itself, before it calls `Upsert`, so by the time your store is called there is room.
 
-To take part, override the new `Capacity` property (default `int.MaxValue`, meaning unbounded) with the number of records your store holds. The SDK evicts the least recently used record — never the client's own Pairing PSK, and never a record backing a connection that is currently open — whenever a pairing would otherwise exceed it. The spec requires room for at least 5 pairing records; a smaller `Capacity` is logged as a warning.
+To take part, override the new `Capacity` property (default `int.MaxValue`, meaning unbounded) with the number of **long-term pairing records** your store holds. The client's own Pairing PSK is extra and does not count against it. The SDK evicts the least recently used record — never the client's own Pairing PSK, and never a record backing a connection that is currently open — whenever a pairing would otherwise exceed it. The spec requires room for at least 5 long-term pairing records; a smaller `Capacity` is logged as a warning.
 
 `PairingRecord` also changed:
 
@@ -139,7 +139,7 @@ Enable a pairing-code method through `ClientCapabilities.PairingCodeMethods`.
 
 This is the same discipline `pairing_psk` has always had. **It is silent when you get it wrong** — nothing throws; the method simply never appears. If a pairing-code method you configured is not being offered, check that `PairingRecordStore`, `PairingCodeLockoutStore`, and (for `dynamic_pairing_code`) `PresentPairingCodeAsync` are all set.
 
-`PresentPairingCodeAsync` is `Func<PairingCodePresentation, CancellationToken, ValueTask>`: the argument carries the derived `PairingCode` **and** the server's `Languages` hint (from `server/hello`), rather than being a bare code string. Read `presentation.PairingCode` for the digits; match `presentation.Languages` (BCP 47, most-preferred first, possibly null) against the languages your app can actually speak when you announce the code aloud. The hint is informational — emitting in another language is never a protocol error.
+`PresentPairingCodeAsync` is `Func<PairingCodePresentation, CancellationToken, ValueTask>`: the argument carries the derived `PairingCode`, the server's `Languages` hint (from `server/hello`), **and** the selected dynamic `Format` (currently `digits`), rather than being a bare code string. Read `presentation.PairingCode` for the digits; match `presentation.Languages` (BCP 47, most-preferred first, possibly null) against the languages your app can actually speak when you announce the code aloud. The hint is informational — emitting in another language is never a protocol error.
 
 ### A `PairingWindow` is required for the gesture-gated methods
 
@@ -156,7 +156,7 @@ var window = new PairingWindow();   // one per device — share it across every 
 var options = new SendspinClientOptions
 {
     Identity = identity,
-    PinLockoutStore = lockouts,
+    PairingCodeLockoutStore = lockouts,
     PairingWindow = window,         // omitted, every gated attempt waits forever
     // ...
 };
@@ -227,7 +227,7 @@ New: `PairingCodePresentation.Groups` splits the code into the groups the spec r
 Grouping is presentation-only. Separators never enter pairing code derivation, operator entry, or the `PRS` transcript, so join `Groups` with whatever separator suits the surface, and strip separators from anything typed back in.
 
 ```csharp
-PresentPinAsync = (presentation, ct) =>
+PresentPairingCodeAsync = (presentation, ct) =>
 {
     ShowPairingCode(string.Join(" ", presentation.Groups));   // was: presentation.PairingCode
     return ValueTask.CompletedTask;

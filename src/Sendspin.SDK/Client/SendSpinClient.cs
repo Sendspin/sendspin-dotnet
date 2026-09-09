@@ -42,19 +42,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly ISourceAudioEncoderFactory? _sourceEncoderFactory;
     private readonly IPairingRecordStore? _pairingStore;
 
-    // Serializes this client's record-store accesses. IPairingRecordStore promises that
+    // Serializes this client's multi-step record-store sequences through the gate shared by
+    // every SDK object using the same store instance. IPairingRecordStore promises that
     // "the SDK serializes access"; before EnsurePairingPsk/RotatePairingPsk every mutation
     // ran on the receive path, and now app threads mutate too. Never held across an await.
     // Boundary: RecordPskResolver.Resolve also reads the store, from the framing inbound
-    // path — a separate public object this client-private lock cannot reach — so an
-    // app-thread call can still race an in-flight re-handshake's psk_id lookup.
-    // Boundary 2: this lock is per-client, so two clients over one shared store (as
-    // SendspinHostService builds) cannot serialize multi-call sequences against each other —
-    // two concurrent EnsurePairingPsk calls can mint two Pairing records, and Rotate's
-    // remove-then-upsert can interleave with set-pairing-config's. Every individual store
-    // operation is safe after the store-level locking, so the worst case is nondeterminism
-    // (which token wins), not corruption or lockout.
-    private readonly object _pairingStoreLock = new();
+    // path — a separate public object this lock cannot reach — so an app-thread call can
+    // still race an in-flight re-handshake's psk_id lookup. Every individual store
+    // operation is safe after the store-level locking, so the worst case there is
+    // nondeterminism, not corruption or lockout.
+    private readonly object _pairingStoreLock;
     private readonly SendspinIdentity _identity;
     private bool _markedPskUsed;
 
@@ -422,6 +419,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _session = session;
         _capabilities = options.Capabilities;
         _pairingStore = options.PairingRecordStore;
+        _pairingStoreLock = _pairingStore is null
+            ? new object()
+            : PairingRecordStoreSynchronization.For(_pairingStore);
         _identity = options.Identity;
         _pairingCodeLockoutStore = options.PairingCodeLockoutStore;
         _presentPairingCodeAsync = options.PresentPairingCodeAsync;
@@ -2387,27 +2387,46 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         _activationPairingCodeFormat = null;
-        if (payload.Pairing?.Method == PairMethods.DynamicPairingCode)
+        string? format = payload.Pairing?.Format;
+        switch (payload.Pairing?.Method)
         {
-            // The activation names the emission format the server picked from the descriptor's
-            // formats (spec #178). It is required for this method and must be one this client
-            // advertised; anything else is a method this client cannot run, which is exactly
-            // what method_not_supported says. pin_length is gone — a digits code is 6 digits.
-            string? format = payload.Pairing.Format;
-            if (!string.Equals(format, PairingCodeFormats.Digits, StringComparison.Ordinal))
-            {
-                _logger.LogWarning(
-                    "Activation format {Format} is not one this client offers for {Method}; aborting the attempt",
-                    format ?? "(none)",
-                    PairMethods.DynamicPairingCode);
-                SendAsync(new PairAbortMessage
+            case PairMethods.DynamicPairingCode:
+                // The activation names the emission format the server picked from the descriptor's
+                // formats (spec #178). It is required for this method and must be one this client
+                // advertised; anything else is a method this client cannot run, which is exactly
+                // what method_not_supported says. pin_length is gone — a digits code is 6 digits.
+                if (!string.Equals(format, PairingCodeFormats.Digits, StringComparison.Ordinal))
                 {
-                    Payload = new PairAbortPayload { Reason = PairAbortReasons.MethodNotSupported },
-                }).SafeFireAndForget(_logger);
-                return;
-            }
+                    _logger.LogWarning(
+                        "Activation format {Format} is not one this client offers for {Method}; aborting the attempt",
+                        format ?? "(none)",
+                        PairMethods.DynamicPairingCode);
+                    SendAsync(new PairAbortMessage
+                    {
+                        Payload = new PairAbortPayload { Reason = PairAbortReasons.MethodNotSupported },
+                    }).SafeFireAndForget(_logger);
+                    return;
+                }
 
-            _activationPairingCodeFormat = format;
+                _activationPairingCodeFormat = format;
+                break;
+
+            case PairMethods.StaticPairingCode:
+            case PairMethods.PairingPsk:
+                if (format is not null)
+                {
+                    _logger.LogWarning(
+                        "Activation format {Format} is invalid for {Method}; aborting the attempt",
+                        format,
+                        payload.Pairing!.Method);
+                    SendAsync(new PairAbortMessage
+                    {
+                        Payload = new PairAbortPayload { Reason = PairAbortReasons.MethodNotSupported },
+                    }).SafeFireAndForget(_logger);
+                    return;
+                }
+
+                break;
         }
 
         switch (payload.Pairing?.Method)
@@ -2674,7 +2693,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Non-null on every path that reaches a dynamic pair-init: CanOffer refuses
         // dynamic_pairing_code without a presenter, and without StartPairingCodeAttempt(dynamic: true)
         // there is no { Dynamic: true } state for HandleServerPairInit to act on.
-        await _presentPairingCodeAsync!(new PairingCodePresentation(pin, _serverLanguages), cancellationToken);
+        await _presentPairingCodeAsync!(
+            new PairingCodePresentation(pin, _serverLanguages)
+            {
+                Format = _activationPairingCodeFormat,
+            },
+            cancellationToken);
     }
 
     private void HandleServerPairAuth(string json)

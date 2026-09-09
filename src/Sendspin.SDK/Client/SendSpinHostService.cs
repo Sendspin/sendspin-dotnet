@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Discovery;
 using Sendspin.SDK.Extensions;
 using Sendspin.SDK.Models;
@@ -28,6 +29,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly ILastPlayedServerStore? _lastPlayedServerStore;
 
     private readonly Dictionary<string, ActiveServerConnection> _connections = new();
+    private readonly HashSet<SendspinClientService> _openClients = new();
     private readonly object _connectionsLock = new();
 
     // The client-initiated session the application asked this host to arbitrate on behalf of,
@@ -39,11 +41,9 @@ public sealed class SendspinHostService : IAsyncDisposable
     // _connectionsLock so arbitration reads one consistent view of both.
     private AdoptedClientConnection? _adopted;
 
-    // Serializes this host's EnsurePairingPsk/RotatePairingPsk sequences. The per-connection
-    // clients hold their own private locks over the same shared store, so cross-object
-    // sequences can still interleave — every individual store operation is safe (the shipped
-    // stores lock internally), so the worst case is nondeterminism, not corruption.
-    private readonly object _pairingStoreLock = new();
+    // Serializes this host's EnsurePairingPsk/RotatePairingPsk sequences through the same
+    // per-store gate the per-connection clients sharing this record store use.
+    private readonly object _pairingStoreLock;
 
     /// <summary>
     /// Whether the host is running (listening and advertising).
@@ -269,6 +269,9 @@ public sealed class SendspinHostService : IAsyncDisposable
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SendspinHostService>();
         _options = options;
+        _pairingStoreLock = options.PairingRecordStore is null
+            ? new object()
+            : PairingRecordStoreSynchronization.For(options.PairingRecordStore);
         _lastPlayedServerStore = lastPlayedServerStore;
 
         // Fail here rather than on the first inbound connection: a misconfigured pairing-code
@@ -704,22 +707,50 @@ public sealed class SendspinHostService : IAsyncDisposable
     }
 
     /// <summary>
-    /// The <c>psk_id</c>s of pairing records backing connections this host currently holds.
+    /// The <c>psk_id</c>s of pairing records backing open clients this host currently holds or
+    /// is arbitrating on behalf of.
     /// </summary>
     private IReadOnlyCollection<string> CollectLiveRecordPskIds()
     {
         lock (_connectionsLock)
         {
             var ids = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var entry in _connections.Values)
+            foreach (var client in _openClients)
             {
-                if (entry.Client.MatchedRecordPskId is { } id)
-                {
-                    ids.Add(id);
-                }
+                AddLiveRecordPskId(ids, client);
+            }
+
+            if (_adopted is { } adopted)
+            {
+                AddLiveRecordPskId(ids, adopted.Client);
             }
 
             return ids;
+        }
+    }
+
+    private void TrackOpenClient(SendspinClientService client)
+    {
+        lock (_connectionsLock)
+        {
+            _openClients.Add(client);
+        }
+    }
+
+    private void UntrackOpenClient(SendspinClientService client)
+    {
+        lock (_connectionsLock)
+        {
+            _openClients.Remove(client);
+        }
+    }
+
+    private static void AddLiveRecordPskId(HashSet<string> ids, SendspinClientService client)
+    {
+        if (client.ConnectionState != ConnectionState.Disconnected
+            && client.MatchedRecordPskId is { } id)
+        {
+            ids.Add(id);
         }
     }
 
@@ -771,6 +802,7 @@ public sealed class SendspinHostService : IAsyncDisposable
                 connection,
                 framing,
                 clientOptions);
+            TrackOpenClient(client);
 
             client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
             client.PairingGestureRequested += (s, e) => PairingGestureRequested?.Invoke(this, e);
@@ -818,7 +850,7 @@ public sealed class SendspinHostService : IAsyncDisposable
             }
 
             // Subscribe to connection state AFTER handshake so we use the correct serverId
-            client.ConnectionStateChanged += (s, e) => OnClientConnectionStateChanged(serverId, e);
+            client.ConnectionStateChanged += (s, e) => OnClientConnectionStateChanged(serverId, client, e);
             var activeConnection = new ActiveServerConnection
             {
                 ServerId = serverId,
@@ -866,7 +898,14 @@ public sealed class SendspinHostService : IAsyncDisposable
             // it is logged as the error it is rather than swallowed (#88 item 2).
             if (client is not null && !registered)
             {
-                await client.DisposeAsync();
+                try
+                {
+                    await client.DisposeAsync();
+                }
+                finally
+                {
+                    UntrackOpenClient(client);
+                }
             }
         }
     }
@@ -1087,12 +1126,16 @@ public sealed class SendspinHostService : IAsyncDisposable
         ServerDisconnected?.Invoke(this, existing.ServerId);
     }
 
-    private void OnClientConnectionStateChanged(string connectionId, ConnectionStateChangedEventArgs e)
+    private void OnClientConnectionStateChanged(
+        string connectionId,
+        SendspinClientService client,
+        ConnectionStateChangedEventArgs e)
     {
         if (e.NewState == ConnectionState.Disconnected)
         {
             lock (_connectionsLock)
             {
+                _openClients.Remove(client);
                 var entry = _connections.FirstOrDefault(c => c.Value.ServerId == connectionId);
                 // FirstOrDefault returns default(KeyValuePair) when not found, which has Key=null.
                 // This check works because dictionary keys are never null (serverId falls back to GUID).

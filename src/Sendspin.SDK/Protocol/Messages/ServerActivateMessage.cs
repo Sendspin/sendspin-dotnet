@@ -60,13 +60,17 @@ public sealed class PairingActivation
     /// <summary>
     /// The dynamic emission format for this attempt, drawn from the client's
     /// <c>dynamic_pairing_code</c> descriptor. Required when <see cref="Method"/> is
-    /// <c>dynamic_pairing_code</c>; absent otherwise. See <see cref="PairingCodeFormats"/>.
+    /// <c>dynamic_pairing_code</c>; absent otherwise. Forwarded to
+    /// <see cref="Client.PairingCodePresentation.Format"/> when the SDK raises
+    /// <see cref="Client.SendspinClientOptions.PresentPairingCodeAsync"/>. See
+    /// <see cref="PairingCodeFormats"/>.
     /// </summary>
     /// <remarks>
     /// Validated on receipt of the activation rather than at <c>server/pair-init</c>: a format
     /// the client does not offer is <c>pair/abort</c> <c>method_not_supported</c>, which the
-    /// spec expects before <c>client/pair-init</c> is sent. This replaces the earlier
-    /// <c>pin_length</c> field — the dynamic pairing code is now a fixed 6 digits.
+    /// spec expects before <c>client/pair-init</c> is sent, and a non-null format on any other
+    /// pairing method is rejected the same way. This replaces the earlier <c>pin_length</c>
+    /// field — the dynamic pairing code is now a fixed 6 digits.
     /// </remarks>
     [JsonPropertyName("format")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

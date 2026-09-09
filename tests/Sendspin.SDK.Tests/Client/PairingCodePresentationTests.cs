@@ -11,7 +11,8 @@ namespace Sendspin.SDK.Tests.Client;
 /// Covers <c>SendspinClientOptions.PresentPairingCodeAsync</c>: the derived dynamic pairing code reaches the
 /// app through an awaited delegate whose completion gates client/pair-auth, dynamic_pairing_code is
 /// refused (fail closed) when no presenter is configured, and the delegate receives the
-/// client's own cancellation token rather than a defaulted one.
+/// activation-selected format plus the client's own cancellation token rather than a
+/// defaulted one.
 /// </summary>
 public class PairingCodePresentationTests
 {
@@ -77,11 +78,13 @@ public class PairingCodePresentationTests
     public async Task DynamicPairingCode_PresentationIsAwaited_BeforePairAuthIsSent()
     {
         string? presentedPairingCode = null;
+        string? presentedFormat = null;
         bool presentationCompleted = false;
         var release = new TaskCompletionSource();
         var (client, conn) = CreateDynamicPairingCodeClient(async (presentation, _) =>
         {
             presentedPairingCode = presentation.PairingCode;
+            presentedFormat = presentation.Format;
             await release.Task;
             await Task.Yield();
             presentationCompleted = true;
@@ -96,6 +99,7 @@ public class PairingCodePresentationTests
 
         Assert.NotNull(presentedPairingCode);
         Assert.Equal(6, presentedPairingCode!.Length);
+        Assert.Equal(PairingCodeFormats.Digits, presentedFormat);
 
         // Server side of the PAKE, keyed with the pairing code the presenter received.
         byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
