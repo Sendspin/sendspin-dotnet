@@ -24,6 +24,10 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Pairing config | `management/*` removed (spec PR #183): `ISendspinClient.PairingConfigChanged`, `PairingConfigChangedEventArgs`, `ClientCapabilities.RecordModePskId`, `ConnectionPriority.Management` and the `management/*` message types are gone; pairing configuration is local to the client | Medium — compiler error where the event was subscribed; a server can no longer read or change a client's pairing config |
 | `client/state` | `available` is a boolean, not a state string | Medium |
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
+| Pairing | `ClientCapabilities.MinPairingCodeLength` removed; code lengths are fixed by the spec (6 digits dynamic, 8 static) | Low — compiler error where it was set |
+| Pairing | On the wire, `dynamic_pin` / `static_pin` are `dynamic_pairing_code` / `static_pairing_code`, `pin_length` is gone and `server/activate` carries the emission `format`; the `pair/abort` reason `pin_mismatch` is `pairing_code_mismatch` | Low — compiler error only if you matched the reason string; requires a server on the pairing-code wire |
+| Pairing | A `pairing` activity on a long-term (already paired) session is refused with `client/goodbye` reason `unauthorized` | Low — behavioural |
+| Pairing | `server/unpair` removes the pairing record for the server that sent it | Low — behavioural; a custom store sees a `Remove` |
 | Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
 | Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
 | Output delay | "Static delay" renamed to "output delay" across the C# surface (spec PR #164); the wire is unchanged | Medium — compiler errors only, see §8 for the full table |
@@ -136,6 +140,10 @@ Three methods, all optional to offer except the first:
 
 Enable a pairing-code method through `ClientCapabilities.PairingCodeMethods`.
 
+**The pairing-code wire changed with it.** The methods are `dynamic_pairing_code` and `static_pairing_code` on the wire (9.x sent `dynamic_pin` and `static_pin`), `client/hello` advertises them as a `supported_pair_methods` object keyed by method with a descriptor per entry, code lengths are fixed by the spec at 6 digits dynamic and 8 static so `ClientCapabilities.MinPairingCodeLength` is gone, and a dynamic attempt's `server/activate` carries the emission `format`. A code that does not match aborts with `pairing_code_mismatch` where 9.x said `pin_mismatch`. A 10.x client therefore pairs only with a server on the pairing-code wire; unpaired connect and an existing pairing record still work against older servers.
+
+**Two behaviours are new around an existing pairing.** A server that activates a `pairing` activity on a session authenticated by a long-term (paired) PSK is refused with `client/goodbye` reason `unauthorized`, because a paired session has nothing to pair. And `server/unpair` from a paired server removes the pairing record bound to that server: a custom `IPairingRecordStore` sees a `Remove` for it, and the next connection from that server starts unpaired.
+
 **Every pair method needs a `PairingRecordStore`, including the pairing-code methods.** Without one the exchange runs to completion and the *server* writes a long-term record while the client stores nothing — so the client fails to authenticate on its very next connection, having told your app that pairing succeeded. The SDK therefore withholds a method it cannot complete: an unrunnable method is absent from `supported_pair_methods` in `client/hello`, and any activation for it is answered `method_not_supported` with the connection left open.
 
 This is the same discipline `pairing_psk` has always had. **It is silent when you get it wrong** — nothing throws; the method simply never appears. If a pairing-code method you configured is not being offered, check that `PairingRecordStore`, `PairingCodeLockoutStore`, and (for `dynamic_pairing_code`) `PresentPairingCodeAsync` are all set.
@@ -179,8 +187,7 @@ Once an attempt has started it is bounded by `SendspinClientOptions.PairingAttem
 ### Pairing configuration is local
 
 The client's pairing configuration — which methods it offers, their enablement, the static
-pairing code, the minimum dynamic pairing code length, unpaired access, and the `locations`
-hints — is manufacturer-defined and set through `ClientCapabilities`. No server can read or
+pairing code, unpaired access, and the `locations` hints — is manufacturer-defined and set through `ClientCapabilities`. No server can read or
 change it, and the pairing window is opened only by a local operator gesture.
 
 ---
