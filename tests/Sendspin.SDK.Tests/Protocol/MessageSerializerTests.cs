@@ -106,6 +106,16 @@ public class MessageSerializerTests
     }
 
     [Fact]
+    public void Deserialize_StreamRequestFormat_ReturnsNull_MessageTypeIsGone()
+    {
+        // Spec PR #195 removed stream/request-format from the wire vocabulary entirely: the
+        // player's format preference and the artwork/visualizer dynamic configuration moved into
+        // their role objects in client/state. Nothing may resurrect the old type through the
+        // source-generated serializer.
+        Assert.Null(MessageSerializer.Deserialize("""{"type":"stream/request-format","payload":{}}"""));
+    }
+
+    [Fact]
     public void Deserialize_AllServerMessageTypes_Succeeds()
     {
         var testCases = new Dictionary<string, Type>
@@ -164,7 +174,6 @@ public class MessageSerializerTests
             ["""{"type":"client/pair-init","payload":{}}"""] = typeof(ClientPairInitMessage),
             ["""{"type":"client/pair-auth","payload":{}}"""] = typeof(ClientPairAuthMessage),
             ["""{"type":"client/pair-confirm","payload":{}}"""] = typeof(ClientPairConfirmMessage),
-            ["""{"type":"stream/request-format","payload":{}}"""] = typeof(StreamRequestFormatMessage),
             ["""{"type":"client_stream/start","payload":{}}"""] = typeof(ClientStreamStartMessage),
             ["""{"type":"client_stream/end","payload":{}}"""] = typeof(ClientStreamEndMessage),
         };

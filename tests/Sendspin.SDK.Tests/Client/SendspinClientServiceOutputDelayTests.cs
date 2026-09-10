@@ -188,7 +188,7 @@ public class SendspinClientServiceOutputDelayTests
     }
 
     [Fact]
-    public async Task InitialClientState_OmitsSupportedCommandsWhenCapabilityDisabled()
+    public async Task InitialClientState_SendsEmptySupportedCommandsWhenCapabilityDisabled()
     {
         var (client, connection, _) = TestClient.Create(configure: options => options with
         {
@@ -199,8 +199,11 @@ public class SendspinClientServiceOutputDelayTests
 
         TestClient.CompleteHandshake(connection, "player@v1");
 
+        // Spec PR #175 made supported_commands required: a player that accepts no commands says
+        // so with [], because absence and [] meant the same thing and the redundant encoding let
+        // a reader treating a missing field as "unchanged" keep a revoked command.
         var player = await WaitForPlayerStateAsync(connection);
-        Assert.Null(player.SupportedCommands);
+        Assert.Empty(player.SupportedCommands);
     }
 
     [Fact]

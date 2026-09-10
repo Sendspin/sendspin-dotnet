@@ -72,7 +72,7 @@ public class MediaDisplaySchedulingTests
                 Capabilities = new ClientCapabilities
                 {
                     Roles = new List<string> { "visualizer@v1", "artwork@v1" },
-                    VisualizerSupport = new VisualizerSupport
+                    VisualizerRoleSupport = new VisualizerRoleSupport
                     {
                         BufferCapacity = bufferCapacity,
                         RateMax = 30,

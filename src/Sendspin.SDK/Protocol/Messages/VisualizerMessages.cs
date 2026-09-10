@@ -62,30 +62,19 @@ public sealed class VisualizerSpectrum
 }
 
 /// <summary>
-/// The <c>visualizer@v1_support</c> object in <c>client/hello</c>: what audio features the client
-/// can render and at what rate.
+/// The <c>visualizer@v1_support</c> object in <c>client/hello</c>. Since spec PR #195 it carries
+/// only the client's buffer capacity: the requested feature types, frame-rate cap and spectrum
+/// layout are all things a client may change during a connection, so they live in the
+/// <c>client/state</c> visualizer object (<see cref="VisualizerStatePayload"/>) instead.
 /// </summary>
 public sealed class VisualizerSupport
 {
-    /// <summary>Max size in bytes of buffered visualization messages not yet displayed.</summary>
+    /// <summary>
+    /// Max total size in bytes of buffered visualizer binary messages, counting each message's
+    /// full wire size (message-type byte + timestamp + data).
+    /// </summary>
     [JsonPropertyName("buffer_capacity")]
     public int BufferCapacity { get; init; }
-
-    /// <summary>Maximum frames per second the client wants to receive.</summary>
-    [JsonPropertyName("rate_max")]
-    public int RateMax { get; init; }
-
-    /// <summary>
-    /// Requested feature types, a subset of <see cref="VisualizerTypes"/>
-    /// (loudness, f_peak, spectrum, beat, peak).
-    /// </summary>
-    [JsonPropertyName("types")]
-    required public List<string> Types { get; init; }
-
-    /// <summary>Spectrum configuration. Required when <c>spectrum</c> is in <see cref="Types"/>.</summary>
-    [JsonPropertyName("spectrum")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public VisualizerSpectrum? Spectrum { get; init; }
 }
 
 /// <summary>

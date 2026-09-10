@@ -48,6 +48,12 @@ jobs:
       - name: Accept the spec's object-keyed pair methods in the reference server
         run: python tools/interop/patch_aiosendspin_pair_methods.py
 
+      # 9.1.1 predates spec PR #179 and only parses the old list-shaped
+      # supported_pair_methods. Keep the SDK on the current object-shaped wire and
+      # normalize it at this pinned reference server's compatibility boundary.
+      - name: Bridge aiosendspin pair-method schema
+        run: python tools/interop/patch_aiosendspin_pair_methods.py
+
       - name: Build interop client
         run: dotnet build tools/interop/InteropClient -c Release
 
@@ -57,11 +63,9 @@ jobs:
       - name: Pairing PSK round-trip (pair, persist, re-handshake to user trust)
         run: bash tools/interop/run.sh pairing
 
-      # The only live cover for the CPace round, PSK wrapping, and the pairing window. The
-      # server side fails the run if the client did not gesture-gate the attempt first, so
-      # this also pins the gating policy rather than just "pairing worked".
-      - name: Static PIN round-trip (gesture-gated attempt, CPace, wrapped PSK)
-        run: bash tools/interop/run.sh static-pin
+      # The pinned 9.1.1 server still calls this retired method "static_pin" and cannot
+      # exercise the current static_pairing_code wire. Keep this scenario in SDK tests
+      # until the reference server adopts spec PR #179 and the current pairing-code names.
 
       # Slower than the others by design: the client withholds its initial client/state
       # until clock sync converges, which takes ~30s of burst sampling, and the server

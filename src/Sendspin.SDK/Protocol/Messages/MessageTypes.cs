@@ -35,7 +35,9 @@ public static class MessageTypes
     public const string StreamStart = "stream/start";
     public const string StreamEnd = "stream/end";
     public const string StreamClear = "stream/clear";
-    public const string StreamRequestFormat = "stream/request-format";
+
+    // No stream/request-format: spec PR #195 removed the message and folded its fields into
+    // client/state, so the vocabulary no longer contains it and an inbound one has no model.
 
     // Group state
     public const string GroupUpdate = "group/update";

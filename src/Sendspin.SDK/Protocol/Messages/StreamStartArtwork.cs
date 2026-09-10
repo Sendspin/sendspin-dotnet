@@ -9,7 +9,8 @@ namespace Sendspin.SDK.Protocol.Messages;
 /// <summary>
 /// Artwork metadata carried inside a <c>stream/start</c> payload.
 /// Describes which artwork channels the server is about to stream (one or more album/etc. images).
-/// Distinct from <see cref="ArtworkSupport"/>, which is the client's capability advertisement in <c>client/hello</c>.
+/// Distinct from <see cref="ArtworkStatePayload"/>, which is the client's own channel declaration
+/// in <c>client/state</c>.
 /// </summary>
 public sealed class StreamStartArtwork
 {
