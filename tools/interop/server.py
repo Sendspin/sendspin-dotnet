@@ -147,12 +147,12 @@ async def main() -> int:
                 )
             else:
                 # The operator would type this in; here both sides already know it.
-                async def supply_pin() -> str:
+                async def supply_code() -> str:
                     return secret
 
                 attempt = PairingAttempt(
                     method=PairMethod.STATIC_PAIRING_CODE,
-                    pin_provider=supply_pin,
+                    pairing_code_provider=supply_code,
                     on_pair_pending=gated.set,
                 )
             server.connect_to_client(
