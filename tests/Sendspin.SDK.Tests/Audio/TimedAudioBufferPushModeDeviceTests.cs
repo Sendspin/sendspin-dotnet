@@ -72,7 +72,7 @@ public class TimedAudioBufferPushModeDeviceTests
         player.DeviceStall(20_000);
         player.Run(30_000);
 
-        AssertSnapTierSettled(player, before);
+        AssertSnapTierSettled(player, before, FocusritePeriodFrames);
     }
 
     /// <summary>
@@ -90,7 +90,7 @@ public class TimedAudioBufferPushModeDeviceTests
         player.DeviceStall(20_000);
         player.Run(30_000);
 
-        AssertSnapTierSettled(player, before);
+        AssertSnapTierSettled(player, before, FinePeriodFrames);
     }
 
     /// <summary>
@@ -131,8 +131,11 @@ public class TimedAudioBufferPushModeDeviceTests
             "restart. The lateness was absorbed into the baseline as a constant offset.");
     }
 
-    private void AssertSnapTierSettled(PushModePlayer player, int hardSyncsBefore)
+    private void AssertSnapTierSettled(PushModePlayer player, int hardSyncsBefore, int periodFrames)
     {
+        // The device's unreported 100 ms first fill is plumbing, and is absorbed without a snap.
+        Assert.Equal(0, hardSyncsBefore);
+
         var after = player.HardSyncs.Skip(hardSyncsBefore).ToList();
         _output.WriteLine(
             $"hard syncs before disturbance: {hardSyncsBefore}, after: {after.Count}, underruns: {player.Underruns}, " +
@@ -151,7 +154,7 @@ public class TimedAudioBufferPushModeDeviceTests
         }
 
         var amounts = string.Join(", ", after.Take(12).Select(s => $"{s.Frames / (SampleRate / 1000.0):+0.0;-0.0}"));
-        var period = FocusritePeriodFrames / (SampleRate / 1000.0);
+        var period = periodFrames / (SampleRate / 1000.0);
 
         // A 20 ms disturbance is one snap. Allow a second for the EMA re-seed to settle. Beyond
         // that the tier is chasing something that is not misalignment.
