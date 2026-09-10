@@ -178,15 +178,6 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<string>? PairingCompleted;
 
     /// <summary>
-    /// Raised when a server on any connection changes this client's pairing configuration
-    /// via <c>management/set-pairing-config</c>, or removes the stored Pairing record via
-    /// <c>management/remove-record</c>. Forwarded from the per-connection client — see
-    /// <see cref="ISendspinClient.PairingConfigChanged"/>. Subscribe to persist the new
-    /// effective configuration; without that, a server-made change reverts on restart.
-    /// </summary>
-    public event EventHandler<PairingConfigChangedEventArgs>? PairingConfigChanged;
-
-    /// <summary>
     /// Raised when a pairing attempt on any connection is gesture-gated and no pairing
     /// window is open. Forwarded from the per-connection client — see
     /// <see cref="ISendspinClient.PairingGestureRequested"/>. Prompt the operator, then call
@@ -752,7 +743,6 @@ public sealed class SendspinHostService : IAsyncDisposable
                 clientOptions);
 
             client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
-            client.PairingConfigChanged += (s, e) => PairingConfigChanged?.Invoke(this, e);
             client.PairingGestureRequested += (s, e) => PairingGestureRequested?.Invoke(this, e);
 
             client.GroupStateChanged += (s, g) =>

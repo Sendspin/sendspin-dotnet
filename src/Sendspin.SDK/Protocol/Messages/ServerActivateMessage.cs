@@ -82,7 +82,4 @@ public static class Activities
 
     /// <summary>A pairing exchange is in progress.</summary>
     public const string Pairing = "pairing";
-
-    /// <summary>Management operations (paired servers only).</summary>
-    public const string Management = "management";
 }

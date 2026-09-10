@@ -24,14 +24,7 @@ public static class MessageTypes
     public const string ServerPairConfirm = "server/pair-confirm";
     public const string ClientPairConfirm = "client/pair-confirm";
 
-    // Management (all requests answered by management/result)
-    public const string ManagementListRecords = "management/list-records";
-    public const string ManagementAddRecord = "management/add-record";
-    public const string ManagementRemoveRecord = "management/remove-record";
-    public const string ManagementGetPairingConfig = "management/get-pairing-config";
-    public const string ManagementSetPairingConfig = "management/set-pairing-config";
-    public const string ManagementOpenPairingWindow = "management/open-pairing-window";
-    public const string ManagementResult = "management/result";
+    // Unpairing (a paired server dropping its own record from this client)
     public const string ServerUnpair = "server/unpair";
 
     // Clock synchronization

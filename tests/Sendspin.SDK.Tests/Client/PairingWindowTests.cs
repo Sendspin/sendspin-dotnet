@@ -137,8 +137,8 @@ public class PairingWindowTests
     public void StateChanged_ContainsAThrowingSubscriber()
     {
         // Every connection sharing the window subscribes, and the raise is synchronous on the
-        // caller's thread -- for management/open-pairing-window, one connection's receive loop,
-        // whose catch does not cover an arbitrary handler fault. A throwing handler must not
+        // caller's thread -- for a local open, whatever thread the app opened it on.
+        // A throwing handler must not
         // reach the caller or stop the other subscribers from seeing the opening.
         var window = new PairingWindow();
         int reached = 0;

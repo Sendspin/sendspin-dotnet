@@ -7,8 +7,7 @@ using Sendspin.SDK.Connection.Noise;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// The pairing surface in host (server-dials-client) mode: the host-level
-/// <see cref="SendspinHostService.PairingConfigChanged"/> forward, and
+/// The pairing surface in host (server-dials-client) mode:
 /// <see cref="SendspinHostService.EnsurePairingPsk"/> /
 /// <see cref="SendspinHostService.RotatePairingPsk"/> working before any server has
 /// connected — which is when the QR code has to be shown in this mode.
@@ -19,39 +18,6 @@ public class SendspinHostServicePairingTests
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
 
     private static readonly byte[] TestPsk = Enumerable.Repeat((byte)0x42, 32).ToArray();
-
-    [Fact]
-    public async Task PairingConfigChanged_OnAConnection_ReachesAHostLevelSubscriber()
-    {
-        var records = new InMemoryPairingRecordStore();
-        records.Upsert(new PairingRecord(TestPsk, PskCategory.LongTerm));
-
-        await using var host = new SendspinHostService(
-            NullLoggerFactory.Instance,
-            new SendspinClientOptions
-            {
-                Identity = SendspinIdentity.Generate(),
-                PairingRecordStore = records,
-            },
-            listenerOptions: new ListenerOptions { Port = 0 },
-            advertiserOptions: new AdvertiserOptions { Enabled = false });
-        await host.StartAsync();
-
-        var changed = new TaskCompletionSource<PairingConfigChangedEventArgs>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        host.PairingConfigChanged += (_, e) => changed.TrySetResult(e);
-
-        await using var server = new FakeServer(TestPsk, ["playback", "management"]);
-        await server.ConnectAsync(host.ListeningPort);
-        await WaitForServerConnectedAsync(host, server.ServerId);
-
-        await server.SendJsonAsync(
-            """{"type":"management/set-pairing-config","payload":{"unpaired_access":{"enabled":true}}}""");
-
-        var change = await changed.Task.WaitAsync(Timeout);
-        Assert.True(change.UnpairedAccessEnabled);
-        Assert.False(change.PairingPskReplaced);
-    }
 
     [Fact]
     public async Task EnsurePairingPsk_WorksBeforeAnyConnection_AndMatchesAClientOverTheSameStore()

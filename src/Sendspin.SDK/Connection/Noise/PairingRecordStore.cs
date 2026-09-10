@@ -12,8 +12,8 @@ namespace Sendspin.SDK.Connection.Noise;
 /// <param name="Category">Long-term (from pairing) or Pairing (bootstrap secret).</param>
 /// <param name="ServerId">Bound server id for stored-pubkey records; null for shared records.</param>
 /// <param name="Used">
-/// True once a server has authenticated a session with this record. Reported to
-/// servers in management/list-records; nothing in the SDK gates on it. Per spec
+/// True once a server has authenticated a session with this record. Informational:
+/// nothing in the SDK reads it, and nothing gates on it. Per spec
 /// #122 the Pairing PSK is NOT consumed by a successful pairing — it persists and
 /// may pair this client with any number of servers — so a used Pairing PSK record
 /// is deliberately retained, not retired.
@@ -259,9 +259,9 @@ internal sealed class RecordPskResolver : INoisePskResolver
     /// <param name="store">The records to resolve psk_ids against.</param>
     /// <param name="isPairingPskEnabled">
     /// Reports whether the <c>pairing_psk</c> method is currently enabled in the client's
-    /// pairing config. Called on every resolve rather than snapshotted, because
-    /// <c>management/set-pairing-config</c> can flip it mid-session and the very next
-    /// handshake has to see the new value. Defaults to always-enabled for callers with no
+    /// pairing config. Called on every resolve rather than snapshotted, so a client that
+    /// changes its pairing config mid-session has the very next handshake see the new
+    /// value. Defaults to always-enabled for callers with no
     /// pairing config of their own.
     /// </param>
     public RecordPskResolver(IPairingRecordStore store, Func<bool>? isPairingPskEnabled = null)

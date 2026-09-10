@@ -265,30 +265,14 @@ and waits forever, so pairing simply never completes. Subscribe to
 [MIGRATION-10.0.0.md](MIGRATION-10.0.0.md#a-pairingwindow-is-required-for-the-gesture-gated-methods)
 for the full migration note.
 
-**Runtime reconfiguration.** `ClientCapabilities` only seeds the client's *initial* pairing
-config. Once paired, a management-activated server can enable, disable, and reconfigure each
-pairing method at runtime via `management/set-pairing-config` — the Pairing PSK, dynamic pairing code
-(including its minimum length), static pairing code (including its value), unpaired access, and the
-record-mode fallback record. The SDK tracks this effective state itself and never writes it
-back to your `ClientCapabilities` instance, so it lives in memory only: subscribe to
-`ISendspinClient.PairingConfigChanged` to observe every change.
-
-Every setting the event reports has a `ClientCapabilities` property to seed it back on the next
-startup — `UnpairedAccessEnabled`, `MinPairingCodeLength`, `StaticPairingCode`,
-`PairingPskEnabled`, `DynamicPairingCodeEnabled`, `StaticPairingCodeEnabled`,
-`RecordModePskId`, and the two `locations` hints below. Persist them when the event fires,
-reapply them to the `ClientCapabilities` you construct the client with, and the server's
-change survives a restart. `PairingPskReplaced` is not one of those settings — it's a
-staleness signal, not a value to persist: when it's true, any pairing token you already handed
-out has stopped being valid, and the replaced PSK itself round-trips through your
-`IPairingRecordStore`, not through `ClientCapabilities`.
+**Pairing configuration is local.** Which pair methods a client offers, the dynamic
+pairing code minimum length, and whether a method is enabled are all decided by the
+app through `ClientCapabilities` — no server can read or change any of it.
 
 Note that `DynamicPairingCodeEnabled`/`StaticPairingCodeEnabled` are not the same as listing the method in
 `PairingCodeMethods`. That list means *implemented*: a method omitted from it is reported to
-the server as absent and can never be re-enabled, whereas a listed-but-disabled method
-reports `enabled: false` and the server can turn it back on. `RecordModePskId` is ignored
-unless it still names a shared-PSK record in your store, since a server may have removed that
-record while your app was down.
+the server as absent, whereas a listed-but-disabled method is simply withheld from
+`client/hello` until your app turns it back on.
 
 ### Telling servers where the operator can find a secret
 
@@ -308,15 +292,10 @@ var caps = new ClientCapabilities
 ```
 
 Both default to empty, which omits the hint entirely — the SDK cannot know where your secret
-is printed, and a wrong hint is worse than none.
-
-**The SDK overrides the hint to `["operator"]` once a server sets that method's secret**
-through `management/set-pairing-config`, because the operator has chosen it and any printed
-copy is now stale — this is the spec's *"when the secret is rotated, the client updates the
-hint accordingly"*. A Pairing PSK your own client mints (`EnsurePairingPsk`,
-`RotatePairingPsk`) does **not** flip it: the client generated that one, so it is still found
-wherever your app renders it. The new value arrives on `PairingConfigChanged` beside the
-rotated secret, so persist the two together.
+is printed, and a wrong hint is worse than none. Set `["operator"]` yourself when the operator
+chooses the secret through your own UI, since any printed copy is then stale. A Pairing PSK
+your own client mints (`EnsurePairingPsk`, `RotatePairingPsk`) does **not** change the hint:
+the client generated that one, so it is still found wherever your app renders it.
 
 ## Architecture
 
@@ -669,7 +648,7 @@ arbitrates which one is active. It completes each server's `client/hello` ↔ `s
 first, then applies the spec's decision:
 
 - connections rank by priority class, from the highest-priority activity declared in the
-  connection's `server/activate`: `management` > `playback` > `pairing` > empty (no
+  connection's `server/activate`: `playback` > `pairing` > empty (no
   recognized activity declared);
 - the incoming server is accepted when its priority is **higher than or equal to** the holder's,
   with two exceptions: a pairing attempt is never displaced by incoming playback/pairing, and an

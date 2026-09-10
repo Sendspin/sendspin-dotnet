@@ -39,7 +39,7 @@ public class DisabledPairingMethodPskTests
     [Fact]
     public void PairingPskEnablement_IsReadAtResolveTime()
     {
-        // management/set-pairing-config can flip the method mid-session, so a snapshot taken
+        // The app can flip the method between handshakes, so a snapshot taken
         // when the resolver was built is the wrong answer for every handshake after the
         // change. One resolver, two handshakes, opposite outcomes.
         byte[] psk = Psk(0x22);

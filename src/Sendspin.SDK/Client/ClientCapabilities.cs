@@ -220,34 +220,20 @@ public sealed class ClientCapabilities
     /// </summary>
     /// <remarks>
     /// Purely informational: it drives server UX copy like "check the label on the device",
-    /// and no pairing decision depends on it. <b>The SDK overrides this to
-    /// <c>["operator"]</c> once a server sets the pairing code through
-    /// <c>management/set-pairing-config</c></b> — at that point the operator chose the secret
-    /// and any printed copy is stale, which is what the spec's "the client updates the hint
-    /// accordingly" requires. The new value arrives on
-    /// <see cref="PairingConfigChangedEventArgs.StaticPairingCodeLocations"/> for the app to persist
-    /// alongside the rotated pairing code (#129).
+    /// and no pairing decision depends on it. Pairing configuration is local and
+    /// manufacturer-defined, so nothing on the wire rewrites this hint (#129).
     /// </remarks>
     public List<string> StaticPairingCodeLocations { get; set; } = new();
 
     /// <summary>
     /// Where an operator can find this device's Pairing PSK, advertised as the
-    /// <c>locations</c> hint on the <c>pairing_psk</c> descriptor. Same vocabulary and same
-    /// server-rotation override as <see cref="StaticPairingCodeLocations"/>; empty by default.
+    /// <c>locations</c> hint on the <c>pairing_psk</c> descriptor. Same vocabulary as
+    /// <see cref="StaticPairingCodeLocations"/>; empty by default.
     /// </summary>
-    /// <remarks>
-    /// A Pairing PSK the client mints itself (<see cref="ISendspinClient.EnsurePairingPsk"/>,
-    /// <see cref="ISendspinClient.RotatePairingPsk"/>) does <em>not</em> flip the hint: the
-    /// client generated it, so it is still found wherever the app renders it — typically the
-    /// device's own display. Only a server supplying the PSK does.
-    /// </remarks>
     public List<string> PairingPskLocations { get; set; } = new();
 
     /// <summary>
-    /// Whether the mandatory Pairing PSK method starts enabled. Default true. Set false only
-    /// to restore a server's <c>management/set-pairing-config</c> change: a server that
-    /// disabled this method expects it to stay disabled across a restart, and leaving the
-    /// default would silently re-offer Pairing-PSK pairing.
+    /// Whether the mandatory Pairing PSK method starts enabled. Default true.
     /// </summary>
     /// <remarks>
     /// <see cref="ISendspinClient.EnsurePairingPsk"/> and
@@ -264,10 +250,8 @@ public sealed class ClientCapabilities
     /// </summary>
     /// <remarks>
     /// Distinct from removing the method from <see cref="PairingCodeMethods"/>, which means
-    /// <em>not implemented</em>. A disabled-but-implemented method still reports itself to a
-    /// managing server with <c>enabled: false</c> and can be turned back on with
-    /// <c>set-pairing-config</c>; an unimplemented one is omitted entirely and can never be
-    /// re-enabled.
+    /// <em>not implemented</em>: an unimplemented method is never advertised at all, while a
+    /// disabled-but-implemented one can be turned back on by reconfiguring the app.
     /// </remarks>
     public bool DynamicPairingCodeEnabled { get; set; } = true;
 
@@ -277,20 +261,6 @@ public sealed class ClientCapabilities
     /// <see cref="DynamicPairingCodeEnabled"/> for why this is not the same as omitting the method.
     /// </summary>
     public bool StaticPairingCodeEnabled { get; set; } = true;
-
-    /// <summary>
-    /// The shared-PSK record this client falls back to when its stored-pubkey record space
-    /// is exhausted, as last set by a server's <c>management/set-pairing-config</c>. Null by
-    /// default. Ignored unless it names a shared-PSK record still present in the pairing
-    /// record store — a server may have removed that record while the app was down.
-    /// </summary>
-    /// <remarks>
-    /// When an id you persisted here is ignored, the client logs a warning rather than
-    /// raising — a store the app doesn't control is not the client's error to throw. Treat
-    /// that warning as a signal to clear the persisted value: left in place, it is relogged
-    /// and re-ignored on every subsequent start.
-    /// </remarks>
-    public string? RecordModePskId { get; set; }
 
     /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.

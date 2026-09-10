@@ -13,8 +13,7 @@ namespace Sendspin.SDK.Client;
 /// </para>
 /// <para>
 /// Opened by a deliberate operator gesture on the device — a button press, a reset pinhole, a
-/// power-cycle pattern — or by a paired server through <c>management/open-pairing-window</c>.
-/// Gestures should be hard to induce remotely.
+/// power-cycle pattern. Gestures should be hard to induce remotely.
 /// </para>
 /// <para>All members are safe to call concurrently.</para>
 /// </remarks>
@@ -113,10 +112,10 @@ public sealed class PairingWindow
     /// </summary>
     /// <remarks>
     /// Every connection sharing this window subscribes, and the raise is synchronous on the
-    /// caller's thread — which for <c>management/open-pairing-window</c> is one connection's
-    /// receive loop. A subscriber that throws would otherwise propagate out of
-    /// <see cref="Open"/> into that connection's message dispatch and tear it down over
-    /// another connection's fault, and would stop the remaining subscribers from ever seeing
+    /// caller's thread — typically the thread that observed the operator gesture. A subscriber
+    /// that throws would otherwise propagate out of
+    /// <see cref="Open"/> into a connection's message dispatch and tear it down over
+    /// another subscriber's fault, and would stop the remaining subscribers from ever seeing
     /// the opening. The window itself is already updated before this runs, so a swallowed
     /// handler fault costs that handler's reaction and nothing else.
     /// </remarks>

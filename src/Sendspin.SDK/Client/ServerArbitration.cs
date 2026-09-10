@@ -5,7 +5,7 @@ namespace Sendspin.SDK.Client;
 /// <summary>
 /// The priority class of a server connection for multi-server arbitration, per the
 /// spec's "Multiple servers" section: connections rank by their highest declared
-/// activity — management &gt; playback &gt; pairing &gt; empty.
+/// activity — playback &gt; pairing &gt; empty.
 /// </summary>
 public enum ConnectionPriority
 {
@@ -17,9 +17,6 @@ public enum ConnectionPriority
 
     /// <summary>Playback.</summary>
     Playback = 2,
-
-    /// <summary>Management.</summary>
-    Management = 3,
 }
 
 /// <summary>
@@ -68,11 +65,6 @@ internal static class ServerArbitration
         // The Activities constants rather than literals: this is the same wire vocabulary the
         // rest of the SDK matches against, and a literal here would not follow a change to it
         // (#93).
-        if (activities.Contains(Activities.Management))
-        {
-            return ConnectionPriority.Management;
-        }
-
         if (activities.Contains(Activities.Playback))
         {
             return ConnectionPriority.Playback;

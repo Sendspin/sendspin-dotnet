@@ -143,14 +143,16 @@ public class SendspinHostServiceArbitrationTests
     {
         // connection.md: a displaced connection that is a pairing handshake receives pair/abort
         // concurrent_attempt, not client/goodbye another_server — a goodbye is not something a
-        // pairing state machine processes as an attempt teardown (#203). Management is the only
-        // priority that displaces a pairing attempt at all.
+        // pairing state machine processes as an attempt teardown (#203). Since the management
+        // activity was removed (#183) the only way a pairing holder is displaced at all is its
+        // own server reconnecting, which drops the previous socket as stale.
         await using var host = await StartHostAsync();
-        await using var pairing = new FakeServer(TestPsk, ["pairing"]);
+        var keys = KeyPair.Generate();
+        await using var pairing = new FakeServer(TestPsk, ["pairing"], keys);
         await pairing.ConnectAsync(host.ListeningPort);
         await WaitForServerConnectedAsync(host, pairing.ServerId);
 
-        await using var incoming = new FakeServer(TestPsk, ["management"]);
+        await using var incoming = new FakeServer(TestPsk, ["playback"], keys);
         await incoming.ConnectAsync(host.ListeningPort);
 
         Assert.True(await pairing.WaitForPairAbortAsync("concurrent_attempt", Timeout));

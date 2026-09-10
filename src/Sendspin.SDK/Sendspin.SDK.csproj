@@ -29,9 +29,8 @@ v10.0.0 - Encrypted Transport (BREAKING):
   gets a new client_id every launch and silently loses every pairing on restart.
 - Construction moved to SendspinClientService.CreateForDial(loggerFactory, options) with a
   SendspinClientOptions object.
-- Pairing: Pairing PSK plus optional dynamic/static PIN (CPace). A paired server can read
-  and change pairing config via management/*; persist what PairingConfigChanged reports or
-  those changes revert on restart.
+- Pairing: Pairing PSK plus optional dynamic/static PIN (CPace). Pairing configuration is
+  local and manufacturer-defined: set it through ClientCapabilities; no server can change it.
 - client/state reports 'available' as a boolean rather than the legacy state string.
 - New source@v1 role for line-in/microphone capture.
 - Neither connection teardown path waits for the peer's Close frame any longer: both now

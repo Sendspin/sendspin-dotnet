@@ -5,7 +5,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// <summary>
 /// Exhaustive coverage of the pure multi-server arbitration decision table (spec
 /// "Multiple servers" section): incoming accepted on higher-or-equal priority
-/// (management &gt; playback &gt; pairing &gt; empty), pairing attempts not displaced
+/// (playback &gt; pairing &gt; empty), pairing attempts not displaced
 /// by playback/pairing, empty-vs-empty ties gated on the last-playback server, a
 /// displaced holder told 'another_server', and a rejected incoming told
 /// 'concurrent_attempt' — except that a loser which is a pairing handshake is told
@@ -51,14 +51,11 @@ public class ServerArbitrationTests
     // theory parameter has to be at least as accessible as the public test method.)
     // Higher priority displaces:
     [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Empty, null, true, "another_server", false)]
-    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Playback, null, true, "another_server", false)]
     // Lower priority rejected with concurrent_attempt:
     [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Playback, null, false, "concurrent_attempt", false)]
-    [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Management, null, false, "concurrent_attempt", false)]
     // Equal non-empty priority: incoming accepted (spec: "higher or equal is accepted"):
     [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Playback, null, true, "another_server", false)]
     [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Playback, "a", true, "another_server", false)]
-    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Management, null, true, "another_server", false)]
     // Empty-vs-empty tie: incoming admitted only when it is the last-playback server:
     [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, "b", true, "another_server", false)]
     [InlineData("b", ConnectionPriority.Empty, "a", ConnectionPriority.Empty, "a", false, "concurrent_attempt", false)]
@@ -67,9 +64,6 @@ public class ServerArbitrationTests
     // rejected incoming is itself a pairing handshake, so that loss goes out as pair/abort:
     [InlineData("b", ConnectionPriority.Playback, "a", ConnectionPriority.Pairing, null, false, "concurrent_attempt", false)]
     [InlineData("b", ConnectionPriority.Pairing, "a", ConnectionPriority.Pairing, null, false, "concurrent_attempt", true)]
-    // ...but management may displace a pairing attempt, and that displaced pairing handshake
-    // is told pair/abort concurrent_attempt rather than goodbye another_server:
-    [InlineData("b", ConnectionPriority.Management, "a", ConnectionPriority.Pairing, null, true, "concurrent_attempt", true)]
     // Pairing loses to a playback holder:
     [InlineData("b", ConnectionPriority.Pairing, "a", ConnectionPriority.Playback, null, false, "concurrent_attempt", true)]
     public void DecisionTable(
@@ -110,13 +104,13 @@ public class ServerArbitrationTests
     }
 
     [Fact]
-    public void ClientInitiatedHolder_IsNotDisplacedByManagementEither()
+    public void ClientInitiatedHolder_IsNotDisplacedByPlaybackEither()
     {
         // The highest priority the table has, against the lowest the holder can declare: the
         // rule is "not displaced", not "wins ties".
         var r = ServerArbitration.Decide(
             "srv-new",
-            ConnectionPriority.Management,
+            ConnectionPriority.Playback,
             "dialled",
             ConnectionPriority.Empty,
             null,
@@ -166,9 +160,12 @@ public class ServerArbitrationTests
     [InlineData(new string[0], ConnectionPriority.Empty)]
     [InlineData(new[] { "pairing" }, ConnectionPriority.Pairing)]
     [InlineData(new[] { "playback" }, ConnectionPriority.Playback)]
-    [InlineData(new[] { "management" }, ConnectionPriority.Management)]
-    [InlineData(new[] { "playback", "management" }, ConnectionPriority.Management)]
     [InlineData(new[] { "pairing", "playback" }, ConnectionPriority.Playback)]
+
+    // 'management' was removed from the activity vocabulary (#183): it is now just an
+    // unrecognized activity, carrying no priority of its own.
+    [InlineData(new[] { "management" }, ConnectionPriority.Empty)]
+    [InlineData(new[] { "playback", "management" }, ConnectionPriority.Playback)]
     [InlineData(new[] { "unknown-future-activity" }, ConnectionPriority.Empty)]
     public void FromActivities_RanksByHighestDeclaredActivity(string[] activities, ConnectionPriority expected)
     {

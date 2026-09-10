@@ -8,10 +8,9 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// A server can disable a pairing method with management/set-pairing-config, and the SDK
-/// tells the app to persist the result. Before #131 four of the seven values it reports had
-/// no ClientCapabilities property to reapply, so the change reverted on the next start —
-/// most sharply for pairing_psk, which was hardcoded back on.
+/// The pairing config the SDK seeds from ClientCapabilities: which pair methods a client
+/// offers, whether each one is enabled, and the dependencies a method needs before it can
+/// be advertised at all. All of it is local, manufacturer-defined configuration.
 /// </summary>
 public class PairingConfigSeedingTests
 {
@@ -64,32 +63,6 @@ public class PairingConfigSeedingTests
         connection.SentMessages.OfType<ClientHelloMessage>().Last()
             .Payload.SupportedPairMethods?.Select(m => m.Method).ToList() ?? [];
 
-    /// <summary>
-    /// Activates the connection for management. Management requests are scoped to
-    /// connections whose activities include 'management', so any test driving
-    /// management/* messages needs this first.
-    /// </summary>
-    private static void ActivateManagement(FakeSendspinConnection connection) =>
-        connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["management"],"active_roles":[]}}""");
-
-    /// <summary>
-    /// Drives a management-activated session and returns the full get-pairing-config data.
-    /// </summary>
-    private static JsonElement GetPairingConfigData(FakeSendspinConnection connection)
-    {
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/get-pairing-config","payload":{}}""");
-
-        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-        Assert.Equal("ok", result.Result);
-        return result.Data!.Value;
-    }
-
-    private static JsonElement RecordModeFromGetPairingConfig(FakeSendspinConnection connection) =>
-        GetPairingConfigData(connection).GetProperty("record_mode");
-
     [Fact]
     public void PairingPskEnabledFalse_IsNotAdvertised()
     {
@@ -118,11 +91,8 @@ public class PairingConfigSeedingTests
     [InlineData("static_pin")]
     public void PairingCodeMethodDisabled_IsImplementedButNotAdvertised(string method)
     {
-        // Disabled is not unimplemented: the method stays in PairingCodeMethods so a server
-        // can turn it back on, but client/hello must not offer it — while get-pairing-config
-        // must still report the method's object, with enabled: false, so a management server
-        // sees "implemented but disabled" rather than "not implemented" (the two the AND in
-        // the seeding block exists to keep distinct).
+        // Disabled is not unimplemented: the method stays in PairingCodeMethods so the app
+        // can turn it back on, but client/hello must not offer it.
         var capabilities = new ClientCapabilities
         {
             PairingCodeMethods = { method },
@@ -134,11 +104,6 @@ public class PairingConfigSeedingTests
         using var _c = client;
 
         Assert.DoesNotContain(method, HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.TryGetProperty(method, out var methodState),
-            "a disabled method is still implemented and must still be reported");
-        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     [Theory]
@@ -165,66 +130,12 @@ public class PairingConfigSeedingTests
         // The flags default true, so they must be ANDed with PairingCodeMethods. client/hello
         // omitting the method is not proof of that AND by itself: BuildPairMethods gates on
         // IsMethodImplemented independently, so it omits an unlisted method whether or not
-        // the AND exists. The AND is only observable on PairingConfigChanged, where
-        // CurrentPairingConfig reports _dynamicPairingCodeEnabled/_staticPairingCodeEnabled raw with no
-        // implemented-gate — the very event apps are told to persist — so that path is
-        // asserted here too.
+        // the AND exists.
         var (client, connection) = CreateAndGreet(new ClientCapabilities());
         using var _c = client;
 
         Assert.DoesNotContain("dynamic_pin", HelloPairMethods(connection));
         Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
-
-        var events = new List<PairingConfigChangedEventArgs>();
-        client.PairingConfigChanged += (_, e) => events.Add(e);
-        ActivateManagement(connection);
-        // unpaired_access is unrelated to the pairing code flags; it exists only to make the event
-        // fire so the raw effective state can be observed.
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"unpaired_access":{"enabled":true}}}""");
-
-        var change = Assert.Single(events);
-        Assert.False(change.DynamicPairingCodeEnabled);
-        Assert.False(change.StaticPairingCodeEnabled);
-    }
-
-    [Fact]
-    public void RecordModePskId_NamingNoStoredRecord_SeedsNull()
-    {
-        // A server can remove that record with management/remove-record while the app is
-        // down. Reporting a psk_id no record backs tells the next server a fallback exists
-        // that cannot be used.
-        var store = new InMemoryPairingRecordStore();
-        store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId));
-
-        var (client, connection) = CreateAndGreet(
-            new ClientCapabilities { RecordModePskId = "not-a-stored-record" },
-            store);
-        using var _c = client;
-
-        // RecordModeState.PskId carries JsonIgnore(WhenWritingNull) (ManagementData.cs:49-50,
-        // predating this change), so an unset fallback omits the key rather than writing
-        // psk_id: null.
-        Assert.False(RecordModeFromGetPairingConfig(connection).TryGetProperty("psk_id", out _));
-    }
-
-    [Fact]
-    public void RecordModePskId_NamingASharedPskRecord_IsSeeded()
-    {
-        var store = new InMemoryPairingRecordStore();
-        store.Upsert(new PairingRecord(SessionPsk, PskCategory.LongTerm, FakeNoiseSession.FakeServerId));
-        // A shared-PSK record is long-term with no bound server_id (management.md:111).
-        // PairingRecord derives PskId from the PSK, so it cannot be chosen.
-        var shared = new PairingRecord(Enumerable.Repeat((byte)3, 32).ToArray(), PskCategory.LongTerm);
-        store.Upsert(shared);
-
-        var (client, connection) = CreateAndGreet(
-            new ClientCapabilities { RecordModePskId = shared.PskId },
-            store);
-        using var _c = client;
-
-        Assert.Equal(shared.PskId, RecordModeFromGetPairingConfig(connection)
-            .GetProperty("psk_id").GetString());
     }
 
     [Fact]
@@ -232,18 +143,11 @@ public class PairingConfigSeedingTests
     {
         // Construction validated nothing before this fix: an app could list static_pin with
         // no pairing code behind it, and CPace would run with an empty password (management.md:98).
-        // The method object must stay present in get-pairing-config -- it is implemented,
-        // just not currently usable -- so a server can repair it.
         var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = null };
         var (client, connection) = CreateAndGreet(capabilities);
         using var _c = client;
 
         Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.TryGetProperty("static_pin", out var methodState),
-            "an implemented but unusable method must still be reported, so the server can repair it");
-        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     [Theory]
@@ -256,10 +160,6 @@ public class PairingConfigSeedingTests
         using var _c = client;
 
         Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.TryGetProperty("static_pin", out var methodState));
-        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     [Fact]
@@ -280,88 +180,9 @@ public class PairingConfigSeedingTests
         Assert.Equal(ConnectionState.Connected, connection.State);
     }
 
-    [Fact]
-    public void StaticPairingCodeWithNoUsablePairingCode_OpenPairingWindowIsInvalid()
-    {
-        // The fourth surface: ManagementOpenPairingWindow's anyPairingCodeMethod check must also
-        // require HasUsableStaticPairingCode, or a management server could open a window admitting
-        // a method that cannot run.
-        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = null };
-        var window = new PairingWindow();
-        var (client, connection) = CreateAndGreet(capabilities, window: window);
-        using var _c = client;
-
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/open-pairing-window","payload":{}}""");
-
-        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-        Assert.Equal("invalid", result.Result);
-        Assert.False(window.IsOpen);
-    }
-
-    [Fact]
-    public void SetPairingConfigSuppliesAValidPairingCode_WithoutResendingEnabled_MakesTheMethodUsableAgain()
-    {
-        // The live-predicate design's payoff: a server repairs a client constructed with no
-        // pairing code by sending just the pin -- no need to also resend enabled: true, because
-        // usability is evaluated live rather than snapshotted at construction.
-        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = null };
-        var (client, connection) = CreateAndGreet(capabilities);
-        using var _c = client;
-
-        Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
-
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"static_pin":{"pin":"12345678"}}}""");
-        Assert.Equal("ok", connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload.Result);
-
-        // A fresh server/hello gets a fresh client/hello built from the effective state --
-        // the same reply-to-server/hello mechanism CreateAndGreet used for the first one.
-        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
-        Assert.Contains("static_pin", HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
-    }
-
-    [Fact]
-    public void SetPairingConfigEnablesWithAMalformedStoredPairingCode_IsInvalid()
-    {
-        // The set-pairing-config "enable with no secret" check must agree with
-        // HasUsableStaticPairingCode: a malformed-but-non-empty stored pairing code (StaticPairingCode = "abc") is just
-        // as unusable as a null one, so the natural repair {"enabled":true} with no new pin
-        // must be rejected the same way -- not silently accepted as a no-op "ok".
-        var capabilities = new ClientCapabilities { PairingCodeMethods = { "static_pin" }, StaticPairingCode = "abc" };
-        var (client, connection) = CreateAndGreet(capabilities);
-        using var _c = client;
-
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
-
-        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-        Assert.Equal("invalid", result.Result);
-    }
-
-    [Theory]
-    [InlineData(2, 4)]
-    [InlineData(99, 12)]
-    public void MinPairingCodeLengthOutOfRange_IsClamped(int configured, int clamped)
-    {
-        var capabilities = new ClientCapabilities
-        {
-            PairingCodeMethods = { "dynamic_pin" },
-            MinPairingCodeLength = configured,
-        };
-        var (client, connection) = CreateAndGreet(capabilities);
-        using var _c = client;
-
-        var data = GetPairingConfigData(connection);
-        Assert.Equal(clamped, data.GetProperty("dynamic_pin").GetProperty("min_pin_length").GetInt32());
-    }
-
+    // --- #132 item 1: a pairing code method must not be advertised on a client missing a
+    // dependency CanRun requires but BuildPairMethods did not previously check
+    // (IPairingCodeLockoutStore, PresentPairingCodeAsync). ---
     [Fact]
     public void StaticPairingCodeWithValidPairingCode_IsAdvertised_AndReportedEnabled()
     {
@@ -372,30 +193,18 @@ public class PairingConfigSeedingTests
         using var _c = client;
 
         Assert.Contains("static_pin", HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
     }
-
-    // --- #132 item 1: a pairing code method must not be advertised, or reported enabled, on a
-    // client missing a dependency CanRun requires but BuildPairMethods/get-pairing-config
-    // did not previously check (IPairingCodeLockoutStore, PresentPairingCodeAsync). ---
 
     [Fact]
     public void DynamicPairingCodeListedAndEnabled_NoPresentPairingCodeAsync_IsNotAdvertised_ButStillReportedDisabled()
     {
         // Without a presenter, a derived pairing code would reach nobody. CanOffer already refused
-        // this; CanRun must also keep it out of client/hello and get-pairing-config.
+        // this; CanRun must also keep it out of client/hello.
         var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } };
         var (client, connection) = CreateAndGreet(capabilities, hasPresentPairingCodeAsync: false);
         using var _c = client;
 
         Assert.DoesNotContain("dynamic_pin", HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.TryGetProperty("dynamic_pin", out var methodState),
-            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
-        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     [Fact]
@@ -408,11 +217,6 @@ public class PairingConfigSeedingTests
         using var _c = client;
 
         Assert.DoesNotContain("dynamic_pin", HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.TryGetProperty("dynamic_pin", out var methodState),
-            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
-        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     [Fact]
@@ -425,11 +229,6 @@ public class PairingConfigSeedingTests
         using var _c = client;
 
         Assert.DoesNotContain("static_pin", HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.TryGetProperty("static_pin", out var methodState),
-            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
-        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     // --- #158: a pairing code method needs an IPairingRecordStore for the same reason pairing_psk
@@ -450,11 +249,6 @@ public class PairingConfigSeedingTests
         using var _c = client;
 
         Assert.DoesNotContain(method, HelloPairMethods(connection));
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.TryGetProperty(method, out var methodState),
-            "an implemented but unrunnable method must still be reported, so the server can tell it apart from unimplemented");
-        Assert.False(methodState.GetProperty("enabled").GetBoolean());
     }
 
     [Theory]
@@ -527,102 +321,6 @@ public class PairingConfigSeedingTests
     }
 
     [Fact]
-    public void SetPairingConfigEnablesDynamicPairingCodeWithNoStoreOrPresenter_IsInvalid_AndRaisesNoChange()
-    {
-        // A server can't conjure an IPairingCodeLockoutStore or a PresentPairingCodeAsync -- those are app
-        // configuration. Answering ok and then continuing to report enabled: false would
-        // leave the server unable to tell why its change did not take.
-        var capabilities = new ClientCapabilities
-        {
-            PairingCodeMethods = { "dynamic_pin" },
-            DynamicPairingCodeEnabled = false,
-        };
-        var (client, connection) = CreateAndGreet(capabilities, hasPairingCodeLockoutStore: false, hasPresentPairingCodeAsync: false);
-        using var _c = client;
-
-        var events = new List<PairingConfigChangedEventArgs>();
-        client.PairingConfigChanged += (_, e) => events.Add(e);
-
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":true}}}""");
-
-        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-        Assert.Equal("invalid", result.Result);
-        Assert.Empty(events);
-    }
-
-    [Fact]
-    public void SetPairingConfigEnablesDynamicPairingCodeWithBothDependenciesPresent_IsOk()
-    {
-        // Positive control for the check above: without it, an over-broad rejection --
-        // dropping the "&& (_pairingCodeLockoutStore is null || _presentPairingCodeAsync is null)" clause
-        // in favour of refusing every dynamic_pin enable outright -- would pass every test
-        // in this file, since nothing else asserts a dynamic_pin enable can ever succeed.
-        var capabilities = new ClientCapabilities
-        {
-            PairingCodeMethods = { "dynamic_pin" },
-            DynamicPairingCodeEnabled = false,
-        };
-        var (client, connection) = CreateAndGreet(capabilities);
-        using var _c = client;
-
-        var events = new List<PairingConfigChangedEventArgs>();
-        client.PairingConfigChanged += (_, e) => events.Add(e);
-
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"dynamic_pin":{"enabled":true}}}""");
-
-        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-        Assert.Equal("ok", result.Result);
-        Assert.Single(events);
-    }
-
-    [Fact]
-    public void SetPairingConfigEnablesStaticPairingCodeWithNoStore_IsInvalid_AndRaisesNoChange()
-    {
-        var capabilities = new ClientCapabilities
-        {
-            PairingCodeMethods = { "static_pin" },
-            StaticPairingCode = "12345678",
-            StaticPairingCodeEnabled = false,
-        };
-        var (client, connection) = CreateAndGreet(capabilities, hasPairingCodeLockoutStore: false);
-        using var _c = client;
-
-        var events = new List<PairingConfigChangedEventArgs>();
-        client.PairingConfigChanged += (_, e) => events.Add(e);
-
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/set-pairing-config","payload":{"static_pin":{"enabled":true}}}""");
-
-        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-        Assert.Equal("invalid", result.Result);
-        Assert.Empty(events);
-    }
-
-    [Fact]
-    public void OpenPairingWindow_OnlyPairingCodeMethodUnrunnableForMissingPresenter_IsInvalid()
-    {
-        // The only pairing code method listed is dynamic_pin, and it lacks a presenter -- the window
-        // would have nothing runnable to admit.
-        var capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } };
-        var window = new PairingWindow();
-        var (client, connection) = CreateAndGreet(capabilities, window: window, hasPresentPairingCodeAsync: false);
-        using var _c = client;
-
-        ActivateManagement(connection);
-        connection.RaiseTextMessageReceived(
-            """{"type":"management/open-pairing-window","payload":{}}""");
-
-        var result = connection.SentMessages.OfType<ManagementResultMessage>().Last().Payload;
-        Assert.Equal("invalid", result.Result);
-        Assert.False(window.IsOpen);
-    }
-
-    [Fact]
     public void BothPairingCodeMethods_WithAllDependenciesPresent_AreAdvertised_AndReportedEnabled()
     {
         // Positive control: without it, a change that suppresses both pairing code methods
@@ -638,9 +336,5 @@ public class PairingConfigSeedingTests
         var helloMethods = HelloPairMethods(connection);
         Assert.Contains("dynamic_pin", helloMethods);
         Assert.Contains("static_pin", helloMethods);
-
-        var data = GetPairingConfigData(connection);
-        Assert.True(data.GetProperty("dynamic_pin").GetProperty("enabled").GetBoolean());
-        Assert.True(data.GetProperty("static_pin").GetProperty("enabled").GetBoolean());
     }
 }
