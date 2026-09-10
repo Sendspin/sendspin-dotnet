@@ -205,6 +205,17 @@ public sealed class SyncCorrectionOptions
     public long ReconnectStabilizationMicroseconds { get; set; } = 2_000_000;
 
     /// <summary>
+    /// How far the error measured at the end of the startup grace may be absorbed as a constant
+    /// plumbing offset. The host's reported output latency is already pre-rolled into the
+    /// schedule, so what remains at that point is only what the host did not report — a
+    /// push-mode backend's first fill, engine overhead, resampler priming — and those are small.
+    /// An error past this allowance is misalignment, not plumbing, and is left visible for the
+    /// snap and re-anchor tiers. Applies to the startup capture only; the reconnect capture
+    /// keeps the re-anchor threshold as its bound. Default 150 ms.
+    /// </summary>
+    public long StartupBaselineAllowanceMicroseconds { get; set; } = 150_000;
+
+    /// <summary>
     /// How an external corrector realizes the continuous tier — a resampler by default, whole-frame
     /// stepping as the fallback. See <see cref="SyncCorrectionMechanism"/>.
     /// </summary>
@@ -330,6 +341,13 @@ public sealed class SyncCorrectionOptions
                 nameof(StartupGracePeriodMicroseconds));
         }
 
+        if (StartupBaselineAllowanceMicroseconds < 0)
+        {
+            throw new ArgumentException(
+                "StartupBaselineAllowanceMicroseconds must be non-negative.",
+                nameof(StartupBaselineAllowanceMicroseconds));
+        }
+
         if (ScheduledStartGraceWindowMicroseconds < 0)
         {
             throw new ArgumentException(
@@ -362,6 +380,7 @@ public sealed class SyncCorrectionOptions
         StartupGracePeriodMicroseconds = StartupGracePeriodMicroseconds,
         ScheduledStartGraceWindowMicroseconds = ScheduledStartGraceWindowMicroseconds,
         ReconnectStabilizationMicroseconds = ReconnectStabilizationMicroseconds,
+        StartupBaselineAllowanceMicroseconds = StartupBaselineAllowanceMicroseconds,
         TrackClockDrift = TrackClockDrift,
         Mechanism = Mechanism,
     };
