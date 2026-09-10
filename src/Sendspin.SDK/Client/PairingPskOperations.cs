@@ -50,10 +50,7 @@ internal static class PairingPskOperations
     {
         var records = RequireStore(store);
 
-        // Remove every Pairing record first, unlike the management/set-pairing-config handler,
-        // which upserts before removing (SendSpinClient.cs's ManagementSetPairingConfig case).
-        // That handler can afford to refuse: a full store answers storage_exhausted and the
-        // server retries after freeing a slot. This call has no such protocol round-trip — it
+        // Remove every Pairing record first, then upsert. This call has no protocol round-trip — it
         // must return a token or throw — and the new record's psk_id differs from the old one's
         // (derived from the PSK), so upserting first would need transient capacity for N+1
         // records. On a store already at its limit, that would make rotation impossible even

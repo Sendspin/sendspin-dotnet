@@ -21,6 +21,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
 | Pairing | New: Pairing PSK, dynamic PIN, static PIN | Medium — new UX surface |
 | Pairing gestures | PIN pairing can require an open `PairingWindow` | **High** if a PIN method is offered — silently never pairs without one |
+| Pairing config | `management/*` removed (spec PR #183): `ISendspinClient.PairingConfigChanged`, `PairingConfigChangedEventArgs`, `ClientCapabilities.RecordModePskId`, `ConnectionPriority.Management` and the `management/*` message types are gone; pairing configuration is local to the client | Medium — compiler error where the event was subscribed; a server can no longer read or change a client's pairing config |
 | `client/state` | `available` is a boolean, not a state string | Medium |
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
 | Record store | `IPairingRecordStore.Upsert` returns `bool` | Low — compiler error, one-line fix |
@@ -128,7 +129,7 @@ Three methods, all optional to offer except the first:
 
 Enable the PIN methods through `ClientCapabilities.PinPairingMethods`.
 
-**Every pair method needs a `PairingRecordStore`, including the PIN methods.** Without one the exchange runs to completion and the *server* writes a long-term record while the client stores nothing — so the client fails to authenticate on its very next connection, having told your app that pairing succeeded. The SDK therefore withholds a method it cannot complete: an unrunnable method is absent from `supported_pair_methods` in `client/hello`, is reported `enabled: false` by `management/get-pairing-config`, and any activation for it is answered `method_not_supported` with the connection left open.
+**Every pair method needs a `PairingRecordStore`, including the PIN methods.** Without one the exchange runs to completion and the *server* writes a long-term record while the client stores nothing — so the client fails to authenticate on its very next connection, having told your app that pairing succeeded. The SDK therefore withholds a method it cannot complete: an unrunnable method is absent from `supported_pair_methods` in `client/hello`, and any activation for it is answered `method_not_supported` with the connection left open.
 
 This is the same discipline `pairing_psk` has always had. **It is silent when you get it wrong** — nothing throws; the method simply never appears. If a PIN method you configured is not being offered, check that `PairingRecordStore`, `PinLockoutStore`, and (for `dynamic_pin`) `PresentPinAsync` are all set.
 
