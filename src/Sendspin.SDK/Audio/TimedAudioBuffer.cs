@@ -717,7 +717,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
                     && !_syncErrorBaselineCaptured)
                 {
-                    CaptureSyncErrorBaseline("startup (raw)");
+                    CaptureSyncErrorBaseline("startup (raw)", startup: true);
                 }
 
                 // Reconnect stabilization just ended: re-capture the baseline so the re-converged
@@ -733,7 +733,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     if (elapsedSinceReconnect >= _syncOptions.ReconnectStabilizationMicroseconds)
                     {
                         _inReconnectStabilization = false;
-                        CaptureSyncErrorBaseline("reconnect (raw)");
+                        CaptureSyncErrorBaseline("reconnect (raw)", startup: false);
                         _logger.LogInformation("[Correction] Reconnect stabilization ended (raw path), baseline re-captured");
                     }
                 }
@@ -1585,28 +1585,36 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// Must be called under lock.
     /// </summary>
     /// <param name="reason">Window that just ended, for diagnostics.</param>
-    private void CaptureSyncErrorBaseline(string reason)
+    private void CaptureSyncErrorBaseline(string reason, bool startup)
     {
-        // What this absorbs is a constant plumbing offset — an output backend's prefill, engine
-        // overhead, resampler priming — and those are bounded. An error past the re-anchor
-        // threshold is not one of them; it is misalignment the re-anchor tier owns. Absorbing
-        // it here is how a catastrophically late start became permanent at a reported error of
-        // zero: the startup grace suppresses the re-anchor check, and this then erased the
-        // evidence before that check ever ran. Leave it visible and retry on a later callback —
-        // _syncErrorBaselineCaptured stays false, so a genuine plumbing offset is still picked
-        // up once the outsized error resolves (via the re-anchor, which clears and restarts).
-        if (Math.Abs(_smoothedSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
+        // What this absorbs is a constant plumbing offset — an output backend's first fill, engine
+        // overhead, resampler priming — and those are small: the host's reported output latency is
+        // already pre-rolled into the schedule, so only the unreported part is left here. At
+        // startup, anything past the allowance is misalignment the snap and re-anchor tiers own.
+        // Bounding it by the re-anchor threshold alone let a restart that landed half a second
+        // late inside the re-anchor cooldown become permanent at a reported error of zero
+        // (windowsSpin #63): the startup alignment refused it as catastrophic, the re-anchor was
+        // cooling down, and this then erased the evidence. Leave it visible and retry on a later
+        // callback — _syncErrorBaselineCaptured stays false, so a genuine plumbing offset is still
+        // picked up once the outsized error has been snapped away. The reconnect capture absorbs
+        // a re-converged clock offset rather than a prefill, so it keeps the re-anchor threshold.
+        var limit = startup
+            ? Math.Min(_syncOptions.ReanchorThresholdMicroseconds, _syncOptions.StartupBaselineAllowanceMicroseconds)
+            : _syncOptions.ReanchorThresholdMicroseconds;
+        if (Math.Abs(_smoothedSyncErrorMicroseconds) > limit)
         {
             if (!_baselineDeferredLogged)
             {
                 _baselineDeferredLogged = true;
                 _logger.LogWarning(
                     "[Correction] Deferring the {Reason} sync-error baseline: {ErrorMs:F0}ms is past " +
-                    "the {ThresholdMs:F0}ms re-anchor threshold, so it is misalignment rather than a " +
-                    "constant offset — leaving it visible for the re-anchor tier",
+                    "the {LimitMs:F0}ms a constant offset can be here (the reported output latency of " +
+                    "{LatencyMs:F0}ms is already pre-rolled into the schedule), so it is misalignment " +
+                    "rather than plumbing — leaving it visible for the snap and re-anchor tiers",
                     reason,
                     _smoothedSyncErrorMicroseconds / 1000.0,
-                    _syncOptions.ReanchorThresholdMicroseconds / 1000.0);
+                    limit / 1000.0,
+                    OutputLatencyMicroseconds / 1000.0);
             }
 
             return;
@@ -1697,7 +1705,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // ~-100ms error and is audibly ground out via drop/insert on every start.
         if (!_syncErrorBaselineCaptured)
         {
-            CaptureSyncErrorBaseline("startup");
+            CaptureSyncErrorBaseline("startup", startup: true);
         }
 
         // Suppress corrections while the Kalman filter re-converges after reconnect.
@@ -1708,7 +1716,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             if (elapsedSinceReconnect >= _syncOptions.ReconnectStabilizationMicroseconds)
             {
                 _inReconnectStabilization = false;
-                CaptureSyncErrorBaseline("reconnect");
+                CaptureSyncErrorBaseline("reconnect", startup: false);
                 _logger.LogInformation("[Correction] Reconnect stabilization ended, resuming corrections");
             }
             else
