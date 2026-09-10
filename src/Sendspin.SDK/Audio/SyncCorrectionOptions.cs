@@ -205,6 +205,17 @@ public sealed class SyncCorrectionOptions
     public long ReconnectStabilizationMicroseconds { get; set; } = 2_000_000;
 
     /// <summary>
+    /// How far the error measured at the end of the startup grace may be absorbed as a constant
+    /// plumbing offset, over and above the output latency the host reported. The baseline exists
+    /// for the prefill an output backend takes at start (WASAPI gulps its whole buffer at Play());
+    /// that prefill is the reported latency, and this allowance covers what a host does not
+    /// report — engine overhead, resampler priming. An error past reported latency plus allowance
+    /// is misalignment, not plumbing, and is left visible for the snap and re-anchor tiers.
+    /// Default 100 ms.
+    /// </summary>
+    public long StartupBaselineAllowanceMicroseconds { get; set; } = 100_000;
+
+    /// <summary>
     /// How an external corrector realizes the continuous tier — a resampler by default, whole-frame
     /// stepping as the fallback. See <see cref="SyncCorrectionMechanism"/>.
     /// </summary>
@@ -330,6 +341,13 @@ public sealed class SyncCorrectionOptions
                 nameof(StartupGracePeriodMicroseconds));
         }
 
+        if (StartupBaselineAllowanceMicroseconds < 0)
+        {
+            throw new ArgumentException(
+                "StartupBaselineAllowanceMicroseconds must be non-negative.",
+                nameof(StartupBaselineAllowanceMicroseconds));
+        }
+
         if (ScheduledStartGraceWindowMicroseconds < 0)
         {
             throw new ArgumentException(
@@ -362,6 +380,7 @@ public sealed class SyncCorrectionOptions
         StartupGracePeriodMicroseconds = StartupGracePeriodMicroseconds,
         ScheduledStartGraceWindowMicroseconds = ScheduledStartGraceWindowMicroseconds,
         ReconnectStabilizationMicroseconds = ReconnectStabilizationMicroseconds,
+        StartupBaselineAllowanceMicroseconds = StartupBaselineAllowanceMicroseconds,
         TrackClockDrift = TrackClockDrift,
         Mechanism = Mechanism,
     };

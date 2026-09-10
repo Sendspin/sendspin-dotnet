@@ -1593,25 +1593,32 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private void CaptureSyncErrorBaseline(string reason)
     {
         // What this absorbs is a constant plumbing offset — an output backend's prefill, engine
-        // overhead, resampler priming — and those are bounded. An error past the re-anchor
-        // threshold is not one of them; it is misalignment the re-anchor tier owns. Absorbing
-        // it here is how a catastrophically late start became permanent at a reported error of
-        // zero: the startup grace suppresses the re-anchor check, and this then erased the
-        // evidence before that check ever ran. Leave it visible and retry on a later callback —
-        // _syncErrorBaselineCaptured stays false, so a genuine plumbing offset is still picked
-        // up once the outsized error resolves (via the re-anchor, which clears and restarts).
-        if (Math.Abs(_smoothedSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
+        // overhead, resampler priming — and those are bounded by what the host reported as its
+        // output latency plus a small allowance. Anything larger is misalignment the snap and
+        // re-anchor tiers own. Bounding it by the re-anchor threshold alone let a restart that
+        // landed half a second late inside the re-anchor cooldown become permanent at a reported
+        // error of zero (windowsSpin #63): the startup alignment refused it as catastrophic, the
+        // re-anchor was cooling down, and this then erased the evidence. Leave it visible and
+        // retry on a later callback — _syncErrorBaselineCaptured stays false, so a genuine
+        // plumbing offset is still picked up once the outsized error has been snapped away.
+        var limit = Math.Min(
+            _syncOptions.ReanchorThresholdMicroseconds,
+            OutputLatencyMicroseconds + _syncOptions.StartupBaselineAllowanceMicroseconds);
+        if (Math.Abs(_smoothedSyncErrorMicroseconds) > limit)
         {
             if (!_baselineDeferredLogged)
             {
                 _baselineDeferredLogged = true;
                 _logger.LogWarning(
                     "[Correction] Deferring the {Reason} sync-error baseline: {ErrorMs:F0}ms is past " +
-                    "the {ThresholdMs:F0}ms re-anchor threshold, so it is misalignment rather than a " +
-                    "constant offset — leaving it visible for the re-anchor tier",
+                    "the {LimitMs:F0}ms a constant offset can be here (reported output latency " +
+                    "{LatencyMs:F0}ms plus {AllowanceMs:F0}ms), so it is misalignment rather than " +
+                    "plumbing — leaving it visible for the snap and re-anchor tiers",
                     reason,
                     _smoothedSyncErrorMicroseconds / 1000.0,
-                    _syncOptions.ReanchorThresholdMicroseconds / 1000.0);
+                    limit / 1000.0,
+                    OutputLatencyMicroseconds / 1000.0,
+                    _syncOptions.StartupBaselineAllowanceMicroseconds / 1000.0);
             }
 
             return;
