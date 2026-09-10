@@ -159,14 +159,14 @@ public sealed class SyncCorrectionOptions
 
     /// <summary>
     /// How far the error measured at the end of the startup grace may be absorbed as a constant
-    /// plumbing offset, over and above the output latency the host reported. The baseline exists
-    /// for the prefill an output backend takes at start (WASAPI gulps its whole buffer at Play());
-    /// that prefill is the reported latency, and this allowance covers what a host does not
-    /// report — engine overhead, resampler priming. An error past reported latency plus allowance
-    /// is misalignment, not plumbing, and is left visible for the snap and re-anchor tiers.
-    /// Default 100 ms.
+    /// plumbing offset. The host's reported output latency is already pre-rolled into the
+    /// schedule, so what remains at that point is only what the host did not report — a
+    /// push-mode backend's first fill, engine overhead, resampler priming — and those are small.
+    /// An error past this allowance is misalignment, not plumbing, and is left visible for the
+    /// snap and re-anchor tiers. Applies to the startup capture only; the reconnect capture
+    /// keeps the re-anchor threshold as its bound. Default 150 ms.
     /// </summary>
-    public long StartupBaselineAllowanceMicroseconds { get; set; } = 100_000;
+    public long StartupBaselineAllowanceMicroseconds { get; set; } = 150_000;
 
     /// <summary>
     /// When true (default), the sync error tracks post-anchor movement of the Kalman
