@@ -151,7 +151,7 @@ async def main() -> int:
                     return secret
 
                 attempt = PairingAttempt(
-                    method=PairMethod.STATIC_PIN,
+                    method=PairMethod.STATIC_PAIRING_CODE,
                     pin_provider=supply_pin,
                     on_pair_pending=gated.set,
                 )
