@@ -21,6 +21,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
 | Pairing | New: Pairing PSK, dynamic pairing code, static pairing code (at most one code method) | Medium — new UX surface |
 | Pairing gestures | Pairing-code pairing can require an open `PairingWindow` | **High** if a code method is offered — silently never pairs without one |
+| Pairing config | `management/*` removed (spec PR #183): `ISendspinClient.PairingConfigChanged`, `PairingConfigChangedEventArgs`, `ClientCapabilities.RecordModePskId`, `ConnectionPriority.Management` and the `management/*` message types are gone; pairing configuration is local to the client | Medium — compiler error where the event was subscribed; a server can no longer read or change a client's pairing config |
 | `client/state` | `available` is a boolean, not a state string | Medium |
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
 | Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
