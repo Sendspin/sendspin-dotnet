@@ -61,12 +61,52 @@ public sealed class PairAbortMessage : IMessageWithPayload<PairAbortPayload>
 /// <summary>Payload of <c>pair/abort</c>.</summary>
 public sealed class PairAbortPayload
 {
-    /// <summary>
-    /// Abort reason: attempt_timeout, concurrent_attempt, method_not_supported,
-    /// pin_length_unacceptable, pin_mismatch, or user_cancelled.
-    /// </summary>
+    /// <summary>The abort reason; one of <see cref="PairAbortReasons"/>.</summary>
     [JsonPropertyName("reason")]
     public string Reason { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// The closed set of <c>pair/abort</c> reasons the spec defines
+/// (pairing.md, "Client ↔ Server: <c>pair/abort</c>").
+/// </summary>
+/// <remarks>
+/// Constants rather than literals for the same reason as <see cref="GoodbyeReasons"/>: the
+/// reason is wire vocabulary a peer branches on, and a literal at a call site does not follow
+/// a change to it. The spec's earlier <c>pin_mismatch</c> and <c>pin_length_unacceptable</c>
+/// are gone: key-confirmation failure is now <see cref="PairingCodeMismatch"/>, and an
+/// emission format the client does not offer is <see cref="MethodNotSupported"/>.
+/// </remarks>
+public static class PairAbortReasons
+{
+    /// <summary>The attempt did not complete within the attempt timeout (client).</summary>
+    public const string AttemptTimeout = "attempt_timeout";
+
+    /// <summary>Another pairing attempt is already in progress with this client (client).</summary>
+    public const string ConcurrentAttempt = "concurrent_attempt";
+
+    /// <summary>
+    /// The activation's method or emission format is not one this client currently offers, or
+    /// the activity set and method are not a permitted combination for the matched PSK (client).
+    /// </summary>
+    public const string MethodNotSupported = "method_not_supported";
+
+    /// <summary>PAKE key confirmation failed (client or server).</summary>
+    public const string PairingCodeMismatch = "pairing_code_mismatch";
+
+    /// <summary>The operator aborted the pairing through a local UI (client or server).</summary>
+    public const string UserCancelled = "user_cancelled";
+
+    /// <summary>Every reason the spec defines, for validating a received value.</summary>
+    public static IReadOnlyList<string> All { get; } =
+    [
+        AttemptTimeout, ConcurrentAttempt, MethodNotSupported, PairingCodeMismatch, UserCancelled,
+    ];
+
+    /// <summary>Whether the spec defines a reason.</summary>
+    /// <param name="reason">The reason to check.</param>
+    /// <returns><see langword="true"/> if <paramref name="reason"/> is in <see cref="All"/>.</returns>
+    public static bool IsDefined(string reason) => All.Contains(reason, StringComparer.Ordinal);
 }
 
 /// <summary>
@@ -92,29 +132,48 @@ public sealed class ClientPairPendingPayload
 }
 
 /// <summary>
-/// A pair-method descriptor advertised in <c>client/hello</c>'s
-/// <c>supported_pair_methods</c>.
+/// A pair-method descriptor: one value of <c>client/hello</c>'s
+/// <c>supported_pair_methods</c> object, whose key is the method identifier
+/// (<see cref="PairMethods"/>).
 /// </summary>
+/// <remarks>
+/// <para>
+/// The descriptor no longer names its own method: spec #179 re-keyed
+/// <c>supported_pair_methods</c> from a list of self-describing descriptors into an object
+/// keyed by method identifier, so the method lives in the key and the value carries only the
+/// operator-interaction hints for it.
+/// </para>
+/// <para>
+/// Which members apply depends on the key: <c>pairing_psk</c> and <c>static_pairing_code</c>
+/// carry <see cref="Locations"/> only; <c>dynamic_pairing_code</c> carries
+/// <see cref="OutChannels"/> and <see cref="Formats"/>. The spec's <c>digit_audio</c> object
+/// is not modelled — it is required only for a client that emits the code over a speaker from
+/// a server-supplied digit audio pack, which this SDK does not implement, so it never
+/// advertises the <c>'speaker'</c> out-channel.
+/// </para>
+/// </remarks>
 public sealed class PairMethodDescriptor
 {
-    /// <summary>The method identifier: pairing_psk, dynamic_pin, or static_pin.</summary>
-    [JsonPropertyName("method")]
-    public string Method { get; set; } = "pairing_psk";
-
-    /// <summary>Out-channels conveying the per-session pairing code (dynamic_pin only).</summary>
+    /// <summary>
+    /// Out-channels conveying the per-session pairing code to the operator
+    /// (<c>dynamic_pairing_code</c> only).
+    /// </summary>
     [JsonPropertyName("out_channels")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? OutChannels { get; set; }
 
-    /// <summary>Shortest acceptable pairing code length in digits (dynamic_pin only, 4-12).</summary>
-    [JsonPropertyName("min_pin_length")]
+    /// <summary>
+    /// The emission formats the client offers for the per-session pairing code
+    /// (<c>dynamic_pairing_code</c> only). Non-empty; see <see cref="PairingCodeFormats"/>.
+    /// </summary>
+    [JsonPropertyName("formats")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public int? MinPairingCodeLength { get; set; }
+    public List<string>? Formats { get; set; }
 
     /// <summary>
     /// Where the operator can find this method's configured secret — <c>"device"</c> (printed
     /// on it), <c>"leaflet"</c> (in the box), or <c>"operator"</c> (they set it themselves).
-    /// Informational, and for <c>static_pin</c> and <c>pairing_psk</c> only.
+    /// Informational, and for <c>static_pairing_code</c> and <c>pairing_psk</c> only.
     /// </summary>
     /// <remarks>
     /// Drives server UX copy such as "check the label on the device", so it has to follow the
@@ -125,6 +184,52 @@ public sealed class PairMethodDescriptor
     [JsonPropertyName("locations")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? Locations { get; set; }
+}
+
+/// <summary>
+/// The pairing method identifiers: the keys of <c>supported_pair_methods</c> and the values
+/// <c>server/activate</c>'s <c>pairing.method</c> may name.
+/// </summary>
+/// <remarks>
+/// Every client implements <see cref="PairingPsk"/>. A client may additionally offer <em>at
+/// most one</em> pairing-code method — <see cref="StaticPairingCode"/> or
+/// <see cref="DynamicPairingCode"/>, never both (spec #189).
+/// </remarks>
+public static class PairMethods
+{
+    /// <summary>Pairing authenticated by the client's pairing PSK; no PAKE round, no code.</summary>
+    public const string PairingPsk = "pairing_psk";
+
+    /// <summary>Pairing with a per-session pairing code emitted through an out-channel.</summary>
+    public const string DynamicPairingCode = "dynamic_pairing_code";
+
+    /// <summary>Pairing with the device's fixed 8-digit pairing code.</summary>
+    public const string StaticPairingCode = "static_pairing_code";
+
+    /// <summary>The two pairing-code methods, of which a client may offer at most one.</summary>
+    public static IReadOnlyList<string> PairingCodeMethods { get; } =
+    [
+        DynamicPairingCode, StaticPairingCode,
+    ];
+
+    /// <summary>Whether the identifier is one of the two pairing-code methods.</summary>
+    /// <param name="method">The method identifier to check.</param>
+    /// <returns><see langword="true"/> for the static and dynamic pairing-code methods.</returns>
+    public static bool IsPairingCodeMethod(string method) =>
+        PairingCodeMethods.Contains(method, StringComparer.Ordinal);
+}
+
+/// <summary>
+/// The emission formats a <c>dynamic_pairing_code</c> descriptor may advertise, and that
+/// <c>server/activate</c>'s <c>pairing.format</c> may name.
+/// </summary>
+public static class PairingCodeFormats
+{
+    /// <summary>The 6-digit decimal code, shown or spoken to the operator.</summary>
+    public const string Digits = "digits";
+
+    /// <summary>A QR code of the per-session pairing token. Not implemented by this SDK.</summary>
+    public const string QrCode = "qr_code";
 }
 
 /// <summary>

@@ -11,7 +11,10 @@ namespace Sendspin.SDK.Client;
 /// </remarks>
 public sealed class PairingGestureRequestedEventArgs : EventArgs
 {
-    /// <summary>The pairing method awaiting the gesture: static_pin or dynamic_pin.</summary>
+    /// <summary>
+    /// The pairing method awaiting the gesture: <c>static_pairing_code</c> or
+    /// <c>dynamic_pairing_code</c>.
+    /// </summary>
     required public string Method { get; init; }
 
     /// <summary>The activation's pairing index.</summary>

@@ -119,15 +119,15 @@ public sealed class StoreHardeningTests : IDisposable
 
         string path = Path.Combine(_dir, "lockout.json");
         var store = new FilePairingCodeLockoutStore(path, NullLogger.Instance);
-        store.SetFailures("dynamic_pin", 3);
+        store.SetFailures("dynamic_pairing_code", 3);
 
         File.SetUnixFileMode(_dir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
         try
         {
-            Assert.ThrowsAny<Exception>(() => store.SetFailures("dynamic_pin", 9));
+            Assert.ThrowsAny<Exception>(() => store.SetFailures("dynamic_pairing_code", 9));
 
             // In memory it must still read what disk holds, not the value that never landed.
-            Assert.Equal(3, store.GetFailures("dynamic_pin"));
+            Assert.Equal(3, store.GetFailures("dynamic_pairing_code"));
         }
         finally
         {
@@ -135,7 +135,7 @@ public sealed class StoreHardeningTests : IDisposable
                 _dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
-        Assert.Equal(3, new FilePairingCodeLockoutStore(path, NullLogger.Instance).GetFailures("dynamic_pin"));
+        Assert.Equal(3, new FilePairingCodeLockoutStore(path, NullLogger.Instance).GetFailures("dynamic_pairing_code"));
     }
 
     [Fact]

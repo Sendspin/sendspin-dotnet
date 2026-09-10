@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
@@ -45,18 +46,84 @@ public class PairingWindowOptionsTests
     }
 
     [Fact]
-    public async Task BuildClientOptions_WithAConfiguredSynchronizer_HandsBackTheStoredOptions()
+    public async Task BuildClientOptions_WithAConfiguredSynchronizer_PassesItThroughUnchanged()
     {
         // The passthrough branch: a synchronizer the app configured is shared across
-        // connections on purpose, and nothing is rebuilt.
+        // connections on purpose, and nothing is rebuilt. The options record is still copied,
+        // because every connection gets the host's live-record callback attached (#183).
+        var synchronizer = new KalmanClockSynchronizer();
         var hostOptions = new SendspinClientOptions
         {
             Identity = SendspinIdentity.Generate(),
-            ClockSynchronizer = new KalmanClockSynchronizer(),
+            ClockSynchronizer = synchronizer,
         };
 
         await using var host = CreateHost(hostOptions);
+        var built = host.BuildClientOptions();
 
-        Assert.Same(hostOptions, host.BuildClientOptions());
+        Assert.Same(synchronizer, built.ClockSynchronizer);
+        Assert.Same(hostOptions.Identity, built.Identity);
+        Assert.NotNull(built.LiveRecordPskIds);
     }
+
+    [Fact]
+    public async Task BuildClientOptions_LiveRecordPskIds_IncludesTrackedOpenClients_BeforeAdmissionAndDuringTeardown()
+    {
+        await using var host = CreateHost(new SendspinClientOptions { Identity = SendspinIdentity.Generate() });
+        var built = host.BuildClientOptions();
+
+        var (provisional, _, provisionalSession) = TestClient.Create(connected: true);
+        using var _provisional = provisional;
+        var provisionalPsk = MakePsk(0x11);
+        provisionalSession.MatchedPsk = new NoisePsk(provisionalPsk, PskCategory.LongTerm, "srv-provisional");
+        TrackOpenClient(host, provisional);
+
+        var (teardown, teardownConnection, teardownSession) = TestClient.Create(connected: true);
+        using var _teardown = teardown;
+        var teardownPsk = MakePsk(0x22);
+        teardownSession.MatchedPsk = new NoisePsk(teardownPsk, PskCategory.LongTerm, "srv-teardown");
+        SetConnectionState(teardownConnection, ConnectionState.Disconnecting);
+        TrackOpenClient(host, teardown);
+
+        var (closed, closedConnection, closedSession) = TestClient.Create(connected: true);
+        using var _closed = closed;
+        var closedPsk = MakePsk(0x33);
+        closedSession.MatchedPsk = new NoisePsk(closedPsk, PskCategory.LongTerm, "srv-closed");
+        closedConnection.DisconnectAsync().GetAwaiter().GetResult();
+        TrackOpenClient(host, closed);
+
+        var ids = built.LiveRecordPskIds!();
+
+        Assert.Contains(NoiseConstants.DerivePskId(provisionalPsk), ids);
+        Assert.Contains(NoiseConstants.DerivePskId(teardownPsk), ids);
+        Assert.DoesNotContain(NoiseConstants.DerivePskId(closedPsk), ids);
+    }
+
+    [Fact]
+    public async Task BuildClientOptions_LiveRecordPskIds_IncludesAnAdoptedOpenClient()
+    {
+        await using var host = CreateHost(new SendspinClientOptions { Identity = SendspinIdentity.Generate() });
+        var (client, _, session) = TestClient.Create(connected: true);
+        using var _c = client;
+        var adoptedPsk = MakePsk(0x44);
+        session.MatchedPsk = new NoisePsk(adoptedPsk, PskCategory.LongTerm, "srv-adopted");
+
+        host.AdoptClientInitiated(client, "srv-adopted");
+
+        Assert.Contains(
+            NoiseConstants.DerivePskId(adoptedPsk),
+            host.BuildClientOptions().LiveRecordPskIds!());
+    }
+
+    private static void TrackOpenClient(SendspinHostService host, SendspinClientService client) =>
+        typeof(SendspinHostService)
+            .GetMethod("TrackOpenClient", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(host, [client]);
+
+    private static void SetConnectionState(FakeSendspinConnection connection, ConnectionState state) =>
+        typeof(FakeSendspinConnection)
+            .GetMethod("SetState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(connection, [state]);
+
+    private static byte[] MakePsk(byte fill) => Enumerable.Repeat(fill, 32).ToArray();
 }

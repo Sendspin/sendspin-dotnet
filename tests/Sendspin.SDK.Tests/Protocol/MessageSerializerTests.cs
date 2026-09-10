@@ -427,20 +427,50 @@ public class MessageSerializerTests
     [Fact]
     public void ServerActivate_DeserializesNestedPairingObject()
     {
-        // Spec 5b0e6469 replaced the flat selected_pair_method with a pairing object
-        // carrying method, pin_length and (spec #131) languages.
+        // The pairing activation is {method, format?}: spec #178 dropped the negotiable
+        // pin_length (a digits code is 6 digits) and moved the operator languages hint to
+        // server/hello, and named the emission format the server picked instead.
         const string json = """
             {"type":"server/activate","payload":{"activities":["pairing"],
-            "active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":8,
-            "languages":["ca","es"]}}}
+            "active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}
             """;
 
         var msg = MessageSerializer.Deserialize<ServerActivateMessage>(json);
 
         Assert.NotNull(msg);
-        Assert.Equal("dynamic_pin", msg!.Payload.Pairing!.Method);
-        Assert.Equal(8, msg.Payload.Pairing.PairingCodeLength);
-        Assert.Equal(new[] { "ca", "es" }, msg.Payload.Pairing.Languages);
+        Assert.Equal("dynamic_pairing_code", msg!.Payload.Pairing!.Method);
+        Assert.Equal("digits", msg.Payload.Pairing.Format);
+    }
+
+    [Fact]
+    public void ClientHello_SerializesSupportedPairMethods_KeyedByMethod()
+    {
+        // Spec #179: supported_pair_methods is an object keyed by method identifier, not a
+        // list of descriptors each repeating its own method name.
+        var hello = ClientHelloMessage.Create(
+            name: "Test",
+            supportedRoles: ["player@v1"],
+            supportedPairMethods: new Dictionary<string, PairMethodDescriptor>
+            {
+                ["pairing_psk"] = new() { Locations = ["device"] },
+                ["dynamic_pairing_code"] = new() { OutChannels = ["display"], Formats = ["digits"] },
+            });
+
+        string json = MessageSerializer.Serialize(hello);
+
+        using var doc = JsonDocument.Parse(json);
+        var methods = doc.RootElement.GetProperty("payload").GetProperty("supported_pair_methods");
+        Assert.Equal(JsonValueKind.Object, methods.ValueKind);
+
+        var psk = methods.GetProperty("pairing_psk");
+        Assert.Equal("device", psk.GetProperty("locations")[0].GetString());
+        Assert.False(psk.TryGetProperty("method", out _), "the key is the method; it is not repeated");
+        Assert.False(psk.TryGetProperty("out_channels", out _));
+
+        var code = methods.GetProperty("dynamic_pairing_code");
+        Assert.Equal("display", code.GetProperty("out_channels")[0].GetString());
+        Assert.Equal("digits", code.GetProperty("formats")[0].GetString());
+        Assert.False(code.TryGetProperty("min_pin_length", out _), "min_pin_length is retired");
     }
 
     [Fact]
@@ -458,8 +488,12 @@ public class MessageSerializerTests
     }
 
     [Fact]
-    public void ClientPairPending_SerializesWithPairingIndex()
+    public void ClientPairPending_SerializesWithPairingIndexOnly()
     {
+        // The payload is {pairing_index} and nothing else. Spec #178 reworked the pairing
+        // vocabulary around it but added no free-text 'message' field: the reason the client
+        // is pending is already implied by the message's existence, and anything a client
+        // invented here would be untranslatable server-side.
         var json = MessageSerializer.Serialize(new ClientPairPendingMessage
         {
             Payload = new ClientPairPendingPayload { PairingIndex = 3 },
@@ -467,7 +501,31 @@ public class MessageSerializerTests
 
         Assert.Contains("\"type\":\"client/pair-pending\"", json, StringComparison.Ordinal);
         Assert.Contains("\"pairing_index\":3", json, StringComparison.Ordinal);
+
+        using var doc = JsonDocument.Parse(json);
+        var payload = doc.RootElement.GetProperty("payload");
+        Assert.Equal("pairing_index", Assert.Single(payload.EnumerateObject()).Name);
     }
+
+    [Theory]
+    [InlineData("attempt_timeout")]
+    [InlineData("concurrent_attempt")]
+    [InlineData("method_not_supported")]
+    [InlineData("pairing_code_mismatch")]
+    [InlineData("user_cancelled")]
+    public void PairAbortReasons_CoverExactlyTheSpecVocabulary(string reason)
+    {
+        // Spec #178 renamed pin_mismatch to pairing_code_mismatch and retired
+        // pin_length_unacceptable outright. Anything the SDK sends must be in this set.
+        Assert.True(PairAbortReasons.IsDefined(reason));
+        Assert.Contains(reason, PairAbortReasons.All);
+    }
+
+    [Theory]
+    [InlineData("pin_mismatch")]
+    [InlineData("pin_length_unacceptable")]
+    public void RetiredPairAbortReasons_AreNotRecognized(string reason) =>
+        Assert.False(PairAbortReasons.IsDefined(reason));
 
     private static byte[] Utf8(string json) => System.Text.Encoding.UTF8.GetBytes(json);
 }
