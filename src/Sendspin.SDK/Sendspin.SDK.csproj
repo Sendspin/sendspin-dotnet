@@ -8,7 +8,7 @@
 
     <!-- NuGet Package Metadata -->
     <PackageId>Sendspin.SDK</PackageId>
-    <Version>9.3.2</Version>
+    <Version>9.3.3</Version>
     <Authors>Sendspin Contributors</Authors>
     <Company>Sendspin</Company>
     <Product>Sendspin SDK</Product>
@@ -20,26 +20,31 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
-v9.3.2 - Discovery (9.x legacy line):
+v9.3.3 - Playback timing (9.x legacy line):
 
-One fix: players are now reliably discoverable by servers. No API changes.
+Two fixes. No API removals; one new option, one new capability, one new event.
 
-- The mDNS advertiser announces its presence instead of only answering
-  queries. Advertising registered the records with a passive query responder
-  and multicast nothing, while a server's mDNS browser stops broadcasting
-  the service type once its startup queries are done - so a player that
-  started after the server was never discovered at all, and discovery only
-  appeared to work when the player was already running when the server came
-  up. The advertiser now multicasts its records unsolicited (RFC 6762
-  section 8.3) when advertising starts, and again whenever a network
-  interface appears - resume from sleep, a late-associating Wi-Fi - since
-  the announcement sent before that interface existed never reached it. The
-  announcement carries the full PTR/SRV/TXT/A set, so a server can connect
-  from its cache alone.
-
-Note: staying visible past the records' TTL still requires the player to
-hear the server's refresh queries, so allow inbound UDP 5353 through any
-host firewall.
+- A stream that restarts late no longer stays late. The startup sync-error
+  baseline exists to absorb an output backend's first fill, and it was bounded
+  only by the 500 ms re-anchor threshold: a restart that landed half a second
+  late inside the re-anchor cooldown was absorbed as a "constant offset that
+  will not be corrected", and the stream played half a second late at a
+  reported error of zero for its whole duration (chrisuthe/windowsSpin#63).
+  The baseline is now bounded by
+  SyncCorrectionOptions.StartupBaselineAllowanceMicroseconds (150 ms); past
+  that the error stays visible and the one-shot snap tier closes it.
+- Live sources no longer cut out. A source role delivers audio in real time
+  from its first chunk, and the server schedules that chunk only min_buffer_ms
+  ahead; the buffer pre-rolls playback by the host's output latency, so a
+  WASAPI host's 100 ms prefill left about 50 ms of the default 150 ms for the
+  network and the decoder. required_lead_time_ms and min_buffer_ms are now
+  reported with the output latency added, from the initial client/state on:
+  ClientCapabilities.ExpectedOutputLatencyMs until a player has measured one,
+  the measured value after, re-reported through the new
+  IAudioPipeline.OutputLatencyChanged event only when the numbers move. Hosts
+  that had folded their backend's latency into RequiredLeadTimeMs or
+  MinBufferMs themselves should stop, or it is counted twice; WASAPI hosts
+  should set ExpectedOutputLatencyMs to their buffer size (typically 100 ms).
 
 ----
 
