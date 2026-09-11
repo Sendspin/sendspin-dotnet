@@ -165,6 +165,13 @@ public interface IAudioPipeline : IAsyncDisposable
     /// Event raised on pipeline errors.
     /// </summary>
     event EventHandler<AudioPipelineError>? ErrorOccurred;
+
+    /// <summary>
+    /// Raised when <see cref="DetectedOutputLatencyMs"/> changes: a player has been attached or
+    /// switched and reports a different output latency than the one last raised. Carries the new
+    /// value in milliseconds. The client uses it to re-report the lead values that include it.
+    /// </summary>
+    event EventHandler<int>? OutputLatencyChanged;
 }
 
 /// <summary>

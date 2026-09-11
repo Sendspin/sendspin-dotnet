@@ -170,6 +170,29 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
 
+    /// <inheritdoc/>
+    public event EventHandler<int>? OutputLatencyChanged;
+
+    private int _lastRaisedOutputLatencyMs = -1;
+
+    /// <summary>
+    /// Raises <see cref="OutputLatencyChanged"/> when the attached player's latency differs from
+    /// the one last raised. Called wherever the buffer's own copy is refreshed, since those are
+    /// the moments a backend can report a new figure: after initialization, after the sample
+    /// source is attached (WASAPI measures only then), and after a device switch.
+    /// </summary>
+    private void PublishOutputLatency()
+    {
+        var latencyMs = _player?.OutputLatencyMs ?? 0;
+        if (latencyMs == _lastRaisedOutputLatencyMs)
+        {
+            return;
+        }
+
+        _lastRaisedOutputLatencyMs = latencyMs;
+        OutputLatencyChanged?.Invoke(this, latencyMs);
+    }
+
     /// <summary>
     /// Initializes a new instance of the <see cref="AudioPipeline"/> class.
     /// </summary>
@@ -295,6 +318,7 @@ public sealed class AudioPipeline : IAudioPipeline
             await _player.InitializeAsync(format, cancellationToken);
 
             _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+            PublishOutputLatency();
 
             // Used by push-model backends to compensate sync error for the calibrated startup latency.
             _buffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
@@ -339,6 +363,7 @@ public sealed class AudioPipeline : IAudioPipeline
             // playback is pre-rolled by the output latency and reaches the speaker on the server's clock.
             _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
             _logger.LogDebug("[Playback] Output latency after attach: {OutputMs}ms", _player.OutputLatencyMs);
+            PublishOutputLatency();
 
             _player.Volume = PerceivedVolumeToAmplitude(_volume);
             _player.IsMuted = _muted;
@@ -597,6 +622,7 @@ public sealed class AudioPipeline : IAudioPipeline
             {
                 _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
                 _buffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
+                PublishOutputLatency();
                 _logger.LogDebug(
                     "Updated latencies after device switch: output={LatencyMs}ms, calibrated={CalibratedMs}ms",
                     _player.OutputLatencyMs,
