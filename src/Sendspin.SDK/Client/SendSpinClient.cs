@@ -117,6 +117,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // at runtime via UpdateTimingAsync (e.g. after measuring lead time or a link-type change).
     private int _requiredLeadTimeMs;
     private int _minBufferMs;
+    private int _lastReportedLeadTimeMs = -1;
+    private int _lastReportedMinBufferMs = -1;
 
     // The effective unpaired-access setting, seeded from capabilities at construction. Held
     // here rather than read straight off the app-owned capabilities object so the admissibility
@@ -505,6 +507,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _audioPipeline.ErrorOccurred += OnPipelineError;
             _audioPipeline.StateChanged += OnPipelineStateChanged;
+            _audioPipeline.OutputLatencyChanged += OnOutputLatencyChanged;
         }
 
         if (_pairingWindow is not null)
@@ -1147,14 +1150,55 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Always the applied delay, never the caller's parameter. The server MUST merge each
         // update into existing state, so a field that is present overwrites -- reporting a
         // defaulted 0 here wiped a delay the server had set, on the next volume change.
+        var (leadTimeMs, minBufferMs) = ReportedLeads();
         var stateMessage = ClientStateMessage.CreatePlayerState(
             clampedVolume, muted, ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
-            _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
+            leadTimeMs, minBufferMs, GetPlayerSupportedCommands());
 
         _logger.LogDebug(
             "Sending player state: Volume={Volume}, Muted={Muted}, OutputDelay={OutputDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
-            clampedVolume, muted, _clockSynchronizer.OutputDelayMs, _requiredLeadTimeMs, _minBufferMs);
+            clampedVolume, muted, _clockSynchronizer.OutputDelayMs, leadTimeMs, minBufferMs);
+        _lastReportedLeadTimeMs = leadTimeMs;
+        _lastReportedMinBufferMs = minBufferMs;
         await SendAsync(stateMessage);
+    }
+
+    /// <summary>
+    /// The lead values to report: the configured ones plus the output latency the player will
+    /// spend before a chunk's timestamp. The buffer pre-rolls playback by that latency, so it is
+    /// lead the server has to give and the player cannot. The measured latency wins once a player
+    /// has reported one; until then the host's expectation stands in. The configured
+    /// <see cref="ClientCapabilities.MinBufferMs"/> alone still bounds the readiness gate.
+    /// </summary>
+    private (int LeadTimeMs, int MinBufferMs) ReportedLeads()
+    {
+        var measured = _audioPipeline?.DetectedOutputLatencyMs ?? 0;
+        var outputLatencyMs = measured > 0 ? measured : Math.Max(0, _capabilities.ExpectedOutputLatencyMs);
+        return (_requiredLeadTimeMs + outputLatencyMs, _minBufferMs + outputLatencyMs);
+    }
+
+    /// <summary>
+    /// A player was attached or switched and reports a different output latency. The leads the
+    /// server holds include the old one, so re-report — but only when the numbers actually move:
+    /// every stream start re-attaches a player, and the spec asks for debounced updates.
+    /// </summary>
+    private void OnOutputLatencyChanged(object? sender, int latencyMs)
+    {
+        var (leadTimeMs, minBufferMs) = ReportedLeads();
+        if (leadTimeMs == _lastReportedLeadTimeMs && minBufferMs == _lastReportedMinBufferMs)
+        {
+            return;
+        }
+
+        if (_connection.State != ConnectionState.Connected)
+        {
+            return; // The next initial client/state carries the new values.
+        }
+
+        _logger.LogInformation(
+            "Output latency now {LatencyMs}ms; re-reporting player timing: LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
+            latencyMs, leadTimeMs, minBufferMs);
+        SendPlayerStateAsync(_playerState.Volume, _playerState.Muted).SafeFireAndForget(_logger);
     }
 
     /// <inheritdoc/>
@@ -3083,6 +3127,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // source object was never built at all, which is why an in-window line-sense signal had
         // nowhere to go (#114).
         bool available = CurrentAvailability;
+        var (leadTimeMs, minBufferMs) = ReportedLeads();
+        _lastReportedLeadTimeMs = leadTimeMs;
+        _lastReportedMinBufferMs = minBufferMs;
         var stateMessage = ClientStateMessage.CreateInitial(
             available: available,
             player: MayReportRoleState("player")
@@ -3091,8 +3138,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     Volume = _playerState.Volume,
                     Muted = _playerState.Muted,
                     OutputDelayMs = ToWireOutputDelayMs(_clockSynchronizer.OutputDelayMs),
-                    RequiredLeadTimeMs = _requiredLeadTimeMs,
-                    MinBufferMs = _minBufferMs,
+                    RequiredLeadTimeMs = leadTimeMs,
+                    MinBufferMs = minBufferMs,
                     SupportedCommands = GetPlayerSupportedCommands(),
                 }
                 : null,
@@ -4707,6 +4754,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _audioPipeline.ErrorOccurred -= OnPipelineError;
             _audioPipeline.StateChanged -= OnPipelineStateChanged;
+            _audioPipeline.OutputLatencyChanged -= OnOutputLatencyChanged;
         }
 
         if (_pairingWindow is not null)
