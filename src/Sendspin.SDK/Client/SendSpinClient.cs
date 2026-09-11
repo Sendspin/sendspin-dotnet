@@ -47,6 +47,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // at runtime via UpdateTimingAsync (e.g. after measuring lead time or a link-type change).
     private int _requiredLeadTimeMs;
     private int _minBufferMs;
+    private int _lastReportedLeadTimeMs = -1;
+    private int _lastReportedMinBufferMs = -1;
 
     // Bounds for any value written to the clock synchronizer's static delay. The GroupSync offset
     // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
@@ -241,6 +243,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _audioPipeline.ErrorOccurred += OnPipelineError;
             _audioPipeline.StateChanged += OnPipelineStateChanged;
+            _audioPipeline.OutputLatencyChanged += OnOutputLatencyChanged;
         }
     }
 
@@ -497,14 +500,55 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     public async Task SendPlayerStateAsync(int volume, bool muted, double staticDelayMs = 0.0)
     {
         var clampedVolume = Math.Clamp(volume, 0, 100);
+        var (leadTimeMs, minBufferMs) = ReportedLeads();
         var stateMessage = ClientStateMessage.CreateSynchronized(
             clampedVolume, muted, staticDelayMs,
-            _requiredLeadTimeMs, _minBufferMs, GetPlayerSupportedCommands());
+            leadTimeMs, minBufferMs, GetPlayerSupportedCommands());
 
         _logger.LogDebug(
             "Sending player state: Volume={Volume}, Muted={Muted}, StaticDelay={StaticDelay}ms, LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
-            clampedVolume, muted, staticDelayMs, _requiredLeadTimeMs, _minBufferMs);
+            clampedVolume, muted, staticDelayMs, leadTimeMs, minBufferMs);
         await _connection.SendMessageAsync(stateMessage);
+        _lastReportedLeadTimeMs = leadTimeMs;
+        _lastReportedMinBufferMs = minBufferMs;
+    }
+
+    /// <summary>
+    /// The lead values to report: the configured ones plus the output latency the player will
+    /// spend before a chunk's timestamp. The buffer pre-rolls playback by that latency, so it is
+    /// lead the server has to give and the player cannot. The measured latency wins once a player
+    /// has reported one; until then the host's expectation stands in.
+    /// </summary>
+    private (int LeadTimeMs, int MinBufferMs) ReportedLeads()
+    {
+        var measured = _audioPipeline?.DetectedOutputLatencyMs ?? 0;
+        var outputLatencyMs = measured > 0 ? measured : Math.Max(0, _capabilities.ExpectedOutputLatencyMs);
+        return (_requiredLeadTimeMs + outputLatencyMs, _minBufferMs + outputLatencyMs);
+    }
+
+    /// <summary>
+    /// A player was attached or switched and reports a different output latency. The leads the
+    /// server holds include the old one, so re-report — but only when the numbers actually move:
+    /// every stream start re-attaches a player, and the spec asks for debounced updates.
+    /// </summary>
+    private void OnOutputLatencyChanged(object? sender, int latencyMs)
+    {
+        var (leadTimeMs, minBufferMs) = ReportedLeads();
+        if (leadTimeMs == _lastReportedLeadTimeMs && minBufferMs == _lastReportedMinBufferMs)
+        {
+            return;
+        }
+
+        if (_connection.State != ConnectionState.Connected)
+        {
+            return; // The next initial client/state carries the new values.
+        }
+
+        _logger.LogInformation(
+            "Output latency now {LatencyMs}ms; re-reporting player timing: LeadTime={LeadTime}ms, MinBuffer={MinBuffer}ms",
+            latencyMs, leadTimeMs, minBufferMs);
+        SendPlayerStateAsync(_playerState.Volume, _playerState.Muted, _clockSynchronizer.StaticDelayMs)
+            .SafeFireAndForget(_logger);
     }
 
     /// <inheritdoc/>
@@ -777,16 +821,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         try
         {
             // Send the current player state (initialized from capabilities)
+            var (leadTimeMs, minBufferMs) = ReportedLeads();
             var stateMessage = ClientStateMessage.CreateSynchronized(
                 volume: _playerState.Volume,
                 muted: _playerState.Muted,
                 staticDelayMs: _clockSynchronizer.StaticDelayMs,
-                requiredLeadTimeMs: _requiredLeadTimeMs,
-                minBufferMs: _minBufferMs,
+                requiredLeadTimeMs: leadTimeMs,
+                minBufferMs: minBufferMs,
                 supportedCommands: GetPlayerSupportedCommands());
             var stateJson = MessageSerializer.Serialize(stateMessage);
             _logger.LogInformation("Sending initial client/state:\n{Json}", stateJson);
             await _connection.SendMessageAsync(stateMessage);
+            _lastReportedLeadTimeMs = leadTimeMs;
+            _lastReportedMinBufferMs = minBufferMs;
 
             // Also apply to audio pipeline to ensure consistency
             _audioPipeline?.SetVolume(_playerState.Volume);
@@ -1832,6 +1879,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _audioPipeline.ErrorOccurred -= OnPipelineError;
             _audioPipeline.StateChanged -= OnPipelineStateChanged;
+            _audioPipeline.OutputLatencyChanged -= OnOutputLatencyChanged;
         }
     }
 

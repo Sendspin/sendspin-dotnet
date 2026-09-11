@@ -147,8 +147,10 @@ public sealed class ClientCapabilities
     /// <para>
     /// Default (200 ms) is a conservative LAN starting point. Tune per device/network: report the
     /// lowest value that reliably avoids truncation for the lowest latency. Do NOT include
-    /// <c>static_delay_ms</c> here — the server applies that separately. For empirical tuning, the
-    /// audio pipeline exposes measured output/startup latency (e.g. DetectedOutputLatencyMs).
+    /// <c>static_delay_ms</c> here — the server applies that separately — and do NOT include the
+    /// audio backend's output latency either: the SDK adds that itself, from
+    /// <see cref="ExpectedOutputLatencyMs"/> until a player has measured one and from the measured
+    /// value after, and re-reports when it changes.
     /// </para>
     /// </summary>
     public int RequiredLeadTimeMs { get; set; } = 200;
@@ -159,10 +161,25 @@ public sealed class ClientCapabilities
     /// where the queue cannot grow after playback begins).
     /// <para>
     /// Default (150 ms) is a conservative LAN starting point. Tune per network: larger for remote
-    /// or high-latency links, smaller for stable LAN. Do NOT include <c>static_delay_ms</c> here.
+    /// or high-latency links, smaller for stable LAN. Do NOT include <c>static_delay_ms</c> here,
+    /// nor the audio backend's output latency: the SDK adds that itself (see
+    /// <see cref="ExpectedOutputLatencyMs"/>). For a live source this is the whole lead the server
+    /// gives, so a backend's prefill left out of it is lead the player does not have.
     /// </para>
     /// </summary>
     public int MinBufferMs { get; set; } = 150;
+
+    /// <summary>
+    /// The output latency this host expects its audio backend to add before the pipeline has
+    /// measured one, in milliseconds. The buffer pre-rolls the playback schedule by the output
+    /// latency, so every millisecond of it is lead the player spends before a chunk's timestamp;
+    /// the SDK adds it to both <see cref="RequiredLeadTimeMs"/> and <see cref="MinBufferMs"/> in
+    /// what it reports, and replaces it with the measured value once a player exists. Set it to
+    /// what the backend will take at start (a WASAPI shared-mode host prefills its whole buffer,
+    /// typically 100 ms); leave it at 0 for a backend with no such delay. Not <c>static_delay_ms</c>,
+    /// which the server applies separately.
+    /// </summary>
+    public int ExpectedOutputLatencyMs { get; set; }
 
     /// <summary>
     /// Whether this client accepts the server's <c>set_static_delay</c> command. When true, the
