@@ -26,6 +26,24 @@ public class PairingInitiationTests
     }
 
     [Fact]
+    public void EnsurePairingPsk_DoesNotConsumeLongTermCapacity()
+    {
+        var existing = new byte[32];
+        existing[0] = 0x42;
+        var store = new BoundedPairingRecordStore(
+            1,
+            new PairingRecord(existing, PskCategory.LongTerm, "srv-existing"));
+        var (client, _, _) = CreateWithStore(store);
+        using var _c = client;
+
+        string token = client.EnsurePairingPsk();
+
+        Assert.Equal(token, client.EnsurePairingPsk());
+        Assert.Single(store.List(), r => r.Category == PskCategory.LongTerm);
+        Assert.Single(store.List(), r => r.Category == PskCategory.Pairing);
+    }
+
+    [Fact]
     public void EnsurePairingPsk_PersistsAcrossClientRestart()
     {
         // Same store, new client = the reboot the spec's "persists across reboots" means.
@@ -126,7 +144,7 @@ public class PairingInitiationTests
 
         var pairing = Assert.Single(store.List(), r => r.Category == PskCategory.Pairing);
         Assert.Equal(pairingPskId, pairing.PskId);
-        Assert.True(pairing.Used, "the matched Pairing record is marked used — retained, not retired");
+        Assert.NotNull(pairing.LastUsedUtc);
         Assert.Equal(token, client.EnsurePairingPsk());
     }
 

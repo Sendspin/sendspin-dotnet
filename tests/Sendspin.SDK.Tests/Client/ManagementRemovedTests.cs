@@ -87,10 +87,24 @@ public class ManagementRemovedTests
     }
 
     [Fact]
+    public void PairingActivity_IsNotAdmissible_OnALongTermSession()
+    {
+        // Spec #183: a client authenticated with a long-term PSK is already paired, so a
+        // pairing activity on that session has nothing to establish and is refused.
+        var (client, connection, _) = CreatePairedClient();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
+
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public void PlaybackActivity_IsAdmissible_OnALongTermSession()
     {
-        // Positive control for the refusal above: the normal case must still be admitted,
-        // or a client that refused every activate would pass it.
+        // Positive control for the two refusals above: the normal case must still be admitted,
+        // or a client that refused every activate would pass them both.
         var (client, connection, _) = CreatePairedClient();
         using var _c = client;
 

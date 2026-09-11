@@ -30,7 +30,7 @@ namespace Sendspin.SDK.Tests.Client;
 public class PairingQuiescenceTests
 {
     private const string PairingActivate =
-        """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pin","pin_length":6}}}""";
+        """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""";
 
     private const string PlaybackActivate =
         """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""";
@@ -38,11 +38,14 @@ public class PairingQuiescenceTests
     private static (SendspinClientService Client, FakeSendspinConnection Connection) PairableClient()
     {
         var (client, connection, _) = TestClient.Create(
+            // Sentinel-keyed: since spec #183 a long-term (paired) PSK admits no pairing
+            // activity, so an unpaired session is where a mid-session pairing window lives.
+            PskCategory.Sentinel,
             unpairedAccess: true,
             configure: options => options with
             {
                 ClockSynchronizer = new ConvergedClock(),
-                Capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pin" } },
+                Capabilities = new ClientCapabilities { PairingCodeMethods = { "dynamic_pairing_code" } },
                 PairingRecordStore = new InMemoryPairingRecordStore(),
                 PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
                 PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,

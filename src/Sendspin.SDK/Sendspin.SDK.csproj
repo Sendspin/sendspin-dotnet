@@ -29,8 +29,17 @@ v10.0.0 - Encrypted Transport (BREAKING):
   gets a new client_id every launch and silently loses every pairing on restart.
 - Construction moved to SendspinClientService.CreateForDial(loggerFactory, options) with a
   SendspinClientOptions object.
-- Pairing: Pairing PSK plus optional dynamic/static PIN (CPace). Pairing configuration is
-  local and manufacturer-defined: set it through ClientCapabilities; no server can change it.
+- Pairing: Pairing PSK plus at most one optional pairing-code method, dynamic or static
+  (CPace), on the spec's pairing-code wire (dynamic_pairing_code / static_pairing_code,
+  fixed 6- and 8-digit codes, pair-method descriptors in client/hello). Pairing
+  configuration is local and manufacturer-defined: set it through ClientCapabilities; no
+  server can change it. A pairing activity on an already-paired session is refused as
+  unauthorized, and server/unpair removes that server's record.
+- Pairing record stores: IPairingRecordStore.Upsert returns void and stores declare a
+  Capacity; a pairing that completes at capacity succeeds and the SDK evicts the least
+  recently used record itself (never its own Pairing PSK, never a record backing an open
+  connection). Records carry ServerId (one record per server; re-pairing replaces) and
+  LastUsedUtc in place of Used; 9.x record files still load.
 - client/state reports 'available' as a boolean rather than the legacy state string.
 - New source@v1 role for line-in/microphone capture.
 - Neither connection teardown path waits for the peer's Close frame any longer: both now

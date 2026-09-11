@@ -9,7 +9,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// <summary>
 /// The pair-method descriptor's <c>locations</c> hint (pairing.md, "client/hello pair-method
 /// descriptor"): where an operator can find a method's configured secret, for
-/// <c>static_pin</c> and <c>pairing_psk</c> only, and updated by the client when the secret is
+/// <c>static_pairing_code</c> and <c>pairing_psk</c> only, and updated by the client when the secret is
 /// rotated (#129).
 /// </summary>
 public class PairMethodLocationsTests
@@ -18,7 +18,7 @@ public class PairMethodLocationsTests
 
     private static PairMethodDescriptor? Descriptor(FakeSendspinConnection connection, string method) =>
         connection.SentMessages.OfType<ClientHelloMessage>().Last()
-            .Payload.SupportedPairMethods?.FirstOrDefault(d => d.Method == method);
+            .Payload.SupportedPairMethods?.GetValueOrDefault(method);
 
     /// <summary>
     /// A paired, playback-activated client built around the caller's capabilities, with the
@@ -51,7 +51,7 @@ public class PairMethodLocationsTests
     {
         var (client, connection) = CreatePairedClient(new ClientCapabilities
         {
-            PairingCodeMethods = { "static_pin" },
+            PairingCodeMethods = { "static_pairing_code" },
             StaticPairingCode = "12345678",
             StaticPairingCodeLocations = { PairMethodLocations.Device, PairMethodLocations.Leaflet },
             PairingPskLocations = { PairMethodLocations.Device },
@@ -60,7 +60,7 @@ public class PairMethodLocationsTests
 
         Assert.Equal(
             new[] { "device", "leaflet" },
-            Descriptor(connection, "static_pin")!.Locations);
+            Descriptor(connection, "static_pairing_code")!.Locations);
         Assert.Equal(new[] { "device" }, Descriptor(connection, "pairing_psk")!.Locations);
     }
 
@@ -73,12 +73,12 @@ public class PairMethodLocationsTests
     {
         var (client, connection) = CreatePairedClient(new ClientCapabilities
         {
-            PairingCodeMethods = { "static_pin" },
+            PairingCodeMethods = { "static_pairing_code" },
             StaticPairingCode = "12345678",
         });
         using var _c = client;
 
-        Assert.Null(Descriptor(connection, "static_pin")!.Locations);
+        Assert.Null(Descriptor(connection, "static_pairing_code")!.Locations);
         Assert.Null(Descriptor(connection, "pairing_psk")!.Locations);
 
         // Asserted on the wire too: a null List<string> still serializes as "locations":null
@@ -89,28 +89,28 @@ public class PairMethodLocationsTests
 
         // Positive control: the descriptors themselves did go out, so the absence above is
         // about the field and not about an empty method list.
-        Assert.Contains("static_pin", json);
+        Assert.Contains("static_pairing_code", json);
         Assert.Contains("pairing_psk", json);
     }
 
-    /// <summary>The spec scopes the hint to static_pin and pairing_psk; dynamic_pin has no secret to find.</summary>
+    /// <summary>The spec scopes the hint to static_pairing_code and pairing_psk; dynamic_pairing_code has no secret to find.</summary>
     [Fact]
     public void DynamicPairingCode_NeverCarriesALocationsHint()
     {
         var (client, connection) = CreatePairedClient(new ClientCapabilities
         {
-            PairingCodeMethods = { "dynamic_pin" },
+            PairingCodeMethods = { "dynamic_pairing_code" },
             StaticPairingCodeLocations = { PairMethodLocations.Device },
             PairingPskLocations = { PairMethodLocations.Device },
         });
         using var _c = client;
 
-        var dynamicPairingCode = Descriptor(connection, "dynamic_pin");
+        var dynamicPairingCode = Descriptor(connection, "dynamic_pairing_code");
         Assert.NotNull(dynamicPairingCode);
         Assert.Null(dynamicPairingCode.Locations);
 
         // Positive control: the hint machinery is live on this client, so the null above is
-        // dynamic_pin being excluded rather than locations being switched off wholesale.
+        // dynamic_pairing_code being excluded rather than locations being switched off wholesale.
         Assert.Equal(new[] { "device" }, Descriptor(connection, "pairing_psk")!.Locations);
     }
 
