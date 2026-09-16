@@ -34,7 +34,7 @@ public class HandshakeFailureTests
 
         Assert.Equal(HandshakeFailureKind.LegacyServer, ex.Kind);
         Assert.Contains("does not support Sendspin encryption", ex.Message);
-        Assert.Contains("aiosendspin >= 7.0.0", ex.Message);
+        Assert.Contains("aiosendspin 10.0.0 line", ex.Message);
         Assert.Contains("9.x", ex.Message);
     }
 
@@ -461,7 +461,7 @@ public class HandshakeFailureTests
         var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
 
         Assert.Contains("does not support Sendspin encryption", warning.Message);
-        Assert.Contains("aiosendspin >= 7.0.0", warning.Message);
+        Assert.Contains("aiosendspin 10.0.0 line", warning.Message);
     }
 
     /// <summary>

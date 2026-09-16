@@ -6,9 +6,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 **Why this matters**: before 10.0.0 the protocol was plaintext on the local network. Anyone on the same LAN could read metadata and audio, impersonate a server, or issue commands to a player. Encryption closes that, but it cannot be added transparently — both peers must speak it, so this is a hard break with no downgrade path.
 
-**Server requirement**: a 10.x client requires a server speaking the encrypted protocol — `aiosendspin >= 7.0.0`. There is no negotiation and no fallback: against an older server the handshake fails. **The 9.x line remains maintained** for deployments that need to talk to those servers.
-
-**Pairing requires `aiosendspin >= 9.0.0`**, a higher floor than connecting. 9.0.0 is the first release carrying the current pairing wire shape: `server/activate` names the chosen method inside a `pairing` object (with the emission `format` alongside it) rather than in a flat `selected_pair_method` field. 7.0.0 and 8.0.0 still send the old shape, so a 10.x client reads the offered method as absent and refuses every pairing attempt with `pair/abort` reason `method_not_supported`. Connecting and playback — including unpaired access — are unaffected and still work against `>= 7.0.0`.
+**Server requirement**: a 10.x client requires a server on the **10.0.0 line** of `aiosendspin`. There is one floor and it gates connecting as much as pairing — every encrypted `client/hello` carries the object-keyed `supported_pair_methods` from spec PR #179 (a map keyed by method name, not the older list of descriptors), so a server that does not accept that shape rejects the hello outright, before any playback path opens. There is no negotiation and no fallback. The 10.0.0 line is unpublished at the time of writing, so the interop workflow pins the draft commit it targets (see `.github/workflows/interop.yml`); the latest published release, 9.1.1, rejects the hello. **The 9.x line remains maintained** for deployments that need to talk to older, plaintext servers.
 
 ---
 
@@ -16,7 +14,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 | Area | Change | Impact |
 |------|--------|--------|
-| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin >= 7.0.0`, and `>= 9.0.0` to pair |
+| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be on the `aiosendspin` 10.0.0 line (object-keyed pair methods) |
 | Client identity | New required persistent Curve25519 identity | **High** — silent data loss if unpersisted |
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
 | Pairing | New: Pairing PSK, dynamic pairing code, static pairing code (at most one code method) | Medium — new UX surface |
@@ -141,7 +139,7 @@ Three methods, all optional to offer except the first:
 
 Enable a pairing-code method through `ClientCapabilities.PairingCodeMethods`.
 
-**The pairing-code wire changed with it.** The methods are `dynamic_pairing_code` and `static_pairing_code` on the wire (9.x sent `dynamic_pin` and `static_pin`), `client/hello` advertises them as a `supported_pair_methods` object keyed by method with a descriptor per entry, code lengths are fixed by the spec at 6 digits dynamic and 8 static so `ClientCapabilities.MinPairingCodeLength` is gone, and a dynamic attempt's `server/activate` carries the emission `format`. A code that does not match aborts with `pairing_code_mismatch` where 9.x said `pin_mismatch`. A 10.x client therefore pairs only with a server on the pairing-code wire; unpaired connect and an existing pairing record still work against older servers.
+**The pairing-code wire changed with it.** The methods are `dynamic_pairing_code` and `static_pairing_code` on the wire (9.x sent `dynamic_pin` and `static_pin`), `client/hello` advertises them as a `supported_pair_methods` object keyed by method with a descriptor per entry, code lengths are fixed by the spec at 6 digits dynamic and 8 static so `ClientCapabilities.MinPairingCodeLength` is gone, and a dynamic attempt's `server/activate` carries the emission `format`. A code that does not match aborts with `pairing_code_mismatch` where 9.x said `pin_mismatch`. A 10.x client therefore pairs only with a server on the pairing-code wire — and there is no older-server exemption for connecting either: every encrypted `client/hello` carries the object-keyed `supported_pair_methods` (spec PR #179), so a server that predates the 10.0.0 line rejects the hello before an unpaired connection or an existing pairing record can be used.
 
 **Two behaviours are new around an existing pairing.** A server that activates a `pairing` activity on a session authenticated by a long-term (paired) PSK is refused with `client/goodbye` reason `unauthorized`, because a paired session has nothing to pair. And `server/unpair` from a paired server removes the pairing record bound to that server: a custom `IPairingRecordStore` sees a `Remove` for it, and the next connection from that server starts unpaired.
 
@@ -735,8 +733,7 @@ If you need the 9.x line, `Auto` is still present there but `[Obsolete]` as of 9
 
 ## 17. Checklist
 
-- [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
-- [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
+- [ ] Server is on the `aiosendspin` 10.0.0 line — the draft commit pinned in `.github/workflows/interop.yml` until it ships — for both connecting and pairing, or stay on the 9.x line
 - [ ] `Identity` comes from a **store**, not `Generate()` — verify by restarting the app twice and confirming the pairing survives
 - [ ] The same identity and pairing store are shared across dial and listen modes
 - [ ] `PairingRecordStore` is configured and writes somewhere durable

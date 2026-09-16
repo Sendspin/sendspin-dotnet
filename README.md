@@ -29,21 +29,19 @@ Pick the line that matches your server.
 
 | SDK | Transport | Requires | Status |
 |---|---|---|---|
-| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin >= 7.0.0`, and `>= 9.0.0` to pair | Current |
+| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin` 10.0.0 line (object-keyed pair methods) | Current |
 | **9.x** | Plaintext | Any `aiosendspin` | Maintained for pre-encryption servers |
 
-The floor differs by capability. Connecting and playing back, including over unpaired
-access, works against `aiosendspin >= 7.0.0`. **Pairing needs `>= 9.0.0`**: that is the
-first release carrying the current pairing wire shape, where `server/activate` names the
-method in a `pairing` object rather than a flat `selected_pair_method` field. Against 7.0.0
-or 8.0.0 a 10.x client refuses every pairing attempt with `method_not_supported`, because
-the method it is offered reads as absent. The interop workflow for this line runs against
-the aiosendspin commit the unpublished 10.0.0 release targets, because the pairing wire
-the 10.x client sends (spec PR #179's object-keyed `supported_pair_methods` and the
-pairing-code method names) exists only there, with the reference server's model patched
-in CI to accept the object-keyed shape it has not yet adopted; the 9.x line runs against
-9.1.1. So the 9.0.0 pairing floor and the 7.0.0 playback floor both rest on inspection
-rather than CI.
+There is one floor, and it gates connecting as much as pairing. Every encrypted
+`client/hello` carries the object-keyed `supported_pair_methods` introduced by spec PR #179
+(a map keyed by method name, replacing the older list of descriptors), so a server that does
+not accept that shape rejects the hello outright — which stops playback, not just pairing.
+Only the 10.0.0 line of `aiosendspin` accepts that shape — its `main` branch has done so
+since #354. The release is unpublished at the time of writing, and the draft commit the
+interop workflow pins predates that change and still parses the older list shape, so the
+workflow patches its pair-method parsing to match (see
+[`.github/workflows/interop.yml`](.github/workflows/interop.yml)); the latest published
+release, 9.1.1, rejects the hello.
 
 The 9.x line stays maintained for now; it is not end-of-life. If you are on 9.x and your
 server supports the encrypted protocol, see
@@ -130,8 +128,8 @@ try
 }
 catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.LegacyServer)
 {
-    // The server predates the encrypted protocol. Upgrade it to aiosendspin >= 7.0.0,
-    // or pin this SDK to the 9.x line. Retrying cannot help.
+    // The server predates the encrypted protocol. Upgrade it to the aiosendspin 10.0.0
+    // line, or pin this SDK to the 9.x line. Retrying cannot help.
     Console.Error.WriteLine(ex.Message);
     return;
 }

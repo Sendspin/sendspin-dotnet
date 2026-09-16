@@ -181,8 +181,8 @@ try
 }
 catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.LegacyServer)
 {
-    // The server predates the encrypted protocol. Upgrade it to aiosendspin >= 7.0.0, or
-    // pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
+    // The server predates the encrypted protocol. Upgrade it to the aiosendspin 10.0.0
+    // line, or pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
 }
 catch (SendspinHandshakeException ex)   // HandshakeRejected
 {
