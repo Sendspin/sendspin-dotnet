@@ -29,9 +29,10 @@ our host responds — the same path a real server-initiated deployment uses.
 ## Running locally
 
 ```bash
-# Install the pinned aiosendspin 10.0.0 draft commit and apply the pair-method patch
-# that .github/workflows/interop.yml uses (the published releases reject the object-keyed
-# client/hello), then run a scenario:
+# Mirror .github/workflows/interop.yml: install the pinned aiosendspin 10.0.0 draft
+# commit, patch its pair-method parsing to the object shape, then run a scenario.
+pip install "aiosendspin[server] @ git+https://github.com/Sendspin/aiosendspin@892af8c87b453442600a4d17f9eb32862fdb5593"
+python tools/interop/patch_aiosendspin_pair_methods.py
 bash tools/interop/run.sh unpaired
 bash tools/interop/run.sh pairing
 ```
