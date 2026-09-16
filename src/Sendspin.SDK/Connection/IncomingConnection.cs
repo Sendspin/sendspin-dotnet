@@ -305,10 +305,14 @@ public sealed class IncomingConnection : ISendspinConnection
             _logger.LogWarning("{Message}", failure?.Message
                 ?? $"Wire framing failure on an established session: {fatal}; closing connection");
 
-            // Per spec: close without sending an application-level error message.
+            // Per spec: close without sending an application-level error message. Publish the
+            // terminal state (carrying the classified exception) BEFORE starting the close:
+            // CloseSocketSafeAsync can bring the peer's Close frame back through OnClose, whose own
+            // SetState(Disconnected) would otherwise win and make this one no-op, dropping the
+            // exception. CloseWithoutGoodbyeAsync uses this same order.
             _isOpen = false;
-            _ = CloseSocketSafeAsync();
             SetState(ConnectionState.Disconnected, failure?.Message ?? fatal, failure);
+            _ = CloseSocketSafeAsync();
             return;
         }
 
