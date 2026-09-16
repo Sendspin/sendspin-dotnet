@@ -578,8 +578,10 @@ public enum SyncCorrectionMode
 
     /// <summary>
     /// Dropping samples to catch up (playing too slow), one frame every N.
-    /// Reached only when <see cref="SyncCorrectionOptions.ResamplingThresholdMicroseconds"/>
-    /// is lowered below the hard-sync threshold, or that tier is disabled.
+    /// Reached when the error is above the derived
+    /// <see cref="SyncCorrectionOptions.ResamplingThresholdMicroseconds"/> and the one-shot snap
+    /// tier is not taking it — because that tier is disabled, has stood down, or the error is past
+    /// the re-anchor ceiling.
     /// </summary>
     Dropping,
 
