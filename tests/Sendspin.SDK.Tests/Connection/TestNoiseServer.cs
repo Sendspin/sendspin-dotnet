@@ -129,7 +129,7 @@ internal sealed class TestNoiseServer
         string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = _advertisedPskId,
-            ["psk_category"] = "lt", // see Respond for both extra members
+            ["psk_category"] = "lt", // alternate initial handshake; see Respond
             ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
@@ -154,6 +154,8 @@ internal sealed class TestNoiseServer
         string payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = NoiseConstants.DerivePskId(newPsk),
+            ["psk_category"] = "lt", // re-handshake message 1; see Respond
+            ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(payload), buf);
