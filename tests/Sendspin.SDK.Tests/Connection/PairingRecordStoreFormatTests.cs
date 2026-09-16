@@ -23,7 +23,8 @@ public class PairingRecordStoreFormatTests : IDisposable
     public void AFileWrittenByAnEarlierVersion_StillLoads()
     {
         // Written by hand in the pre-source-gen shape: PascalCase members, exactly what
-        // JsonSerializer.Serialize produced with default options.
+        // JsonSerializer.Serialize produced with default options. The bare Used flag is the
+        // pre-#183 shape, before the store needed a timestamp to evict by.
         var psk = Enumerable.Repeat((byte)0x42, 32).ToArray();
         string pskB64 = Convert.ToBase64String(psk).TrimEnd('=').Replace('+', '-').Replace('/', '_');
         File.WriteAllText(
@@ -35,7 +36,10 @@ public class PairingRecordStoreFormatTests : IDisposable
         var record = Assert.Single(store.List());
         Assert.Equal(PskCategory.LongTerm, record.Category);
         Assert.Null(record.ServerId);
-        Assert.True(record.Used);
+
+        // Used-at-an-unknown-time, so it sorts ahead of every dated record for eviction rather
+        // than being promoted to never-used.
+        Assert.Equal(DateTimeOffset.MinValue, record.LastUsedUtc);
         Assert.Equal(psk, record.Psk.ToArray());
     }
 
@@ -46,15 +50,34 @@ public class PairingRecordStoreFormatTests : IDisposable
         // expecting the established shape. Asserted on the raw text, not by round-tripping.
         var store = new FilePairingRecordStore(_path);
         store.Upsert(new PairingRecord(
-            Enumerable.Repeat((byte)0x42, 32).ToArray(), PskCategory.LongTerm, ServerId: null));
+            Enumerable.Repeat((byte)0x42, 32).ToArray(),
+            PskCategory.LongTerm,
+            "server-1",
+            DateTimeOffset.UnixEpoch));
 
         string written = File.ReadAllText(_path);
 
         Assert.Contains("\"Psk\":", written, StringComparison.Ordinal);
         Assert.Contains("\"Category\":", written, StringComparison.Ordinal);
-        Assert.Contains("\"Used\":", written, StringComparison.Ordinal);
+        Assert.Contains("\"LastUsed\":", written, StringComparison.Ordinal);
+
+        // The retired flag is no longer written; it is read only to migrate an old file.
+        Assert.DoesNotContain("\"Used\":", written, StringComparison.Ordinal);
         Assert.DoesNotContain("\"psk\":", written, StringComparison.Ordinal);
         Assert.DoesNotContain("server_id", written, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARecordWrittenByThisVersion_RoundTripsItsLastUsedInstant()
+    {
+        var when = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
+        var store = new FilePairingRecordStore(_path);
+        store.Upsert(new PairingRecord(
+            Enumerable.Repeat((byte)0x11, 32).ToArray(), PskCategory.LongTerm, "server-1", when));
+
+        var reloaded = Assert.Single(new FilePairingRecordStore(_path).List());
+        Assert.Equal(when, reloaded.LastUsedUtc);
+        Assert.Equal("server-1", reloaded.ServerId);
     }
 
     public void Dispose()

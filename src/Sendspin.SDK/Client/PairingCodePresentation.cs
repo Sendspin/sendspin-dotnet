@@ -1,21 +1,35 @@
 namespace Sendspin.SDK.Client;
 
 /// <summary>
-/// A dynamic pairing pairing code to present to the operator, with the server's language hint.
+/// A pairing-code presentation for the operator, including any format and language hints the
+/// protocol supplied.
 /// </summary>
-/// <param name="PairingCode">The derived pairing code, exactly the session's <c>pin_length</c> digits.</param>
+/// <param name="PairingCode">
+/// The derived pairing code: 6 digits for a dynamic pairing code, 8 for a static one.
+/// </param>
 /// <param name="Languages">
-/// BCP 47 tags in descending operator preference from the activation, or null when the server
-/// sent none. Informational: emitting in another language is never a protocol error. Match
+/// BCP 47 tags in descending operator preference from <c>server/hello</c>, or null when the
+/// server sent none. Informational: emitting in another language is never a protocol error. Match
 /// with RFC 4647 Lookup against the languages the application can actually speak, falling back
 /// to its own default when nothing matches.
 /// </param>
 public sealed record PairingCodePresentation(string PairingCode, IReadOnlyList<string>? Languages)
 {
     /// <summary>
+    /// The dynamic pairing-code format the server selected from the client's advertised
+    /// descriptor, or null when this presentation was constructed without one.
+    /// </summary>
+    /// <remarks>
+    /// The SDK sets this for every <see cref="SendspinClientOptions.PresentPairingCodeAsync"/>
+    /// callback it raises; today that is always <c>digits</c>, but surfacing the selection keeps
+    /// the application-facing presentation aligned with the wire contract.
+    /// </remarks>
+    public string? Format { get; init; }
+
+    /// <summary>
     /// Group sizes the spec recommends for each pairing code length, indexed by length. Entries below
-    /// index 4 are unreachable: <c>min_pin_length</c> is bounded to 4-12, and the pairing code is derived
-    /// at the negotiated length.
+    /// index 4 are unreachable: the shortest code either flow produces is the 6-digit dynamic
+    /// pairing code.
     /// </summary>
     /// <remarks>
     /// This is the table the spec prints, not a derivation of it. The stated rule -- the most

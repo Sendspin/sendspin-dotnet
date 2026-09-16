@@ -71,6 +71,20 @@ public sealed class ServerHelloPayload
     public string? Name { get; set; }
 
     /// <summary>
+    /// BCP 47 language tags in descending operator preference (e.g. <c>["ca", "es", "en"]</c>)
+    /// — a hint about the languages the operator understands, informing any operator-facing
+    /// output. Optional; null when the server sends none.
+    /// </summary>
+    /// <remarks>
+    /// The SDK forwards this to <see cref="Client.PairingCodePresentation.Languages"/>, which is
+    /// where it was read from before the spec moved the hint off <c>server/activate</c>'s
+    /// pairing object onto this message.
+    /// </remarks>
+    [JsonPropertyName("languages")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Languages { get; set; }
+
+    /// <summary>
     /// Protocol version. Not sent by an encrypted server — the version is negotiated in
     /// <c>client/init</c>/<c>server/init</c>. See the remarks on <see cref="ServerHelloPayload"/>.
     /// </summary>

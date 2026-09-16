@@ -25,6 +25,11 @@ public class SendspinHostServiceArbitrationTests
 
     private static readonly byte[] TestPsk = Enumerable.Repeat((byte)0x42, 32).ToArray();
 
+    // A second, Pairing-category credential: since spec #183 a long-term (paired) PSK admits no
+    // pairing activity at all, so a connection whose activities are ["pairing"] has to be keyed
+    // with the pairing PSK to get past the admissibility table.
+    private static readonly byte[] PairingPsk = Enumerable.Repeat((byte)0x43, 32).ToArray();
+
     private static async Task<SendspinHostService> StartHostAsync(string? seed = null)
     {
         var records = new InMemoryPairingRecordStore();
@@ -35,6 +40,7 @@ public class SendspinHostServiceArbitrationTests
         // deliberately unbound: each FakeServer generates a fresh server identity, and a
         // bound record whose server_id differs fails the handshake.
         records.Upsert(new PairingRecord(TestPsk, PskCategory.LongTerm));
+        records.Upsert(new PairingRecord(PairingPsk, PskCategory.Pairing));
 
         var host = new SendspinHostService(
             NullLoggerFactory.Instance,
@@ -148,7 +154,7 @@ public class SendspinHostServiceArbitrationTests
         // own server reconnecting, which drops the previous socket as stale.
         await using var host = await StartHostAsync();
         var keys = KeyPair.Generate();
-        await using var pairing = new FakeServer(TestPsk, ["pairing"], keys);
+        await using var pairing = new FakeServer(PairingPsk, ["pairing"], keys);
         await pairing.ConnectAsync(host.ListeningPort);
         await WaitForServerConnectedAsync(host, pairing.ServerId);
 
@@ -172,7 +178,7 @@ public class SendspinHostServiceArbitrationTests
         await existing.ConnectAsync(host.ListeningPort);
         await WaitForServerConnectedAsync(host, existing.ServerId);
 
-        await using var incoming = new FakeServer(TestPsk, ["pairing"]);
+        await using var incoming = new FakeServer(PairingPsk, ["pairing"]);
         await incoming.ConnectAsync(host.ListeningPort);
 
         Assert.True(await incoming.WaitForPairAbortAsync("concurrent_attempt", Timeout));

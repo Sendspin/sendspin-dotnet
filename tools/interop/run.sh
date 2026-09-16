@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Live interop harness: runs the .NET SDK host against the aiosendspin 9.1.1 reference
-# server for one scenario. Starts the .NET host (it prints its listening port), then
+# Live interop harness: runs the .NET SDK host against the aiosendspin reference server
+# pinned in .github/workflows/interop.yml (the 10.0.0 draft's commit) for one scenario. Starts the .NET host (it prints its listening port), then
 # dials it from the Python server, and checks both sides report success.
 #
 # Usage: run.sh <scenario>              scenario: unpaired | pairing | static-pin
-# Env:   PYTHON  - python interpreter with aiosendspin[server]==9.1.1 (default: python3)
+# Env:   PYTHON  - python interpreter with aiosendspin[server] at that pin (default: python3)
 set -euo pipefail
 
 SCENARIO="${1:-unpaired}"

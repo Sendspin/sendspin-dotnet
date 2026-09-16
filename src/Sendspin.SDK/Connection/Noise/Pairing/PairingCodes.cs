@@ -41,17 +41,25 @@ internal static class PairingCodes
     }
 
     /// <summary>
-    /// Derives the dynamic pairing code: <c>SHA-256("sendspin-pin-derive-v1" || h || nonce_A ||
-    /// nonce_B)</c> as an unsigned big-endian integer mod 10^L, zero-padded to L digits.
+    /// The number of decimal digits in a dynamic pairing code in the <c>digits</c> emission
+    /// format. Fixed by the spec: the negotiable <c>pin_length</c> is gone, so there is no
+    /// per-activation length any more.
+    /// </summary>
+    internal const int DynamicPairingCodeLength = 6;
+
+    /// <summary>
+    /// Derives the dynamic pairing code: <c>SHA-256("sendspin-pairing-code-derive-v1" || h ||
+    /// nonce_A || nonce_B)</c> as an unsigned big-endian integer mod 10^L, zero-padded to L digits.
     /// </summary>
     internal static string DerivePairingCode(
         ReadOnlySpan<byte> handshakeHash, ReadOnlySpan<byte> nonceA, ReadOnlySpan<byte> nonceB, int length)
     {
-        byte[] input = new byte[22 + handshakeHash.Length + nonceA.Length + nonceB.Length];
-        Encoding.ASCII.GetBytes("sendspin-pin-derive-v1", input);
-        handshakeHash.CopyTo(input.AsSpan(22));
-        nonceA.CopyTo(input.AsSpan(22 + handshakeHash.Length));
-        nonceB.CopyTo(input.AsSpan(22 + handshakeHash.Length + nonceA.Length));
+        const int LabelLength = 31; // "sendspin-pairing-code-derive-v1"
+        byte[] input = new byte[LabelLength + handshakeHash.Length + nonceA.Length + nonceB.Length];
+        Encoding.ASCII.GetBytes("sendspin-pairing-code-derive-v1", input);
+        handshakeHash.CopyTo(input.AsSpan(LabelLength));
+        nonceA.CopyTo(input.AsSpan(LabelLength + handshakeHash.Length));
+        nonceB.CopyTo(input.AsSpan(LabelLength + handshakeHash.Length + nonceA.Length));
 
         var digest = new BigInteger(SHA256.HashData(input), isUnsigned: true, isBigEndian: true);
         BigInteger pin = digest % BigInteger.Pow(10, length);
@@ -91,7 +99,7 @@ internal static class PairingCodes
 /// </summary>
 public interface IPairingCodeLockoutStore
 {
-    /// <summary>The failure counter for a method ('static_pin' or 'dynamic_pin').</summary>
+    /// <summary>The failure counter for a method ('static_pairing_code' or 'dynamic_pairing_code').</summary>
     int GetFailures(string method);
 
     /// <summary>Sets the failure counter for a method.</summary>

@@ -48,7 +48,7 @@ var caps = new ClientCapabilities
 
 if (scenario == "static-pin")
 {
-    caps.PairingCodeMethods.Add("static_pin");
+    caps.PairingCodeMethods.Add("static_pairing_code");
     caps.StaticPairingCode = secret;
 }
 
@@ -58,7 +58,7 @@ if (scenario == "source")
     caps.SourceRoleSupport = new SourceRoleSupport();
 }
 
-// Every static_pin attempt is gesture-gated, so the window is what lets it proceed at all.
+// Every static_pairing_code attempt is gesture-gated, so the window is what lets it proceed at all.
 var window = new PairingWindow();
 
 await using var host = new SendspinHostService(

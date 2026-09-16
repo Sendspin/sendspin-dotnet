@@ -16,6 +16,9 @@ namespace Sendspin.SDK.Connection.Noise.Pairing;
 /// </remarks>
 public sealed class FilePairingCodeLockoutStore : IPairingCodeLockoutStore
 {
+    private const string LegacyDynamicPairingCodeMethod = "dynamic_pin";
+    private const string LegacyStaticPairingCodeMethod = "static_pin";
+
     private readonly string _path;
     private readonly ILogger _logger;
     private readonly Dictionary<string, int> _failures;
@@ -68,8 +71,9 @@ public sealed class FilePairingCodeLockoutStore : IPairingCodeLockoutStore
 
         try
         {
-            return JsonSerializer.Deserialize(text, PairingCodeLockoutStoreJsonContext.Default.DictionaryStringInt32)
-                ?? new Dictionary<string, int>();
+            return MigrateLegacyKeys(
+                JsonSerializer.Deserialize(text, PairingCodeLockoutStoreJsonContext.Default.DictionaryStringInt32)
+                ?? new Dictionary<string, int>());
         }
         catch (JsonException ex)
         {
@@ -83,5 +87,33 @@ public sealed class FilePairingCodeLockoutStore : IPairingCodeLockoutStore
                 + "failures. Every pairing code method returns to its un-escalated state.", path);
             return new Dictionary<string, int>();
         }
+    }
+
+    private static Dictionary<string, int> MigrateLegacyKeys(Dictionary<string, int> failures)
+    {
+        if (failures.Count == 0)
+        {
+            return failures;
+        }
+
+        var migrated = new Dictionary<string, int>(failures);
+        MigrateLegacyKey(migrated, LegacyDynamicPairingCodeMethod, "dynamic_pairing_code");
+        MigrateLegacyKey(migrated, LegacyStaticPairingCodeMethod, "static_pairing_code");
+        return migrated;
+    }
+
+    private static void MigrateLegacyKey(
+        Dictionary<string, int> failures,
+        string legacyMethod,
+        string currentMethod)
+    {
+        if (!failures.Remove(legacyMethod, out int legacyFailures))
+        {
+            return;
+        }
+
+        failures[currentMethod] = failures.TryGetValue(currentMethod, out int currentFailures)
+            ? Math.Max(currentFailures, legacyFailures)
+            : legacyFailures;
     }
 }

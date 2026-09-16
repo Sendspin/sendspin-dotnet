@@ -44,10 +44,10 @@ public class PairingWindowEndToEndTests
         await using var incomingCleanup = incoming;
         await using var linkCleanup = link;
 
-        // Activation: static_pin is always gesture-gated, and the window starts closed, so
+        // Activation: static_pairing_code is always gesture-gated, and the window starts closed, so
         // the attempt is deferred -- client/pair-pending goes out, client/pair-init must not.
         link.SendServerJson(
-            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pin"}}}""");
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pairing_code"}}}""");
 
         var pending = await link.NextMessageAsync<ClientPairPendingMessage>();
         Assert.Equal(1, pending.Payload.PairingIndex);
@@ -120,7 +120,7 @@ public class PairingWindowEndToEndTests
             PairingRecordStore = store,
             Capabilities = new ClientCapabilities
             {
-                PairingCodeMethods = new List<string> { "static_pin" },
+                PairingCodeMethods = new List<string> { "static_pairing_code" },
                 StaticPairingCode = StaticPairingCode,
             },
             PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),

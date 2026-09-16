@@ -28,7 +28,7 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
         SourceSupport? sourceSupport = null,
         string? trustLevel = null,
         UnpairedAccess? unpairedAccess = null,
-        List<PairMethodDescriptor>? supportedPairMethods = null)
+        Dictionary<string, PairMethodDescriptor>? supportedPairMethods = null)
     {
         return new ClientHelloMessage
         {
@@ -69,12 +69,14 @@ public sealed class ClientHelloPayload
     public string? TrustLevel { get; init; }
 
     /// <summary>
-    /// Whether this client currently admits unpaired access. Sent only under the
-    /// encrypted protocol.
+    /// The pairing methods this client currently offers, keyed by method identifier
+    /// (<see cref="PairMethods"/>), each value a pair-method descriptor. Sent only under the
+    /// encrypted protocol. Every client offers at least <c>pairing_psk</c>, and at most one
+    /// pairing-code method may be listed.
     /// </summary>
     [JsonPropertyName("supported_pair_methods")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public List<PairMethodDescriptor>? SupportedPairMethods { get; init; }
+    public Dictionary<string, PairMethodDescriptor>? SupportedPairMethods { get; init; }
 
     /// <summary>
     /// Whether this client currently admits unpaired access (encrypted protocol only).
