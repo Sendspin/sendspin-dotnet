@@ -36,8 +36,10 @@ There is one floor, and it gates connecting as much as pairing. Every encrypted
 `client/hello` carries the object-keyed `supported_pair_methods` introduced by spec PR #179
 (a map keyed by method name, replacing the older list of descriptors), so a server that does
 not accept that shape rejects the hello outright — which stops playback, not just pairing.
-Only the 10.0.0 line of `aiosendspin` accepts it natively. That release is unpublished at
-the time of writing, so the interop workflow pins the draft commit it targets (see
+Only the 10.0.0 line of `aiosendspin` accepts that shape — its `main` branch has done so
+since #354. The release is unpublished at the time of writing, and the draft commit the
+interop workflow pins predates that change and still parses the older list shape, so the
+workflow patches its pair-method parsing to match (see
 [`.github/workflows/interop.yml`](.github/workflows/interop.yml)); the latest published
 release, 9.1.1, rejects the hello.
 
@@ -126,8 +128,8 @@ try
 }
 catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.LegacyServer)
 {
-    // The server predates the encrypted protocol. Upgrade it to aiosendspin >= 7.0.0,
-    // or pin this SDK to the 9.x line. Retrying cannot help.
+    // The server predates the encrypted protocol. Upgrade it to the aiosendspin 10.0.0
+    // line, or pin this SDK to the 9.x line. Retrying cannot help.
     Console.Error.WriteLine(ex.Message);
     return;
 }
