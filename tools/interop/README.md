@@ -1,9 +1,10 @@
 # Live interop harness
 
-Runs the .NET SDK against the [`aiosendspin`](https://pypi.org/project/aiosendspin/)
-**7.0.0** reference server over a real WebSocket, exercising the encrypted protocol
-end to end. This is the conformance gate that turns the loopback/known-answer-vector
-confidence into real-server-verified confidence.
+Runs the .NET SDK against the pinned [`aiosendspin`](https://pypi.org/project/aiosendspin/)
+10.0.0 draft commit (the one [`.github/workflows/interop.yml`](../../.github/workflows/interop.yml)
+installs and patches) over a real WebSocket, exercising the encrypted protocol end to end.
+This is the conformance gate that turns the loopback/known-answer-vector confidence into
+real-server-verified confidence.
 
 ## Topology
 
@@ -28,7 +29,9 @@ our host responds — the same path a real server-initiated deployment uses.
 ## Running locally
 
 ```bash
-pip install "aiosendspin[server]==7.0.0"
+# Install the pinned aiosendspin 10.0.0 draft commit and apply the pair-method patch
+# that .github/workflows/interop.yml uses (the published releases reject the object-keyed
+# client/hello), then run a scenario:
 bash tools/interop/run.sh unpaired
 bash tools/interop/run.sh pairing
 ```

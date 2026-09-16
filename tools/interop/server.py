@@ -15,7 +15,8 @@ and drives one scenario against it:
                arrive — the server's start command, the client's client_stream/start, and
                real audio over the wire.
 
-Prints JSON result lines; exits non-zero on failure. Requires aiosendspin[server]==9.0.0.
+Prints JSON result lines; exits non-zero on failure. Requires the pinned aiosendspin 10.0.0
+draft commit (see .github/workflows/interop.yml).
 
 Usage: server.py <scenario> <client_url> [secret]
        secret is the pairing PSK as hex for 'pairing', or the 8-digit PIN for 'static-pin'.
