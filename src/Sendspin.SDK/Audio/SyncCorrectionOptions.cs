@@ -182,7 +182,7 @@ public sealed class SyncCorrectionOptions
     /// cannot re-describe a band the clamped correction still cannot reach. Rate adjustment is
     /// inaudible (bounded by the cap) while frame drop/insert is audible as stutter, so moderate
     /// errors route through resampling; both are bounded by the same ±0.5% cap, and the drop/insert
-    /// interval is floored at <c>ceil(1 / MaxSpeedCorrection)</c> frames, the per-chunk bound
+    /// interval is floored at <c>ceil(1 / EffectiveMaxSpeedCorrection)</c> frames, the per-chunk bound
     /// <c>N ≤ floor(0.005 × samples_in_chunk)</c> from roles/player/v1.md:174 expressed as a rate.
     /// With the default 5 ms <see cref="HardSyncThresholdMicroseconds"/> below this boundary, the
     /// drop/insert band is reached only when the snap tier is disabled, has stood down, or the
