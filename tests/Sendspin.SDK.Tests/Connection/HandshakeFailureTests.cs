@@ -423,9 +423,15 @@ public class HandshakeFailureTests
     /// so a post-call read would collapse both cases below into the first.
     /// </summary>
     [Theory]
-    [InlineData(false, "handshake rejected")]
-    [InlineData(true, "established session")]
-    public async Task IncomingConnection_LogsClassifiedFailure_OnFramingFatal(bool transportReady, string expected)
+    [InlineData(false, null, "expected server/init message", "handshake rejected", HandshakeFailureKind.HandshakeRejected)]
+    [InlineData(false, HandshakeFailureKind.ServerError, "unsupported_suite", "unsupported_suite", HandshakeFailureKind.ServerError)]
+    [InlineData(true, null, "expected server/init message", "established session", null)]
+    public async Task IncomingConnection_LogsClassifiedFailure_OnFramingFatal(
+        bool transportReady,
+        HandshakeFailureKind? fatalKind,
+        string fatalReason,
+        string expectedMessage,
+        HandshakeFailureKind? expectedExceptionKind)
     {
         await using var server = new SimpleWebSocketServer();
         server.Start(0);
@@ -442,13 +448,13 @@ public class HandshakeFailureTests
         await using var incoming = new IncomingConnection(
             logger,
             serverSideSocket,
-            new StubFraming { IsTransportReady = transportReady, FatalOnInbound = "expected server/init message" });
+            new StubFraming { IsTransportReady = transportReady, FatalOnInbound = fatalReason, FatalKindOnInbound = fatalKind });
 
-        var disconnected = new TaskCompletionSource<bool>();
+        var disconnected = new TaskCompletionSource<ConnectionStateChangedEventArgs>();
         incoming.StateChanged += (_, e) =>
         {
             if (e.NewState == ConnectionState.Disconnected)
-                disconnected.TrySetResult(true);
+                disconnected.TrySetResult(e);
         };
 
         await incoming.StartAsync();
@@ -457,11 +463,23 @@ public class HandshakeFailureTests
         await client.SendAsync(
             Encoding.UTF8.GetBytes("{}"), WebSocketMessageType.Text, endOfMessage: true, CancellationToken.None);
 
-        await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var final = await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         var warning = Assert.Single(logger.Entries, e => e.Level == LogLevel.Warning);
+        Assert.Contains(expectedMessage, warning.Message, StringComparison.OrdinalIgnoreCase);
 
-        Assert.Contains(expected, warning.Message, StringComparison.OrdinalIgnoreCase);
+        // A handshake-time fatal must reach the application as a classified exception on the
+        // event, not just the log. An established-session fatal is not a rejected handshake and
+        // carries none — the dial path treats it the same way.
+        if (expectedExceptionKind is { } kind)
+        {
+            var ex = Assert.IsType<SendspinHandshakeException>(final.Exception);
+            Assert.Equal(kind, ex.Kind);
+        }
+        else
+        {
+            Assert.Null(final.Exception);
+        }
     }
 
     /// <summary>
