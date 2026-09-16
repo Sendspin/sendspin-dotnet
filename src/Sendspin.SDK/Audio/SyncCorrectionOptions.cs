@@ -103,7 +103,9 @@ public sealed class SyncCorrectionOptions
     /// <summary>
     /// Target time, in seconds, over which sync error should be corrected.
     /// Smaller values correct faster but can overshoot on jittery platforms.
-    /// Default 3.0; the Python CLI uses 2.0.
+    /// Default 3.0; the Python CLI uses 2.0. Also co-derives
+    /// <see cref="ResamplingThresholdMicroseconds"/> (cap × this target), so lowering it tightens
+    /// the smooth-correction band as well as speeding convergence.
     /// </summary>
     public double CorrectionTargetSeconds { get; set; } = 3.0;
 
@@ -126,9 +128,9 @@ public sealed class SyncCorrectionOptions
     /// The tier sits between the rate/drop-insert band and
     /// <see cref="ReanchorThresholdMicroseconds"/>: errors above the re-anchor
     /// threshold are catastrophic and clear the buffer instead. Because the default
-    /// (5 ms) is below <see cref="ResamplingThresholdMicroseconds"/>, the discrete
-    /// drop/insert band is not reached with default settings — it is used only when a
-    /// caller lowers the resampling threshold below this one.
+    /// (5 ms) is below the derived <see cref="ResamplingThresholdMicroseconds"/> (15 ms),
+    /// the discrete drop/insert band is not reached with default settings — it is used
+    /// only when this tier is disabled or has stood down.
     /// </para>
     /// <para>
     /// The snap is applied by <see cref="TimedAudioBuffer"/> itself on both the default
@@ -164,20 +166,30 @@ public sealed class SyncCorrectionOptions
     public long LateChunkToleranceMicroseconds { get; set; } = 5_000;
 
     /// <summary>
-    /// Below this error magnitude the correction is a smooth rate adjustment;
-    /// above it the correction switches to frame drop/insert. Default 100 ms.
+    /// Gets the error magnitude below which the correction is a smooth rate adjustment; above it
+    /// the correction switches to frame drop/insert. Derived — not settable — as
+    /// <see cref="EffectiveMaxSpeedCorrection"/> × <see cref="CorrectionTargetSeconds"/>, the
+    /// largest error the continuous tier can actually close at the cap: 15 ms with the defaults.
     /// </summary>
     /// <remarks>
-    /// Rate adjustment is inaudible (bounded by <see cref="MaxSpeedCorrection"/>),
-    /// while frame drop/insert is audible as stutter, so moderate errors route through
-    /// resampling. Both are bounded by the same ±0.5% cap: the drop/insert interval is
-    /// floored at <c>ceil(1 / MaxSpeedCorrection)</c> frames, which is the per-chunk
-    /// bound <c>N ≤ floor(0.005 × samples_in_chunk)</c> from roles/player/v1.md:174
-    /// expressed as a rate. <see cref="HardSyncThresholdMicroseconds"/> takes
-    /// precedence above 5 ms by default, so this band is only reached when that tier
-    /// is disabled or this threshold is lowered below it.
+    /// This was once an independent option defaulting to 100 ms, which let it describe a band far
+    /// wider than the continuous tier can reach — a 50 ms error inside it was tagged "worth
+    /// trimming smoothly" while the ±0.5% cap could only close 15 ms of it, so once the snap tier
+    /// stood down (<see cref="HardSyncStallDetector"/>) the rate tier was handed an error it
+    /// provably could not close (issue #267). Deriving the boundary from what the tier can spend
+    /// makes that incoherence unrepresentable. It reads <see cref="EffectiveMaxSpeedCorrection"/>
+    /// rather than the configured <see cref="MaxSpeedCorrection"/> so an over-cap configuration
+    /// cannot re-describe a band the clamped correction still cannot reach. Rate adjustment is
+    /// inaudible (bounded by the cap) while frame drop/insert is audible as stutter, so moderate
+    /// errors route through resampling; both are bounded by the same ±0.5% cap, and the drop/insert
+    /// interval is floored at <c>ceil(1 / EffectiveMaxSpeedCorrection)</c> frames, the per-chunk bound
+    /// <c>N ≤ floor(0.005 × samples_in_chunk)</c> from roles/player/v1.md:174 expressed as a rate.
+    /// With the default 5 ms <see cref="HardSyncThresholdMicroseconds"/> below this boundary, the
+    /// drop/insert band is reached only when the snap tier is disabled, has stood down, or the
+    /// error is past the re-anchor ceiling.
     /// </remarks>
-    public long ResamplingThresholdMicroseconds { get; set; } = 100_000;
+    public long ResamplingThresholdMicroseconds =>
+        (long)Math.Round(EffectiveMaxSpeedCorrection * CorrectionTargetSeconds * 1_000_000.0);
 
     /// <summary>
     /// Above this error magnitude the buffer is cleared and sync is restarted.
@@ -291,17 +303,14 @@ public sealed class SyncCorrectionOptions
                 nameof(CorrectionTargetSeconds));
         }
 
-        if (ResamplingThresholdMicroseconds < 0)
-        {
-            throw new ArgumentException(
-                "ResamplingThresholdMicroseconds must be non-negative.",
-                nameof(ResamplingThresholdMicroseconds));
-        }
-
+        // ResamplingThresholdMicroseconds is derived and non-negative by construction (the speed
+        // cap and target above are already validated positive), so it needs no bound of its own —
+        // only that the catastrophic tier stays above it.
         if (ReanchorThresholdMicroseconds <= ResamplingThresholdMicroseconds)
         {
             throw new ArgumentException(
-                "ReanchorThresholdMicroseconds must be greater than ResamplingThresholdMicroseconds.",
+                "ReanchorThresholdMicroseconds must be greater than the derived resampling band " +
+                "(EffectiveMaxSpeedCorrection × CorrectionTargetSeconds).",
                 nameof(ReanchorThresholdMicroseconds));
         }
 
@@ -374,7 +383,6 @@ public sealed class SyncCorrectionOptions
         CorrectionTargetSeconds = CorrectionTargetSeconds,
         HardSyncThresholdMicroseconds = HardSyncThresholdMicroseconds,
         LateChunkToleranceMicroseconds = LateChunkToleranceMicroseconds,
-        ResamplingThresholdMicroseconds = ResamplingThresholdMicroseconds,
         ReanchorThresholdMicroseconds = ReanchorThresholdMicroseconds,
         ReanchorCooldownMicroseconds = ReanchorCooldownMicroseconds,
         StartupGracePeriodMicroseconds = StartupGracePeriodMicroseconds,
@@ -394,10 +402,10 @@ public sealed class SyncCorrectionOptions
     /// Gets options matching the Python CLI defaults (more aggressive).
     /// </summary>
     /// <remarks>
-    /// The CLI converges faster (shorter correction target, tighter resampling band),
-    /// which works well on platforms with precise timing (hardware audio interfaces,
-    /// etc.). It does <em>not</em> loosen the dead band or the speed cap: both are
-    /// spec conformance points, not platform tuning.
+    /// The CLI converges faster (shorter correction target, and therefore a tighter derived
+    /// resampling band — 10 ms against Windows' 15 ms), which works well on platforms with precise
+    /// timing (hardware audio interfaces, etc.). It does <em>not</em> loosen the dead band or the
+    /// speed cap: both are spec conformance points, not platform tuning.
     /// </remarks>
     public static SyncCorrectionOptions CliDefaults => new()
     {
@@ -405,7 +413,6 @@ public sealed class SyncCorrectionOptions
         MaxSpeedCorrection = SpecMaxSpeedCorrection,
         CorrectionTargetSeconds = 2.0,    // 2s vs Windows 3s
         HardSyncThresholdMicroseconds = 5_000,
-        ResamplingThresholdMicroseconds = 15_000,
         ReanchorThresholdMicroseconds = 500_000,
         StartupGracePeriodMicroseconds = 500_000,
         ScheduledStartGraceWindowMicroseconds = 10_000,

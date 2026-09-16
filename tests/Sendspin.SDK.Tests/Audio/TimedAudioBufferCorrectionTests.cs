@@ -345,12 +345,12 @@ public class TimedAudioBufferCorrectionTests
     [Fact]
     public void DropInsertEpisode_NeverExceedsSpecSpeedCapOverSlidingWindow()
     {
-        // Route a large error through the discrete drop/insert band by collapsing the
-        // resampling band and lifting the snap out of the way, then check the implied speed
-        // over every sliding 150 ms window — the window the spec measures over.
+        // Route a large error through the discrete drop/insert band by lifting the snap out of the
+        // way; a 100 ms stall is well above the derived 15 ms resampling band, so it lands in
+        // drop/insert. Then check the implied speed over every sliding 150 ms window — the window
+        // the spec measures over.
         var options = new SyncCorrectionOptions
         {
-            ResamplingThresholdMicroseconds = 1_000,
             HardSyncThresholdMicroseconds = 300_000,
         };
         using var player = new Player(options).Settled();
@@ -383,7 +383,6 @@ public class TimedAudioBufferCorrectionTests
         var options = new SyncCorrectionOptions
         {
             MaxSpeedCorrection = 0.02,
-            ResamplingThresholdMicroseconds = 1_000,
             HardSyncThresholdMicroseconds = 300_000,
         };
 
@@ -784,7 +783,11 @@ public class TimedAudioBufferCorrectionTests
 
         // A hard-sync verdict reaches an external corrector as None at rate 1.0 — stand down and
         // let the buffer splice. Once the tier gives up, the host must be told to correct again.
-        Assert.Equal(SyncCorrectionMode.Resampling, calculator.CurrentMode);
+        // The 90 ms error is above the derived 15 ms band, so the continuous tier tags it drop/
+        // insert ("too far out to trim smoothly", issue #267) rather than Resampling — but it is
+        // still a real correction at the capped rate, which is what keeps the host correcting
+        // instead of standing down.
+        Assert.Equal(SyncCorrectionMode.Inserting, calculator.CurrentMode);
         Assert.Equal(1.0 - SyncCorrectionOptions.SpecMaxSpeedCorrection, calculator.TargetPlaybackRate, 4);
     }
 
@@ -1062,6 +1065,29 @@ public class TimedAudioBufferCorrectionTests
                 Assert.True(impliedByStepping <= SyncCorrectionOptions.SpecMaxSpeedCorrection);
             }
         }
+    }
+
+    [Fact]
+    public void StandDown_NeverRoutesAnErrorAboveTheDerivedBandThroughResampling()
+    {
+        // Issue #267: when the snap tier stands down (HardSyncStallDetector), Decide falls through
+        // to the continuous ladder. The rate tier can only close the derived band
+        // (EffectiveMaxSpeedCorrection × CorrectionTargetSeconds = 15 ms), so an error above it must
+        // not be tagged Resampling ("worth trimming smoothly") — it lands in drop/insert instead,
+        // and only errors within the reachable band reach the smooth tier.
+        var options = SyncCorrectionOptions.Default;
+        var band = options.ResamplingThresholdMicroseconds; // 15 ms
+
+        // Below the band, stood down: the smooth tier, because the error is closeable.
+        var below = SyncCorrectionPolicy.Decide(band - 1_000, options, suppressHardSync: true);
+        Assert.Equal(SyncCorrectionMode.Resampling, below.Mode);
+
+        // Above the band, stood down: drop/insert, never Resampling, in both directions.
+        var lateAbove = SyncCorrectionPolicy.Decide(band + 50_000, options, suppressHardSync: true);
+        Assert.Equal(SyncCorrectionMode.Dropping, lateAbove.Mode);
+
+        var aheadAbove = SyncCorrectionPolicy.Decide(-(band + 50_000), options, suppressHardSync: true);
+        Assert.Equal(SyncCorrectionMode.Inserting, aheadAbove.Mode);
     }
 
     [Fact]

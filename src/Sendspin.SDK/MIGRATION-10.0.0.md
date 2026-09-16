@@ -42,6 +42,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Sync correction | `DeadbandMicroseconds` defaults to `100` µs, down from 1 ms | Medium — behavioural, no compiler error |
 | Sync correction | New one-shot hard-sync tier above 5 ms, applied by the buffer on **both** read paths | Medium — behavioural, no compiler error |
 | Sync correction | `Read` applies the sub-5 ms correction itself and holds `TargetPlaybackRate` at 1.0 | Medium — double-corrects if you also drive a resampler from that rate |
+| Sync correction | `ResamplingThresholdMicroseconds` is now **derived** (`EffectiveMaxSpeedCorrection × CorrectionTargetSeconds`), not a settable option | Low — compiler error where it was set; a `set` cannot describe a band the continuous tier cannot close (issue #267) |
 | Sync correction | `ITimedAudioBuffer.Read` is no longer `[Obsolete]` — it is the default path again | None — drop any `CS0618` suppression that existed to call it |
 | Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
 | Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |

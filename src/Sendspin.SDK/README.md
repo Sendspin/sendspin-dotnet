@@ -369,9 +369,12 @@ Both read paths follow the same ladder — they differ only in who applies the c
 | 5 ms – 500 ms | One-shot hard sync (single discontinuity) | `TimedAudioBuffer`, on **both** paths |
 | > 500 ms | Re-anchor (clear buffer, restart sync) | `TimedAudioBuffer`, on **both** paths |
 
-`ResamplingThresholdMicroseconds` (100 ms) marks where an error stops being worth trimming
-smoothly, so with the default 5 ms hard-sync threshold below it that mark is never reached — it
-applies only if you lower the hard-sync threshold or disable that tier.
+`ResamplingThresholdMicroseconds` marks where an error stops being worth trimming smoothly. It is
+derived, not set — `EffectiveMaxSpeedCorrection × CorrectionTargetSeconds` (15 ms with the
+defaults), the largest error the continuous tier can actually close at the cap — so it can never
+describe a band wider than that tier can reach (issue #267). With the default 5 ms hard-sync
+threshold below it, the drop/insert band above it is reached only when the snap tier is disabled or
+has stood down.
 
 A correction is always expressed as a **playback rate**, in every tier. That is the single
 currency between a provider and whoever applies it: a provider cannot see whether its caller has
@@ -460,15 +463,15 @@ at 1.0; do not also drive a resampler from that rate, or the same error is corre
 // Spec-conformant defaults (0.5% cap, 100µs dead band, 3s target)
 var options = SyncCorrectionOptions.Default;
 
-// CLI-compatible settings (same caps, faster convergence: 2s target, 15ms resampling band)
+// CLI-compatible settings (same caps, faster convergence: 2s target → 10ms derived resampling band)
 var options = SyncCorrectionOptions.CliDefaults;
 
 // Custom options
 var options = new SyncCorrectionOptions
 {
-    CorrectionTargetSeconds = 2.0,                // Time to eliminate drift
+    CorrectionTargetSeconds = 2.0,                // Time to eliminate drift (also sets the
+                                                  // derived resampling band: cap × this target)
     HardSyncThresholdMicroseconds = 5_000,        // One-shot snap above this
-    ResamplingThresholdMicroseconds = 15_000,     // Resampling vs drop/insert
     ReanchorThresholdMicroseconds = 500_000,      // Clear buffer threshold
     StartupGracePeriodMicroseconds = 500_000,     // No correction during startup
 

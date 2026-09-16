@@ -134,11 +134,10 @@ public class TimedAudioBufferClockDriftTests
     [Fact]
     public void OffsetSlew_InternalReadPath_CatchesUp()
     {
-        // Internal Read applies drop/insert above ResamplingThreshold; with a tight
-        // threshold the loop closes and TRUE misalignment stays bounded near the
-        // threshold instead of reaching the slewed 200ms.
-        var options = new SyncCorrectionOptions { ResamplingThresholdMicroseconds = 5_000 };
-        using var session = new Session(options, useRawReads: false);
+        // Internal Read realizes the continuous tier as drop/insert; a gradual slew is chased
+        // within the rate tier's reach, so the loop closes and TRUE misalignment stays bounded
+        // well inside the slewed 200ms.
+        using var session = new Session(options: null, useRawReads: false);
         session.Steps(300);
 
         session.SlewOffset(totalUs: 200_000, steps: 600);

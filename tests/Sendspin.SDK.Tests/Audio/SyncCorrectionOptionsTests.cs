@@ -5,14 +5,25 @@ namespace Sendspin.SDK.Tests.Audio;
 public class SyncCorrectionOptionsTests
 {
     [Fact]
-    public void Default_RoutesModerateErrorsThroughResampling()
+    public void Default_ResamplingBandEqualsWhatTheContinuousTierCanClose()
     {
         var options = new SyncCorrectionOptions();
 
-        // Errors up to 100ms are corrected inaudibly via playback-rate
-        // adjustment; audible frame drop/insert is reserved for errors
-        // rate correction can't close (9.0.3 item 3).
-        Assert.Equal(100_000, options.ResamplingThresholdMicroseconds);
+        // Issue #267: the band is derived from what the rate tier can actually close at the cap —
+        // EffectiveMaxSpeedCorrection × CorrectionTargetSeconds = 0.005 × 3.0 s = 15 ms — rather
+        // than set independently, so it can never describe a band the continuous tier cannot reach.
+        Assert.Equal(15_000, options.ResamplingThresholdMicroseconds);
+    }
+
+    [Fact]
+    public void OverPermissiveSpeedCap_DoesNotWidenTheDerivedResamplingBand()
+    {
+        // The band reads the clamped EffectiveMaxSpeedCorrection, not the configured cap, so a
+        // configuration above the spec cap cannot re-describe a band the clamped correction still
+        // cannot reach — the incoherence #267 removes must stay unrepresentable.
+        var options = new SyncCorrectionOptions { MaxSpeedCorrection = 0.02 };
+
+        Assert.Equal(15_000, options.ResamplingThresholdMicroseconds);
     }
 
     [Fact]
@@ -42,6 +53,9 @@ public class SyncCorrectionOptionsTests
 
         Assert.True(cli.MaxSpeedCorrection <= SyncCorrectionOptions.SpecMaxSpeedCorrection);
         Assert.Equal(100, cli.DeadbandMicroseconds);
+
+        // Derived from the CLI's shorter 2 s target and the spec cap: 0.005 × 2.0 s = 10 ms.
+        Assert.Equal(10_000, cli.ResamplingThresholdMicroseconds);
         cli.Validate();
     }
 
