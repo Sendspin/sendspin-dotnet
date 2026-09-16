@@ -467,6 +467,44 @@ public class SendspinClientServicePinPairingTests
     }
 
     [Fact]
+    public void FilePairingCodeLockoutStore_LoadsLegacyPinKeys_AndConservativelyMergesThem()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "sendspin-lockout-" + Guid.NewGuid().ToString("N")[..8]);
+        string path = Path.Combine(dir, "lockout.json");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(
+                path,
+                """{"dynamic_pin":3,"dynamic_pairing_code":1,"static_pin":4,"static_pairing_code":2}""");
+
+            var store = new FilePairingCodeLockoutStore(path);
+
+            Assert.Equal(3, store.GetFailures("dynamic_pairing_code"));
+            Assert.Equal(4, store.GetFailures("static_pairing_code"));
+            Assert.Equal(0, store.GetFailures("dynamic_pin"));
+            Assert.Equal(0, store.GetFailures("static_pin"));
+
+            // Any subsequent write rewrites the whole file from the migrated in-memory view,
+            // so the obsolete keys disappear from disk too.
+            store.SetFailures("dynamic_pairing_code", 5);
+
+            string persisted = File.ReadAllText(path);
+            Assert.Contains("dynamic_pairing_code", persisted, StringComparison.Ordinal);
+            Assert.Contains("static_pairing_code", persisted, StringComparison.Ordinal);
+            Assert.DoesNotContain("dynamic_pin", persisted, StringComparison.Ordinal);
+            Assert.DoesNotContain("static_pin", persisted, StringComparison.Ordinal);
+            Assert.Equal(5, new FilePairingCodeLockoutStore(path).GetFailures("dynamic_pairing_code"));
+            Assert.Equal(4, new FilePairingCodeLockoutStore(path).GetFailures("static_pairing_code"));
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void FilePairingCodeLockoutStore_NarrowsALegacyWorldReadableFile()
     {
         // Counters are not secrets but they are security state: anyone who can rewrite this file

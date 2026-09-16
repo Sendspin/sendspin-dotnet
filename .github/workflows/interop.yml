@@ -25,27 +25,27 @@ jobs:
         with:
           python-version: '3.13'
 
-      # Pinned to the latest aiosendspin release, so CI exercises what servers actually
-      # ship. Bump this deliberately when a new release lands: a release is where a spec
-      # wire change first becomes observable, and the SDK's deliberate wire deviations are
-      # held only until the reference server adopts them.
+      # Pinned to the aiosendspin commit the 10.0.0 draft release targets, because this
+      # line's pairing wire (object-keyed pair_methods, dynamic_pairing_code /
+      # static_pairing_code, fixed code lengths, the emission format on server/activate)
+      # exists only there: 9.1.1, the latest published release, rejects the client/hello
+      # outright. Move this to "aiosendspin[server]==10.0.0" the moment it is published, and
+      # thereafter bump deliberately on each release, since a release is where a spec wire
+      # change first becomes observable and the SDK's remaining deliberate wire deviations
+      # (client_stream/*, static_delay_ms, set_static_delay) are held only until the
+      # reference server adopts them. The 9.x line keeps its own pin on 9.1.1.
       #
-      # 9.0.0 is the pairing floor, not the pin. It is the first release implementing spec
-      # 5b0e6469 (spec PR #130): the server/activate 'pairing' object, pin_length validated
-      # at the activation, the pairing window and client/pair-pending. 7.0.0 and 8.0.0 both
-      # still send the flat selected_pair_method, so a client conforming to the current spec
-      # cannot pair with them at all — the pairing scenario fails with
-      # "Cannot offer pair method (null)".
-      # Unpaired connect still works against 7.0.0. The split floor (playback >= 7.0.0,
-      # pairing >= 9.0.0) is documented in the README compatibility matrix; pinning above
-      # it means neither floor is exercised here any more.
+      # 9.0.0 is the pairing floor for the 9.x line, not a pin: the first release with the
+      # server/activate 'pairing' object, the pairing window and client/pair-pending. The
+      # split floor (playback >= 7.0.0, pairing >= 9.0.0) is documented in the README
+      # compatibility matrix; neither floor is exercised here any more.
       - name: Install aiosendspin reference server
-        run: pip install "aiosendspin[server]==9.1.1"
+        run: pip install "aiosendspin[server] @ git+https://github.com/Sendspin/aiosendspin@892af8c87b453442600a4d17f9eb32862fdb5593"
 
-      # 9.1.1 predates spec PR #179 and only parses the old list-shaped
-      # supported_pair_methods. Keep the SDK on the current object-shaped wire and
-      # normalize it at this pinned reference server's compatibility boundary.
-      - name: Bridge aiosendspin pair-method schema
+      # The reference server still declares supported_pair_methods as a list of
+      # descriptors; the spec (PR #179) keys them by method, which is what the SDK sends.
+      # Until aiosendspin adopts the object shape, teach the installed copy to accept it.
+      - name: Accept the spec's object-keyed pair methods in the reference server
         run: python tools/interop/patch_aiosendspin_pair_methods.py
 
       - name: Build interop client
@@ -57,9 +57,11 @@ jobs:
       - name: Pairing PSK round-trip (pair, persist, re-handshake to user trust)
         run: bash tools/interop/run.sh pairing
 
-      # The pinned 9.1.1 server still calls this retired method "static_pin" and cannot
-      # exercise the current static_pairing_code wire. Keep this scenario in SDK tests
-      # until the reference server adopts spec PR #179 and the current pairing-code names.
+      # The only live cover for the CPace round, PSK wrapping, and the pairing window. The
+      # server side fails the run if the client did not gesture-gate the attempt first, so
+      # this also pins the gating policy rather than just "pairing worked".
+      - name: Static PIN round-trip (gesture-gated attempt, CPace, wrapped PSK)
+        run: bash tools/interop/run.sh static-pin
 
       # Slower than the others by design: the client withholds its initial client/state
       # until clock sync converges, which takes ~30s of burst sampling, and the server

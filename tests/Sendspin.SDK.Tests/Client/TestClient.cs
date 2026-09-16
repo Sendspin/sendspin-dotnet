@@ -7,15 +7,16 @@ using Sendspin.SDK.Synchronization;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Store double with a fixed capacity, for exercising the eviction paths of spec #183 without
-/// filling a real store. Delegates the eviction policy itself to the shipped helper by simply
-/// honouring <see cref="Capacity"/>; the SDK is what must make room before it writes.
+/// Store double with a fixed long-term-record capacity, for exercising the eviction paths of
+/// spec #183 without filling a real store. Delegates the eviction policy itself to the shipped
+/// helper by simply honouring <see cref="Capacity"/>; the SDK is what must make room before it
+/// writes.
 /// </summary>
 internal sealed class BoundedPairingRecordStore : IPairingRecordStore
 {
     private readonly Dictionary<string, PairingRecord> _records;
 
-    /// <param name="capacity">The number of records the store holds.</param>
+    /// <param name="capacity">The number of long-term pairing records the store holds.</param>
     /// <param name="seed">Records the store starts out holding.</param>
     public BoundedPairingRecordStore(int capacity, params PairingRecord[] seed)
     {
@@ -35,8 +36,12 @@ internal sealed class BoundedPairingRecordStore : IPairingRecordStore
         UpsertedPskIds.Add(record.PskId);
 
         // Deliberately throws rather than silently overflowing: the SDK is required to make
-        // room first, and a test that stopped exercising that should fail loudly.
-        if (!_records.ContainsKey(record.PskId) && _records.Count >= Capacity)
+        // room first, and a test that stopped exercising that should fail loudly. Capacity
+        // counts long-term pairing records only: the Pairing PSK is this client's bootstrap
+        // secret and lives alongside them.
+        if (record.Category == PskCategory.LongTerm
+            && !_records.ContainsKey(record.PskId)
+            && _records.Values.Count(r => r.Category == PskCategory.LongTerm) >= Capacity)
         {
             throw new InvalidOperationException(
                 $"Upsert of a new record at capacity {Capacity}; the caller did not evict first.");

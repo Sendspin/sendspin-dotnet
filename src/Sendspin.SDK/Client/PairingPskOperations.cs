@@ -7,8 +7,8 @@ namespace Sendspin.SDK.Client;
 /// The ensure/rotate Pairing PSK operations, shared by <see cref="SendspinClientService"/>
 /// and <see cref="SendspinHostService"/> so both surfaces mint identical tokens over the
 /// same store and identity. Each store operation here is individually thread-safe (the
-/// shipped stores lock internally); callers serialize multi-step sequences with their own
-/// lock.
+/// shipped stores lock internally); callers serialize multi-step sequences with the shared
+/// per-store gate returned by <see cref="PairingRecordStoreSynchronization.For"/>.
 /// </summary>
 internal static class PairingPskOperations
 {

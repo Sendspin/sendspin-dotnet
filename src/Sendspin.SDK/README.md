@@ -249,7 +249,7 @@ completes, the server writes a long-term record, and the client stores nothing �
 to authenticate on the next connection having reported success. Offering `dynamic_pairing_code`
 additionally requires `SendspinClientOptions.PresentPairingCodeAsync` (the callback that shows the
 derived pairing code to the operator, taking a `PairingCodePresentation` — the derived pairing code plus the server's
-language hint); without it the SDK refuses that method with `method_not_supported` rather than
+language hint and selected dynamic `Format`); without it the SDK refuses that method with `method_not_supported` rather than
 pairing with a pairing code nobody can see. Show `PairingCodePresentation.Groups` rather than `PairingCode` to display
 the pairing code in the spec's recommended grouping (`123456` → `123 456`); grouping is presentation-only
 and separators never enter derivation or operator entry.

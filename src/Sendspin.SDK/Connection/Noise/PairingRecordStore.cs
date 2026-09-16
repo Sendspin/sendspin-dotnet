@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -42,11 +43,16 @@ public sealed record PairingRecord(
 /// <remarks>
 /// <para>
 /// <b>Capacity and eviction.</b> The spec requires a client to hold at least
-/// <see cref="PairingRecords.MinimumCapacity"/> pairing records and requires a pairing that
-/// completes at capacity to succeed anyway, by evicting an existing record — a pairing never
-/// fails for lack of record storage. A bounded store therefore reports its limit through
-/// <see cref="Capacity"/> and the SDK frees a slot before it writes; <see cref="Upsert"/> must
-/// not refuse a record because the store is full.
+/// <see cref="PairingRecords.MinimumCapacity"/> long-term pairing records and requires a
+/// pairing that completes at capacity to succeed anyway, by evicting an existing record — a
+/// pairing never fails for lack of record storage. A bounded store therefore reports its
+/// long-term-record limit through <see cref="Capacity"/> and the SDK frees a slot before it
+/// writes; <see cref="Upsert"/> must not refuse a record because the store is full.
+/// </para>
+/// <para>
+/// The client's own <see cref="PskCategory.Pairing"/> record does <em>not</em> consume that
+/// capacity: the bootstrap secret is additional to the spec's long-term pairing-record
+/// minimum.
 /// </para>
 /// <para>
 /// This replaces the earlier <c>bool Upsert</c> contract, whose <c>false</c> return meant
@@ -73,11 +79,15 @@ public interface IPairingRecordStore
     void Remove(string pskId);
 
     /// <summary>
-    /// How many records this store can hold. Defaults to unbounded. Override it only if your
-    /// medium really is bounded, and never below <see cref="PairingRecords.MinimumCapacity"/>:
-    /// the client caps its concurrently open paired connections below this so an evictable
-    /// record always exists.
+    /// How many long-term pairing records this store can hold. Defaults to unbounded. Override
+    /// it only if your medium really is bounded, and never below
+    /// <see cref="PairingRecords.MinimumCapacity"/>: the client caps its concurrently open
+    /// paired connections below this so an evictable record always exists.
     /// </summary>
+    /// <remarks>
+    /// The client's own <see cref="PskCategory.Pairing"/> record is extra and does not count
+    /// against this limit.
+    /// </remarks>
     int Capacity => int.MaxValue;
 }
 
@@ -91,7 +101,7 @@ public interface IPairingRecordStore
 /// </remarks>
 internal static class PairingRecords
 {
-    /// <summary>The smallest record capacity the spec permits.</summary>
+    /// <summary>The smallest long-term pairing-record capacity the spec permits.</summary>
     internal const int MinimumCapacity = 5;
 
     // Bounded rather than a while(true): a 32-byte CSPRNG draw colliding even once is already
@@ -150,23 +160,26 @@ internal static class PairingRecords
         IReadOnlyCollection<string> livePskIds,
         ILogger logger)
     {
-        var record = new PairingRecord(psk, PskCategory.LongTerm, serverId, DateTimeOffset.UtcNow);
-
-        // Replace this server's own record first, so a re-pair is a like-for-like swap that
-        // frees its slot before the capacity check rather than counting as a second record.
-        foreach (var existing in store.List())
+        lock (PairingRecordStoreSynchronization.For(store))
         {
-            if (existing.Category == PskCategory.LongTerm
-                && string.Equals(existing.ServerId, serverId, StringComparison.Ordinal)
-                && existing.PskId != record.PskId)
-            {
-                store.Remove(existing.PskId);
-                logger.LogDebug("Replaced the existing pairing record for {ServerId}", serverId);
-            }
-        }
+            var record = new PairingRecord(psk, PskCategory.LongTerm, serverId, DateTimeOffset.UtcNow);
 
-        EvictIfAtCapacity(store, record, livePskIds, logger);
-        store.Upsert(record);
+            // Replace this server's own record first, so a re-pair is a like-for-like swap that
+            // frees its slot before the capacity check rather than counting as a second record.
+            foreach (var existing in store.List())
+            {
+                if (existing.Category == PskCategory.LongTerm
+                    && string.Equals(existing.ServerId, serverId, StringComparison.Ordinal)
+                    && existing.PskId != record.PskId)
+                {
+                    store.Remove(existing.PskId);
+                    logger.LogDebug("Replaced the existing pairing record for {ServerId}", serverId);
+                }
+            }
+
+            EvictIfAtCapacity(store, record, livePskIds, logger);
+            store.Upsert(record);
+        }
     }
 
     private static void EvictIfAtCapacity(
@@ -189,7 +202,8 @@ internal static class PairingRecords
         }
 
         var records = store.List();
-        if (records.Count < capacity || records.Any(r => r.PskId == incoming.PskId))
+        int longTermCount = records.Count(r => r.Category == PskCategory.LongTerm);
+        if (longTermCount < capacity || records.Any(r => r.PskId == incoming.PskId))
         {
             return;
         }
@@ -209,9 +223,11 @@ internal static class PairingRecords
             // so the Upsert that follows is left to overflow the store's own limit rather than
             // silently dropping a pairing the server has already persisted.
             logger.LogError(
-                "The pairing record store is at capacity ({Capacity}) and every record is either "
-                + "backing an open connection or the Pairing PSK; the new record for {ServerId} "
-                + "may not persist.", capacity, incoming.ServerId);
+                "The pairing record store is at capacity ({Capacity} long-term records) and every "
+                + "stored long-term record is backing an open connection; the new record for "
+                + "{ServerId} may not persist.",
+                capacity,
+                incoming.ServerId);
             return;
         }
 
@@ -223,6 +239,14 @@ internal static class PairingRecords
             victim.LastUsedUtc,
             incoming.ServerId);
     }
+}
+
+internal static class PairingRecordStoreSynchronization
+{
+    private static readonly ConditionalWeakTable<IPairingRecordStore, object> Gates = new();
+
+    internal static object For(IPairingRecordStore store) =>
+        Gates.GetValue(store, static _ => new object());
 }
 
 /// <summary>In-memory record store (no persistence). Suitable for tests and ephemeral clients.</summary>
@@ -238,10 +262,10 @@ public sealed class InMemoryPairingRecordStore : IPairingRecordStore
     }
 
     /// <summary>
-    /// Creates a store bounded to <paramref name="capacity"/> records, which is what a device
-    /// with real storage limits looks like to the SDK's eviction logic.
+    /// Creates a store bounded to <paramref name="capacity"/> long-term pairing records, which
+    /// is what a device with real storage limits looks like to the SDK's eviction logic.
     /// </summary>
-    /// <param name="capacity">Records this store can hold.</param>
+    /// <param name="capacity">Long-term records this store can hold.</param>
     public InMemoryPairingRecordStore(int capacity)
     {
         Capacity = capacity;
@@ -319,12 +343,12 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
     }
 
     /// <summary>
-    /// Creates a store bounded to <paramref name="capacity"/> records. See
+    /// Creates a store bounded to <paramref name="capacity"/> long-term pairing records. See
     /// <see cref="IPairingRecordStore.Capacity"/>: the SDK evicts to stay within it rather
     /// than failing a pairing.
     /// </summary>
     /// <param name="path">File backing the store.</param>
-    /// <param name="capacity">Records this store can hold.</param>
+    /// <param name="capacity">Long-term records this store can hold.</param>
     /// <param name="logger">Optional logger for load-time problems.</param>
     public FilePairingRecordStore(string path, int capacity, ILogger? logger = null)
     {

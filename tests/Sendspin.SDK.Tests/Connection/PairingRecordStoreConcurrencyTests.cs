@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Tests.Connection;
@@ -51,6 +52,55 @@ public class PairingRecordStoreConcurrencyTests
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task PersistLongTerm_SerializesTheFullEvictAndUpsertTransaction_PerStore()
+    {
+        var store = new BlockingBoundedPairingRecordStore(
+            2,
+            new PairingRecord(MakePsk(0), PskCategory.LongTerm, "srv-0", DateTimeOffset.UnixEpoch));
+
+        var first = Task.Run(() =>
+            PairingRecords.PersistLongTerm(
+                store,
+                MakePsk(1),
+                "srv-1",
+                Array.Empty<string>(),
+                NullLogger.Instance));
+
+        store.WaitForFirstNewLongTermUpsert();
+
+        int listCallsBeforeSecond = store.ListCallCount;
+        var secondStarted = new ManualResetEventSlim();
+        var second = Task.Run(() =>
+        {
+            secondStarted.Set();
+            PairingRecords.PersistLongTerm(
+                store,
+                MakePsk(2),
+                "srv-2",
+                Array.Empty<string>(),
+                NullLogger.Instance);
+        });
+
+        Assert.True(secondStarted.Wait(TimeSpan.FromSeconds(5)), "the second pairing task never started");
+        Assert.False(
+            SpinWait.SpinUntil(
+                () => store.ListCallCount > listCallsBeforeSecond,
+                TimeSpan.FromMilliseconds(200)),
+            "the second pairing reached the store before the first had finished its transaction");
+
+        store.ReleaseFirstNewLongTermUpsert();
+        await Task.WhenAll(first, second);
+
+        var records = store.List()
+            .Where(r => r.Category == PskCategory.LongTerm)
+            .ToList();
+        Assert.Equal(2, records.Count);
+        Assert.DoesNotContain(records, r => r.ServerId == "srv-0");
+        Assert.Contains(records, r => r.ServerId == "srv-1");
+        Assert.Contains(records, r => r.ServerId == "srv-2");
     }
 
     private static async Task AssertListSurvivesConcurrentUpsertRemoveAsync(
@@ -108,5 +158,77 @@ public class PairingRecordStoreConcurrencyTests
         var bytes = new byte[32];
         BitConverter.GetBytes(i).CopyTo(bytes, 0);
         return bytes;
+    }
+
+    private sealed class BlockingBoundedPairingRecordStore : IPairingRecordStore
+    {
+        private readonly Dictionary<string, PairingRecord> _records;
+        private readonly object _lock = new();
+        private readonly ManualResetEventSlim _firstNewLongTermUpsertEntered = new(false);
+        private readonly ManualResetEventSlim _allowFirstNewLongTermUpsert = new(false);
+        private int _blockFirstNewLongTermUpsert = 1;
+        private int _listCallCount;
+
+        internal BlockingBoundedPairingRecordStore(int capacity, params PairingRecord[] seed)
+        {
+            Capacity = capacity;
+            _records = seed.ToDictionary(r => r.PskId);
+        }
+
+        public int Capacity { get; }
+
+        internal int ListCallCount => Volatile.Read(ref _listCallCount);
+
+        public IReadOnlyList<PairingRecord> List()
+        {
+            Interlocked.Increment(ref _listCallCount);
+            lock (_lock)
+            {
+                return _records.Values.ToList();
+            }
+        }
+
+        public void Upsert(PairingRecord record)
+        {
+            if (record.Category == PskCategory.LongTerm
+                && Interlocked.CompareExchange(ref _blockFirstNewLongTermUpsert, 0, 1) == 1)
+            {
+                _firstNewLongTermUpsertEntered.Set();
+                if (!_allowFirstNewLongTermUpsert.Wait(TimeSpan.FromSeconds(5)))
+                {
+                    throw new TimeoutException("Timed out waiting to release the first long-term upsert.");
+                }
+            }
+
+            lock (_lock)
+            {
+                if (record.Category == PskCategory.LongTerm
+                    && !_records.ContainsKey(record.PskId)
+                    && _records.Values.Count(r => r.Category == PskCategory.LongTerm) >= Capacity)
+                {
+                    throw new InvalidOperationException(
+                        $"Upsert of a new long-term record at capacity {Capacity}; the caller did not evict first.");
+                }
+
+                _records[record.PskId] = record;
+            }
+        }
+
+        public void Remove(string pskId)
+        {
+            lock (_lock)
+            {
+                _records.Remove(pskId);
+            }
+        }
+
+        internal void WaitForFirstNewLongTermUpsert()
+        {
+            Assert.True(
+                _firstNewLongTermUpsertEntered.Wait(TimeSpan.FromSeconds(5)),
+                "the first pairing never reached Upsert");
+        }
+
+        internal void ReleaseFirstNewLongTermUpsert() => _allowFirstNewLongTermUpsert.Set();
     }
 }

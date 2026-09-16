@@ -78,8 +78,9 @@ public sealed record SendspinClientOptions
     /// speaker) so it can be entered into the server. Required when
     /// <see cref="Protocol.Messages.PairMethods.DynamicPairingCode"/> is
     /// offered in <see cref="ClientCapabilities.PairingCodeMethods"/>; pairing fails closed
-    /// without it. Awaited before the client proceeds, so a slow presenter delays pairing
-    /// rather than racing it.
+    /// without it. The <see cref="PairingCodePresentation"/> includes the derived digits, the
+    /// server's language hint, and the activation's selected dynamic format. Awaited before the
+    /// client proceeds, so a slow presenter delays pairing rather than racing it.
     /// </summary>
     public Func<PairingCodePresentation, CancellationToken, ValueTask>? PresentPairingCodeAsync { get; init; }
 
@@ -99,16 +100,17 @@ public sealed record SendspinClientOptions
     public PairingWindow? PairingWindow { get; init; }
 
     /// <summary>
-    /// The <c>psk_id</c>s of pairing records backing connections other than this one, consulted
-    /// before a pairing at capacity evicts a record.
+    /// The <c>psk_id</c>s of pairing records backing other open host clients, consulted before a
+    /// pairing at capacity evicts a record.
     /// </summary>
     /// <remarks>
     /// <para>
     /// The spec forbids evicting the record a currently-open connection authenticated with —
     /// doing so would unpair a server that is still talking to this client. A single
     /// <see cref="SendspinClientService"/> knows only its own matched record, so the host that
-    /// owns the sibling connections supplies the rest through this hook. Internal because it is
-    /// a composition detail between the host and its clients, not application configuration.
+    /// owns the sibling connections supplies the rest through this hook, including provisional
+    /// and adopted sessions it is arbitrating around. Internal because it is a composition detail
+    /// between the host and its clients, not application configuration.
     /// </para>
     /// <para>
     /// Invoked while the record store lock is held; it must return promptly and must not call

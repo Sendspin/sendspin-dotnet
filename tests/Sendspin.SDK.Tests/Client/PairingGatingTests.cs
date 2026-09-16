@@ -11,8 +11,9 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// The pairing activation carries the method and — for the dynamic method — the emission
-/// format, validated on receipt. The gesture-gating policy turns on the method before
-/// client/pair-init is sent, so reading it later is not an option.
+/// format, validated on receipt. Other methods reject a non-null format for the same reason:
+/// the activation is what chooses the flow, and the gesture-gating policy turns on that method
+/// before client/pair-init is sent, so reading it later is not an option.
 /// </summary>
 public class PairingGatingTests
 {
@@ -56,7 +57,7 @@ public class PairingGatingTests
     }
 
     [Fact]
-    public async Task DynamicPairingCodePresenter_ReceivesTheServerHelloLanguages()
+    public async Task DynamicPairingCodePresenter_ReceivesTheServerHelloLanguages_AndActivationFormat()
     {
         // The hint is informational and never grounds for abort, but the spec asks the client
         // to emit in the best-matching language it supports. It cannot do that if the SDK
@@ -73,7 +74,32 @@ public class PairingGatingTests
 
         Assert.NotNull(seen);
         Assert.Equal(new[] { "ca", "es" }, seen!.Languages);
+        Assert.Equal(PairingCodeFormats.Digits, seen.Format);
         Assert.Equal(6, seen.PairingCode.Length);
+    }
+
+    [Fact]
+    public async Task StaticPairingCodeActivation_WithAFormat_AbortsAtTheActivation()
+    {
+        await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678");
+
+        h.SendPairingActivate(method: "static_pairing_code", format: "digits");
+
+        var abort = await h.NextMessageAsync<PairAbortMessage>();
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+        Assert.Empty(h.SentOfType<ClientPairInitMessage>());
+    }
+
+    [Fact]
+    public async Task PairingPskActivation_WithAFormat_AbortsAtTheActivation()
+    {
+        await using var h = await PairingHarness.StartAsync(pairingPsk: true);
+
+        h.SendPairingActivate(method: "pairing_psk", format: "digits");
+
+        var abort = await h.NextMessageAsync<PairAbortMessage>();
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+        Assert.Empty(h.SentOfType<ClientPairFinalizeMessage>());
     }
 
     [Fact]
