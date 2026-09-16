@@ -25,10 +25,9 @@ public enum HandshakeFailureKind
     ServerError,
 
     /// <summary>
-    /// The pairing state has diverged in a way no retry can fix: on a re-handshake the server
-    /// named a <c>psk_id</c> this client cannot match, or a stored PSK is bound to a different
-    /// <c>server_id</c>. The pairing record on one side is stale; the remedy is to pair again.
-    /// A caller's own reconnect loop cannot succeed against this.
+    /// A stored PSK is bound to a different <c>server_id</c> than the server presenting it: the
+    /// pairing record on one side is stale, so no retry can succeed — pair again. (A re-handshake
+    /// <c>psk_id</c> miss is not this: it reconnects and self-heals via the Sentinel fallback.)
     /// </summary>
     PairingStateDiverged,
 }

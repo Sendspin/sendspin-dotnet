@@ -228,11 +228,17 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             // messaging.md § server/error: the server rejected client/init and will now close.
             // The reason (unsupported_version | unsupported_suite | malformed) is cleartext and
             // unauthenticated — a hint for logs and display — but a classified one the app can act on.
-            string reason = doc.RootElement.TryGetProperty("payload", out var errPayload)
+            // A malformed error frame (no object payload, or a non-string reason) is still a
+            // server/error: fall back to "unknown" rather than crashing into an unclassified fatal.
+            string reason = "unknown";
+            if (doc.RootElement.TryGetProperty("payload", out var errPayload)
+                && errPayload.ValueKind == JsonValueKind.Object
                 && errPayload.TryGetProperty("reason", out var reasonProp)
-                && reasonProp.GetString() is { } value
-                    ? value
-                    : "unknown";
+                && reasonProp.ValueKind == JsonValueKind.String)
+            {
+                reason = reasonProp.GetString()!;
+            }
+
             return Fail(reason, HandshakeFailureKind.ServerError);
         }
 
@@ -333,8 +339,11 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             //
             // A re-handshake keeps failing. There is no unauthenticated peer to rescue by then,
             // and substituting the Sentinel would silently downgrade a live session's trust.
+            // Left unclassified (not PairingStateDiverged): this is a transport-mode loss that
+            // reconnects, and the fresh initial handshake self-heals via the Sentinel fallback —
+            // so it is not a "no retry can fix" condition.
             if (!isInitialHandshake)
-                return Fail($"no PSK matches psk_id {pskId}", HandshakeFailureKind.PairingStateDiverged);
+                return Fail($"no PSK matches psk_id {pskId}");
 
             resolved = SentinelPskResolver.Instance.Resolve(NoiseConstants.SentinelPskId)!;
         }

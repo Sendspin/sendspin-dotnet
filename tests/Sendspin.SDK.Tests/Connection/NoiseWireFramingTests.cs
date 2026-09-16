@@ -143,7 +143,7 @@ public class NoiseWireFramingTests
             new WireFrame(WireFrameKind.Binary, server.StartRehandshake(unknownPsk)));
 
         Assert.Contains($"no PSK matches psk_id {NoiseConstants.DerivePskId(unknownPsk)}", result.FatalReason);
-        Assert.Equal(HandshakeFailureKind.PairingStateDiverged, result.FatalKind);
+        Assert.Null(result.FatalKind);
         Assert.False(framing.IsTransportReady);
     }
 
@@ -248,6 +248,25 @@ public class NoiseWireFramingTests
         framing.Start();
 
         var serverError = """{"type":"server/error","payload":{}}""";
+        var result = framing.ProcessInbound(WireFrame.FromText(serverError));
+
+        Assert.Equal("unknown", result.FatalReason);
+        Assert.Equal(HandshakeFailureKind.ServerError, result.FatalKind);
+    }
+
+    /// <summary>
+    /// A malformed server/error (here a non-string <c>reason</c>) must not throw its way into an
+    /// unclassified fatal: it still classifies as <see cref="HandshakeFailureKind.ServerError"/>
+    /// with the "unknown" detail, since the reason is unauthenticated cleartext the client only
+    /// displays.
+    /// </summary>
+    [Fact]
+    public void AwaitingServerInit_ServerErrorWithNonStringReason_DetailIsUnknown()
+    {
+        var framing = new NoiseWireFraming(SendspinIdentity.Generate());
+        framing.Start();
+
+        var serverError = """{"type":"server/error","payload":{"reason":42}}""";
         var result = framing.ProcessInbound(WireFrame.FromText(serverError));
 
         Assert.Equal("unknown", result.FatalReason);
