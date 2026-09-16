@@ -77,9 +77,15 @@ internal sealed class TestNoiseServer
             rs: _clientPublicKey.ToArray(),
             psks: [_psk]);
 
+        // psk_category (lt|pr|sn) is where the PSK came from; this server holds only raw PSK
+        // bytes and cannot know it, so "lt" stands in for the ordinary paired case. x-unknown
+        // is a deliberately unrecognised member: it pins NoiseWireFraming's tolerance of extra
+        // message-1 members (#279) so a strict reader fails the suite here, not every handshake.
         string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = _advertisedPskId,
+            ["psk_category"] = "lt",
+            ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(msg1Payload), buf);
@@ -123,6 +129,8 @@ internal sealed class TestNoiseServer
         string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = _advertisedPskId,
+            ["psk_category"] = "lt", // alternate initial handshake; see Respond
+            ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(msg1Payload), buf);
@@ -146,6 +154,8 @@ internal sealed class TestNoiseServer
         string payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = NoiseConstants.DerivePskId(newPsk),
+            ["psk_category"] = "lt", // re-handshake message 1; see Respond
+            ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
         var (len, _, _) = _state.WriteMessage(Encoding.UTF8.GetBytes(payload), buf);
