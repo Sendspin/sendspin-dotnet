@@ -1532,12 +1532,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
 
             var existing = _artworkChannels[channel];
+            var newSource = source ?? existing.Source;
+
+            // A channel re-enabled with a source alone must still declare the format and size the
+            // spec requires of an active source. When the retained values are null (an app-supplied
+            // disabled channel), fall back to ArtworkChannelState's own defaults — the same ones the
+            // gap filler above keeps. ForWire drops them again for as long as the source is 'none'.
+            var defaults = string.Equals(newSource, ArtworkSources.None, StringComparison.Ordinal)
+                ? existing
+                : new ArtworkChannelState();
             configured = new ArtworkChannelState
             {
-                Source = source ?? existing.Source,
-                Format = format ?? existing.Format,
-                Width = width ?? existing.Width,
-                Height = height ?? existing.Height,
+                Source = newSource,
+                Format = format ?? existing.Format ?? defaults.Format,
+                Width = width ?? existing.Width ?? defaults.Width,
+                Height = height ?? existing.Height ?? defaults.Height,
             };
             _artworkChannels[channel] = configured;
         }

@@ -100,6 +100,29 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
+    public async Task ReEnablingAnAppSuppliedDisabledChannel_WithSourceOnly_CarriesTheDefaults()
+    {
+        // An app can hand over a disabled channel with the format and size nulled. Re-enabling it
+        // with a source alone must still declare the format/width/height the spec requires of an
+        // active source, so the wire object carries the channel defaults rather than a bare source.
+        var (client, connection) = ArtworkClient(new List<ArtworkChannelState>
+        {
+            new() { Source = ArtworkSources.None, Format = null, Width = null, Height = null },
+        });
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+
+        await client.SetArtworkChannelAsync(channel: 0, source: ArtworkSources.Album);
+
+        var only = Assert.Single(StateChannels(connection));
+        Assert.Equal(ArtworkSources.Album, only.Source);
+        Assert.Equal("jpeg", only.Format);
+        Assert.Equal(512, only.Width);
+        Assert.Equal(512, only.Height);
+    }
+
+    [Fact]
     public void ClientState_EmptyCapabilitiesList_IsNormalizedToOneDisabledChannel()
     {
         var (client, connection) = ArtworkClient(new List<ArtworkChannelState>());

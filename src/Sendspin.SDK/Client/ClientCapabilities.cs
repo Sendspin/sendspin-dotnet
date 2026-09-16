@@ -341,8 +341,8 @@ public sealed class ClientCapabilities
     }
 
     /// <summary>
-    /// Rejects an initial visualizer configuration that requests spectrum frames without the
-    /// required spectrum layout.
+    /// Rejects a visualizer configuration that cannot produce a conformant client/hello: the role
+    /// advertised without its support object, or a spectrum request without the spectrum layout.
     /// </summary>
     /// <remarks>
     /// <see cref="ISendspinClient.SetVisualizerConfigurationAsync"/> already validates the
@@ -350,10 +350,22 @@ public sealed class ClientCapabilities
     /// invalid state cannot slip onto the initial <c>client/state</c>.
     /// </remarks>
     /// <exception cref="ArgumentException">
-    /// <see cref="VisualizerRoleSupport.Types"/> contains <c>spectrum</c> but
-    /// <see cref="VisualizerRoleSupport.Spectrum"/> is null.
+    /// <see cref="Roles"/> advertises <c>visualizer@v1</c> without a
+    /// <see cref="VisualizerRoleSupport"/>, or <see cref="VisualizerRoleSupport.Types"/> contains
+    /// <c>spectrum</c> but <see cref="VisualizerRoleSupport.Spectrum"/> is null.
     /// </exception>
-    internal void ValidateVisualizerRoleSupport() => VisualizerRoleSupport?.Validate();
+    internal void ValidateVisualizerRoleSupport()
+    {
+        if (Roles.Contains(ClientRoles.Visualizer, StringComparer.Ordinal) && VisualizerRoleSupport is null)
+        {
+            throw new ArgumentException(
+                $"ClientCapabilities.Roles advertises '{ClientRoles.Visualizer}' but supplies no "
+                + "VisualizerRoleSupport; the role requires a visualizer@v1_support object in client/hello.",
+                nameof(VisualizerRoleSupport));
+        }
+
+        VisualizerRoleSupport?.Validate();
+    }
 
     /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.

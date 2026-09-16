@@ -236,6 +236,21 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
+    public void VisualizerRoleWithoutSupport_ThrowsAtConstruction()
+    {
+        // Advertising visualizer@v1 without a VisualizerRoleSupport would emit a client/hello
+        // that lists the role but omits its required visualizer@v1_support object.
+        Assert.Throws<ArgumentException>(() => TestClient.Create(configure: options => options with
+        {
+            Capabilities = new ClientCapabilities
+            {
+                Roles = new List<string> { "visualizer@v1" },
+                VisualizerRoleSupport = null,
+            },
+        }));
+    }
+
+    [Fact]
     public void SpectrumFrame_BeforeStreamStart_IsDropped()
     {
         var (client, connection) = VisualizerClient();
