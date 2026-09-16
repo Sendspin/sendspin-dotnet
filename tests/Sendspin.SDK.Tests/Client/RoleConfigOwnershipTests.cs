@@ -226,4 +226,40 @@ public class RoleConfigOwnershipTests
         Assert.Equal(new[] { VisualizerTypes.Loudness }, capabilities.VisualizerRoleSupport!.Types);
         Assert.Equal(30, capabilities.VisualizerRoleSupport.RateMax);
     }
+
+    [Fact]
+    public async Task ConcurrentSetters_SerializeThroughTheSendGate_SoTheLastStateReflectsBoth()
+    {
+        // Each Set*Async updates its role config under _roleConfigLock, then sends the full
+        // client/state. The lock keeps a snapshot whole, but without serializing
+        // snapshot-through-send the two could snapshot in one order and reach the transport in
+        // the other — landing the older snapshot last and dropping the newer role's config on
+        // the server. SendClientStateAsync gates every send: hold the first mid-flight and the
+        // second waits behind it, so the later snapshot — the one that sees both updates — lands
+        // last.
+        var (client, connection) = ClientOver(SharedCapabilities(), "artwork@v1", "visualizer@v1");
+        using var _c = client;
+
+        // Park the artwork setter's client/state mid-send.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        connection.HoldNextSend = gate;
+        var setArtwork = client.SetArtworkChannelAsync(
+            channel: 1, source: ArtworkSources.Artist, format: "png", width: 64, height: 64);
+
+        // The visualizer setter starts while the first send is parked. The gate holds it behind
+        // the artwork send rather than letting it race ahead, so it cannot complete yet.
+        var setVisualizer = client.SetVisualizerConfigurationAsync(
+            types: new List<string> { VisualizerTypes.Beat }, rateMax: 15);
+        Assert.False(setVisualizer.IsCompleted);
+
+        // Release the first send; the second then snapshots and sends behind it.
+        gate.SetResult();
+        await Task.WhenAll(setArtwork, setVisualizer);
+
+        // The last client/state the server accepted carries both reconfigurations, not just the
+        // artwork setter's older snapshot.
+        Assert.Equal(2, StateChannels(connection).Count);
+        Assert.Equal(ArtworkSources.Artist, StateChannels(connection)[1].Source);
+        Assert.Equal(new[] { VisualizerTypes.Beat }, StateVisualizer(connection).Types);
+    }
 }

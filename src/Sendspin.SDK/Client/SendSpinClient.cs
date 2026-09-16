@@ -148,6 +148,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // construction.
     private readonly object _roleConfigLock = new();
 
+    // Serializes each client/state send from snapshot through enqueue. _roleConfigLock (above)
+    // prevents a torn snapshot, but two concurrent Set*Async calls could still snapshot in one
+    // order and hand their frames to the transport in the other, landing the older snapshot last
+    // and overwriting the newer configuration on the server. SendClientStateAsync holds this from
+    // the snapshot until SendAsync has been awaited, so the transport accepts frames in snapshot
+    // order. Every client/state send routes through that method.
+    private readonly SemaphoreSlim _clientStateSendGate = new(1, 1);
+
     // This client's effective artwork channel declaration, copied from the capabilities at
     // construction rather than aliased. ClientCapabilities belongs to the app, and a host shares
     // one instance across every connection it accepts: writing a connection's runtime
@@ -1032,42 +1040,53 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </remarks>
     private async Task SendClientStateAsync(bool initial = false)
     {
-        bool available = CurrentAvailability;
-        var activeRoleFamilies = SnapshotActiveRoleFamilies();
-        var message = CreateClientStateMessage(available, activeRoleFamilies);
-
-        if (initial)
-        {
-            _logger.LogInformation("Sending initial client/state:\n{Json}", MessageSerializer.Serialize(message));
-        }
-
-        var claimedFamilies = MarkRoleStateSent(message.Payload);
-
-        // Keep the availability publisher's tracker in step with what the server is being told,
-        // so the next genuine change is neither a spurious repeat nor swallowed as one.
-        lock (_availabilityLock)
-        {
-            _lastAvailabilitySent = available;
-        }
-
-        // Keep the output-latency dedupe (OnOutputLatencyChanged) in step with the leads this
-        // message just put on the wire, so a stream-start re-attach reporting an unchanged
-        // latency does not re-send. Read from the built player object so it cannot disagree
-        // with what the server was told.
-        if (message.Payload.Player is { } reportedPlayer)
-        {
-            _lastReportedLeadTimeMs = reportedPlayer.RequiredLeadTimeMs;
-            _lastReportedMinBufferMs = reportedPlayer.MinBufferMs;
-        }
-
+        // Held from the snapshot until SendAsync has been awaited, so two concurrent Set*Async
+        // calls cannot snapshot in one order and enqueue in the other (see _clientStateSendGate).
+        // Not reentrant, and safe to be so: nothing between here and the await sends a client/state.
+        await _clientStateSendGate.WaitAsync();
         try
         {
-            await SendAsync(message);
+            bool available = CurrentAvailability;
+            var activeRoleFamilies = SnapshotActiveRoleFamilies();
+            var message = CreateClientStateMessage(available, activeRoleFamilies);
+
+            if (initial)
+            {
+                _logger.LogInformation("Sending initial client/state:\n{Json}", MessageSerializer.Serialize(message));
+            }
+
+            var claimedFamilies = MarkRoleStateSent(message.Payload);
+
+            // Keep the availability publisher's tracker in step with what the server is being told,
+            // so the next genuine change is neither a spurious repeat nor swallowed as one.
+            lock (_availabilityLock)
+            {
+                _lastAvailabilitySent = available;
+            }
+
+            // Keep the output-latency dedupe (OnOutputLatencyChanged) in step with the leads this
+            // message just put on the wire, so a stream-start re-attach reporting an unchanged
+            // latency does not re-send. Read from the built player object so it cannot disagree
+            // with what the server was told.
+            if (message.Payload.Player is { } reportedPlayer)
+            {
+                _lastReportedLeadTimeMs = reportedPlayer.RequiredLeadTimeMs;
+                _lastReportedMinBufferMs = reportedPlayer.MinBufferMs;
+            }
+
+            try
+            {
+                await SendAsync(message);
+            }
+            catch
+            {
+                RollBackClaimedRoleState(claimedFamilies);
+                throw;
+            }
         }
-        catch
+        finally
         {
-            RollBackClaimedRoleState(claimedFamilies);
-            throw;
+            _clientStateSendGate.Release();
         }
     }
 
@@ -5332,6 +5351,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
         _displayScheduler.Dispose();
+        _clientStateSendGate.Dispose();
     }
 
     public async ValueTask DisposeAsync()
@@ -5344,6 +5364,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ClearPairingCodeState();
         UnsubscribeConnectionEvents();
         _displayScheduler.Dispose();
+        _clientStateSendGate.Dispose();
 
         // NOTE: We do NOT dispose _audioPipeline here - it's a shared singleton
         // managed by the DI container. We only stop playback if active.

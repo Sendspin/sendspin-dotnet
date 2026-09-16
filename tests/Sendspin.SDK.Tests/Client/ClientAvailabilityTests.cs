@@ -110,13 +110,17 @@ public class ClientAvailabilityTests
         connection.HoldNextSend = gate;
         var enterTask = client.EnterExternalSourceAsync();
 
-        // While it is in flight, a delta publishes: exit reports available: true.
-        await client.ExitExternalSourceAsync();
+        // A delta publishes: exit reports available: true. SendClientStateAsync now serializes
+        // every client/state send, so the delta waits on the gate behind the parked initial
+        // rather than overlapping it — the in-flight overlap is impossible by construction. Its
+        // claim on the tracker still has to survive that wait.
+        var exitTask = client.ExitExternalSourceAsync();
+        Assert.False(exitTask.IsCompleted);
 
-        // The initial's send completes after the delta went out; its seed must not clobber
-        // the tracker the delta has since written.
+        // The initial's send completes; the delta then goes out behind it. The initial's seed
+        // must not clobber the tracker the delta has since written.
         gate.SetResult();
-        await enterTask;
+        await Task.WhenAll(enterTask, exitTask);
 
         // The next genuine false must reach the wire, not be suppressed as a repeat.
         await client.EnterExternalSourceAsync();
