@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
@@ -60,6 +61,57 @@ public class SendspinHostServicePairingTests
 
         Assert.Throws<InvalidOperationException>(() => host.EnsurePairingPsk());
         Assert.Throws<InvalidOperationException>(() => host.RotatePairingPsk());
+    }
+
+    // The disconnect path used to raise ServerDisconnected while holding _connectionsLock. A
+    // handler that reaches back into the host's pairing surface — EnsurePairingPsk /
+    // RotatePairingPsk take _pairingStoreLock — then closes an AB/BA cycle against
+    // CollectLiveRecordPskIds, which takes the two locks in the opposite order during pairing
+    // finalization. Single-threaded, EnsurePairingPsk succeeds either way because the pairing
+    // gate is free, so the meaningful guard is Monitor.IsEntered: the lock must be released
+    // before the event fires.
+    [Fact]
+    public async Task ServerDisconnected_IsRaisedOutsideTheConnectionsLock()
+    {
+        var records = new InMemoryPairingRecordStore();
+
+        // An unbound LongTerm record makes the session trust 'user', so the discovery FakeServer
+        // below is admitted — see SendspinHostServiceArbitrationTests for the full reasoning.
+        records.Upsert(new PairingRecord(TestPsk, PskCategory.LongTerm));
+
+        await using var host = new SendspinHostService(
+            NullLoggerFactory.Instance,
+            new SendspinClientOptions
+            {
+                Identity = SendspinIdentity.Generate(),
+                PairingRecordStore = records,
+            },
+            listenerOptions: new ListenerOptions { Port = 0 },
+            advertiserOptions: new AdvertiserOptions { Enabled = false });
+
+        await host.StartAsync();
+
+        var server = new FakeServer(TestPsk, []);
+        await server.ConnectAsync(host.ListeningPort);
+        await WaitForServerConnectedAsync(host, server.ServerId);
+
+        // The private lock the handler must not be holding when the event is raised.
+        object connectionsLock = typeof(SendspinHostService)
+            .GetField("_connectionsLock", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(host)!;
+
+        var raised = new TaskCompletionSource<(bool LockHeld, string Token)>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        host.ServerDisconnected += (_, _) =>
+            raised.TrySetResult((Monitor.IsEntered(connectionsLock), host.EnsurePairingPsk()));
+
+        // The server drops: the host observes the close and raises ServerDisconnected from
+        // OnClientConnectionStateChanged, the path under test.
+        await server.DisposeAsync();
+
+        var (lockHeld, token) = await raised.Task.WaitAsync(Timeout);
+        Assert.False(lockHeld);
+        Assert.False(string.IsNullOrEmpty(token));
     }
 
     private static async Task WaitForServerConnectedAsync(SendspinHostService host, string serverId)
