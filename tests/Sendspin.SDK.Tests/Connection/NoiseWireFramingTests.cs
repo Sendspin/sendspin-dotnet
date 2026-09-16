@@ -273,6 +273,24 @@ public class NoiseWireFramingTests
         Assert.Equal(HandshakeFailureKind.ServerError, result.FatalKind);
     }
 
+    /// <summary>
+    /// The other malformed shape the guard covers: a non-object <c>payload</c> (here an array).
+    /// It must not throw its way into an unclassified fatal — still
+    /// <see cref="HandshakeFailureKind.ServerError"/> with the "unknown" detail.
+    /// </summary>
+    [Fact]
+    public void AwaitingServerInit_ServerErrorWithNonObjectPayload_DetailIsUnknown()
+    {
+        var framing = new NoiseWireFraming(SendspinIdentity.Generate());
+        framing.Start();
+
+        var serverError = """{"type":"server/error","payload":[]}""";
+        var result = framing.ProcessInbound(WireFrame.FromText(serverError));
+
+        Assert.Equal("unknown", result.FatalReason);
+        Assert.Equal(HandshakeFailureKind.ServerError, result.FatalKind);
+    }
+
     [Fact]
     public void SendBeforeHandshakeComplete_Throws()
     {
