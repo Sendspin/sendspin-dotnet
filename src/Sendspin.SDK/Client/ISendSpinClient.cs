@@ -106,8 +106,8 @@ public interface ISendspinClient : IAsyncDisposable
     /// <see cref="Connection.HandshakeFailureKind.PairingStateDiverged"/> — a stored PSK is bound to
     /// a different server; the pairing record is stale, so pair again.
     /// <see cref="Connection.HandshakeFailureKind.HandshakeRejected"/> — the server speaks the
-    /// encrypted protocol but refused this handshake for any other reason: no usable pairing record,
-    /// an unsupported cipher suite, a version mismatch, or malformed input. Pair again, or check the suite.
+    /// encrypted protocol but refused this handshake for any other reason: an unsupported cipher
+    /// suite, a version mismatch, or malformed input. Check the suite and the server logs.
     /// </exception>
     /// <exception cref="TimeoutException">
     /// The server accepted the socket but did not complete the hello exchange within the

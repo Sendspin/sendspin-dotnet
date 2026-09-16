@@ -172,7 +172,12 @@ an application that never subscribes to `ConnectionStateChanged` still finds out
 handling it the call previously returned as though it had succeeded, and the problem surfaced
 when the first command threw *"WebSocket is not connected"*.
 
-`Kind` separates the two cases, and they call for different responses:
+`Kind` classifies the failure; each calls for a different response:
+
+- `LegacyServer` — the server predates the encrypted protocol (aiosendspin < 7.0.0); upgrade it, or pin this SDK to the 9.x line.
+- `ServerError` — the server answered `client/init` with a cleartext `server/error`; its (unauthenticated) reason is in `Message`.
+- `PairingStateDiverged` — a stored PSK is bound to a different server; the pairing record is stale, so pair again.
+- `HandshakeRejected` — the server refused the handshake for any other reason: an unsupported cipher suite, a version mismatch, or malformed input.
 
 ```csharp
 try
@@ -184,11 +189,10 @@ catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.Lega
     // The server predates the encrypted protocol. Upgrade it to aiosendspin >= 7.0.0, or
     // pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
 }
-catch (SendspinHandshakeException ex)   // HandshakeRejected
+catch (SendspinHandshakeException ex)   // ServerError, PairingStateDiverged, or HandshakeRejected
 {
-    // The server speaks the encrypted protocol but refused this handshake: no usable
-    // pairing record, an unsupported cipher suite, a version mismatch, or malformed input.
-    // Pair again rather than retrying.
+    // See the list above. ex.Message carries the detail; re-pair for a diverged pairing
+    // record. Retrying cannot help for any of these, and the SDK does not retry.
 }
 catch (TimeoutException)
 {
