@@ -791,7 +791,7 @@ Clients with the `visualizer@v1` role receive real-time audio features for music
 ```csharp
 var capabilities = new ClientCapabilities
 {
-    Roles = { "player@v1", "visualizer@v1" },
+    Roles = new() { "player@v1", "visualizer@v1" },
     VisualizerRoleSupport = new VisualizerRoleSupport
     {
         BufferCapacity = 65536,           // client/hello: visualizer@v1_support
@@ -849,7 +849,7 @@ implementation) and add `source@v1` to `Roles`:
 ```csharp
 var caps = new ClientCapabilities
 {
-    Roles = { "player@v1", "source@v1" },   // a device can be both
+    Roles = new() { "player@v1", "source@v1" },   // a device can be both
     SourceRoleSupport = new SourceRoleSupport { LineSense = true },   // optional: report signal presence
 };
 
