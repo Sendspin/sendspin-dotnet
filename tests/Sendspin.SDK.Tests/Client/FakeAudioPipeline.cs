@@ -84,7 +84,14 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     /// <summary>The format of the stream the pipeline reports as running.</summary>
     public AudioFormat? CurrentFormat { get; set; }
 
-    public int DetectedOutputLatencyMs => 0;
+    public int DetectedOutputLatencyMs { get; private set; }
+
+    /// <summary>What a real pipeline does when an attached player reports its latency.</summary>
+    public void SetDetectedOutputLatency(int milliseconds)
+    {
+        DetectedOutputLatencyMs = milliseconds;
+        OutputLatencyChanged?.Invoke(this, milliseconds);
+    }
 
     /// <summary>Formats the client started the pipeline with, in order.</summary>
     public List<AudioFormat> StartCalls { get; } = new List<AudioFormat>();
@@ -107,6 +114,7 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
 
     public event EventHandler<AudioPipelineState>? StateChanged;
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
+    public event EventHandler<int>? OutputLatencyChanged;
 
     public void RaiseError(string message = "underrun") => ErrorOccurred?.Invoke(this, new AudioPipelineError(message));
 
