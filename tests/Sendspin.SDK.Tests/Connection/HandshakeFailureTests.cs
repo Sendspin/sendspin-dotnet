@@ -217,6 +217,51 @@ public class HandshakeFailureTests
         Assert.Contains("bad psk", ex.Message);
     }
 
+    /// <summary>
+    /// A framing fatal the framing could classify (here a server/error reply) surfaces to the
+    /// application carrying that kind, not collapsed to HandshakeRejected. The receive loop maps
+    /// <c>inbound.FatalKind ?? HandshakeRejected</c>, so an unclassified fatal (above) still reads
+    /// as HandshakeRejected while a classified one carries its own kind.
+    /// </summary>
+    [Fact]
+    public async Task ClassifiedFramingFatal_SurfacesItsKind_ToTheApplication()
+    {
+        await using var server = new SimpleWebSocketServer();
+        server.Start(0);
+
+        var accepted = new TaskCompletionSource<WebSocketClientConnection>();
+        server.ClientConnected += (_, c) => accepted.TrySetResult(c);
+
+        await using var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions { AutoReconnect = true, ReconnectDelayMs = 10 },
+            new StubFraming
+            {
+                IsTransportReady = false,
+                FatalOnInbound = "unsupported_suite",
+                FatalKindOnInbound = HandshakeFailureKind.ServerError,
+            });
+
+        var disconnected = new TaskCompletionSource<ConnectionStateChangedEventArgs>();
+        connection.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Disconnected)
+                disconnected.TrySetResult(e);
+        };
+
+        await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"));
+        var serverConn = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Any inbound frame trips the framing's (now classified) fatal path.
+        await serverConn.SendAsync("{}");
+
+        var final = await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var ex = Assert.IsType<SendspinHandshakeException>(final.Exception);
+        Assert.Equal(HandshakeFailureKind.ServerError, ex.Kind);
+        Assert.Contains("unsupported_suite", ex.Message);
+    }
+
     [Fact]
     public async Task AmbiguousHandshakeDrop_BacksOffOnTheHandshakeSchedule()
     {

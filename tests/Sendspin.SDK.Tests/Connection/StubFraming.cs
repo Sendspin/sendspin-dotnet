@@ -1,3 +1,4 @@
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Framing;
 
 namespace Sendspin.SDK.Tests.Connection;
@@ -18,6 +19,13 @@ internal sealed class StubFraming : IWireFraming
     /// standing in for a rejected handshake (bad PSK, unsupported suite, malformed input).
     /// </summary>
     public string? FatalOnInbound { get; set; }
+
+    /// <summary>
+    /// When set alongside <see cref="FatalOnInbound"/>, the fatal result carries this
+    /// classification — standing in for a framing that classified the failure (a server/error
+    /// reply, diverged pairing state) rather than leaving it unclassified.
+    /// </summary>
+    public HandshakeFailureKind? FatalKindOnInbound { get; set; }
 
     /// <summary>
     /// When set, EncodeText throws instead of producing a frame — models a send that never
@@ -52,7 +60,9 @@ internal sealed class StubFraming : IWireFraming
             // ProcessInbound therefore cannot tell a handshake-time fatal from a
             // transport-mode one — this stub reproduces that so tests can catch it.
             IsTransportReady = false;
-            return InboundFrameResult.Fatal(fatal);
+            return FatalKindOnInbound is { } kind
+                ? InboundFrameResult.Fatal(fatal, kind)
+                : InboundFrameResult.Fatal(fatal);
         }
 
         return frame.Kind == WireFrameKind.Text

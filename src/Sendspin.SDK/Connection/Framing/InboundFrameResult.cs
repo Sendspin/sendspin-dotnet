@@ -30,9 +30,17 @@ public readonly struct InboundFrameResult
     /// <summary>
     /// When set, the framing layer hit an unrecoverable protocol/crypto failure. The
     /// connection must close the socket without sending any application-level error
-    /// (per the spec's handshake failure-handling rules). The value is a log-only reason.
+    /// (per the spec's handshake failure-handling rules). The value is a log-only reason;
+    /// <see cref="FatalKind"/>, when present, is the app-facing classification of the same failure.
     /// </summary>
     public string? FatalReason { get; init; }
+
+    /// <summary>
+    /// The app-facing classification of a fatal failure, when the framing could classify it.
+    /// Null means unclassified — the connection reports it as
+    /// <see cref="HandshakeFailureKind.HandshakeRejected"/>.
+    /// </summary>
+    public HandshakeFailureKind? FatalKind { get; init; }
 
     /// <summary>A result surfacing an application JSON message.</summary>
     public static InboundFrameResult ForText(string text) => new() { Text = text };
@@ -51,4 +59,8 @@ public readonly struct InboundFrameResult
 
     /// <summary>A result signaling an unrecoverable framing failure.</summary>
     public static InboundFrameResult Fatal(string reason) => new() { FatalReason = reason };
+
+    /// <summary>A result signaling an unrecoverable framing failure classified for the application.</summary>
+    public static InboundFrameResult Fatal(string reason, HandshakeFailureKind kind) =>
+        new() { FatalReason = reason, FatalKind = kind };
 }

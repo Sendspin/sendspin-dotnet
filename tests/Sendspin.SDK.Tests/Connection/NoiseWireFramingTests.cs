@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Framing;
 using Sendspin.SDK.Connection.Noise;
 
@@ -142,6 +143,7 @@ public class NoiseWireFramingTests
             new WireFrame(WireFrameKind.Binary, server.StartRehandshake(unknownPsk)));
 
         Assert.Contains($"no PSK matches psk_id {NoiseConstants.DerivePskId(unknownPsk)}", result.FatalReason);
+        Assert.Equal(HandshakeFailureKind.PairingStateDiverged, result.FatalKind);
         Assert.False(framing.IsTransportReady);
     }
 
@@ -165,6 +167,7 @@ public class NoiseWireFramingTests
 
         var result = framing.ProcessInbound(WireFrame.FromText(msg1));
         Assert.Contains("bound to a different server_id", result.FatalReason);
+        Assert.Equal(HandshakeFailureKind.PairingStateDiverged, result.FatalKind);
         Assert.False(framing.IsTransportReady);
     }
 
@@ -213,6 +216,42 @@ public class NoiseWireFramingTests
         var result = framing.ProcessInbound(WireFrame.FromText(serverInit));
 
         Assert.NotNull(result.FatalReason);
+    }
+
+    /// <summary>
+    /// messaging.md § server/error: the server answers client/init with server/error in place of
+    /// server/init when it cannot accept the client. The framing classifies it as
+    /// <see cref="HandshakeFailureKind.ServerError"/> and carries the spec reason as the detail.
+    /// </summary>
+    [Fact]
+    public void AwaitingServerInit_ServerError_IsFatalWithReasonAndKind()
+    {
+        var framing = new NoiseWireFraming(SendspinIdentity.Generate());
+        framing.Start();
+
+        var serverError = """{"type":"server/error","payload":{"reason":"unsupported_suite"}}""";
+        var result = framing.ProcessInbound(WireFrame.FromText(serverError));
+
+        Assert.Equal("unsupported_suite", result.FatalReason);
+        Assert.Equal(HandshakeFailureKind.ServerError, result.FatalKind);
+    }
+
+    /// <summary>
+    /// The reason is unauthenticated cleartext, so a server/error that omits it (or sends a
+    /// non-string) must still classify as <see cref="HandshakeFailureKind.ServerError"/> rather
+    /// than crash — the detail falls back to "unknown".
+    /// </summary>
+    [Fact]
+    public void AwaitingServerInit_ServerErrorWithoutReason_DetailIsUnknown()
+    {
+        var framing = new NoiseWireFraming(SendspinIdentity.Generate());
+        framing.Start();
+
+        var serverError = """{"type":"server/error","payload":{}}""";
+        var result = framing.ProcessInbound(WireFrame.FromText(serverError));
+
+        Assert.Equal("unknown", result.FatalReason);
+        Assert.Equal(HandshakeFailureKind.ServerError, result.FatalKind);
     }
 
     [Fact]

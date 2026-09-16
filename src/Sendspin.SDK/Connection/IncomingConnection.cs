@@ -295,7 +295,7 @@ public sealed class IncomingConnection : ISendspinConnection
             // listen path has no reconnect loop, so we close and let the server redial.
             _logger.LogWarning("{Message}", wasTransportReady
                 ? $"Wire framing failure on an established session: {fatal}; closing connection"
-                : new SendspinHandshakeException(HandshakeFailureKind.HandshakeRejected, fatal).Message);
+                : new SendspinHandshakeException(inbound.FatalKind ?? HandshakeFailureKind.HandshakeRejected, fatal).Message);
 
             // Per spec: close without sending an application-level error message.
             _isOpen = false;

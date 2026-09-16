@@ -14,6 +14,23 @@ public enum HandshakeFailureKind
     /// unusable PSK, an unsupported suite, a version mismatch, or malformed input.
     /// </summary>
     HandshakeRejected,
+
+    /// <summary>
+    /// The server answered <c>client/init</c> with a cleartext <c>server/error</c> instead of
+    /// <c>server/init</c>. The exception's <see cref="Exception.Message"/> carries the spec
+    /// <c>reason</c> — one of <c>unsupported_version</c>, <c>unsupported_suite</c>, or
+    /// <c>malformed</c>. That reason arrives before any key is established and so is
+    /// unauthenticated: treat it as a hint for logging and operator display, not a trusted fact.
+    /// </summary>
+    ServerError,
+
+    /// <summary>
+    /// The pairing state has diverged in a way no retry can fix: on a re-handshake the server
+    /// named a <c>psk_id</c> this client cannot match, or a stored PSK is bound to a different
+    /// <c>server_id</c>. The pairing record on one side is stale; the remedy is to pair again.
+    /// A caller's own reconnect loop cannot succeed against this.
+    /// </summary>
+    PairingStateDiverged,
 }
 
 /// <summary>
@@ -38,6 +55,10 @@ public sealed class SendspinHandshakeException : Exception
             + "encryption. Upgrade the server to aiosendspin >= 7.0.0, or pin Sendspin SDK 9.x.",
         HandshakeFailureKind.HandshakeRejected =>
             $"Sendspin handshake rejected: {detail ?? "no detail"}.",
+        HandshakeFailureKind.ServerError =>
+            $"Server rejected client/init with reason '{detail ?? "unknown"}'.",
+        HandshakeFailureKind.PairingStateDiverged =>
+            $"Sendspin pairing state has diverged; re-pair (retrying cannot help): {detail ?? "no detail"}.",
         _ => $"Sendspin handshake failed: {kind}.",
     };
 }

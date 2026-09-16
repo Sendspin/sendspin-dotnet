@@ -20,7 +20,7 @@ namespace Sendspin.SDK.Connection.Noise;
 /// <c>client/init</c> (via <see cref="Start"/>) → <c>server/init</c> →
 /// <c>noise/handshake</c> msg 1 (psk_id inside) → <c>noise/handshake</c> msg 2 (reply)
 /// → transport mode. Any protocol/crypto failure surfaces as
-/// <see cref="InboundFrameResult.Fatal"/> and the connection closes without an
+/// <see cref="InboundFrameResult.Fatal(string)"/> and the connection closes without an
 /// application-level error, per spec.
 /// </remarks>
 public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
@@ -222,7 +222,21 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             return Fail("expected server/init text frame");
 
         using var doc = JsonDocument.Parse(frame.PayloadAsText());
-        if (doc.RootElement.GetProperty("type").GetString() != "server/init")
+        string? type = doc.RootElement.GetProperty("type").GetString();
+        if (type == "server/error")
+        {
+            // messaging.md § server/error: the server rejected client/init and will now close.
+            // The reason (unsupported_version | unsupported_suite | malformed) is cleartext and
+            // unauthenticated — a hint for logs and display — but a classified one the app can act on.
+            string reason = doc.RootElement.TryGetProperty("payload", out var errPayload)
+                && errPayload.TryGetProperty("reason", out var reasonProp)
+                && reasonProp.GetString() is { } value
+                    ? value
+                    : "unknown";
+            return Fail(reason, HandshakeFailureKind.ServerError);
+        }
+
+        if (type != "server/init")
             return Fail("expected server/init message");
 
         var payload = doc.RootElement.GetProperty("payload");
@@ -320,7 +334,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             // A re-handshake keeps failing. There is no unauthenticated peer to rescue by then,
             // and substituting the Sentinel would silently downgrade a live session's trust.
             if (!isInitialHandshake)
-                return Fail($"no PSK matches psk_id {pskId}");
+                return Fail($"no PSK matches psk_id {pskId}", HandshakeFailureKind.PairingStateDiverged);
 
             resolved = SentinelPskResolver.Instance.Resolve(NoiseConstants.SentinelPskId)!;
         }
@@ -330,7 +344,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         // keeps it excluded -- the substituted Sentinel carries no bound server_id, so it can
         // never be what fails here.
         if (resolved.ServerId is not null && resolved.ServerId != _serverId)
-            return Fail("PSK is bound to a different server_id");
+            return Fail("PSK is bound to a different server_id", HandshakeFailureKind.PairingStateDiverged);
 
         // Same treatment for the real exchange, and for the resolved PSK's copy alongside it:
         // "handshake did not complete after message 2" returns between the copy and the end of
@@ -562,13 +576,17 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         return new WireFrame(WireFrameKind.Binary, ciphertext.AsMemory(0, written));
     }
 
-    private InboundFrameResult Fail(string reason)
+    private InboundFrameResult Fail(string reason) => Fail(reason, null);
+
+    private InboundFrameResult Fail(string reason, HandshakeFailureKind? kind)
     {
         _phase = HandshakePhase.Failed;
         _transport?.Dispose();
         _transport = null;
         ClearPendingSwap();
-        return InboundFrameResult.Fatal(reason);
+        return kind is { } k
+            ? InboundFrameResult.Fatal(reason, k)
+            : InboundFrameResult.Fatal(reason);
     }
 
     private void ClearPendingSwap()

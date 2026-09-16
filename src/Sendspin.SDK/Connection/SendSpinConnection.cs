@@ -448,7 +448,7 @@ public sealed class SendspinConnection : ISendspinConnection
                     }
 
                     await FailPermanentlyAsync(
-                        new SendspinHandshakeException(HandshakeFailureKind.HandshakeRejected, fatal));
+                        new SendspinHandshakeException(inbound.FatalKind ?? HandshakeFailureKind.HandshakeRejected, fatal));
                     return;
                 }
 
