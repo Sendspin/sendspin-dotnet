@@ -26,10 +26,11 @@ public class SendspinClientServiceStreamStartTests
 
     private static byte[] AudioFrame(long timestamp, byte[] encoded)
     {
-        var frame = new byte[9 + encoded.Length];
+        // Player audio chunk header: type + timestamp + send_ahead (13 bytes), audio from byte 13.
+        var frame = new byte[13 + encoded.Length];
         frame[0] = BinaryMessageTypes.PlayerAudio0;
         BinaryPrimitives.WriteInt64BigEndian(frame.AsSpan(1, 8), timestamp);
-        encoded.CopyTo(frame, 9);
+        encoded.CopyTo(frame, 13);
         return frame;
     }
 

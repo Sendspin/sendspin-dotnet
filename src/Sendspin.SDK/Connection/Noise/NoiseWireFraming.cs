@@ -12,7 +12,7 @@ namespace Sendspin.SDK.Connection.Noise;
 /// The Sendspin encrypted transport as an <see cref="IWireFraming"/>: owns the
 /// cleartext init exchange and Noise KKpsk2 handshake, then encrypts/decrypts all
 /// application frames as Noise transport ciphertexts (JSON as binary type 0), splitting
-/// and reassembling messages larger than one Noise message via fragment types 2/3.
+/// and reassembling messages larger than one Noise message via binary ID 1 with a flags byte.
 /// </summary>
 /// <remarks>
 /// Client-side (Noise responder) only; the server is always the Noise initiator
@@ -139,6 +139,9 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         ThrowIfNotReady();
         if (data.Length == 0)
             throw new ArgumentException("binary message must include a type byte", nameof(data));
+        byte type = data.Span[0];
+        if (type is NoiseConstants.MessageTypeFragment or 2 or 3)
+            throw new ArgumentOutOfRangeException(nameof(data), type, "binary message type 1 is fragmentation and 2-3 are reserved; they cannot be sent as an application message.");
         return EncryptOutbound(data.ToArray());
     }
 
@@ -438,35 +441,55 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             return Fail("empty transport message");
 
         byte type = plainBuf[0];
-        return type switch
+        if (type == NoiseConstants.MessageTypeFragment)
         {
-            NoiseConstants.MessageTypeFragmentMore => HandleFragment(plainBuf.AsMemory(0, plainLen), last: false),
-            NoiseConstants.MessageTypeFragmentEnd => HandleFragment(plainBuf.AsMemory(0, plainLen), last: true),
-            _ when _reassemblyBuffer is not null =>
-                Fail("non-fragment frame received while a fragmented message is in flight"),
-            _ => DispatchMessage(type, plainBuf.AsMemory(1, plainLen - 1)),
-        };
+            // [1][flags][...]: flags bit 1 = first fragment, bit 0 = last, bits 2-7 MUST be zero.
+            if (plainLen < 2)
+                return Fail("fragment frame missing flags byte");
+            byte flags = plainBuf[1];
+            if ((flags & NoiseConstants.FragmentFlagsReserved) != 0)
+                return Fail("fragment flags reserved bits set");
+            bool first = (flags & NoiseConstants.FragmentFlagFirst) != 0;
+            bool last = (flags & NoiseConstants.FragmentFlagLast) != 0;
+            return HandleFragment(plainBuf.AsMemory(0, plainLen), first, last);
+        }
+
+        if (_reassemblyBuffer is not null)
+            return Fail("non-fragment frame received while a fragmented message is in flight");
+
+        // IDs 2 and 3 were the pre-1.0 fragment types and are now reserved (spec messaging.md).
+        // A reserved ID is not a valid application binary type, so it is a silent failure like a
+        // malformed fragment rather than something surfaced to BinaryMessageParser as a message.
+        if (type is 2 or 3)
+            return Fail($"reserved binary message id {type}");
+
+        return DispatchMessage(type, plainBuf.AsMemory(1, plainLen - 1));
     }
 
-    private InboundFrameResult HandleFragment(ReadOnlyMemory<byte> plaintext, bool last)
+    private InboundFrameResult HandleFragment(ReadOnlyMemory<byte> plaintext, bool first, bool last)
     {
         ReadOnlyMemory<byte> data;
-        if (_reassemblyBuffer is null)
+        if (first)
         {
-            // Opening fragment carries orig_type after the fragment type byte.
-            if (last)
-                return Fail("fragment-end with no fragmented message in flight");
-            if (plaintext.Length < 2)
+            // Opening fragment: [1][flags][orig_type][data]. Only one message may be in flight.
+            if (_reassemblyBuffer is not null)
+                return Fail("opening fragment while a fragmented message is in flight");
+            if (plaintext.Length < 3)
                 return Fail("opening fragment missing orig_type");
-            _reassemblyOrigType = plaintext.Span[1];
-            if (_reassemblyOrigType is NoiseConstants.MessageTypeFragmentMore or NoiseConstants.MessageTypeFragmentEnd)
-                return Fail("orig_type of 2 or 3");
+            _reassemblyOrigType = plaintext.Span[2];
+            // orig_type must be a real message type: the fragment id (1) and the reserved ids
+            // (2, 3) are malformed here, the same as receiving them as a top-level frame.
+            if (_reassemblyOrigType is NoiseConstants.MessageTypeFragment or 2 or 3)
+                return Fail($"orig_type is a reserved id {_reassemblyOrigType}");
             _reassemblyBuffer = new MemoryStream();
-            data = plaintext[2..];
+            data = plaintext[3..];
         }
         else
         {
-            data = plaintext[1..];
+            // Continuation fragment: [1][flags][data]. There must be a message in flight.
+            if (_reassemblyBuffer is null)
+                return Fail("continuation fragment with no fragmented message in flight");
+            data = plaintext[2..];
         }
 
         int maxReassembled = _surfacedApplicationMessage
@@ -553,20 +576,27 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             yield break;
         }
 
-        // Fragment: [2][orig_type][data...] then [2][data...]* then [3][data...].
+        // Fragment: [1][flags][orig_type][data...] first, then [1][flags][data...].
+        // flags bit 1 = first, bit 0 = last.
         byte origType = plaintext.Span[0];
         ReadOnlyMemory<byte> remaining = plaintext[1..];
         bool first = true;
         while (true)
         {
-            int headerLen = first ? 2 : 1;
+            int headerLen = first ? 3 : 2;
             int chunkLen = Math.Min(remaining.Length, NoiseConstants.MaxTransportPlaintext - headerLen);
             bool isLast = chunkLen == remaining.Length;
 
             var fragment = new byte[headerLen + chunkLen];
-            fragment[0] = isLast ? NoiseConstants.MessageTypeFragmentEnd : NoiseConstants.MessageTypeFragmentMore;
+            fragment[0] = NoiseConstants.MessageTypeFragment;
+            byte flags = 0;
             if (first)
-                fragment[1] = origType;
+                flags |= NoiseConstants.FragmentFlagFirst;
+            if (isLast)
+                flags |= NoiseConstants.FragmentFlagLast;
+            fragment[1] = flags;
+            if (first)
+                fragment[2] = origType;
             remaining[..chunkLen].CopyTo(fragment.AsMemory(headerLen));
 
             yield return EncryptFrame(fragment);

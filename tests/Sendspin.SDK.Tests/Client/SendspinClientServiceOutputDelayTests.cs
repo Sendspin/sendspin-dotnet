@@ -11,9 +11,9 @@ namespace Sendspin.SDK.Tests.Client;
 /// avoiding any dependency on the fire-and-forget client/state acknowledgement.
 /// </summary>
 /// <remarks>
-/// Test names beginning <c>SetStaticDelay</c> or <c>SetOutputDelay</c> name the wire command
-/// spelling under test, not the concept: spec 168a677 renamed <c>set_static_delay</c> to
-/// <c>set_output_delay</c> with no alias, and both are accepted inbound.
+/// Spec 168a677 renamed <c>set_static_delay</c> to <c>set_output_delay</c> with no alias; the
+/// 10.x line accepts only the new name. The pre-rename command is exercised once, to pin that
+/// it is now ignored.
 /// </remarks>
 public class SendspinClientServiceOutputDelayTests
 {
@@ -26,46 +26,16 @@ public class SendspinClientServiceOutputDelayTests
         """;
 
     [Fact]
-    public void SetStaticDelay_AppliesDelayAndPersists()
+    public void SetStaticDelay_LegacyCommandName_IsIgnored()
     {
+        // Spec 168a677 (PR #164) removed the pre-rename set_static_delay / static_delay_ms with
+        // no alias, so a server still sending them is a no-op: the delay is neither applied nor
+        // persisted.
         var sync = new KalmanClockSynchronizer();
         var store = new FakeOutputDelayStore();
         var (client, connection, _) = TestClient.Create(configure: options => options with
         {
             ClockSynchronizer = sync,
-            OutputDelayStore = store,
-        });
-        using var _c = client;
-
-        connection.RaiseTextMessageReceived(SetStaticDelayCommand(250));
-
-        Assert.Equal(250.0, sync.OutputDelayMs);
-        Assert.Equal(new[] { 250.0 }, store.Saved);
-    }
-
-    [Theory]
-    [InlineData(9000, 5000)] // above max clamps down
-    [InlineData(-100, 0)]    // negatives are not supported; clamp to zero
-    public void SetStaticDelay_ClampsToSpecRange(int requested, double expected)
-    {
-        var sync = new KalmanClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = sync });
-        using var _c = client;
-
-        connection.RaiseTextMessageReceived(SetStaticDelayCommand(requested));
-
-        Assert.Equal(expected, sync.OutputDelayMs);
-    }
-
-    [Fact]
-    public void SetStaticDelay_IgnoredWhenCapabilityDisabled()
-    {
-        var sync = new KalmanClockSynchronizer();
-        var store = new FakeOutputDelayStore();
-        var (client, connection, _) = TestClient.Create(configure: options => options with
-        {
-            ClockSynchronizer = sync,
-            Capabilities = new ClientCapabilities { SupportsSetOutputDelay = false },
             OutputDelayStore = store,
         });
         using var _c = client;
@@ -74,6 +44,20 @@ public class SendspinClientServiceOutputDelayTests
 
         Assert.Equal(0.0, sync.OutputDelayMs);
         Assert.Empty(store.Saved);
+    }
+
+    [Theory]
+    [InlineData(9000, 5000)] // above max clamps down
+    [InlineData(-100, 0)]    // negatives are not supported; clamp to zero
+    public void SetOutputDelay_ClampsToSpecRange(int requested, double expected)
+    {
+        var sync = new KalmanClockSynchronizer();
+        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = sync });
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(SetOutputDelayCommand(requested));
+
+        Assert.Equal(expected, sync.OutputDelayMs);
     }
 
     [Fact]
@@ -94,22 +78,6 @@ public class SendspinClientServiceOutputDelayTests
 
         Assert.Equal(120.0, sync.OutputDelayMs);
         Assert.Equal(new[] { 120.0 }, store.Saved);
-    }
-
-    [Fact]
-    public void SetOutputDelay_WithBothFields_PrefersOutputDelayMs()
-    {
-        // A transitional server may send both names. The post-rename field is the authoritative
-        // one, so it wins rather than the legacy field it replaced.
-        var sync = new KalmanClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = sync });
-        using var _c = client;
-
-        connection.RaiseTextMessageReceived("""
-            { "type": "server/command", "payload": { "player": { "command": "set_output_delay", "output_delay_ms": 120, "static_delay_ms": 250 } } }
-            """);
-
-        Assert.Equal(120.0, sync.OutputDelayMs);
     }
 
     [Fact]
@@ -184,11 +152,13 @@ public class SendspinClientServiceOutputDelayTests
         Assert.Equal(200, player.RequiredLeadTimeMs);
         Assert.Equal(150, player.MinBufferMs);
         Assert.NotNull(player.SupportedCommands);
-        Assert.Contains("set_static_delay", player.SupportedCommands);
+        // volume and mute are always advertised (the client applies both unconditionally);
+        // set_output_delay is added when SupportsSetOutputDelay is on.
+        Assert.Equal(new[] { "volume", "mute", "set_output_delay" }, player.SupportedCommands);
     }
 
     [Fact]
-    public async Task InitialClientState_SendsEmptySupportedCommandsWhenCapabilityDisabled()
+    public async Task InitialClientState_OmitsSetOutputDelayWhenCapabilityDisabled()
     {
         var (client, connection, _) = TestClient.Create(configure: options => options with
         {
@@ -199,11 +169,11 @@ public class SendspinClientServiceOutputDelayTests
 
         TestClient.CompleteHandshake(connection, "player@v1");
 
-        // Spec PR #175 made supported_commands required: a player that accepts no commands says
-        // so with [], because absence and [] meant the same thing and the redundant encoding let
-        // a reader treating a missing field as "unchanged" keep a revoked command.
+        // volume and mute are always advertised (the client applies both unconditionally); with
+        // SupportsSetOutputDelay off, set_output_delay is the only entry dropped. The field is
+        // still required (spec PR #175) and never absent.
         var player = await WaitForPlayerStateAsync(connection);
-        Assert.Empty(player.SupportedCommands);
+        Assert.Equal(new[] { "volume", "mute" }, player.SupportedCommands);
     }
 
     [Fact]
@@ -286,7 +256,7 @@ public class SendspinClientServiceOutputDelayTests
         });
         using var _c = client;
 
-        connection.RaiseTextMessageReceived(SetStaticDelayCommand(250));
+        connection.RaiseTextMessageReceived(SetOutputDelayCommand(250));
 
         // Persistence failure must not prevent the in-memory apply.
         Assert.Equal(250.0, sync.OutputDelayMs);

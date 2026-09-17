@@ -13,6 +13,11 @@ jobs:
   interop:
     runs-on: ubuntu-latest
     steps:
+      # Interop matrix PARKED: the pinned draft server (892af8c) predates the 1.0 client/hello —
+      # its ClientHelloPayload still requires trust_level, which the spec deleted and aiosendspin
+      # removed in #355 — so every scenario fails at the hello with "Malformed client/hello". All
+      # scenarios below are skipped (if: false) until the pin moves to a server that accepts the
+      # 1.0 hello. Do not bump the pin or patch the server here.
       - uses: actions/checkout@v4
 
       - name: Setup .NET
@@ -31,9 +36,12 @@ jobs:
       # exists only there: 9.1.1, the latest published release, rejects the client/hello
       # outright. Move this to "aiosendspin[server]==10.0.0" the moment it is published, and
       # thereafter bump deliberately on each release, since a release is where a spec wire
-      # change first becomes observable and the SDK's remaining deliberate wire deviations
-      # (client_stream/*, static_delay_ms, set_static_delay) are held only until the
-      # reference server adopts them. The 9.x line keeps its own pin on 9.1.1.
+      # change first becomes observable. As of the 1.0 wire cut-over (#287) the SDK is AHEAD
+      # of this pinned draft commit: it sends client-stream/* (spec PR #163), output_delay_ms /
+      # set_output_delay (#164), drops trust_level (#158) and player supported_commands (#177)
+      # from client/hello, and frames fragments as binary ID 1 (#172). The source scenario
+      # below is skipped until aiosendspin adopts the client-stream/* rename. The 9.x line
+      # keeps its own pin on 9.1.1.
       #
       # The compatibility floor is a single one — the aiosendspin 10.0.0 line — and is
       # documented in the README matrix, not exercised here: this job runs only against the
@@ -50,9 +58,12 @@ jobs:
       - name: Build interop client
         run: dotnet build tools/interop/InteropClient -c Release
 
+      # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
       - name: Unpaired connect (client admitted over unpaired access)
+        if: false
         run: bash tools/interop/run.sh unpaired
 
+      # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
       # SKIPPED (spec #247 / aiosendspin#402): the client now sends client/pair-init before
       # client/pair-finalize, and the pinned server predates that and rejects the leading init.
       # Re-enable once the interop pin includes aiosendspin#402.
@@ -63,6 +74,7 @@ jobs:
       # The only live cover for the CPace round, PSK wrapping, and the pairing window. The
       # server side fails the run if the client did not gesture-gate the attempt first, so
       # this also pins the gating policy rather than just "pairing worked".
+      # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
       #
       # SKIPPED (spec #237 / aiosendspin#415): the client now binds the round into the CPace
       # sid, which the pinned server predates, so key confirmation fails against it. Re-enable
@@ -75,9 +87,13 @@ jobs:
       # until clock sync converges, which takes ~30s of burst sampling, and the server
       # discards source chunks until that state arrives.
       #
+      # Skipped for the 1.0 wire cut-over (#287): the SDK now announces client-stream/start
+      # (spec PR #163), but this pinned draft server still expects client_stream/start and so
+      # never starts the stream. Re-enable when aiosendspin adopts the client-stream/* rename.
+      #
       # SKIPPED (spec #247 / aiosendspin#402): this scenario pairs via Pairing PSK first, which
       # now sends client/pair-init before client/pair-finalize — rejected by the pinned server
       # that predates aiosendspin#402. Re-enable once the interop pin includes aiosendspin#402.
-      - name: Source streaming (server start command, client_stream/start, decoded audio)
+      - name: Source streaming (server start command, client-stream/start, decoded audio)
         if: false
         run: bash tools/interop/run.sh source

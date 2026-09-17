@@ -13,7 +13,7 @@ public interface ISourceAudioEncoder : IDisposable
     string Codec { get; }
 
     /// <summary>
-    /// Optional base64 codec header for <c>client_stream/start</c> (e.g. FLAC). Null when
+    /// Optional base64 codec header for <c>client-stream/start</c> (e.g. FLAC). Null when
     /// the codec needs none.
     /// </summary>
     string? CodecHeader { get; }

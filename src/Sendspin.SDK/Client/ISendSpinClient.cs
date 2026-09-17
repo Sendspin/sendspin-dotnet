@@ -256,8 +256,8 @@ public interface ISendspinClient : IAsyncDisposable
     /// </param>
     /// <remarks>
     /// <para>
-    /// Supplying a value is a client-initiated static-delay update — the spec permits one "when
-    /// audio output changes" and requires clients to persist <c>static_delay_ms</c> across
+    /// Supplying a value is a client-initiated output-delay update — the spec permits one "when
+    /// audio output changes" and requires clients to persist <c>output_delay_ms</c> across
     /// reboots and reconnections — so the value is written to
     /// <see cref="Synchronization.IClockSynchronizer.OutputDelayMs"/> and to
     /// <see cref="SendspinClientOptions.OutputDelayStore"/>, not merely reported.

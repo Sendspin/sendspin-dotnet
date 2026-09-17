@@ -210,7 +210,7 @@ public sealed class VisualizerStatePayload
 /// Player-specific state within client/state message.
 /// </summary>
 /// <remarks>
-/// The spec closes this object at <c>volume</c>, <c>muted</c>, <c>static_delay_ms</c>,
+/// The spec closes this object at <c>volume</c>, <c>muted</c>, <c>output_delay_ms</c>,
 /// <c>required_lead_time_ms</c>, <c>min_buffer_ms</c>, <c>supported_commands</c> and
 /// <c>format</c>, and a client MUST NOT send a field it does not define. Diagnostics belong in an
 /// <c>_</c>-prefixed application-specific role object, not here.
@@ -243,14 +243,11 @@ public sealed class PlayerStatePayload
     /// through. Reporting the raw value emitted a float, omitted the field entirely at its
     /// default, and could send a negative that a spec-conformant server rejects outright.
     /// <para>
-    /// The wire name stays <c>static_delay_ms</c> deliberately. Spec 168a677 (spec PR #164)
-    /// renamed the field to <c>output_delay_ms</c> with no alias, but no server has adopted it —
-    /// aiosendspin still reads only the old name — so flipping this attribute would drop the
-    /// delay from every server's view. It flips when servers adopt the rename, not before; the
-    /// C# name follows the spec's vocabulary in the meantime.
+    /// The wire name is <c>output_delay_ms</c>: spec 168a677 (spec PR #164) renamed the field
+    /// from <c>static_delay_ms</c> with no alias, and the 10.x line cuts over to it outright.
     /// </para>
     /// </remarks>
-    [JsonPropertyName("static_delay_ms")]
+    [JsonPropertyName("output_delay_ms")]
     public int OutputDelayMs { get; init; }
 
     /// <summary>
@@ -271,14 +268,15 @@ public sealed class PlayerStatePayload
     public int MinBufferMs { get; init; }
 
     /// <summary>
-    /// Player commands this client accepts via server/command, beyond the always-available
-    /// volume/mute. Currently a subset of: 'set_static_delay'.
+    /// The player commands the server MAY send via server/command. As this SDK builds it, the
+    /// list always contains <c>volume</c> and <c>mute</c> — the client applies both
+    /// unconditionally — plus <c>set_output_delay</c> when the client accepts that command, so it
+    /// is never empty here.
     /// </summary>
     /// <remarks>
     /// Not optional and never omitted: spec PR #175 dropped the <c>?</c>, because absence and
-    /// <c>[]</c> said the same thing and the redundant encoding silently revoked
-    /// <c>set_output_delay</c> for a reader that treated a missing field as unchanged. A player
-    /// that accepts no commands sends <c>[]</c>.
+    /// <c>[]</c> said the same thing and the redundant encoding silently revoked a command for a
+    /// reader that treated a missing field as unchanged.
     /// </remarks>
     [JsonPropertyName("supported_commands")]
     public List<string> SupportedCommands { get; init; } = new();

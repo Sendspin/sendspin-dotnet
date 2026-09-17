@@ -58,7 +58,7 @@ public class SourceCodecSelectionTests
     public void ConfiguredCodec_OverridesPcmCaptureFormat()
     {
         // The defect (#85 item 8): a PCM capture device with an explicit Codec="opus" must
-        // produce an opus encoder, so client_stream/start announces "opus". Before the fix
+        // produce an opus encoder, so client-stream/start announces "opus". Before the fix
         // the encoder is created from capture.Format.Codec ("pcm") no matter what
         // SourceRoleSupport.Codec says, so this fails on the current code. If this test were
         // the only one present, a factory that ignores SourceRoleSupport.Codec entirely (i.e.

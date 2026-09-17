@@ -23,7 +23,7 @@ public static class MessageSerializer
     /// <see cref="IMessage"/> — the source role's send delegate is
     /// <c>Func&lt;IMessage, Task&gt;</c> — would otherwise ask the context for the interface,
     /// which has no entry, and serialization would fail on null metadata. That made
-    /// <c>client_stream/start</c> unsendable, so the source role never streamed at all, and
+    /// <c>client-stream/start</c> unsendable, so the source role never streamed at all, and
     /// the only symptom was a swallowed ArgumentNullException naming 'jsonTypeInfo'.
     /// </remarks>
     /// <exception cref="InvalidOperationException">The message type has no context entry.</exception>

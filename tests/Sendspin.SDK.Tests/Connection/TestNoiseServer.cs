@@ -197,14 +197,20 @@ internal sealed class TestNoiseServer
         bool first = true;
         while (true)
         {
-            int headerLen = first ? 2 : 1;
+            int headerLen = first ? 3 : 2;
             int chunkLen = Math.Min(remaining.Length, NoiseConstants.MaxTransportPlaintext - headerLen);
             bool isLast = chunkLen == remaining.Length;
 
             var fragment = new byte[headerLen + chunkLen];
-            fragment[0] = isLast ? NoiseConstants.MessageTypeFragmentEnd : NoiseConstants.MessageTypeFragmentMore;
+            fragment[0] = NoiseConstants.MessageTypeFragment;
+            byte flags = 0;
             if (first)
-                fragment[1] = origType;
+                flags |= NoiseConstants.FragmentFlagFirst;
+            if (isLast)
+                flags |= NoiseConstants.FragmentFlagLast;
+            fragment[1] = flags;
+            if (first)
+                fragment[2] = origType;
             remaining[..chunkLen].CopyTo(fragment.AsMemory(headerLen));
             yield return EncryptFrame(fragment);
 
@@ -222,19 +228,20 @@ internal sealed class TestNoiseServer
         foreach (var frame in frames)
         {
             byte[] plaintext = DecryptFrame(frame);
-            if (origType is null && plaintext[0] is not (NoiseConstants.MessageTypeFragmentMore or NoiseConstants.MessageTypeFragmentEnd))
+            if (origType is null && plaintext[0] != NoiseConstants.MessageTypeFragment)
             {
                 return plaintext;
             }
 
+            // Fragment: [1][flags][orig_type?][data]. The first fragment carries orig_type.
             if (origType is null)
             {
-                origType = plaintext[1];
-                assembled.Write(plaintext.AsSpan(2));
+                origType = plaintext[2];
+                assembled.Write(plaintext.AsSpan(3));
             }
             else
             {
-                assembled.Write(plaintext.AsSpan(1));
+                assembled.Write(plaintext.AsSpan(2));
             }
         }
 
