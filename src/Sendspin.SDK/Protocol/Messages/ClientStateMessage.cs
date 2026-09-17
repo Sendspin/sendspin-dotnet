@@ -210,7 +210,7 @@ public sealed class VisualizerStatePayload
 /// Player-specific state within client/state message.
 /// </summary>
 /// <remarks>
-/// The spec closes this object at <c>volume</c>, <c>muted</c>, <c>static_delay_ms</c>,
+/// The spec closes this object at <c>volume</c>, <c>muted</c>, <c>output_delay_ms</c>,
 /// <c>required_lead_time_ms</c>, <c>min_buffer_ms</c>, <c>supported_commands</c> and
 /// <c>format</c>, and a client MUST NOT send a field it does not define. Diagnostics belong in an
 /// <c>_</c>-prefixed application-specific role object, not here.
@@ -243,14 +243,11 @@ public sealed class PlayerStatePayload
     /// through. Reporting the raw value emitted a float, omitted the field entirely at its
     /// default, and could send a negative that a spec-conformant server rejects outright.
     /// <para>
-    /// The wire name stays <c>static_delay_ms</c> deliberately. Spec 168a677 (spec PR #164)
-    /// renamed the field to <c>output_delay_ms</c> with no alias, but no server has adopted it —
-    /// aiosendspin still reads only the old name — so flipping this attribute would drop the
-    /// delay from every server's view. It flips when servers adopt the rename, not before; the
-    /// C# name follows the spec's vocabulary in the meantime.
+    /// The wire name is <c>output_delay_ms</c>: spec 168a677 (spec PR #164) renamed the field
+    /// from <c>static_delay_ms</c> with no alias, and the 10.x line cuts over to it outright.
     /// </para>
     /// </remarks>
-    [JsonPropertyName("static_delay_ms")]
+    [JsonPropertyName("output_delay_ms")]
     public int OutputDelayMs { get; init; }
 
     /// <summary>
@@ -272,7 +269,7 @@ public sealed class PlayerStatePayload
 
     /// <summary>
     /// Player commands this client accepts via server/command, beyond the always-available
-    /// volume/mute. Currently a subset of: 'set_static_delay'.
+    /// volume/mute. Currently a subset of: 'set_output_delay'.
     /// </summary>
     /// <remarks>
     /// Not optional and never omitted: spec PR #175 dropped the <c>?</c>, because absence and

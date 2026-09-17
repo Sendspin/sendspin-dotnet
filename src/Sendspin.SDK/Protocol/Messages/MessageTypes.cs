@@ -49,8 +49,8 @@ public static class MessageTypes
     public const string ServerState = "server/state";
 
     // Source role (client streams captured audio to the server)
-    public const string ClientStreamStart = "client_stream/start";
-    public const string ClientStreamEnd = "client_stream/end";
+    public const string ClientStreamStart = "client-stream/start";
+    public const string ClientStreamEnd = "client-stream/end";
 }
 
 /// <summary>

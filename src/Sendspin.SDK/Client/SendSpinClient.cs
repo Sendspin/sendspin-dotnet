@@ -169,7 +169,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private VisualizerRoleSupport? _visualizerRoleSupport;
 
     // Bounds for any value written to the clock synchronizer's output delay. The GroupSync offset
-    // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
+    // path allows negatives (schedule later), so this is wider than the set_output_delay spec range.
     private const double MinOutputDelayMs = -5000.0;
     private const double MaxOutputDelayMs = 5000.0;
 
@@ -526,6 +526,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The runtime reconfiguration path validates spectrum-vs-spectrum-config already; the
         // initial configuration needs the same guard before the first client/state is built.
         _capabilities.ValidateVisualizerRoleSupport();
+
+        // A custom (_-prefixed) role must carry an explicit @v version (spec template.md).
+        _capabilities.ValidateCustomRoleVersions();
 
         // Implemented methods start enabled unless the app says otherwise. ANDing each with
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
@@ -1174,7 +1177,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// A conformant server never gets ahead of this, so a frame the gate drops is a server
     /// deviation — and dropping it is the safe reading: the player object is where
-    /// <c>static_delay_ms</c>, <c>required_lead_time_ms</c> and <c>min_buffer_ms</c> live, so
+    /// <c>output_delay_ms</c>, <c>required_lead_time_ms</c> and <c>min_buffer_ms</c> live, so
     /// audio that arrives before it was scheduled against timings the server had to guess.
     /// <para>
     /// Before any <c>server/hello</c> there is no statement about active roles at all and
@@ -1240,8 +1243,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         return ClientHelloMessage.Create(
-            // Under the encrypted protocol client_id/version travel in client/init and
-            // are omitted here; trust_level and unpaired_access are required instead.
+            // Under the encrypted protocol client_id/version travel in client/init and are
+            // omitted here; unpaired_access and supported_pair_methods travel here instead.
+            // trust_level is gone: spec PR #158 deleted it from client/hello.
             name: _capabilities.ClientName,
             supportedRoles: _capabilities.Roles,
 
@@ -1268,7 +1272,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         })
                         .ToList(),
                     BufferCapacity = _capabilities.BufferCapacity,
-                    SupportedCommands = new List<string> { "volume", "mute" }
                 }
                 : null,
             deviceInfo: new DeviceInfo
@@ -1290,7 +1293,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     Features = _capabilities.SourceRoleSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
-            trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
             supportedPairMethods: BuildPairMethods(),
             unpairedAccess: new UnpairedAccess { Enabled = _unpairedAccessEnabled }
         );
@@ -1608,8 +1610,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var clampedVolume = Math.Clamp(volume, 0, 100);
 
         // A supplied delay is a client-initiated update, which the spec permits ("clients may
-        // update static_delay_ms ... when audio output changes") and requires be persisted
-        // ("clients must persist static_delay_ms locally across reboots and server
+        // update output_delay_ms ... when audio output changes") and requires be persisted
+        // ("clients must persist output_delay_ms locally across reboots and server
         // reconnections"). Applying it here is what makes the reported value true: this used to
         // report the caller's number while continuing to schedule with the old one, so the
         // server's group calibration and the client's playback disagreed, and a reconnect
@@ -1919,7 +1921,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Closes an open source input stream before this client reports <c>available: false</c>.
     /// The server rejects source chunks whenever the client is not available and treats
-    /// <c>client_stream/end</c> as an implicit stop, so the end MUST precede the state: the
+    /// <c>client-stream/end</c> as an implicit stop, so the end MUST precede the state: the
     /// other order leaves the server holding a stream open across the window in which it has
     /// already begun rejecting that stream's audio.
     /// </summary>
@@ -1987,16 +1989,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Builds the player <c>supported_commands</c> list reported in client/state. Currently
-    /// advertises 'set_static_delay' when the client accepts that command.
+    /// Builds the player <c>supported_commands</c> list reported in client/state:
+    /// <c>volume</c> and <c>mute</c> always — the client applies both unconditionally — plus
+    /// <c>set_output_delay</c> when the client accepts that command. The reference server derives
+    /// controller group volume/mute from this list, so omitting them reads as volume-incapable.
     /// </summary>
     /// <remarks>
-    /// Empty, never absent: spec PR #175 made the field required, and an empty array is its
-    /// explicit "accepts no commands". Omitting it once merging was removed would have left the
+    /// Never absent: spec PR #175 made the field required, and the list is the explicit set of
+    /// commands the server MAY send. Omitting it once merging was removed would have left the
     /// server unable to tell "no commands" from "unchanged".
     /// </remarks>
     private List<string> GetPlayerSupportedCommands()
-        => _capabilities.SupportsSetOutputDelay ? new List<string> { Commands.SetStaticDelay } : new List<string>();
+    {
+        var commands = new List<string> { "volume", "mute" };
+        if (_capabilities.SupportsSetOutputDelay)
+        {
+            commands.Add(Commands.SetOutputDelay);
+        }
+
+        return commands;
+    }
 
     /// <summary>
     /// Projects a scheduler-side output delay onto the wire type: an integer millisecond value
@@ -2005,7 +2017,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     /// <remarks>
     /// The scheduler's value is a double in <see cref="MinOutputDelayMs"/>..<see cref="MaxOutputDelayMs"/> —
-    /// fractional from calibration, negative to schedule later. The spec's <c>static_delay_ms</c>
+    /// fractional from calibration, negative to schedule later. The spec's <c>output_delay_ms</c>
     /// is an integer 0-5000 and states negatives are not supported; a conformant server rejects
     /// one outright rather than tolerating it. Clamping is therefore not optional, and a clamp
     /// that moved the value is worth saying out loud: the server is being told a delay the
@@ -2027,7 +2039,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _lastWarnedOutputDelayMs = outputDelayMs;
             _logger.LogWarning(
-                "static_delay_ms {Configured}ms is reported to the server as {Reported}ms: the wire "
+                "output_delay_ms {Configured}ms is reported to the server as {Reported}ms: the wire "
                 + "value is an integer 0-5000 and negatives are not supported. Audio is still "
                 + "scheduled using {Configured}ms, so the server's group calibration will differ.",
                 outputDelayMs, wire, outputDelayMs);
@@ -2113,7 +2125,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             // Streaming state is per-connection (spec): a start from the old connection
             // must not survive into the next one, so tear capture down now, without a
-            // client_stream/end — the stream it would end died with the connection.
+            // client-stream/end — the stream it would end died with the connection.
             _sourcePipeline?.ResetForConnectionLossAsync().SafeFireAndForget(_logger);
 
             // Same reason, and additionally: the clock synchronizer resets on re-handshake,
@@ -2496,7 +2508,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Answers an encrypted-flow server/hello with the encrypted-shape client/hello
-    /// (client_id/version omitted; trust_level and unpaired_access included).
+    /// (client_id/version omitted; unpaired_access and supported_pair_methods included).
     /// </summary>
     private async Task SendEncryptedClientHelloAsync()
     {
@@ -3698,7 +3710,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // and NotifyReconnect on null buffer/player is a no-op.
         _audioPipeline?.NotifyReconnect();
 
-        // Restore any persisted static_delay_ms before reporting initial state, so the server
+        // Restore any persisted output_delay_ms before reporting initial state, so the server
         // sees the calibrated delay immediately on (re)connect. No-op when no store is configured.
         LoadPersistedOutputDelay();
 
@@ -4615,23 +4627,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Mute.Value);
         }
 
-        // Apply set_static_delay only when advertised as supported and a value is present.
+        // Apply set_output_delay only when advertised as supported and a value is present.
         // Per spec the value is 0-5000 ms (negatives are not supported), so we clamp to that range.
-        //
-        // Spec 168a677 (spec PR #164) renamed the command to 'set_output_delay' and the field to
-        // 'output_delay_ms' with no alias, so both spellings are accepted here — a client fielded
-        // now keeps working the day a server flips. The post-rename field wins if both arrive.
-        // Only the read side changed: what this client advertises and reports is still the old
-        // naming, until servers adopt the rename.
-        var requestedDelayMs = player.OutputDelayMs ?? player.StaticDelayMs;
-        if ((player.Command == Commands.SetStaticDelay || player.Command == Commands.SetOutputDelay)
+        // Spec 168a677 (spec PR #164) renamed the command from 'set_static_delay' and the field
+        // from 'static_delay_ms' with no alias; the 10.x line accepts only the new names.
+        var requestedDelayMs = player.OutputDelayMs;
+        if (player.Command == Commands.SetOutputDelay
             && _capabilities.SupportsSetOutputDelay
             && requestedDelayMs.HasValue)
         {
             var clamped = Math.Clamp(requestedDelayMs.Value, 0, 5000);
             if (clamped != requestedDelayMs.Value)
             {
-                _logger.LogWarning("server/command [{Player}]: static_delay_ms clamped from {Requested}ms to {Clamped}ms",
+                _logger.LogWarning("server/command [{Player}]: output_delay_ms clamped from {Requested}ms to {Clamped}ms",
                     _capabilities.ClientName, requestedDelayMs.Value, clamped);
             }
 

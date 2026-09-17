@@ -28,8 +28,14 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Pairing | `server/unpair` removes the pairing record for the server that sent it | Low — behavioural; a custom store sees a `Remove` |
 | Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
 | Visualizer | `RequestVisualizerFormatAsync` removed; use `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`. `ClientCapabilities.VisualizerSupport` is now `VisualizerRoleSupport` | **High** — compiler error, see §6 |
-| Output delay | "Static delay" renamed to "output delay" across the C# surface (spec PR #164); the wire is unchanged | Medium — compiler errors only, see §8 for the full table |
-| Output delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
+| Output delay | "Static delay" renamed to "output delay" across the C# surface **and the wire** (spec PR #164): `client/state` sends `output_delay_ms`, the command is `set_output_delay`, and there is no alias in either direction | Medium — compiler errors, plus a wire change; see §8 |
+| Output delay | `client/state` now always reports `output_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
+| `client/hello` | `trust_level` removed (spec PR #158); it is no longer sent | Low — wire-only; a peer parsing it must stop requiring it |
+| `client/hello` | `supported_commands` removed from `player@v1_support`; the real set is reported in the `client/state` player object instead (spec PR #177), now `volume`, `mute` and, when enabled, `set_output_delay` | Low — wire-only; a server derives controller group volume/mute from the state list |
+| Source role | On the wire, `client_stream/start` / `client_stream/end` are `client-stream/start` / `client-stream/end` (spec PR #163) | Low — wire-only; a server on the source wire must adopt the hyphen |
+| Player audio | The player audio chunk header gains a 4-byte `send_ahead` (uint32 BE) after the timestamp, audio from byte 13; `AudioChunk.SendAhead` exposes it (spec PR #167). It carries no scheduling meaning | Low — wire-only; a server must emit the wider header |
+| Connection | Fragmentation is binary ID `1` with a flags byte (`[1][flags][orig_type][data]` first, `[1][flags][data]` after); IDs 2 and 3 are reserved and no longer sent or accepted (spec PR #172) | Low — wire-only; encrypted transport internals |
+| Roles | A custom (`_`-prefixed) role must carry an explicit `@v…` version, or `ClientCapabilities` rejects it at construction (spec PR #243) | Low — compiler/argument error only if you advertise a versionless custom role |
 | Clock sync | `IClockSynchronizer` gains `ServerToClientTimeUncompensated` | Low — compiler error, one-line fix, and only for a custom synchronizer |
 | Clock sync | Filter constants, burst cadence and timestamping now match the reference implementation | Low — behavioural, no code change; see §11 |
 | Connection | `ISendspinConnection` gains `SendTimeMessageAsync`; `TextMessageReceived` carries `TextMessageReceivedEventArgs` | Low — compiler error, only for a custom connection or a raw event subscriber |
@@ -250,7 +256,7 @@ Optional — existing code reading `presentation.PairingCode` keeps working and 
 
 ### "Static delay" is now "output delay" on the C# surface
 
-Spec 168a677 (spec PR #164) renamed the player's static delay to **output delay**: `static_delay_ms` → `output_delay_ms`, `set_static_delay` → `set_output_delay`. The .NET surface follows the spec's vocabulary from 10.0.0 on. **The wire does not move with it.** No server has adopted the rename — `aiosendspin` still reads only the old names — so every byte this SDK sends is unchanged: `client/state` still carries `static_delay_ms`, and the `supported_commands` entry it advertises is still `set_static_delay`. Inbound, both spellings are accepted, and the post-rename one wins if a server sends both.
+Spec 168a677 (spec PR #164) renamed the player's static delay to **output delay**: `static_delay_ms` → `output_delay_ms`, `set_static_delay` → `set_output_delay`. Both the .NET surface **and the wire** follow the spec's vocabulary in 10.0.0: `client/state` carries `output_delay_ms`, the `supported_commands` entry it advertises is `set_output_delay`, and only `set_output_delay` / `output_delay_ms` are accepted inbound. There is no alias — the old names are gone from the wire in both directions.
 
 The rename is mechanical: every renamed member is a compiler error at your call site, and none of them changed behaviour.
 
@@ -264,18 +270,18 @@ The rename is mechanical: every renamed member is a compiler error at your call 
 | `ClientCapabilities.SupportsSetStaticDelay` | `ClientCapabilities.SupportsSetOutputDelay` |
 | `ISendspinClient.SendPlayerStateAsync(int, bool, double? staticDelayMs)` | `…, double? outputDelayMs` |
 | `SendspinHostService.SendPlayerStateAsync(int, bool, double? staticDelayMs, string?)` | `…, double? outputDelayMs, string?` |
-| `PlayerStatePayload.StaticDelayMs` | `PlayerStatePayload.OutputDelayMs` — still `[JsonPropertyName("static_delay_ms")]` |
+| `PlayerStatePayload.StaticDelayMs` | `PlayerStatePayload.OutputDelayMs` — `[JsonPropertyName("output_delay_ms")]` |
 | `ClientStateMessage.CreatePlayerState(int, bool, int staticDelayMs, …)` | Removed — build a `PlayerStatePayload { OutputDelayMs = … }` and pass it to `ClientStateMessage.Create` |
 
-Two names deliberately keep the old spelling, because each is named for its own wire literal and both literals exist while servers migrate: `Commands.SetStaticDelay` (`"set_static_delay"`, alongside `Commands.SetOutputDelay`) and `PlayerCommand.StaticDelayMs` (`static_delay_ms`, alongside `PlayerCommand.OutputDelayMs`).
+The pre-rename `Commands.SetStaticDelay` and `PlayerCommand.StaticDelayMs` are **removed**: the wire cut over to `set_output_delay` / `output_delay_ms` with no alias, so a call site still referencing either is a compiler error.
 
-### `static_delay_ms` is reported as a spec-conformant integer
+### `output_delay_ms` is reported as a spec-conformant integer
 
-`client/state` now always carries `static_delay_ms`, projected onto the spec's wire type: an **integer in 0–5000**.
+`client/state` now always carries `output_delay_ms`, projected onto the spec's wire type: an **integer in 0–5000**.
 
 Three things changed, all on what goes out on the wire:
 
-- **It is no longer omitted at zero.** The spec marks `static_delay_ms` REQUIRED for players, exactly like `required_lead_time_ms` and `min_buffer_ms`. Zero is its default, so it used to be missing from almost every player's initial state — and a server reads an absent value as "unchanged", which on the first message means it has no value at all.
+- **It is no longer omitted at zero.** The spec marks `output_delay_ms` REQUIRED for players, exactly like `required_lead_time_ms` and `min_buffer_ms`. Zero is its default, so it used to be missing from almost every player's initial state — and a server reads an absent value as "unchanged", which on the first message means it has no value at all.
 - **It is an integer.** A fractional delay used to serialize as e.g. `12.5`. It is now rounded.
 - **Negatives are clamped to 0.** The spec states negative values are not supported, and `aiosendspin` raises `ValueError` on parse rather than tolerating one — so a negative delay failed the connection.
 
@@ -297,7 +303,7 @@ Both facades carry the same signature and the same semantics.
 
 **Omit it for volume and mute changes.** The old `0.0` default reported `static_delay_ms: 0` on every such call, and the spec requires the server to *merge* each `client/state`, "retaining the last value of any field that is absent" — so a present value overwrites. One volume change after the server set a 250 ms delay wiped it back to 0. The reported delay is now always the one actually applied, regardless of what you pass.
 
-**Supplying a value is now a real update, not just a report.** It is written to `IClockSynchronizer.OutputDelayMs` *and* persisted through `IOutputDelayStore`, which is what the spec requires of a client-initiated change ("clients must persist `static_delay_ms` locally across reboots and server reconnections"). Previously the value was reported and nothing else: playback kept using the old delay, nothing was persisted, and the next reconnect silently reverted to it.
+**Supplying a value is now a real update, not just a report.** It is written to `IClockSynchronizer.OutputDelayMs` *and* persisted through `IOutputDelayStore`, which is what the spec requires of a client-initiated change ("clients must persist `output_delay_ms` locally across reboots and server reconnections"). Previously the value was reported and nothing else: playback kept using the old delay, nothing was persisted, and the next reconnect silently reverted to it.
 
 If you were calling the three-argument form purely to report a delay you had already applied yourself, it now also persists it — which is almost certainly what you wanted.
 
@@ -312,7 +318,7 @@ public long ServerToClientTime(long serverTime) =>
     ServerToClientTimeUncompensated(serverTime) - (long)(OutputDelayMs * 1000);
 ```
 
-Both exist because `static_delay_ms` belongs to the player role alone: it compensates for hardware past the audio port, so it applies to scheduling sound and not to the visualizer and artwork roles' display timestamps, which the spec translates with the clock offset alone. The SDK calls the uncompensated conversion for those, which is what keeps visuals with the audio on a device that has a delay configured.
+Both exist because `output_delay_ms` belongs to the player role alone: it compensates for hardware past the audio port, so it applies to scheduling sound and not to the visualizer and artwork roles' display timestamps, which the spec translates with the clock offset alone. The SDK calls the uncompensated conversion for those, which is what keeps visuals with the audio on a device that has a delay configured.
 
 ---
 
