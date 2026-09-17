@@ -279,6 +279,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         // where the app can still see which call built the options (#189).
         _options.Capabilities.ValidatePairingCodeMethods();
         _options.Capabilities.ValidateVisualizerRoleSupport();
+        _options.Capabilities.ValidateAudioFormats();
 
         // Explicit seed wins; otherwise fall back to the store (best-effort).
         LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();

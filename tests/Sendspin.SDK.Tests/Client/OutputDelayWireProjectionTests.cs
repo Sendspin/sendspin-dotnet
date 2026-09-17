@@ -7,14 +7,15 @@ using Sendspin.SDK.Synchronization;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// The scheduler's output delay is a double over -5000..5000 — fractional from calibration,
-/// negative to schedule later. The spec's <c>static_delay_ms</c> is an integer 0-5000 and states
-/// negatives are not supported. Everything the client reports must be projected onto that.
+/// The applied output delay is a double the clock synchronizer's setter clamps to the spec's
+/// 0-5000 range; <c>static_delay_ms</c> on the wire is an integer, so the client rounds the
+/// applied value onto it. These pin the rounding and the always-present field, and the end-to-end
+/// clamp through the public path; the clamp in isolation is <c>KalmanClockSynchronizerTests</c>.
 /// </summary>
 /// <remarks>
-/// The negative case is not cosmetic: aiosendspin's PlayerStatePayload raises
-/// <c>ValueError("static_delay_ms must be in range 0-5000")</c> on parse, so a negative delay
-/// fails the connection rather than being tolerated.
+/// aiosendspin's PlayerStatePayload raises <c>ValueError("static_delay_ms must be in range
+/// 0-5000")</c> on parse, so a value the wire cannot carry fails the connection rather than being
+/// tolerated — the reason the applied value is bounded before it is ever reported.
 /// </remarks>
 public class OutputDelayWireProjectionTests
 {
@@ -43,7 +44,9 @@ public class OutputDelayWireProjectionTests
     /// <summary>
     /// Converged from the outset, so the initial client/state is not deferred. A player client
     /// holds its initial state back until clock sync establishes, which would otherwise leave
-    /// these tests asserting against a message that was never sent.
+    /// these tests asserting against a message that was never sent. Deliberately does not clamp
+    /// its setter — that is the real synchronizer's job — so it can feed the projection the
+    /// already-bounded values a real one would produce.
     /// </summary>
     private sealed class ConvergedClock : IClockSynchronizer
     {
@@ -75,12 +78,7 @@ public class OutputDelayWireProjectionTests
     [InlineData(250.0, 250)]
     [InlineData(12.5, 13)]        // fractional: rounded, never emitted as 12.5
     [InlineData(12.4, 12)]
-    [InlineData(-200.0, 0)]       // negative: clamped, spec says unsupported
-    [InlineData(-5000.0, 0)]
-    [InlineData(9000.0, 5000)]    // above the spec maximum
-    [InlineData(double.NaN, 0)]   // the setter is public and takes any double
-    [InlineData(double.PositiveInfinity, 0)]
-    public void ClientState_ReportsAnIntegerInSpecRange(double configured, int expected)
+    public void ClientState_RoundsTheAppliedValueToAnInteger(double configured, int expected)
     {
         var (client, connection) = Connected(configured);
         using var _c = client;
@@ -106,33 +104,42 @@ public class OutputDelayWireProjectionTests
             "static_delay_ms is REQUIRED for players and 0 is its default, so it must still be sent");
     }
 
-    [Fact]
-    public void SchedulerKeepsTheConfiguredValue_TheProjectionIsWireOnly()
+    [Theory]
+    [InlineData(-100.0, 0)]
+    [InlineData(9000.0, 5000)]
+    public void OutputDelay_ThroughPublicPath_ClampsInSchedulerAndOnWire(double requested, int expected)
     {
-        // The clamp must not write back. A negative delay still schedules audio later; only the
-        // report is constrained, and conflating the two would silently change playback timing.
-        var sync = new ConvergedClock { OutputDelayMs = -200.0 };
+        // The public path: KalmanClockSynchronizer.OutputDelayMs is the single owner of the
+        // applied value. Setting it clamps to the spec's 0-5000 in the scheduler, and the
+        // client/state projects exactly that onto the wire. A real synchronizer is used so both
+        // halves are the production path rather than a passthrough double.
+        var sync = new KalmanClockSynchronizer();
         var (client, connection, _) = TestClient.Create(
             configure: options => options with { ClockSynchronizer = sync });
         using var _c = client;
-
         TestClient.CompleteHandshake(connection, "player@v1");
 
-        Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
-        Assert.Equal(-200.0, sync.OutputDelayMs);
+        sync.OutputDelayMs = requested;
+
+        Assert.Equal((double)expected, sync.OutputDelayMs);
+
+        var player = client.CreateClientStateMessage(
+            available: true, client.SnapshotActiveRoleFamilies()).Payload.Player;
+        Assert.NotNull(player);
+        Assert.Equal(expected, player!.OutputDelayMs);
     }
 
     [Fact]
     public async Task PlayerStateDelta_ProjectsTheSameWay()
     {
         // Two call sites build a client/state (the initial full state and the player delta).
-        // Only one of them having the projection is exactly the defect shape this codebase
-        // keeps hitting, so the delta is pinned separately rather than assumed.
+        // Only one of them projecting is exactly the defect shape this codebase keeps hitting,
+        // so the delta is pinned separately rather than assumed.
         var (client, connection) = Connected(0.0);
         using var _c = client;
 
-        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: -750.0);
+        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: 12.5);
 
-        Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
+        Assert.Equal(13, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
     }
 }

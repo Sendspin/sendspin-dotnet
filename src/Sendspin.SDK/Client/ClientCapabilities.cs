@@ -368,6 +368,33 @@ public sealed class ClientCapabilities
     }
 
     /// <summary>
+    /// Rejects a player client that advertises no audio formats: the spec requires a player's
+    /// <c>supported_formats</c> to list at least one entry (spec PR #257).
+    /// </summary>
+    /// <remarks>
+    /// Gated on the player role for the same reason <see cref="ValidateVisualizerRoleSupport"/>
+    /// is gated on the visualizer role: <c>supported_formats</c> is only put in <c>client/hello</c>
+    /// when the player role is advertised, so a non-player client that clears the list has nothing
+    /// to violate. Matched by family (any <c>player@</c> version), the way the hello builder gates
+    /// the object, so a future <c>player@v2</c> is caught too. <see cref="BufferCapacity"/> also
+    /// derives from the list, so an empty one would leave the advertised buffer with no format to
+    /// size against.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <see cref="Roles"/> advertises the player role but <see cref="AudioFormats"/> is empty.
+    /// </exception>
+    internal void ValidateAudioFormats()
+    {
+        if (Roles.Any(r => r.StartsWith("player@", StringComparison.Ordinal)) && AudioFormats.Count == 0)
+        {
+            throw new ArgumentException(
+                "ClientCapabilities.Roles advertises the player role but AudioFormats is empty; "
+                + "the player role requires supported_formats to list at least one audio format.",
+                nameof(AudioFormats));
+        }
+    }
+
+    /// <summary>
     /// Initial volume level (0-100) to report to the server after connection.
     /// This is sent in the initial client/state message after handshake.
     /// Default is 100 for backwards compatibility.

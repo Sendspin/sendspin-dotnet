@@ -65,7 +65,15 @@ public class SendspinClientServiceStreamStartTests
             },
         };
 
-        var (client, connection, _) = TestClient.Create(configure: options => options with { AudioPipeline = pipeline });
+        // Converged clock so the client is available: in production a client that is receiving and
+        // queuing player audio has completed clock sync and reported available (spec #270 discards
+        // audio only while unavailable). Without it the default unconverged clock leaves the client
+        // available: false, and the queued chunks these tests drain would be discarded on arrival.
+        var (client, connection, _) = TestClient.Create(configure: options => options with
+        {
+            AudioPipeline = pipeline,
+            ClockSynchronizer = new ConvergedClockSynchronizer(),
+        });
         pipeline.SetState(AudioPipelineState.Playing);
         return (client, connection, pipeline);
     }

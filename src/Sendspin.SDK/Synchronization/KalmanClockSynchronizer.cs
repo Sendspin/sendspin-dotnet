@@ -533,15 +533,33 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// Gets or sets the output delay in milliseconds. Compensates for hardware delay beyond
-    /// the device's audio port (external speakers, amplifiers). Per the Sendspin protocol spec,
-    /// this value is subtracted from server timestamps when scheduling playback: positive values
-    /// schedule audio earlier from the digital pipeline; negative values schedule it later.
+    /// Maximum applied output delay in milliseconds. The spec's <c>static_delay_ms</c> is 0-5000
+    /// and states negatives are unsupported, so the setter clamps to that range.
     /// </summary>
+    private const double MaxOutputDelayMs = 5000.0;
+
+    /// <summary>
+    /// Gets or sets the output delay in milliseconds. Compensates for hardware delay beyond the
+    /// device's audio port (external speakers, amplifiers). Per the Sendspin protocol spec this
+    /// value is subtracted from server timestamps when scheduling playback, and its range is
+    /// <c>static_delay_ms</c>'s 0-5000: a larger delay schedules audio that much earlier from the
+    /// digital pipeline.
+    /// </summary>
+    /// <remarks>
+    /// This setter is the single owner of the applied output delay: every path that sets one (the
+    /// server command, <c>SendPlayerStateAsync</c>, the persisted-store load) relies on it to clamp
+    /// to 0-5000 rather than clamping first. A public settable double can be NaN or infinity, which
+    /// <see cref="Math.Clamp(double,double,double)"/> propagates and the cast to microseconds would
+    /// then store as garbage, so a non-finite value is treated as 0.
+    /// </remarks>
     public double OutputDelayMs
     {
         get { lock (_lock) return _outputDelayMicroseconds / 1000.0; }
-        set { lock (_lock) _outputDelayMicroseconds = (long)(value * 1000); }
+        set
+        {
+            double clamped = double.IsFinite(value) ? Math.Clamp(value, 0.0, MaxOutputDelayMs) : 0.0;
+            lock (_lock) _outputDelayMicroseconds = (long)(clamped * 1000);
+        }
     }
 
     /// <summary>

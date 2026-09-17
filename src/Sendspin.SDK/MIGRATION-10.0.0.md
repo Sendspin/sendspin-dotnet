@@ -31,6 +31,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Visualizer | `RequestVisualizerFormatAsync` removed; use `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`. `ClientCapabilities.VisualizerSupport` is now `VisualizerRoleSupport` | **High** — compiler error, see §6 |
 | Output delay | "Static delay" renamed to "output delay" across the C# surface (spec PR #164); the wire is unchanged | Medium — compiler errors only, see §8 for the full table |
 | Output delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
+| Output delay | Negative and out-of-range applied delays are clamped to 0-5000 at one site (the clock synchronizer's setter); a negative no longer schedules audio later, it is clamped to 0 | Medium — behavioural, only if you set a negative or out-of-range delay |
 | Clock sync | `IClockSynchronizer` gains `ServerToClientTimeUncompensated` | Low — compiler error, one-line fix, and only for a custom synchronizer |
 | Clock sync | Filter constants, burst cadence and timestamping now match the reference implementation | Low — behavioural, no code change; see §11 |
 | Connection | `ISendspinConnection` gains `SendTimeMessageAsync`; `TextMessageReceived` carries `TextMessageReceivedEventArgs` | Low — compiler error, only for a custom connection or a raw event subscriber |
@@ -280,7 +281,7 @@ Three things changed, all on what goes out on the wire:
 - **It is an integer.** A fractional delay used to serialize as e.g. `12.5`. It is now rounded.
 - **Negatives are clamped to 0.** The spec states negative values are not supported, and `aiosendspin` raises `ValueError` on parse rather than tolerating one — so a negative delay failed the connection.
 
-`IClockSynchronizer.OutputDelayMs` is **unchanged**: still a `double`, still accepting −5000…5000. Negative values still schedule audio *later*, and that is still applied to playback. Only the report is constrained, and the SDK logs a warning naming both values when a configured delay does not survive the projection — because the server's group calibration is then working from a different number than your playback is.
+`IClockSynchronizer.OutputDelayMs` is the **single clamp site**: setting it clamps to 0–5000 (and a non-finite value to 0), so the applied delay and the reported one always agree. A negative no longer schedules audio *later* — the spec does not support one, so it is clamped to 0 — and the command path, `SendPlayerStateAsync` and the persisted-store load all rely on the setter rather than clamping first.
 
 `PlayerStatePayload.OutputDelayMs` is an `int` rather than a `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
 
