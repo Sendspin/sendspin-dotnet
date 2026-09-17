@@ -18,11 +18,15 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
     /// <summary>
     /// Creates a ClientHelloMessage with the specified payload.
     /// </summary>
+    /// <remarks>
+    /// There is no artwork parameter: spec PR #195 removed <c>artwork@v1_support</c> entirely and
+    /// moved the channel configuration into the <c>client/state</c> artwork object, where it can
+    /// change during a connection.
+    /// </remarks>
     public static ClientHelloMessage Create(
         string name,
         List<string> supportedRoles,
         PlayerSupport? playerSupport = null,
-        ArtworkSupport? artworkSupport = null,
         DeviceInfo? deviceInfo = null,
         VisualizerSupport? visualizerSupport = null,
         SourceSupport? sourceSupport = null,
@@ -40,7 +44,6 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
                 SupportedPairMethods = supportedPairMethods,
                 SupportedRoles = supportedRoles,
                 PlayerV1Support = playerSupport,
-                ArtworkV1Support = artworkSupport,
                 VisualizerV1Support = visualizerSupport,
                 SourceV1Support = sourceSupport,
                 DeviceInfo = deviceInfo
@@ -107,14 +110,8 @@ public sealed class ClientHelloPayload
     public SourceSupport? SourceV1Support { get; init; }
 
     /// <summary>
-    /// Artwork role support details.
-    /// </summary>
-    [JsonPropertyName("artwork@v1_support")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public ArtworkSupport? ArtworkV1Support { get; init; }
-
-    /// <summary>
-    /// Visualizer role support details (types, rate, spectrum config).
+    /// Visualizer role support details (buffer capacity only; the requested types, frame-rate cap
+    /// and spectrum layout are dynamic and travel in <c>client/state</c>).
     /// </summary>
     [JsonPropertyName("visualizer@v1_support")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -186,48 +183,6 @@ public sealed class AudioFormatSpec
 
     [JsonPropertyName("bit_depth")]
     public int BitDepth { get; init; } = 16;
-}
-
-/// <summary>
-/// Artwork role support details per the Sendspin spec.
-/// </summary>
-public sealed class ArtworkSupport
-{
-    /// <summary>
-    /// Artwork channel specifications. Each element corresponds to a channel (0-3).
-    /// </summary>
-    [JsonPropertyName("channels")]
-    public List<ArtworkChannelSpec> Channels { get; init; } = new();
-}
-
-/// <summary>
-/// Specification for a single artwork channel.
-/// </summary>
-public sealed class ArtworkChannelSpec
-{
-    /// <summary>
-    /// The source type for this artwork channel.
-    /// </summary>
-    [JsonPropertyName("source")]
-    public string Source { get; init; } = "album";
-
-    /// <summary>
-    /// Preferred image format for this channel.
-    /// </summary>
-    [JsonPropertyName("format")]
-    public string Format { get; init; } = "jpeg";
-
-    /// <summary>
-    /// Maximum image width in pixels.
-    /// </summary>
-    [JsonPropertyName("media_width")]
-    public int MediaWidth { get; init; } = 512;
-
-    /// <summary>
-    /// Maximum image height in pixels.
-    /// </summary>
-    [JsonPropertyName("media_height")]
-    public int MediaHeight { get; init; } = 512;
 }
 
 /// <summary>

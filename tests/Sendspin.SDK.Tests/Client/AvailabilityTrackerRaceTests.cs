@@ -12,8 +12,8 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 /// <remarks>
 /// Deterministic, not timing-dependent: <see cref="FakeSendspinConnection.HoldNextSend"/> parks
-/// the first send until the test releases it, so the second publish provably runs while the
-/// first is mid-flight. Nothing here sleeps or races the scheduler.
+/// the first send until the test releases it, so the second publish provably starts while the
+/// first is parked. Nothing here sleeps or races the scheduler.
 /// </remarks>
 public class AvailabilityTrackerRaceTests
 {
@@ -31,7 +31,7 @@ public class AvailabilityTrackerRaceTests
 
     private static IReadOnlyList<bool?> AvailableValuesSent(FakeSendspinConnection connection) =>
         connection.SnapshotSentMessages().OfType<ClientStateMessage>()
-            .Select(m => m.Payload.Available).ToList();
+            .Select(m => (bool?)m.Payload.Available).ToList();
 
     [Fact]
     public async Task PublishWhileAnotherIsInFlight_IsNotSuppressedByTheStaleTracker()
@@ -45,17 +45,22 @@ public class AvailabilityTrackerRaceTests
         int before = AvailableValuesSent(connection).Count;
 
         // Park the available:false send mid-flight.
-        var gate = new TaskCompletionSource();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         connection.HoldNextSend = gate;
         var entering = client.EnterExternalSourceAsync();
 
-        // ...and flip back while it is still in flight. Reading the tracker after the send would
-        // have found it still true here, matched, and dropped this transition on the floor.
-        await client.ExitExternalSourceAsync();
+        // ...and flip back to true. SendClientStateAsync now serializes every client/state send
+        // through one gate, so this second publish waits behind the parked first rather than
+        // overlapping it — the in-flight overlap this test once forced is impossible by
+        // construction. The tracker claim still has to survive that wait: reading it after the
+        // send would have found it still true here, matched, and dropped this transition.
+        var exiting = client.ExitExternalSourceAsync();
+        Assert.False(exiting.IsCompleted);
 
         gate.SetResult();
-        await entering;
+        await Task.WhenAll(entering, exiting);
 
+        // Both messages reached the transport, in order, and the last carries the newer value.
         var sent = AvailableValuesSent(connection).Skip(before).ToList();
         Assert.Equal(new bool?[] { false, true }, sent);
     }

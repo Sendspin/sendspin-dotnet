@@ -136,6 +136,23 @@ public class ClientStateRoleObjectTests
             LastStatePayload(connection).GetProperty("source").GetProperty("signal").GetString());
     }
 
+    [Fact]
+    public void StateMessageComposition_UsesOneSnapshotOfTheActiveRoles()
+    {
+        var (client, connection) = Create(["player@v1", "artwork@v1"]);
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+
+        var snapshot = client.SnapshotActiveRoleFamilies();
+        client.LastServerHello!.ActiveRoles = new List<string> { "artwork@v1" };
+
+        var payload = client.CreateClientStateMessage(available: true, snapshot).Payload;
+
+        Assert.NotNull(payload.Player);
+        Assert.Null(payload.Artwork);
+    }
+
     private sealed class ConvergedClock : IClockSynchronizer
     {
         public double OutputDelayMs { get; set; }
