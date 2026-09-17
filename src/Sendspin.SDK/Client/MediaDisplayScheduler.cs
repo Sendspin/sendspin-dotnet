@@ -423,6 +423,21 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
     }
 
+    /// <summary>
+    /// Discards the pending update one state role is holding, leaving every other role alone. For
+    /// a <c>server/activate</c> that drops the role from <c>active_roles</c> (spec PR #275): an
+    /// update scheduled for a future moment while the role was active must not surface after the
+    /// server has removed the role.
+    /// </summary>
+    /// <param name="role">The state role whose pending update to discard.</param>
+    internal void FlushStateUpdate(ScheduledStateRole role)
+    {
+        lock (_lock)
+        {
+            _stateUpdates[(int)role] = null;
+        }
+    }
+
     private void ClearPendingLocked()
     {
         ClearPendingFramesLocked();

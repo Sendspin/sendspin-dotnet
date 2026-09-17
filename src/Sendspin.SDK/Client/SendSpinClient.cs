@@ -1170,6 +1170,65 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
+    /// Discards the inbound display state of every role dropped from <c>active_roles</c> by a
+    /// <c>server/activate</c> (spec PR #275): the role's current object on the group model and any
+    /// future-scheduled update it left pending, raising the same cleared events a <c>null</c> role
+    /// object raises. A role still active is untouched — its state and its pending update alike.
+    /// </summary>
+    /// <remarks>
+    /// Runs on the receive loop, like the <c>server/state</c> handler whose clears it mirrors.
+    /// Does nothing before any group state exists: the server sends no <c>server/state</c> before
+    /// the first activate, so a role dropped between <c>server/hello</c> and that activate held no
+    /// state to clear and has nothing to announce.
+    /// </remarks>
+    private void DiscardDeactivatedRoleState(
+        IReadOnlySet<string> previousActiveRoleFamilies,
+        IReadOnlySet<string> currentActiveRoleFamilies)
+    {
+        if (_currentGroup is not { } group)
+        {
+            return;
+        }
+
+        bool Removed(string family)
+            => previousActiveRoleFamilies.Contains(family) && !currentActiveRoleFamilies.Contains(family);
+
+        var changed = false;
+        var colorCleared = false;
+
+        if (Removed("metadata"))
+        {
+            _displayScheduler.FlushStateUpdate(ScheduledStateRole.Metadata);
+            ApplyMetadata(group, null);
+            changed = true;
+        }
+
+        if (Removed("controller"))
+        {
+            ClearControllerState(group);
+            changed = true;
+        }
+
+        if (Removed("color"))
+        {
+            _displayScheduler.FlushStateUpdate(ScheduledStateRole.Color);
+            ApplyColor(group, null);
+            changed = true;
+            colorCleared = true;
+        }
+
+        if (changed)
+        {
+            GroupStateChanged?.Invoke(this, group);
+        }
+
+        if (colorCleared)
+        {
+            ColorChanged?.Invoke(this, group.Colors);
+        }
+    }
+
+    /// <summary>
     /// Whether this connection has sent the <c>client/state</c> object for
     /// <paramref name="family"/>, which spec PR #204 makes the gate on that role's binary data:
     /// "The server MUST NOT send a role's binary data until it has received that object."
@@ -2586,6 +2645,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             if (activeRolesChanged)
             {
                 RemoveRoleStateClaimsForInactiveFamilies(currentActiveRoleFamilies);
+                DiscardDeactivatedRoleState(previousActiveRoleFamilies, currentActiveRoleFamilies);
             }
         }
 
@@ -3022,10 +3082,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case PairMethods.PairingPsk:
                 _pendingPairingPsk = PairingRecords.GenerateUniquePsk(_pairingStore!);
                 _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
-                SendAsync(new ClientPairFinalizeMessage
-                {
-                    Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(_pendingPairingPsk) },
-                }).SafeFireAndForget(_logger);
+
+                // Spec #247: the attempt starts with client/pair-init, then client/pair-finalize,
+                // so a delayed finalize from a cancelled attempt can no longer finalize a later
+                // one. The two are one awaited flow — the finalize send is issued only after the
+                // init send completes — so the order holds even when another writer contends for
+                // the send lock, which SemaphoreSlim does not serve FIFO.
+                SendPairingPskInitThenFinalizeAsync(_pairingCounter, _pendingPairingPsk)
+                    .SafeFireAndForget(_logger);
                 ArmAttemptTimeout();
                 break;
 
@@ -3041,6 +3105,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 throw new System.Diagnostics.UnreachableException(
                     $"CanOffer admitted pair method '{payload.Pairing?.Method}' with no dispatch arm");
         }
+    }
+
+    /// <summary>
+    /// Sends the Pairing PSK attempt's <c>client/pair-init</c> then <c>client/pair-finalize</c> in
+    /// order (spec #247): the finalize send is issued only after the init send completes, so the
+    /// order holds even under send-lock contention, which <see cref="System.Threading.SemaphoreSlim"/>
+    /// does not serve FIFO. Both values are captured at dispatch so a later attempt cannot change
+    /// them across the awaits.
+    /// </summary>
+    private async Task SendPairingPskInitThenFinalizeAsync(int pairingIndex, byte[] pendingPairingPsk)
+    {
+        // No commit_B — that is dynamic pairing code only.
+        await SendAsync(new ClientPairInitMessage
+        {
+            Payload = new ClientPairInitPayload { PairingIndex = pairingIndex },
+        });
+        await SendAsync(new ClientPairFinalizeMessage
+        {
+            Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(pendingPairingPsk) },
+        });
     }
 
     /// <summary>
@@ -3310,7 +3394,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Static pairing code: the pairing code is device-printed and known from the start.
         string pin = state.Dynamic ? state.PairingCode! : (_effectiveStaticPairingCode ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
-        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter);
+
+        // Round 1: the static flow is always round 1, and the dynamic flow has no
+        // client/pair-retry yet (separate task), so every attempt is a single round.
+        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter, 1);
 
         var cpace = CPace.Start(
             CPaceRole.Responder,
@@ -3399,7 +3486,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         };
         if (state.Dynamic)
         {
-            confirm.Payload.NonceB = Base64UrlText.Encode(state.NonceB!);
+            // Spec #155: nonce_B is revealed wrapped, not raw, sealed under the round's sid + ISK.
+            confirm.Payload.WrappedNonceB = Base64UrlText.Encode(
+                PairingCodes.WrapNonceB(state.Sid!, cpace.Isk, state.NonceB!, _session.Suite));
         }
 
         SendAsync(confirm).SafeFireAndForget(_logger);
@@ -4343,21 +4432,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Each role object is itself Optional: absent = no change, present-null = clear all of
         // that role's state (sent when the role leaves active_roles, and on pairing quiesce),
-        // present-with-value = merge the delta. Clearing one role leaves the others alone.
-        // Every branch below is announced by the GroupStateChanged at the end of this method,
-        // which is how a UI learns to drop the deactivated role's data (#196). What that
-        // announcement carries is the state as it stands: a scheduled metadata or color update
-        // has not been merged yet and announces itself when it is (spec #135, pending merge).
+        // present-with-value = the role's full state (spec #175). Clearing one role leaves the
+        // others alone. Every branch below is announced by the GroupStateChanged at the end of
+        // this method, which is how a UI learns to drop the deactivated role's data (#196). What
+        // that announcement carries is the state as it stands: a scheduled metadata or color
+        // update has not been applied yet and announces itself when it is (spec #135, pending merge).
 
-        // Update metadata from server/state (merge with existing to preserve data across partial updates)
+        // Apply the metadata role. Full state per spec #175: the object is the role's complete
+        // metadata, so a leaf it omits is unset — ApplyMetadata builds from it alone rather than
+        // merging against what is held.
         if (payload.Metadata.IsPresent)
         {
             var meta = payload.Metadata.Value;
 
-            // A future timestamp defers the merge to that moment; anything else — a past or
-            // present timestamp, no timestamp, or the null role object — merges now and
+            // A future timestamp defers the apply to that moment; anything else — a past or
+            // present timestamp, no timestamp, or the null role object — applies now and
             // discards whatever update was being held.
-            long? takesEffectAt = meta is not null && meta.Timestamp.IsPresent ? meta.Timestamp.Value : null;
+            long? takesEffectAt = meta?.Timestamp.GetValueOrDefault();
 
             if (!_displayScheduler.TryScheduleStateUpdate(
                     ScheduledStateRole.Metadata,
@@ -4377,17 +4468,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             if (payload.Controller.Value is not { } controller)
             {
-                // HandleServerState is the only writer of these six, so the controller role
-                // owns them outright and clearing it returns each to the value a group carries
-                // before the server has reported any of them. Read off a fresh GroupState
-                // rather than repeating its literals, so the two cannot drift.
-                var unreported = new GroupState();
-                _currentGroup.Volume = unreported.Volume;
-                _currentGroup.Muted = unreported.Muted;
-                _currentGroup.Repeat = unreported.Repeat;
-                _currentGroup.Shuffle = unreported.Shuffle;
-                _currentGroup.SupportedCommands = unreported.SupportedCommands;
-                _currentGroup.SeekMaxMs = unreported.SeekMaxMs;
+                ClearControllerState(_currentGroup);
             }
             else
             {
@@ -4402,16 +4483,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (controller.SupportedCommands is not null)
                     _currentGroup.SupportedCommands = controller.SupportedCommands;
 
-                // The one OPTIONAL controller leaf, so unlike its always-reported siblings it
-                // needs Optional<T> to tell "not in this partial update" (keep the bound) from
-                // an explicit null (the seekable range became unknown — drop the bound).
-                if (controller.SeekMaxMs.IsPresent)
-                    _currentGroup.SeekMaxMs = controller.SeekMaxMs.Value;
+                // Full state per spec #175: an absent seek_max_ms is unset, not the last bound
+                // kept. Absence and an explicit null both read as unset here. The always-reported
+                // siblings above stay keep-on-absent — a conformant server never omits them, and
+                // Volume/Muted are non-nullable with no "unset" to clear to.
+                _currentGroup.SeekMaxMs = controller.SeekMaxMs.GetValueOrDefault();
             }
         }
 
-        // Merge color deltas (color role). Each field is Optional: absent keeps the existing color,
-        // present-null clears it, present-with-value updates it. Scheduled exactly as metadata is.
+        // Apply the color role. Full state per spec #175: the object is the complete palette, so a
+        // color it omits is unset — ApplyColor takes each from it alone. Scheduled as metadata is.
         var colorChanged = false;
         if (payload.Color.IsPresent)
         {
@@ -4443,12 +4524,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Merges a <c>metadata</c> role object into the current state: a null object clears the
-    /// role, anything else applies its Optional deltas (absent = keep existing, present-null =
-    /// clear, present-with-value = update).
+    /// Applies a <c>metadata</c> role object to the current state: a null object clears the role,
+    /// anything else replaces the metadata with the object's full state (spec #175). A leaf the
+    /// object omits is unset — nothing carries forward from the previous metadata.
     /// </summary>
     /// <param name="group">
-    /// The group state to merge into, resolved by the caller. Passed rather than read from
+    /// The group state to write, resolved by the caller. Passed rather than read from
     /// <see cref="_currentGroup"/> here, because the scheduled callers run on the scheduler loop
     /// and must not create a group state the disconnect that raced them has already dropped.
     /// </param>
@@ -4457,39 +4538,54 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         if (meta is null)
         {
-            // Dropping the merge base too, not just the exposed object: a later partial
-            // update must start from empty rather than resurrect pre-clear fields.
             group.Metadata = null;
             return;
         }
 
-        var existing = group.Metadata ?? new TrackMetadata();
-
-        // Merged against the state as it stands when the update takes effect, not as it stood
-        // when the message arrived: the spec's current state is the running merge of applied
-        // updates, and a scheduled update joins that running merge at its own moment.
+        // Built from the object alone, never merged against what is held: spec #175 makes the
+        // object the role's complete state, so an omitted leaf is unset (absent and explicit-null
+        // both read as null through GetValueOrDefault) rather than a value kept from before.
         group.Metadata = new TrackMetadata
         {
-            Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
-            Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
-            Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
-            AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
-            Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
-            ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
-            Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
-            Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
-            Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
+            Timestamp = meta.Timestamp.GetValueOrDefault(),
+            Title = meta.Title.GetValueOrDefault(),
+            Artist = meta.Artist.GetValueOrDefault(),
+            AlbumArtist = meta.AlbumArtist.GetValueOrDefault(),
+            Album = meta.Album.GetValueOrDefault(),
+            ArtworkUrl = meta.ArtworkUrl.GetValueOrDefault(),
+            Year = meta.Year.GetValueOrDefault(),
+            Track = meta.Track.GetValueOrDefault(),
+            Progress = meta.Progress.GetValueOrDefault()
         };
     }
 
     /// <summary>
-    /// Merges a <c>color</c> role object into the current palette, in place rather than replacing
+    /// Returns every field the controller role owns to the value a group carries before the
+    /// server has reported any of them — read off a fresh <see cref="GroupState"/> rather than
+    /// repeating its literals, so the two cannot drift. Used for an explicit <c>null</c>
+    /// controller object and when the role leaves <c>active_roles</c> (spec PR #275).
+    /// </summary>
+    private static void ClearControllerState(GroupState group)
+    {
+        var unreported = new GroupState();
+        group.Volume = unreported.Volume;
+        group.Muted = unreported.Muted;
+        group.Repeat = unreported.Repeat;
+        group.Shuffle = unreported.Shuffle;
+        group.SupportedCommands = unreported.SupportedCommands;
+        group.SeekMaxMs = unreported.SeekMaxMs;
+    }
+
+    /// <summary>
+    /// Applies a <c>color</c> role object to the current palette, in place rather than replacing
     /// it, so a consumer holding the <see cref="ColorPalette"/> it was handed by an earlier
-    /// <see cref="ColorChanged"/> sees the update — including a clear.
+    /// <see cref="ColorChanged"/> sees the update — including a clear. Full state per spec #175:
+    /// the object is the complete palette, so a color it omits is unset (a null object clears
+    /// every color), taken from the object alone rather than merged against what is held.
     /// </summary>
     /// <param name="group">
-    /// The group state whose palette is merged into — see <see cref="ApplyMetadata"/> on why it
-    /// is the caller that resolves it.
+    /// The group state whose palette is written — see <see cref="ApplyMetadata"/> on why it is
+    /// the caller that resolves it.
     /// </param>
     /// <param name="color">The role object, or null to clear the role.</param>
     private static void ApplyColor(GroupState group, ColorState? color)
@@ -4508,13 +4604,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        colors.Timestamp = color.Timestamp ?? colors.Timestamp;
-        if (color.BackgroundDark.IsPresent) colors.BackgroundDark = color.BackgroundDark.Value;
-        if (color.BackgroundLight.IsPresent) colors.BackgroundLight = color.BackgroundLight.Value;
-        if (color.Primary.IsPresent) colors.Primary = color.Primary.Value;
-        if (color.Accent.IsPresent) colors.Accent = color.Accent.Value;
-        if (color.OnDark.IsPresent) colors.OnDark = color.OnDark.Value;
-        if (color.OnLight.IsPresent) colors.OnLight = color.OnLight.Value;
+        colors.Timestamp = color.Timestamp;
+        colors.BackgroundDark = color.BackgroundDark.GetValueOrDefault();
+        colors.BackgroundLight = color.BackgroundLight.GetValueOrDefault();
+        colors.Primary = color.Primary.GetValueOrDefault();
+        colors.Accent = color.Accent.GetValueOrDefault();
+        colors.OnDark = color.OnDark.GetValueOrDefault();
+        colors.OnLight = color.OnLight.GetValueOrDefault();
     }
 
     /// <summary>

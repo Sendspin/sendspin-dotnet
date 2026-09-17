@@ -64,6 +64,9 @@ jobs:
         run: bash tools/interop/run.sh unpaired
 
       # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
+      # SKIPPED (spec #247 / aiosendspin#402): the client now sends client/pair-init before
+      # client/pair-finalize, and the pinned server predates that and rejects the leading init.
+      # Re-enable once the interop pin includes aiosendspin#402.
       - name: Pairing PSK round-trip (pair, persist, re-handshake to user trust)
         if: false
         run: bash tools/interop/run.sh pairing
@@ -72,6 +75,10 @@ jobs:
       # server side fails the run if the client did not gesture-gate the attempt first, so
       # this also pins the gating policy rather than just "pairing worked".
       # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
+      #
+      # SKIPPED (spec #237 / aiosendspin#415): the client now binds the round into the CPace
+      # sid, which the pinned server predates, so key confirmation fails against it. Re-enable
+      # once the interop pin includes aiosendspin#415.
       - name: Static PIN round-trip (gesture-gated attempt, CPace, wrapped PSK)
         if: false
         run: bash tools/interop/run.sh static-pin
@@ -83,6 +90,10 @@ jobs:
       # Skipped for the 1.0 wire cut-over (#287): the SDK now announces client-stream/start
       # (spec PR #163), but this pinned draft server still expects client_stream/start and so
       # never starts the stream. Re-enable when aiosendspin adopts the client-stream/* rename.
+      #
+      # SKIPPED (spec #247 / aiosendspin#402): this scenario pairs via Pairing PSK first, which
+      # now sends client/pair-init before client/pair-finalize — rejected by the pinned server
+      # that predates aiosendspin#402. Re-enable once the interop pin includes aiosendspin#402.
       - name: Source streaming (server start command, client-stream/start, decoded audio)
         if: false
         run: bash tools/interop/run.sh source

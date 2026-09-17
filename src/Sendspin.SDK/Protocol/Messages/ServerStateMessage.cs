@@ -31,7 +31,8 @@ public sealed class ServerStatePayload
 {
     /// <summary>
     /// Current track metadata and playback progress. Absent = no change, present-null = clear all
-    /// metadata state, present-with-value = merge the delta.
+    /// metadata state, present-with-value = the role's full metadata (spec #175: a leaf the object
+    /// omits is unset).
     /// </summary>
     [JsonPropertyName("metadata")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -39,7 +40,7 @@ public sealed class ServerStatePayload
 
     /// <summary>
     /// Controller state (volume, mute, supported commands). Absent = no change, present-null =
-    /// clear all controller state, present-with-value = merge the delta.
+    /// clear all controller state, present-with-value = the role's full controller state.
     /// </summary>
     [JsonPropertyName("controller")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -47,8 +48,8 @@ public sealed class ServerStatePayload
 
     /// <summary>
     /// Color palette derived from the current audio. Only sent to clients with the <c>color</c>
-    /// role. Absent = no change, present-null = clear the whole palette, present-with-value =
-    /// merge the delta.
+    /// role. Absent = no change, present-null = clear the whole palette, present-with-value = the
+    /// full palette (spec #175: a color the object omits is unset).
     /// </summary>
     [JsonPropertyName("color")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -59,9 +60,11 @@ public sealed class ServerStatePayload
 /// Track metadata from server/state message.
 /// </summary>
 /// <remarks>
-/// All fields use <see cref="Optional{T}"/> to distinguish "absent" (partial update; keep existing)
-/// from "present but null" (explicit clear; e.g. artless track or <c>cleared_update()</c> on stop)
-/// and "present with value" (update). This matches <c>UndefinedField</c> in aiosendspin.
+/// The object is the role's full state (spec #175): a leaf the object omits is unset — the client
+/// reads it exactly as an explicit null and never carries a value forward from the previous object.
+/// The leaves keep <see cref="Optional{T}"/> so the wire type and its serialization coverage stay
+/// unchanged, but the client distinguishes only a present value from unset; absence and an explicit
+/// null both read as unset (via <c>GetValueOrDefault</c>).
 /// </remarks>
 public sealed class ServerMetadata
 {
@@ -98,8 +101,8 @@ public sealed class ServerMetadata
     public Optional<int?> Track { get; init; } = Optional<int?>.Absent();
 
     /// <summary>
-    /// Playback progress. Absent = keep existing, present-null = track ended (clear),
-    /// present-with-value = update.
+    /// Playback progress. Spec #175: absent and present-null both leave progress unset (position
+    /// cleared); present-with-value sets it.
     /// </summary>
     [JsonPropertyName("progress")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -164,14 +167,15 @@ public sealed class ControllerState
 
     /// <summary>
     /// Maximum absolute position in milliseconds a <c>seek</c> may target (e.g. the end of the
-    /// current track). Absent = keep the last bound, present-null = the seekable range became
-    /// unknown (clear it), present-with-value = update.
+    /// current track). Spec #175: absent and present-null both leave the bound unset — the server
+    /// omits <c>seek</c> from <see cref="SupportedCommands"/> and drops this together when the
+    /// range goes away (e.g. a seekable track giving way to a live stream), while
+    /// <c>seek_relative</c> may still be offered.
     /// </summary>
     /// <remarks>
-    /// The only OPTIONAL leaf on this object, which is why it needs <see cref="Optional{T}"/> while
-    /// its always-reported siblings can be plain nullables. The server omits <c>seek</c> from
-    /// <see cref="SupportedCommands"/> and nulls this out together when the range goes away — e.g.
-    /// a seekable track giving way to a live stream — and <c>seek_relative</c> may still be offered.
+    /// Unlike its always-reported siblings, this leaf is genuinely optional on the wire, so it
+    /// keeps <see cref="Optional{T}"/> — but the client reads absent and null alike as unset, so
+    /// the distinction no longer changes what it does.
     /// </remarks>
     [JsonPropertyName("seek_max_ms")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
