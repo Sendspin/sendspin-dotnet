@@ -454,6 +454,12 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (_reassemblyBuffer is not null)
             return Fail("non-fragment frame received while a fragmented message is in flight");
 
+        // IDs 2 and 3 were the pre-1.0 fragment types and are now reserved (spec messaging.md).
+        // A reserved ID is not a valid application binary type, so it is a silent failure like a
+        // malformed fragment rather than something surfaced to BinaryMessageParser as a message.
+        if (type is 2 or 3)
+            return Fail($"reserved binary message id {type}");
+
         return DispatchMessage(type, plainBuf.AsMemory(1, plainLen - 1));
     }
 

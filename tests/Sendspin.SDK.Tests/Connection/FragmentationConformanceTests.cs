@@ -115,19 +115,20 @@ public class FragmentationConformanceTests
     [Theory]
     [InlineData((byte)2)]
     [InlineData((byte)3)]
-    public void ReservedBinaryId_IsNotTreatedAsAFragment(byte reservedId)
+    public void ReservedBinaryId_IsSilentlyDiscarded_NotSurfaced(byte reservedId)
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity);
         var server = CompleteHandshake(framing, identity);
 
-        // IDs 2 and 3 were the pre-1.0 fragment types; now reserved. A frame carrying one must not
-        // open a reassembly — so a following non-fragment frame surfaces normally rather than
-        // tripping the "non-fragment frame mid-reassembly" fatal.
-        Assert.Null(Feed(framing, server, [reservedId, 0xAA, 0xBB]).FatalReason);
+        // IDs 2 and 3 were the pre-1.0 fragment types; now reserved. A reserved ID is a silent
+        // failure like a malformed fragment — the connection closes and nothing is surfaced to
+        // BinaryMessageReceived, rather than being dispatched as an application binary message.
+        var result = Feed(framing, server, [reservedId, 0xAA, 0xBB]);
 
-        var next = Feed(framing, server, [NoiseConstants.MessageTypeJsonBody, .. Encoding.UTF8.GetBytes(HelloJson)]);
-        Assert.Equal(HelloJson, next.Text);
+        Assert.NotNull(result.FatalReason);
+        Assert.Null(result.Text);
+        Assert.Null(result.Binary);
     }
 
     [Fact]
