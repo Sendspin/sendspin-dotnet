@@ -360,4 +360,33 @@ public class SendspinClientServiceControllerTests
 
         Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientCommandMessage);
     }
+
+    [Fact]
+    public async Task SetVolumeAsync_WhenSupportedCommandsUnsetByLaterFullState_Drops()
+    {
+        // The controller object is full state (spec #175): a later object that omits
+        // supported_commands unsets the list, so a command the earlier state advertised is no
+        // longer authorised. Without the unconditional assign, the stale list would keep letting
+        // it through.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, ClientRoles.Controller);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"supported_commands":["volume"]}}}
+            """);
+
+        await client.SetVolumeAsync(50);
+        Assert.Equal(Commands.Volume, LastControllerCommand(connection).Command);
+        int sentBefore = connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Count();
+
+        // A later controller object without supported_commands unsets the list.
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"volume":30}}}
+            """);
+
+        await client.SetVolumeAsync(60);
+
+        Assert.Equal(sentBefore, connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Count());
+    }
 }

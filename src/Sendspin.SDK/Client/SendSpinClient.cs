@@ -4491,13 +4491,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _currentGroup.Repeat = controller.Repeat;
                 if (controller.Shuffle.HasValue)
                     _currentGroup.Shuffle = controller.Shuffle.Value;
-                if (controller.SupportedCommands is not null)
-                    _currentGroup.SupportedCommands = controller.SupportedCommands;
 
-                // Full state per spec #175: an absent seek_max_ms is unset, not the last bound
-                // kept. Absence and an explicit null both read as unset here. The always-reported
-                // siblings above stay keep-on-absent — a conformant server never omits them, and
-                // Volume/Muted are non-nullable with no "unset" to clear to.
+                // Full state per spec #175: supported_commands and seek_max_ms are unset when the
+                // controller object omits them, not kept from the last one. This matters for the
+                // client/command gate (MaySendControllerCommand), which authorises a command only
+                // while it is in the current supported_commands — a stale list would let it send a
+                // command the latest state no longer advertises. Absence and an explicit null both
+                // read as unset. The always-reported siblings above stay keep-on-absent: a
+                // conformant server never omits them, and Volume/Muted are non-nullable with no
+                // "unset" to clear to.
+                _currentGroup.SupportedCommands = controller.SupportedCommands;
                 _currentGroup.SeekMaxMs = controller.SeekMaxMs.GetValueOrDefault();
             }
         }
