@@ -137,6 +137,30 @@ public class PlayerAudioDispatchTests
     }
 
     [Fact]
+    public void AudioWhileUnavailable_LogsAgainAfterAnAvailablePeriod_EvenWithNoAudioInIt()
+    {
+        var logger = new CapturingLogger<SendspinClientService>();
+        var (client, connection, pipe) = PlayerClient(logger);
+        using var _c = client;
+
+        // First unavailable period: one drop notice.
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 1, 0xAA));
+
+        // Become available with no audio in the window, then unavailable again. The latch clears on
+        // the availability transition, not on an available frame, so the second period logs too.
+        pipe.SetState(AudioPipelineState.Playing);
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 2, 0xBB));
+
+        Assert.Empty(pipe.Chunks);
+        Assert.Equal(
+            2,
+            logger.MessagesAt(LogLevel.Debug)
+                .Count(m => m.Contains("Discarding player audio while unavailable", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public void ParseAudioChunk_AcceptsOnlyTheDefinedType()
     {
         // The parser layer stays honest on its own: an undefined slot never becomes an AudioChunk

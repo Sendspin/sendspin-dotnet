@@ -374,19 +374,21 @@ public sealed class ClientCapabilities
     /// <remarks>
     /// Gated on the player role for the same reason <see cref="ValidateVisualizerRoleSupport"/>
     /// is gated on the visualizer role: <c>supported_formats</c> is only put in <c>client/hello</c>
-    /// when <c>player@v1</c> is advertised, so a non-player client that clears the list has nothing
-    /// to violate. <see cref="BufferCapacity"/> also derives from the list, so an empty one would
-    /// leave the advertised buffer with no format to size against.
+    /// when the player role is advertised, so a non-player client that clears the list has nothing
+    /// to violate. Matched by family (any <c>player@</c> version), the way the hello builder gates
+    /// the object, so a future <c>player@v2</c> is caught too. <see cref="BufferCapacity"/> also
+    /// derives from the list, so an empty one would leave the advertised buffer with no format to
+    /// size against.
     /// </remarks>
     /// <exception cref="ArgumentException">
-    /// <see cref="Roles"/> advertises <c>player@v1</c> but <see cref="AudioFormats"/> is empty.
+    /// <see cref="Roles"/> advertises the player role but <see cref="AudioFormats"/> is empty.
     /// </exception>
     internal void ValidateAudioFormats()
     {
-        if (Roles.Contains(ClientRoles.Player, StringComparer.Ordinal) && AudioFormats.Count == 0)
+        if (Roles.Any(r => r.StartsWith("player@", StringComparison.Ordinal)) && AudioFormats.Count == 0)
         {
             throw new ArgumentException(
-                $"ClientCapabilities.Roles advertises '{ClientRoles.Player}' but AudioFormats is empty; "
+                "ClientCapabilities.Roles advertises the player role but AudioFormats is empty; "
                 + "the player role requires supported_formats to list at least one audio format.",
                 nameof(AudioFormats));
         }

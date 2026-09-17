@@ -1,4 +1,7 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection.Noise;
+using Sendspin.SDK.Discovery;
 using Sendspin.SDK.Models;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -12,14 +15,16 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 public class PlayerSupportedFormatsValidationTests
 {
-    [Fact]
-    public void EmptyAudioFormats_WithPlayerRole_ThrowsAtConstruction()
+    [Theory]
+    [InlineData("player@v1")]
+    [InlineData("player@v2")] // matched by family, so a future player version is caught too
+    public void EmptyAudioFormats_WithPlayerRole_ThrowsAtConstruction(string playerRole)
     {
         Assert.Throws<ArgumentException>(() => TestClient.Create(configure: options => options with
         {
             Capabilities = new ClientCapabilities
             {
-                Roles = new List<string> { ClientRoles.Player },
+                Roles = new List<string> { playerRole },
                 AudioFormats = new List<AudioFormat>(),
             },
         }));
@@ -40,5 +45,24 @@ public class PlayerSupportedFormatsValidationTests
         });
 
         client.Dispose();
+    }
+
+    [Fact]
+    public void HostConstruction_WithPlayerRoleAndEmptyAudioFormats_Throws()
+    {
+        // The host validates the same capabilities up front, so an empty player supported_formats
+        // is rejected at construction on the listen path too — before any server connects.
+        Assert.Throws<ArgumentException>(() => new SendspinHostService(
+            NullLoggerFactory.Instance,
+            new SendspinClientOptions
+            {
+                Identity = SendspinIdentity.Generate(),
+                Capabilities = new ClientCapabilities
+                {
+                    Roles = new List<string> { ClientRoles.Player },
+                    AudioFormats = new List<AudioFormat>(),
+                },
+            },
+            advertiserOptions: new AdvertiserOptions { Enabled = false }));
     }
 }

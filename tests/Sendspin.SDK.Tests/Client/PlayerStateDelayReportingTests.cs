@@ -110,18 +110,20 @@ public class PlayerStateDelayReportingTests
     }
 
     [Fact]
-    public async Task SuppliedDelay_IsStillProjectedOntoTheWireRange()
+    public async Task SuppliedFractionalDelay_IsRoundedOnTheWire_ButAppliedAndPersistedInFull()
     {
-        // The projection and the apply-and-persist path have to compose: negatives still
-        // schedule audio later, and still must not reach the wire.
+        // The projection and the apply-and-persist path have to compose: the wire carries an
+        // integer, so a fractional delay is rounded onto it, while the scheduler and the store
+        // keep the value actually applied. (The out-of-range clamp is the setter's, exercised end
+        // to end in OutputDelayWireProjectionTests.)
         var (client, connection, clock, store) = Connected();
         using var _c = client;
 
-        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: -300);
+        await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: 12.5);
 
-        Assert.Equal(0, ReportedDelay(connection));
-        Assert.Equal(-300.0, clock.OutputDelayMs);
-        Assert.Equal(new[] { -300.0 }, store.Saved);
+        Assert.Equal(13, ReportedDelay(connection));
+        Assert.Equal(12.5, clock.OutputDelayMs);
+        Assert.Equal(new[] { 12.5 }, store.Saved);
     }
 
     private sealed class RecordingDelayStore : IOutputDelayStore

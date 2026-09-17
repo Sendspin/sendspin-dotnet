@@ -144,7 +144,7 @@ public class KalmanClockSynchronizerTests
     }
 
     [Fact]
-    public void OutputDelay_NegativeValue_DelaysPlaybackLater()
+    public void OutputDelay_NegativeValue_IsClampedToZero()
     {
         _sync.ProcessMeasurement(0, 5000, 5100, 10_000);
         _sync.ProcessMeasurement(100_000, 105_000, 105_100, 110_000);
@@ -152,10 +152,24 @@ public class KalmanClockSynchronizerTests
         long serverTime = 200_000L;
         long withoutDelay = _sync.ServerToClientTime(serverTime);
 
-        _sync.OutputDelayMs = -5.0; // negative compensation → schedule later
-        long withDelay = _sync.ServerToClientTime(serverTime);
+        // The spec's static_delay_ms is 0-5000 and negatives are unsupported. This setter is the
+        // single clamp site, so a negative is pinned to zero and no scheduling shift results.
+        _sync.OutputDelayMs = -5.0;
+        Assert.Equal(0.0, _sync.OutputDelayMs);
 
-        Assert.Equal(5_000, withDelay - withoutDelay);
+        long withDelay = _sync.ServerToClientTime(serverTime);
+        Assert.Equal(0, withDelay - withoutDelay);
+    }
+
+    [Theory]
+    [InlineData(-100.0, 0.0)]
+    [InlineData(9000.0, 5000.0)] // above the spec maximum
+    [InlineData(double.NaN, 0.0)] // a public settable double can be non-finite
+    [InlineData(double.PositiveInfinity, 0.0)]
+    public void OutputDelay_OutOfRangeOrNonFinite_IsClampedToSpecRange(double set, double expected)
+    {
+        _sync.OutputDelayMs = set;
+        Assert.Equal(expected, _sync.OutputDelayMs);
     }
 
     [Fact]

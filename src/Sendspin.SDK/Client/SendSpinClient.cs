@@ -168,14 +168,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // mutated, so a reader that has taken the reference sees a complete configuration.
     private VisualizerRoleSupport? _visualizerRoleSupport;
 
-    // Bounds for any value written to the clock synchronizer's output delay. The GroupSync offset
-    // path allows negatives (schedule later), so this is wider than the set_static_delay spec range.
-    private const double MinOutputDelayMs = -5000.0;
+    // Bounds for a persisted output delay loaded from the store. The applied value is 0-5000 per
+    // the spec's static_delay_ms (the clock synchronizer's setter is the single clamp site), so a
+    // stored value outside that range is bounded here before it is logged and re-applied.
+    private const double MinOutputDelayMs = 0.0;
     private const double MaxOutputDelayMs = 5000.0;
-
-    // Last scheduler-side value ToWireOutputDelayMs warned about, so a delay that does not
-    // survive the projection is reported once rather than on every client/state.
-    private double? _lastWarnedOutputDelayMs;
 
     // Last line-sense signal the app reported, or null if it never has. Survives reconnects on
     // purpose: it describes the device's input, not the session (#114).
@@ -217,9 +214,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
 
     // Whether the "discarding audio while unavailable" line has already been logged for the
-    // current unavailable period. Set on the first dropped chunk and cleared once a chunk flows
-    // while available again, so a live stream logs once per period rather than per chunk. Touched
-    // only from the receive loop (DispatchBinaryMessage), so it needs no lock.
+    // current unavailable period. Set on the first dropped chunk and cleared when availability
+    // returns to true (in PublishAvailabilityAsync), so a false->true->false sequence logs once
+    // per period even when no audio arrives while available. Written from the receive loop and the
+    // availability publisher; a stale read only ever costs a duplicated or skipped debug line, so
+    // it needs no lock.
     private bool _audioDroppedWhileUnavailable;
 
     /// <summary>
@@ -1627,7 +1626,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (outputDelayMs is { } requested && requested != _clockSynchronizer.OutputDelayMs)
         {
             _clockSynchronizer.OutputDelayMs = requested;
-            TrySaveOutputDelay(requested);
+
+            // Persist what the setter actually applied (clamped to 0-5000), not the raw request,
+            // so a reload restores the same value rather than re-clamping a stored out-of-range one.
+            TrySaveOutputDelay(_clockSynchronizer.OutputDelayMs);
         }
 
         // Persist the caller's values: SendInitialClientStateAsync reads _playerState, so
@@ -1855,6 +1857,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // drift between a flag and the thing it describes that this publisher exists to stop.
         var current = CurrentAvailability;
 
+        // Clear the audio-drop log latch when the client is available again, so the next
+        // unavailable period logs its first dropped chunk even if none arrived while available.
+        if (current)
+        {
+            _audioDroppedWhileUnavailable = false;
+        }
+
         // An availability input flipped while the initial client/state is still deferred (e.g. a
         // pipeline error or external-source enter inside the converging window). Send the
         // connection's initial message instead — it reads CurrentAvailability and every role's
@@ -2009,42 +2018,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         => _capabilities.SupportsSetOutputDelay ? new List<string> { Commands.SetStaticDelay } : new List<string>();
 
     /// <summary>
-    /// Projects a scheduler-side output delay onto the wire type: an integer millisecond value
-    /// in 0-5000. Every client/state goes through here, so the internal range stays wider than
-    /// the wire's without the difference leaking onto it.
+    /// Projects the scheduler-side output delay onto the wire type: the spec's
+    /// <c>static_delay_ms</c> is an integer and the applied value a double, so this rounds to the
+    /// nearest millisecond.
     /// </summary>
     /// <remarks>
-    /// The scheduler's value is a double in <see cref="MinOutputDelayMs"/>..<see cref="MaxOutputDelayMs"/> —
-    /// fractional from calibration, negative to schedule later. The spec's <c>static_delay_ms</c>
-    /// is an integer 0-5000 and states negatives are not supported; a conformant server rejects
-    /// one outright rather than tolerating it. Clamping is therefore not optional, and a clamp
-    /// that moved the value is worth saying out loud: the server is being told a delay the
-    /// client is not actually applying.
+    /// The applied value is already in 0-5000 — <see cref="IClockSynchronizer.OutputDelayMs"/>'s
+    /// setter is the single clamp site — so this only rounds a fractional delay to the integer the
+    /// wire carries, and the reported value can no longer differ from the applied one by more than
+    /// that rounding.
     /// </remarks>
-    private int ToWireOutputDelayMs(double outputDelayMs)
-    {
-        // A public settable double can be NaN or infinity; Math.Clamp propagates NaN and the
-        // cast would then produce a garbage int rather than throwing.
-        double bounded = double.IsFinite(outputDelayMs)
-            ? Math.Clamp(outputDelayMs, 0.0, MaxOutputDelayMs)
-            : 0.0;
-
-        int wire = (int)Math.Round(bounded, MidpointRounding.AwayFromZero);
-
-        // Deduplicated on the value: a volume slider can drive many state sends, and a
-        // misconfigured delay would otherwise warn on every one of them.
-        if (wire != outputDelayMs && _lastWarnedOutputDelayMs != outputDelayMs)
-        {
-            _lastWarnedOutputDelayMs = outputDelayMs;
-            _logger.LogWarning(
-                "static_delay_ms {Configured}ms is reported to the server as {Reported}ms: the wire "
-                + "value is an integer 0-5000 and negatives are not supported. Audio is still "
-                + "scheduled using {Configured}ms, so the server's group calibration will differ.",
-                outputDelayMs, wire, outputDelayMs);
-        }
-
-        return wire;
-    }
+    private static int ToWireOutputDelayMs(double outputDelayMs)
+        => (int)Math.Round(outputDelayMs, MidpointRounding.AwayFromZero);
 
     /// <inheritdoc/>
     public void ClearAudioBuffer()
@@ -4625,8 +4610,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Mute.Value);
         }
 
-        // Apply set_static_delay only when advertised as supported and a value is present.
-        // Per spec the value is 0-5000 ms (negatives are not supported), so we clamp to that range.
+        // Apply set_static_delay only when advertised as supported and a value is present. Per spec
+        // the value is 0-5000 ms (negatives are not supported); the clock synchronizer's setter is
+        // the single clamp site, so the requested value is handed to it and the applied result read
+        // back for persistence and the log.
         //
         // Spec 168a677 (spec PR #164) renamed the command to 'set_output_delay' and the field to
         // 'output_delay_ms' with no alias, so both spellings are accepted here — a client fielded
@@ -4638,18 +4625,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && _capabilities.SupportsSetOutputDelay
             && requestedDelayMs.HasValue)
         {
-            var clamped = Math.Clamp(requestedDelayMs.Value, 0, 5000);
-            if (clamped != requestedDelayMs.Value)
-            {
-                _logger.LogWarning("server/command [{Player}]: static_delay_ms clamped from {Requested}ms to {Clamped}ms",
-                    _capabilities.ClientName, requestedDelayMs.Value, clamped);
-            }
-
-            _clockSynchronizer.OutputDelayMs = clamped;
-            TrySaveOutputDelay(clamped);
+            _clockSynchronizer.OutputDelayMs = requestedDelayMs.Value;
+            var applied = _clockSynchronizer.OutputDelayMs;
+            TrySaveOutputDelay(applied);
             changed = true;
             _logger.LogInformation("server/command [{Player}]: Applied output delay {Delay}ms",
-                _capabilities.ClientName, clamped);
+                _capabilities.ClientName, applied);
         }
 
         if (changed)
@@ -4698,8 +4679,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// Best-effort: a throwing or out-of-range store must not abort the handshake (the initial
     /// client/state and time-sync loop run after this). On failure we log and continue without the
-    /// persisted delay. The loaded value is clamped to the same range as the GroupSync offset path,
-    /// since that is the broadest legitimate source of a persisted delay (negatives allowed).
+    /// persisted delay. The loaded value is bounded to the spec's 0-5000 range before it is logged;
+    /// the synchronizer's setter clamps to the same range, so the two agree.
     /// </remarks>
     private void LoadPersistedOutputDelay()
     {
@@ -5256,8 +5237,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                     break;
                 }
-
-                _audioDroppedWhileUnavailable = false;
 
                 if (type != BinaryMessageTypes.PlayerAudio0)
                 {
