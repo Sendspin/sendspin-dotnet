@@ -8,12 +8,12 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// The scheduler's output delay is a double over -5000..5000 — fractional from calibration,
-/// negative to schedule later. The spec's <c>static_delay_ms</c> is an integer 0-5000 and states
+/// negative to schedule later. The spec's <c>output_delay_ms</c> is an integer 0-5000 and states
 /// negatives are not supported. Everything the client reports must be projected onto that.
 /// </summary>
 /// <remarks>
 /// The negative case is not cosmetic: aiosendspin's PlayerStatePayload raises
-/// <c>ValueError("static_delay_ms must be in range 0-5000")</c> on parse, so a negative delay
+/// <c>ValueError("output_delay_ms must be in range 0-5000")</c> on parse, so a negative delay
 /// fails the connection rather than being tolerated.
 /// </remarks>
 public class OutputDelayWireProjectionTests
@@ -86,7 +86,7 @@ public class OutputDelayWireProjectionTests
         using var _c = client;
 
         var player = PlayerObjectOfLastState(connection);
-        var delay = player.GetProperty("static_delay_ms");
+        var delay = player.GetProperty("output_delay_ms");
 
         Assert.Equal(JsonValueKind.Number, delay.ValueKind);
         Assert.Equal(expected, delay.GetInt32());
@@ -102,8 +102,8 @@ public class OutputDelayWireProjectionTests
         using var _c = client;
 
         Assert.True(
-            PlayerObjectOfLastState(connection).TryGetProperty("static_delay_ms", out _),
-            "static_delay_ms is REQUIRED for players and 0 is its default, so it must still be sent");
+            PlayerObjectOfLastState(connection).TryGetProperty("output_delay_ms", out _),
+            "output_delay_ms is REQUIRED for players and 0 is its default, so it must still be sent");
     }
 
     [Fact]
@@ -118,7 +118,7 @@ public class OutputDelayWireProjectionTests
 
         TestClient.CompleteHandshake(connection, "player@v1");
 
-        Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
+        Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("output_delay_ms").GetInt32());
         Assert.Equal(-200.0, sync.OutputDelayMs);
     }
 
@@ -133,6 +133,6 @@ public class OutputDelayWireProjectionTests
 
         await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: -750.0);
 
-        Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
+        Assert.Equal(0, PlayerObjectOfLastState(connection).GetProperty("output_delay_ms").GetInt32());
     }
 }

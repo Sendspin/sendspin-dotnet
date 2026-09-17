@@ -96,7 +96,7 @@ public class ClientStateFullStateTests
         var json = MessageSerializer.Serialize(ClientStateMessage.Create(
             available: true, player: new PlayerStatePayload()));
 
-        Assert.Contains("\"static_delay_ms\":0", json);
+        Assert.Contains("\"output_delay_ms\":0", json);
         Assert.Contains("\"required_lead_time_ms\":0", json);
         Assert.Contains("\"min_buffer_ms\":0", json);
     }

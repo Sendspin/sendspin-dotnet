@@ -381,7 +381,7 @@ public class NoiseWireFramingTests
     {
         var (framing, server) = CompleteHandshake();
 
-        var frame = server.EncryptFrame([NoiseConstants.MessageTypeFragmentEnd, 1, 2, 3]);
+        var frame = server.EncryptFrame([NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 1, 2, 3]);
         var result = framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, frame));
 
         Assert.NotNull(result.FatalReason);
