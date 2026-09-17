@@ -3011,17 +3011,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _pendingPairingPsk = PairingRecords.GenerateUniquePsk(_pairingStore!);
                 _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
 
-                // Spec #247: the attempt starts with client/pair-init (no commit_B — that is
-                // dynamic pairing code only), then client/pair-finalize back-to-back, so a
-                // delayed finalize from a cancelled attempt can no longer finalize a later one.
-                SendAsync(new ClientPairInitMessage
-                {
-                    Payload = new ClientPairInitPayload { PairingIndex = _pairingCounter },
-                }).SafeFireAndForget(_logger);
-                SendAsync(new ClientPairFinalizeMessage
-                {
-                    Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(_pendingPairingPsk) },
-                }).SafeFireAndForget(_logger);
+                // Spec #247: the attempt starts with client/pair-init, then client/pair-finalize,
+                // so a delayed finalize from a cancelled attempt can no longer finalize a later
+                // one. The two are one awaited flow — the finalize send is issued only after the
+                // init send completes — so the order holds even when another writer contends for
+                // the send lock, which SemaphoreSlim does not serve FIFO.
+                SendPairingPskInitThenFinalizeAsync(_pairingCounter, _pendingPairingPsk)
+                    .SafeFireAndForget(_logger);
                 ArmAttemptTimeout();
                 break;
 
@@ -3037,6 +3033,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 throw new System.Diagnostics.UnreachableException(
                     $"CanOffer admitted pair method '{payload.Pairing?.Method}' with no dispatch arm");
         }
+    }
+
+    /// <summary>
+    /// Sends the Pairing PSK attempt's <c>client/pair-init</c> then <c>client/pair-finalize</c> in
+    /// order (spec #247): the finalize send is issued only after the init send completes, so the
+    /// order holds even under send-lock contention, which <see cref="System.Threading.SemaphoreSlim"/>
+    /// does not serve FIFO. Both values are captured at dispatch so a later attempt cannot change
+    /// them across the awaits.
+    /// </summary>
+    private async Task SendPairingPskInitThenFinalizeAsync(int pairingIndex, byte[] pendingPairingPsk)
+    {
+        // No commit_B — that is dynamic pairing code only.
+        await SendAsync(new ClientPairInitMessage
+        {
+            Payload = new ClientPairInitPayload { PairingIndex = pairingIndex },
+        });
+        await SendAsync(new ClientPairFinalizeMessage
+        {
+            Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(pendingPairingPsk) },
+        });
     }
 
     /// <summary>

@@ -67,6 +67,37 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
+    public async Task PairingActivate_WithholdsFinalize_UntilPairInitSendCompletes()
+    {
+        // Spec #247's order must hold even when another writer contends for the send lock, which
+        // SemaphoreSlim does not serve FIFO. The flow issues the finalize only after the init send
+        // completes, so parking the init send mid-flight proves the finalize is causally
+        // sequenced after it — not merely enqueued in program order. The pre-fix code, which fired
+        // both sends independently, would have recorded the finalize while the init was parked.
+        var (client, connection, _) = Create();
+        using var _c = client;
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        connection.HoldNextSend = gate;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
+
+        // The init send is parked mid-flight; the finalize must not have been issued yet.
+        Assert.Single(connection.SnapshotSentMessages().OfType<ClientPairInitMessage>());
+        Assert.Empty(connection.SnapshotSentMessages().OfType<ClientPairFinalizeMessage>());
+
+        // Releasing the init send lets the flow issue the finalize.
+        gate.SetResult();
+        for (int i = 0; i < 200 && !connection.SnapshotSentMessages().OfType<ClientPairFinalizeMessage>().Any(); i++)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.Single(connection.SnapshotSentMessages().OfType<ClientPairFinalizeMessage>());
+    }
+
+    [Fact]
     public void ServerPairFinalize_PersistsRecord_BoundToServer_AndRaisesEvent()
     {
         var (client, connection, store) = Create();
