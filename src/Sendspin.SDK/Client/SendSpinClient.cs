@@ -3010,6 +3010,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case PairMethods.PairingPsk:
                 _pendingPairingPsk = PairingRecords.GenerateUniquePsk(_pairingStore!);
                 _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
+
+                // Spec #247: the attempt starts with client/pair-init (no commit_B — that is
+                // dynamic pairing code only), then client/pair-finalize back-to-back, so a
+                // delayed finalize from a cancelled attempt can no longer finalize a later one.
+                SendAsync(new ClientPairInitMessage
+                {
+                    Payload = new ClientPairInitPayload { PairingIndex = _pairingCounter },
+                }).SafeFireAndForget(_logger);
                 SendAsync(new ClientPairFinalizeMessage
                 {
                     Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(_pendingPairingPsk) },
@@ -3298,7 +3306,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Static pairing code: the pairing code is device-printed and known from the start.
         string pin = state.Dynamic ? state.PairingCode! : (_effectiveStaticPairingCode ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
-        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter);
+
+        // Round 1: the static flow is always round 1, and the dynamic flow has no
+        // client/pair-retry yet (separate task), so every attempt is a single round.
+        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter, 1);
 
         var cpace = CPace.Start(
             CPaceRole.Responder,
@@ -3387,7 +3398,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         };
         if (state.Dynamic)
         {
-            confirm.Payload.NonceB = Base64UrlText.Encode(state.NonceB!);
+            // Spec #155: nonce_B is revealed wrapped, not raw, sealed under the round's sid + ISK.
+            confirm.Payload.WrappedNonceB = Base64UrlText.Encode(
+                PairingCodes.WrapNonceB(state.Sid!, cpace.Isk, state.NonceB!, _session.Suite));
         }
 
         SendAsync(confirm).SafeFireAndForget(_logger);

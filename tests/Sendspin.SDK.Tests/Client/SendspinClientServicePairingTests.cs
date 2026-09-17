@@ -43,6 +43,30 @@ public class SendspinClientServicePairingTests
     }
 
     [Fact]
+    public void PairingActivate_SendsPairInit_ThenPairFinalize()
+    {
+        // Spec #247: the Pairing PSK attempt starts with an indexed client/pair-init (no
+        // commit_B — that is dynamic pairing code only), then client/pair-finalize, so a
+        // delayed finalize from a cancelled attempt cannot finalize a later one.
+        var (client, connection, _) = Create();
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"pairing_psk"}}}""");
+
+        var sent = connection.SentMessages;
+        int initIndex = sent.FindIndex(m => m is ClientPairInitMessage);
+        int finalizeIndex = sent.FindIndex(m => m is ClientPairFinalizeMessage);
+        Assert.True(initIndex >= 0, "client/pair-init must be sent");
+        Assert.True(finalizeIndex >= 0, "client/pair-finalize must be sent");
+        Assert.True(initIndex < finalizeIndex, "client/pair-init must precede client/pair-finalize");
+
+        var init = Assert.Single(sent.OfType<ClientPairInitMessage>());
+        Assert.Equal(1, init.Payload.PairingIndex);
+        Assert.Null(init.Payload.CommitB);
+    }
+
+    [Fact]
     public void ServerPairFinalize_PersistsRecord_BoundToServer_AndRaisesEvent()
     {
         var (client, connection, store) = Create();

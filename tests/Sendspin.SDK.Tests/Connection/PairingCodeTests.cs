@@ -42,9 +42,19 @@ public class PairingCodeTests
     [Fact]
     public void BuildSid_MatchesReference()
     {
-        var v = Kats.GetProperty("sid");
-        Assert.Equal(Hex(v.GetProperty("sid").GetString()!),
-            PairingCodes.BuildSid(Hex(v.GetProperty("h").GetString()!), (uint)v.GetProperty("counter").GetInt32()));
+        // Vectors: label || h || u32be(pairing_index) || u32be(round). Cross-checked against
+        // aiosendspin tests/noise/test_pairing.py::test_pake_sid_known_answer (commit 4ed7c45,
+        // spec #237 / aiosendspin #415). The SDK emits round 1 for both static and dynamic (no
+        // client/pair-retry yet); the round-3 vector pins that BuildSid binds the round anyway.
+        foreach (var v in Kats.GetProperty("sid").EnumerateArray())
+        {
+            Assert.Equal(
+                Hex(v.GetProperty("sid").GetString()!),
+                PairingCodes.BuildSid(
+                    Hex(v.GetProperty("h").GetString()!),
+                    (uint)v.GetProperty("pairing_index").GetInt32(),
+                    (uint)v.GetProperty("round").GetInt32()));
+        }
     }
 
     [Fact]
@@ -60,6 +70,22 @@ public class PairingCodeTests
     }
 
     [Fact]
+    public void WrapNonceB_MatchesReference()
+    {
+        // The nonce wrap is byte-identical to wrap_psk but for the label
+        // (sendspin-pair-nonce-wrap-v1, spec #155 / aiosendspin #344). The vector was produced by
+        // aiosendspin's construction; the generator reproduced the wrap_psk KAT above byte for
+        // byte first, proving the seal matches the reference.
+        var v = Kats.GetProperty("wrap_nonce_B");
+        byte[] wrapped = PairingCodes.WrapNonceB(
+            Hex(v.GetProperty("sid").GetString()!),
+            Hex(v.GetProperty("isk").GetString()!),
+            Hex(v.GetProperty("nonce_B").GetString()!),
+            NoiseCipherSuite.ChaChaPoly);
+        Assert.Equal(Hex(v.GetProperty("wrapped").GetString()!), wrapped);
+    }
+
+    [Fact]
     public void FullPakeRound_ServerUnwrapsClientPsk()
     {
         // Both sides derive the same pairing code from shared handshake material, run CPace, and
@@ -70,7 +96,7 @@ public class PairingCodeTests
         System.Security.Cryptography.RandomNumberGenerator.Fill(nonceB);
         const int length = 6;
         string pin = PairingCodes.DerivePairingCode(h, nonceA, nonceB, length);
-        byte[] sid = PairingCodes.BuildSid(h, 1);
+        byte[] sid = PairingCodes.BuildSid(h, 1, 1);
         byte[] prs = Encoding.ASCII.GetBytes(pin);
 
         var server = CPace.Start(CPaceRole.Initiator, prs, sid, ad: PairingCodes.AdServer);
