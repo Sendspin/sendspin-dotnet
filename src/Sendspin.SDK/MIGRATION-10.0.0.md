@@ -776,7 +776,7 @@ See §6: `buffer_capacity` stays in `client/hello`, everything else moved to the
 
 ### Full state, and what gates binary data
 
-Because merging is gone, the SDK rebuilds each role object from its current values on every send and never emits a partial object. Player `supported_commands` is always written — `[]` means "accepts no commands" — rather than being omitted.
+Because merging is gone, the SDK rebuilds each role object from its current values on every send and never emits a partial object. Player `supported_commands` is always written rather than omitted, and this SDK always fills it with `volume` and `mute` (it applies both unconditionally) plus `set_output_delay` when enabled — so it is never empty.
 
 Two related rules the SDK now enforces:
 
