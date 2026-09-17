@@ -139,6 +139,9 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         ThrowIfNotReady();
         if (data.Length == 0)
             throw new ArgumentException("binary message must include a type byte", nameof(data));
+        byte type = data.Span[0];
+        if (type is NoiseConstants.MessageTypeFragment or 2 or 3)
+            throw new ArgumentOutOfRangeException(nameof(data), type, "binary message type 1 is fragmentation and 2-3 are reserved; they cannot be sent as an application message.");
         return EncryptOutbound(data.ToArray());
     }
 

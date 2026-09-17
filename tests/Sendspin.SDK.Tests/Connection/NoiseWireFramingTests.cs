@@ -376,6 +376,19 @@ public class NoiseWireFramingTests
         Assert.Equal(appMessage, reassembled);
     }
 
+    [Theory]
+    [InlineData((byte)1)]  // fragmentation
+    [InlineData((byte)2)]  // reserved
+    [InlineData((byte)3)]  // reserved
+    public void EncodeBinary_WithReservedType_Throws(byte type)
+    {
+        // The outbound boundary must not let a caller emit a reserved id — either as its own
+        // small frame or copied into a fragment's orig_type.
+        var (framing, _) = CompleteHandshake();
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => framing.EncodeBinary(new byte[] { type, 0xAA }).ToList());
+    }
+
     [Fact]
     public void Inbound_FragmentEndWithoutStart_IsFatal()
     {
