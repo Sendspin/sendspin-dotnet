@@ -236,6 +236,27 @@ public class SendspinClientServiceVisualizerTests
     }
 
     [Fact]
+    public void PeriodicTypeWithNonPositiveRateMax_ThrowsAtConstruction()
+    {
+        // rate_max is the per-second ceiling on periodic frames, so a periodic type (loudness) with
+        // a zero cap advertises a client/state the server could never stream. Rejected at
+        // construction, where a spectrum-without-config is.
+        Assert.Throws<ArgumentException>(() => TestClient.Create(configure: options => options with
+        {
+            Capabilities = new ClientCapabilities
+            {
+                Roles = new List<string> { "visualizer@v1" },
+                VisualizerRoleSupport = new VisualizerRoleSupport
+                {
+                    BufferCapacity = 65536,
+                    RateMax = 0,
+                    Types = new List<string> { VisualizerTypes.Loudness },
+                },
+            },
+        }));
+    }
+
+    [Fact]
     public void VisualizerRoleWithoutSupport_ThrowsAtConstruction()
     {
         // Advertising visualizer@v1 without a VisualizerRoleSupport would emit a client/hello
@@ -369,5 +390,19 @@ public class SendspinClientServiceVisualizerTests
 
         await Assert.ThrowsAsync<ArgumentException>(() => client.SetVisualizerConfigurationAsync(
             types: new List<string> { VisualizerTypes.Spectrum }, rateMax: 15, spectrum: null));
+    }
+
+    [Fact]
+    public async Task SetVisualizerConfigurationAsync_PeriodicTypeWithNonPositiveRateMax_Throws()
+    {
+        // The runtime twin of the construction check: a periodic type reconfigured with a
+        // non-positive rate_max is rejected before it can reach the wire.
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SetVisualizerConfigurationAsync(
+            types: new List<string> { VisualizerTypes.Loudness }, rateMax: 0, spectrum: null));
     }
 }

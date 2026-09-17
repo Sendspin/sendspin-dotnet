@@ -126,6 +126,14 @@ internal sealed class MediaDisplayScheduler : IDisposable
     private readonly PendingArtwork?[] _artwork = new PendingArtwork?[ArtworkChannelCount];
 
     /// <summary>
+    /// The server timestamp of the image each channel is currently displaying, or null when the
+    /// channel shows nothing — set when an image is raised and cleared when a clear is. Lets a
+    /// <c>stream/end</c> flush tell apps to clear the channels that still show something (spec
+    /// #266). Guarded by <see cref="_lock"/>.
+    /// </summary>
+    private readonly long?[] _shownArtwork = new long?[ArtworkChannelCount];
+
+    /// <summary>
     /// One pending update per <see cref="ScheduledStateRole"/>, indexed by the enum. The roles
     /// are independent: a scheduled <c>color</c> update never displaces a scheduled
     /// <c>metadata</c> one, and neither is ordered against the other.
@@ -275,6 +283,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
             if (displayTime <= now && !HasPendingArtworkLocked() && !_dispatching)
             {
                 raiseNow = pending;
+                _shownArtwork[channel] = pending.ImageData.Length == 0 ? null : pending.ServerTimestamp;
             }
             else
             {
@@ -391,16 +400,46 @@ internal sealed class MediaDisplayScheduler : IDisposable
     }
 
     /// <summary>
-    /// Discards pending artwork, leaving visualizer frames held. For a <c>stream/end</c> that
-    /// names the <c>artwork</c> role — including the routine case of a server dropping that role
-    /// alone, where artwork already sent for a coming track must not surface but the visualizer
-    /// stream plays on.
+    /// Discards pending artwork, leaving visualizer frames held. For a <c>stream/end</c> or
+    /// <c>stream/clear</c> that names the <c>artwork</c> role — including the routine case of a
+    /// server dropping that role alone, where artwork already sent for a coming track must not
+    /// surface but the visualizer stream plays on.
     /// </summary>
-    internal void FlushArtwork()
+    /// <param name="raiseCleared">
+    /// True for a <c>stream/end</c>, which is playback termination: after discarding what is
+    /// pending, raise <c>ArtworkCleared</c> for every channel still showing an image so apps blank
+    /// their display (spec #266). False for a <c>stream/clear</c> seek, which keeps the current
+    /// image and only drops what was buffered ahead.
+    /// </param>
+    internal void FlushArtwork(bool raiseCleared)
     {
+        List<ArtworkClearedEventArgs>? cleared = null;
+
         lock (_lock)
         {
             Array.Clear(_artwork);
+
+            if (raiseCleared)
+            {
+                for (int channel = 0; channel < _shownArtwork.Length; channel++)
+                {
+                    if (_shownArtwork[channel] is { } timestamp)
+                    {
+                        _shownArtwork[channel] = null;
+                        (cleared ??= new()).Add(new ArtworkClearedEventArgs(channel, timestamp));
+                    }
+                }
+            }
+        }
+
+        // Raised outside the lock, as the inline artwork path is, so a subscriber cannot re-enter
+        // the scheduler under it.
+        if (cleared is not null)
+        {
+            foreach (var args in cleared)
+            {
+                _raiseArtworkCleared(args);
+            }
         }
     }
 
@@ -647,6 +686,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
             if (_artwork[channel] is { } slot && DisplayTimeLocked(slot.ServerTimestamp) <= now)
             {
                 dueArtwork.Add(slot);
+                _shownArtwork[channel] = slot.ImageData.Length == 0 ? null : slot.ServerTimestamp;
                 _artwork[channel] = null;
             }
         }

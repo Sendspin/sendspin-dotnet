@@ -21,6 +21,15 @@ public static class VisualizerTypes
 
     /// <summary>Energy-onset events with strength (binary type 20).</summary>
     public const string Peak = "peak";
+
+    /// <summary>
+    /// Whether a type is periodic — throttled by <c>rate_max</c>. Everything but the event types
+    /// <see cref="Beat"/> and <see cref="Peak"/> is periodic (roles/visualizer/v1.md).
+    /// </summary>
+    internal static bool IsPeriodic(string type) => type is Loudness or FPeak or Spectrum;
+
+    /// <summary>Whether any requested type is periodic, so <c>rate_max</c> must be positive.</summary>
+    internal static bool ContainsPeriodic(IEnumerable<string> types) => types.Any(IsPeriodic);
 }
 
 /// <summary>
@@ -70,8 +79,8 @@ public sealed class VisualizerSpectrum
 public sealed class VisualizerSupport
 {
     /// <summary>
-    /// Max total size in bytes of buffered visualizer binary messages, counting each message's
-    /// full wire size (message-type byte + timestamp + data).
+    /// Max total size in bytes of buffered visualizer binary messages, counting each reassembled
+    /// message's bytes (message-type byte + timestamp + data).
     /// </summary>
     [JsonPropertyName("buffer_capacity")]
     public int BufferCapacity { get; init; }

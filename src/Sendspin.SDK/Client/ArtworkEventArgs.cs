@@ -16,7 +16,7 @@ public sealed class ArtworkReceivedEventArgs : EventArgs
     public long Timestamp { get; }
 
     /// <summary>
-    /// Encoded image bytes (JPEG/PNG/BMP).
+    /// Encoded image bytes (JPEG/PNG).
     /// </summary>
     public byte[] ImageData { get; }
 
