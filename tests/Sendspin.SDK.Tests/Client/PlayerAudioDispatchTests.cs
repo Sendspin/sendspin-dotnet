@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
@@ -87,6 +88,52 @@ public class PlayerAudioDispatchTests
 
         Assert.Empty(pipe.Chunks);
         Assert.Equal(2, logger.MessagesAt(LogLevel.Warning).Count);
+    }
+
+    [Fact]
+    public void AudioWhileUnavailable_IsDroppedButConnectionStaysOpen_ThenFlowsWhenAvailableAgain()
+    {
+        // Spec #270: a player that has reported available: false is not consuming audio, so the
+        // server's chunks are discarded rather than decoded — but the connection is kept open
+        // (the spec says discard, MUST NOT close), so the stream resumes once the client is
+        // available again.
+        var (client, connection, pipe) = PlayerClient();
+        using var _c = client;
+
+        // A pipeline error is the composed availability going false (_clientErrorReported).
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 5_000, 1, 2, 3));
+
+        Assert.Empty(pipe.Chunks);
+        Assert.Null(connection.LastDisconnectReason);
+
+        // Reaching Playing clears the error; the client is available and audio flows again.
+        pipe.SetState(AudioPipelineState.Playing);
+        connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 6_000, 4, 5, 6));
+
+        var chunk = Assert.Single(pipe.Chunks);
+        Assert.Equal(6_000, chunk.ServerTimestamp);
+    }
+
+    [Fact]
+    public void AudioWhileUnavailable_LogsOncePerPeriod_NotPerChunk()
+    {
+        var logger = new CapturingLogger<SendspinClientService>();
+        var (client, connection, pipe) = PlayerClient(logger);
+        using var _c = client;
+
+        // A live stream keeps sending at chunk rate while the client is unavailable, so the drop
+        // notice has to be latched per unavailable period or it buries every other diagnostic.
+        pipe.RaiseError();
+        for (int i = 0; i < 5; i++)
+        {
+            connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, i, 0xAA));
+        }
+
+        Assert.Empty(pipe.Chunks);
+        Assert.Single(
+            logger.MessagesAt(LogLevel.Debug),
+            m => m.Contains("Discarding player audio while unavailable", StringComparison.Ordinal));
     }
 
     [Fact]

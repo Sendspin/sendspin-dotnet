@@ -216,6 +216,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
 
+    // Whether the "discarding audio while unavailable" line has already been logged for the
+    // current unavailable period. Set on the first dropped chunk and cleared once a chunk flows
+    // while available again, so a live stream logs once per period rather than per chunk. Touched
+    // only from the receive loop (DispatchBinaryMessage), so it needs no lock.
+    private bool _audioDroppedWhileUnavailable;
+
     /// <summary>
     /// Serializes the two places a chunk is handed to the pipeline: the receive loop's direct
     /// hand-off, and the <c>stream/start</c> handler draining what queued while the pipeline was
@@ -526,6 +532,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The runtime reconfiguration path validates spectrum-vs-spectrum-config already; the
         // initial configuration needs the same guard before the first client/state is built.
         _capabilities.ValidateVisualizerRoleSupport();
+
+        // A player must advertise at least one supported_format (spec #257); check before the
+        // first client/hello, where an empty list would otherwise go out.
+        _capabilities.ValidateAudioFormats();
 
         // Implemented methods start enabled unless the app says otherwise. ANDing each with
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
@@ -5231,6 +5241,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         switch (category)
         {
             case BinaryMessageCategory.PlayerAudio:
+                // Spec #270: while this client reports available: false its pipeline is not
+                // consuming, so discard inbound audio rather than decode it — the connection stays
+                // open (the spec says discard, MUST NOT close). Logged once per unavailable period,
+                // not per chunk, since a live stream would otherwise flood the log.
+                if (!CurrentAvailability)
+                {
+                    if (!_audioDroppedWhileUnavailable)
+                    {
+                        _audioDroppedWhileUnavailable = true;
+                        _logger.LogDebug(
+                            "Discarding player audio while unavailable; chunks are dropped until this client reports available again");
+                    }
+
+                    break;
+                }
+
+                _audioDroppedWhileUnavailable = false;
+
                 if (type != BinaryMessageTypes.PlayerAudio0)
                 {
                     // player@v1 defines one audio slot; 5-7 are allocated to the role but carry no
