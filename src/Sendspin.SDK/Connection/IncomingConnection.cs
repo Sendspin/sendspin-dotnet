@@ -293,14 +293,26 @@ public sealed class IncomingConnection : ISendspinConnection
             // because the peer never sends anything. A fatal on an established session is a
             // desync or a failed server-initiated re-handshake. Neither is retried here: the
             // listen path has no reconnect loop, so we close and let the server redial.
-            _logger.LogWarning("{Message}", wasTransportReady
-                ? $"Wire framing failure on an established session: {fatal}; closing connection"
-                : new SendspinHandshakeException(HandshakeFailureKind.HandshakeRejected, fatal).Message);
+            //
+            // For the handshake-time case, surface the classified exception on the state-changed
+            // event so a consumer reads the kind (ServerError / PairingStateDiverged) off
+            // ConnectionStateChanged, not just the log line. The established-session case is not a
+            // rejected handshake, so it carries no such exception — as on the dial path.
+            SendspinHandshakeException? failure = wasTransportReady
+                ? null
+                : new SendspinHandshakeException(inbound.FatalKind ?? HandshakeFailureKind.HandshakeRejected, fatal);
 
-            // Per spec: close without sending an application-level error message.
+            _logger.LogWarning("{Message}", failure?.Message
+                ?? $"Wire framing failure on an established session: {fatal}; closing connection");
+
+            // Per spec: close without sending an application-level error message. Publish the
+            // terminal state (carrying the classified exception) BEFORE starting the close:
+            // CloseSocketSafeAsync can bring the peer's Close frame back through OnClose, whose own
+            // SetState(Disconnected) would otherwise win and make this one no-op, dropping the
+            // exception. CloseWithoutGoodbyeAsync uses this same order.
             _isOpen = false;
+            SetState(ConnectionState.Disconnected, failure?.Message ?? fatal, failure);
             _ = CloseSocketSafeAsync();
-            SetState(ConnectionState.Disconnected, fatal);
             return;
         }
 

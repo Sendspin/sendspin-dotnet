@@ -97,12 +97,17 @@ public interface ISendspinClient : IAsyncDisposable
     /// </remarks>
     /// <exception cref="Connection.SendspinHandshakeException">
     /// The handshake failed permanently, so retrying cannot help.
-    /// <see cref="Connection.SendspinHandshakeException.Kind"/> distinguishes the two cases:
+    /// <see cref="Connection.SendspinHandshakeException.Kind"/> distinguishes the cases:
     /// <see cref="Connection.HandshakeFailureKind.LegacyServer"/> — the server predates the
     /// encrypted protocol (aiosendspin &lt; 7.0.0); upgrade it, or use the 9.x SDK line.
+    /// <see cref="Connection.HandshakeFailureKind.ServerError"/> — the server answered
+    /// <c>client/init</c> with a cleartext <c>server/error</c>; its (unauthenticated) reason is in
+    /// <see cref="System.Exception.Message"/>.
+    /// <see cref="Connection.HandshakeFailureKind.PairingStateDiverged"/> — a stored PSK is bound to
+    /// a different server; the pairing record is stale, so pair again.
     /// <see cref="Connection.HandshakeFailureKind.HandshakeRejected"/> — the server speaks the
-    /// encrypted protocol but refused this handshake: no usable pairing record, an unsupported
-    /// cipher suite, a version mismatch, or malformed input. Pair again, or check the suite.
+    /// encrypted protocol but refused this handshake for any other reason: an unsupported cipher
+    /// suite, a version mismatch, or malformed input. Check the suite and the server logs.
     /// </exception>
     /// <exception cref="TimeoutException">
     /// The server accepted the socket but did not complete the hello exchange within the
