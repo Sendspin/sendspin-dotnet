@@ -474,8 +474,10 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             if (plaintext.Length < 3)
                 return Fail("opening fragment missing orig_type");
             _reassemblyOrigType = plaintext.Span[2];
-            if (_reassemblyOrigType == NoiseConstants.MessageTypeFragment)
-                return Fail("orig_type of 1");
+            // orig_type must be a real message type: the fragment id (1) and the reserved ids
+            // (2, 3) are malformed here, the same as receiving them as a top-level frame.
+            if (_reassemblyOrigType is NoiseConstants.MessageTypeFragment or 2 or 3)
+                return Fail($"orig_type is a reserved id {_reassemblyOrigType}");
             _reassemblyBuffer = new MemoryStream();
             data = plaintext[3..];
         }

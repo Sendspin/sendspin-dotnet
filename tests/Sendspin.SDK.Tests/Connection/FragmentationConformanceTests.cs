@@ -50,16 +50,20 @@ public class FragmentationConformanceTests
         Assert.Equal(new byte[] { 8, 0x01, 0x02, 0x03 }, reassembled.Binary!.Value.ToArray());
     }
 
-    [Fact]
-    public void OpeningFragment_WithFragmentOrigType_IsFatal_AndSurfacesNothing()
+    [Theory]
+    [InlineData((byte)1)]  // the fragment id itself
+    [InlineData((byte)2)]  // reserved
+    [InlineData((byte)3)]  // reserved
+    public void OpeningFragment_WithReservedOrigType_IsFatal_AndSurfacesNothing(byte origType)
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity);
         var server = CompleteHandshake(framing, identity);
 
-        // Spec: an orig_type of 1 (the fragment ID itself) is a malformed sequence.
+        // Spec: orig_type must be a real message type; the fragment id (1) and the reserved ids
+        // (2, 3) are malformed and MUST close the connection without surfacing anything.
         var opening = Feed(framing, server,
-            [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, NoiseConstants.MessageTypeFragment, 0xAA]);
+            [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, origType, 0xAA]);
         Assert.NotNull(opening.FatalReason);
         Assert.Null(opening.Text);
         Assert.Null(opening.Binary);
