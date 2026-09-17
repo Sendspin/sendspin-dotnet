@@ -60,6 +60,11 @@ public class PairingCodeTests
     [Fact]
     public void WrapPsk_MatchesReference()
     {
+        // Provenance: the wrap KATs use a spec-current round-aware sid whose bytes match
+        // aiosendspin test_pake_sid_known_answer (index 2, round 1). The wrapped value is the
+        // reference AEAD seal — AEAD(SHA-256(label || sid || ISK), 12-byte zero nonce) over the
+        // 32-byte plaintext, 48-byte ciphertext+tag — from aiosendspin noise/pairing.py
+        // (_wrap_key + _wrap_aead), computed by the same generator used for the sid and nonce KATs.
         var v = Kats.GetProperty("wrap_psk");
         byte[] wrapped = PairingCodes.WrapPsk(
             Hex(v.GetProperty("sid").GetString()!),
@@ -72,10 +77,10 @@ public class PairingCodeTests
     [Fact]
     public void WrapNonceB_MatchesReference()
     {
-        // The nonce wrap is byte-identical to wrap_psk but for the label
-        // (sendspin-pair-nonce-wrap-v1, spec #155 / aiosendspin #344). The vector was produced by
-        // aiosendspin's construction; the generator reproduced the wrap_psk KAT above byte for
-        // byte first, proving the seal matches the reference.
+        // wrap_psk and wrap_nonce_B share the same round-aware sid and ISK, so this vector differs
+        // from wrap_psk only by the label (sendspin-pair-nonce-wrap-v1, spec #155 / aiosendspin
+        // #344) and the plaintext. Both are the reference AEAD seal; see WrapPsk_MatchesReference
+        // for provenance.
         var v = Kats.GetProperty("wrap_nonce_B");
         byte[] wrapped = PairingCodes.WrapNonceB(
             Hex(v.GetProperty("sid").GetString()!),
