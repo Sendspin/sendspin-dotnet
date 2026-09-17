@@ -368,8 +368,9 @@ public sealed class ClientPairConfirmPayload
     public string ClientKc { get; set; } = string.Empty;
 
     /// <summary>
-    /// The wrapped nonce_B preimage of commit_B (48-byte base64url, dynamic pairing code only):
-    /// nonce_B sealed under <c>SHA-256("sendspin-pair-nonce-wrap-v1" || sid || ISK)</c>.
+    /// The wrapped nonce_B preimage of commit_B (dynamic pairing code only): nonce_B sealed under
+    /// <c>SHA-256("sendspin-pair-nonce-wrap-v1" || sid || ISK)</c> — 48 bytes of ciphertext plus
+    /// tag, carried as unpadded base64url text.
     /// </summary>
     [JsonPropertyName("wrapped_nonce_B")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
