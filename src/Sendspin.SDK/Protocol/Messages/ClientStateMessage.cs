@@ -268,14 +268,15 @@ public sealed class PlayerStatePayload
     public int MinBufferMs { get; init; }
 
     /// <summary>
-    /// Player commands this client accepts via server/command, beyond the always-available
-    /// volume/mute. Currently a subset of: 'set_output_delay'.
+    /// The player commands the server MAY send via server/command. As this SDK builds it, the
+    /// list always contains <c>volume</c> and <c>mute</c> — the client applies both
+    /// unconditionally — plus <c>set_output_delay</c> when the client accepts that command, so it
+    /// is never empty here.
     /// </summary>
     /// <remarks>
     /// Not optional and never omitted: spec PR #175 dropped the <c>?</c>, because absence and
-    /// <c>[]</c> said the same thing and the redundant encoding silently revoked
-    /// <c>set_output_delay</c> for a reader that treated a missing field as unchanged. A player
-    /// that accepts no commands sends <c>[]</c>.
+    /// <c>[]</c> said the same thing and the redundant encoding silently revoked a command for a
+    /// reader that treated a missing field as unchanged.
     /// </remarks>
     [JsonPropertyName("supported_commands")]
     public List<string> SupportedCommands { get; init; } = new();
