@@ -183,10 +183,10 @@ public class SendspinClientServiceControllerTests
     }
 
     [Fact]
-    public void ServerState_SeekMaxMsAbsent_KeepsPreviousValue()
+    public void ServerState_SeekMaxMsAbsent_IsUnset()
     {
-        // The controller object is a partial update, so an update carrying only volume must not
-        // wipe seek_max_ms — same keep-on-absent rule its siblings (volume/muted/repeat) follow.
+        // The controller object is full state (spec #175): a later object carrying only volume
+        // omits seek_max_ms, which unsets the bound rather than keeping it.
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
@@ -198,17 +198,17 @@ public class SendspinClientServiceControllerTests
             """);
 
         Assert.NotNull(client.CurrentGroup);
-        Assert.Equal(245_000, client.CurrentGroup.SeekMaxMs);
+        Assert.Null(client.CurrentGroup.SeekMaxMs);
         Assert.Equal(30, client.CurrentGroup.Volume);
     }
 
     [Fact]
     public void ServerState_SeekMaxMsExplicitNull_ClearsPreviousValue()
     {
-        // The counterpart to the absent case above, and the reason this leaf is Optional: the
-        // server nulls it when the seekable range becomes unknown (a seekable track giving way to
-        // a live stream), and a leaf set to null is a clear. Keeping the old bound would leave a
-        // seek bar pointing at the length of a track that is no longer playing.
+        // The explicit-null counterpart to the absent case above — both unset the bound under
+        // spec #175. The server nulls it when the seekable range becomes unknown (a seekable track
+        // giving way to a live stream); keeping the old bound would leave a seek bar pointing at
+        // the length of a track that is no longer playing.
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 

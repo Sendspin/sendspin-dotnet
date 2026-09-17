@@ -772,7 +772,7 @@ await client.SetArtworkChannelAsync(channel: 1, source: ArtworkSources.None);
 
 ## Color
 
-Clients with the `color` role receive a palette derived from the current audio — useful for ambient lighting, screen backgrounds, or UI theming. Colors arrive via `server/state` and are merged onto `GroupState.Colors`; subscribe to `ColorChanged` to react:
+Clients with the `color` role receive a palette derived from the current audio — useful for ambient lighting, screen backgrounds, or UI theming. Colors arrive via `server/state` and are applied to `GroupState.Colors`; subscribe to `ColorChanged` to react:
 
 ```csharp
 client.ColorChanged += (_, palette) =>
@@ -785,7 +785,7 @@ client.ColorChanged += (_, palette) =>
 
 Available colors: `BackgroundDark`, `BackgroundLight`, `Primary`, `Accent`, `OnDark`, `OnLight`, plus a `Timestamp` (server clock, µs). The server guarantees WCAG 4.5:1 contrast ratios between the background/on-color pairs — clients use the values directly and do no contrast math.
 
-Updates are deltas: a color absent from an update is left unchanged, an explicit `null` clears it, and a value updates it. The role is enabled by default (`color@v1` in `ClientCapabilities.Roles`); remove it to opt out.
+Each `color` object is the role's full palette (spec #175): a color it omits is unset, an explicit `null` clears it, and a value sets it — an omitted color is not carried forward. The role is enabled by default (`color@v1` in `ClientCapabilities.Roles`); remove it to opt out.
 
 ## Visualizer
 
