@@ -24,6 +24,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Roles | New `source@v1` (line-in / microphone) | None unless adopted |
 | Pairing | `ClientCapabilities.MinPairingCodeLength` removed; code lengths are fixed by the spec (6 digits dynamic, 8 static) | Low — compiler error where it was set |
 | Pairing | On the wire, `dynamic_pin` / `static_pin` are `dynamic_pairing_code` / `static_pairing_code`, `pin_length` is gone and `server/activate` carries the emission `format`; the `pair/abort` reason `pin_mismatch` is `pairing_code_mismatch` | Low — compiler error only if you matched the reason string; requires a server on the pairing-code wire |
+| Pairing | `ClientPairConfirmPayload.NonceB` renamed to `WrappedNonceB` (wire `nonce_B` → `wrapped_nonce_B`); the value is now the wrapped nonce_B — 48 bytes, base64url — not the raw nonce | Low — compiler error only if you construct `client/pair-confirm` yourself (dynamic pairing code) |
 | Pairing | A `pairing` activity on a long-term (already paired) session is refused with `client/goodbye` reason `unauthorized` | Low — behavioural |
 | Pairing | `server/unpair` removes the pairing record for the server that sent it | Low — behavioural; a custom store sees a `Remove` |
 | Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
