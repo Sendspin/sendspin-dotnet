@@ -86,6 +86,67 @@ public class FragmentationConformanceTests
     }
 
     [Fact]
+    public void OpeningFragment_MissingOrigType_IsFatal()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // An opening fragment ([1][flags]) with no orig_type byte and no data.
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst]);
+
+        Assert.NotNull(result.FatalReason);
+    }
+
+    [Fact]
+    public void Fragment_WithReservedFlagBits_IsFatal()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // Bits 2-7 of the flags byte MUST be zero; one is set here (0x04) alongside the first bit.
+        const byte flagsWithReservedBit = NoiseConstants.FragmentFlagFirst | 0x04;
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, flagsWithReservedBit, 8, 0xAA]);
+
+        Assert.NotNull(result.FatalReason);
+    }
+
+    [Theory]
+    [InlineData((byte)2)]
+    [InlineData((byte)3)]
+    public void ReservedBinaryId_IsNotTreatedAsAFragment(byte reservedId)
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // IDs 2 and 3 were the pre-1.0 fragment types; now reserved. A frame carrying one must not
+        // open a reassembly — so a following non-fragment frame surfaces normally rather than
+        // tripping the "non-fragment frame mid-reassembly" fatal.
+        Assert.Null(Feed(framing, server, [reservedId, 0xAA, 0xBB]).FatalReason);
+
+        var next = Feed(framing, server, [NoiseConstants.MessageTypeJsonBody, .. Encoding.UTF8.GetBytes(HelloJson)]);
+        Assert.Equal(HelloJson, next.Text);
+    }
+
+    [Fact]
+    public void ThreeFragments_FirstMiddleLast_Reassemble()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // orig_type 8 (artwork), split across an opening, one middle (neither bit), and a last.
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, 0x01, 0x02]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, 0x03, 0x04]).FatalReason);
+        var reassembled = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 0x05]);
+
+        Assert.Null(reassembled.FatalReason);
+        Assert.Equal(new byte[] { 8, 0x01, 0x02, 0x03, 0x04, 0x05 }, reassembled.Binary!.Value.ToArray());
+    }
+
+    [Fact]
     public void Reassembly_PastPreFirstMessageCap_BeforeFirstApplicationMessage_IsFatal()
     {
         var identity = SendspinIdentity.Generate();
