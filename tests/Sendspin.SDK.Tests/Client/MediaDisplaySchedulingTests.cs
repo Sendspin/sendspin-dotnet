@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Synchronization;
@@ -281,6 +283,32 @@ public class MediaDisplaySchedulingTests
         await WaitUntilAsync(() => frames.Count == 2, "the two frames within capacity");
 
         Assert.Equal(new[] { 200, 300 }, frames.Select(f => f.Loudness!.Value).ToArray());
+    }
+
+    [Fact]
+    public void VisualizerFrame_ArrivingWhileUnavailable_IsDroppedWithoutClosing_ThenFlowsWhenAvailable()
+    {
+        var pipe = new FakeAudioPipeline();
+        var (client, connection, _) = SchedulingClient(audioPipeline: pipe);
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+
+        // A pipeline error makes the client report available: false. The spec says the server
+        // should not stream display data then, so a frame that arrives anyway is dropped before it
+        // is scheduled — and the connection is left open (spec #266/#271).
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 100));
+        Assert.Empty(frames);
+        Assert.Equal(ConnectionState.Connected, connection.State);
+
+        // Recovery to Playing restores availability, and frames flow again.
+        pipe.SetState(AudioPipelineState.Playing);
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 200));
+
+        var only = Assert.Single(frames);
+        Assert.Equal(200, only.Loudness);
     }
 
     [Fact]
@@ -936,6 +964,62 @@ public class MediaDisplaySchedulingTests
 
         await DrainPastAsync(client, connection, timer, Now + 1_000);
         Assert.Empty(received);
+    }
+
+    [Fact]
+    public async Task StreamEnd_NamingArtwork_ClearsEveryChannelStillShowingAnImage()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        var cleared = new List<ArtworkClearedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+        client.ArtworkCleared += (_, e) => cleared.Add(e);
+
+        // Two channels showing an image now (past-stamped, so raised on arrival).
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now - 1, new byte[] { 2 }, BinaryMessageTypes.Artwork1));
+        Assert.Equal(2, received.Count);
+
+        // stream/end is playback termination, so every channel still showing an image is cleared
+        // (spec #266). The flush runs before the handler's first await, so the cleared events have
+        // been raised by the time this returns.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+
+        Assert.Equal(new[] { 0, 1 }, cleared.Select(c => c.Channel).OrderBy(c => c).ToArray());
+
+        // Nothing pending is left to surface afterwards.
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Equal(2, received.Count);
+    }
+
+    [Fact]
+    public void StreamClear_NamingArtwork_KeepsTheImageOnDisplay()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var cleared = new List<ArtworkClearedEventArgs>();
+        client.ArtworkCleared += (_, e) => cleared.Add(e);
+
+        // An image on display now.
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+
+        // A seek clears buffered data but keeps playing the same track, so the cover already shown
+        // must not be blanked — unlike a stream/end, it does not clear the display.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+        Assert.DoesNotContain(cleared, c => c.Channel == 0);
+
+        // The image is still tracked as displayed, so a later stream/end does clear it.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":2,"roles":["artwork"]}}""");
+        Assert.Contains(cleared, c => c.Channel == 0);
     }
 
     [Fact]

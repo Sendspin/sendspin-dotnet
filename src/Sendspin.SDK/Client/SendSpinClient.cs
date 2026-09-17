@@ -205,6 +205,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // field costs a duplicate warning and nothing else, so it needs no synchronization.
     private int _warnedUndefinedPlayerAudioTypes;
 
+    // True once this unavailable period has logged a dropped display frame, so the drop (spec
+    // #266/#271) is reported once rather than at frame rate. Re-armed when a display frame flows
+    // again while available. A lost race costs a duplicate debug line and nothing else.
+    private bool _loggedDisplayDropWhileUnavailable;
+
     // Tail of the stream-lifecycle chain: the task the next lifecycle handler waits for. See
     // DispatchStreamLifecycle. The lock covers the read-and-replace only.
     private readonly object _streamLifecycleLock = new();
@@ -1630,6 +1635,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 "A visualizer configuration that requests 'spectrum' must also carry a spectrum object; "
                 + "the server closes the connection over one that does not.",
                 nameof(spectrum));
+        }
+
+        // rate_max is the ceiling on periodic frames per second, so it must be positive whenever a
+        // periodic type is requested — a zero cap would leave the server unable to send any.
+        if (rateMax <= 0 && VisualizerTypes.ContainsPeriodic(types))
+        {
+            throw new ArgumentException(
+                "A visualizer configuration that requests a periodic type (loudness, f_peak, "
+                + "spectrum) must set a positive rate_max.",
+                nameof(rateMax));
         }
 
         lock (_roleConfigLock)
@@ -5135,8 +5150,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             StreamEndReceived?.Invoke(this, payload);
 
             // Media held for a display time that belongs to the stream just ended must not
-            // surface after it.
-            FlushDisplayRoles(payload.Roles);
+            // surface after it, and the artwork on display is cleared: stream/end is playback
+            // termination (spec #266), unlike the stream/clear seek below.
+            FlushDisplayRoles(payload.Roles, endingStream: true);
 
             if (!ReachesPlayerRole(payload.Roles))
             {
@@ -5192,8 +5208,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         StreamClearReceived?.Invoke(this, payload);
 
         // "Clients should clear all buffered visualization data and continue with data received
-        // after this message" — the same boundary applies to artwork still held for display.
-        FlushDisplayRoles(payload.Roles);
+        // after this message" — the same boundary applies to artwork still held for display. A
+        // seek keeps the image already on screen, so the flush drops only what is pending.
+        FlushDisplayRoles(payload.Roles, endingStream: false);
 
         if (ReachesPlayerRole(payload.Roles) && _audioPipeline is { } pipeline)
         {
@@ -5239,8 +5256,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// A present-but-empty array names no role and so ends nothing, as everywhere else.
     /// Dropping the artwork still held is what spec #135 (pending merge) means by "on
     /// <c>stream/end</c>, clearing buffers includes discarding pending images".
+    /// <para>
+    /// <paramref name="endingStream"/> separates the two messages for the artwork already on
+    /// display: a <c>stream/end</c> is playback termination and additionally clears it (spec #266),
+    /// while a <c>stream/clear</c> is a seek or track jump that keeps it and only drops the pending
+    /// image.
+    /// </para>
     /// </remarks>
-    private void FlushDisplayRoles(List<string>? roles)
+    private void FlushDisplayRoles(List<string>? roles, bool endingStream)
     {
         if (roles is null)
         {
@@ -5248,7 +5271,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // hold no stream, and spec #135 (pending merge) ties a pending metadata or color
             // update to nothing a stream teardown says.
             _displayScheduler.FlushVisualizer();
-            _displayScheduler.FlushArtwork();
+            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
             return;
         }
 
@@ -5259,7 +5282,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (roles.Contains("artwork"))
         {
-            _displayScheduler.FlushArtwork();
+            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
         }
     }
 
@@ -5293,6 +5316,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             WarnOnceOnUngatedRoleBinary(family);
             return;
+        }
+
+        // Spec #266/#271 (SHOULD): while this client reports available: false the server should not
+        // stream it display data, so an artwork or visualizer frame that arrives anyway is dropped
+        // before it is scheduled — its timings belong to a state this client is not in. The
+        // connection stays open, and the player-audio arm keeps its own handling.
+        if (category is BinaryMessageCategory.Artwork or BinaryMessageCategory.Visualizer)
+        {
+            if (!CurrentAvailability)
+            {
+                DropDisplayBinaryWhileUnavailable();
+                return;
+            }
+
+            _loggedDisplayDropWhileUnavailable = false;
         }
 
         switch (category)
@@ -5403,6 +5441,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             "Dropping binary type {Type}: player@v1 defines only audio type {DefinedType}",
             type,
             BinaryMessageTypes.PlayerAudio0);
+    }
+
+    /// <summary>
+    /// Logs the first artwork/visualizer frame dropped in each unavailable period, so a server
+    /// that keeps streaming display data to an unavailable client says so once rather than at
+    /// frame rate. Re-armed in <see cref="DispatchBinaryMessage"/> when a display frame flows again
+    /// while available.
+    /// </summary>
+    private void DropDisplayBinaryWhileUnavailable()
+    {
+        if (_loggedDisplayDropWhileUnavailable)
+        {
+            return;
+        }
+
+        _loggedDisplayDropWhileUnavailable = true;
+        _logger.LogDebug(
+            "Dropping artwork/visualizer binary data while unavailable (available: false); the "
+            + "server should not stream display data to an unavailable client");
     }
 
     /// <summary>

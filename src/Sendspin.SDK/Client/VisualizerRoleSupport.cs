@@ -18,8 +18,8 @@ namespace Sendspin.SDK.Client;
 public sealed class VisualizerRoleSupport
 {
     /// <summary>
-    /// Max total size in bytes of buffered visualizer binary messages, counting each message's
-    /// full wire size (message-type byte + timestamp + data). Advertised in <c>client/hello</c>.
+    /// Max total size in bytes of buffered visualizer binary messages, counting each reassembled
+    /// message's bytes (message-type byte + timestamp + data). Advertised in <c>client/hello</c>.
     /// </summary>
     public int BufferCapacity { get; init; }
 
@@ -30,8 +30,8 @@ public sealed class VisualizerRoleSupport
     required public List<string> Types { get; init; }
 
     /// <summary>
-    /// Maximum periodic frames per second. Clients should set this to their display refresh rate.
-    /// Reported in <c>client/state</c>.
+    /// Maximum periodic frames per second: the per-periodic-type ceiling the server must respect,
+    /// not the display refresh rate. Reported in <c>client/state</c>.
     /// </summary>
     public int RateMax { get; init; }
 
@@ -46,7 +46,8 @@ public sealed class VisualizerRoleSupport
     /// Validates the configuration against the visualizer role's wire rules.
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// <see cref="Types"/> contains <c>spectrum</c> but <see cref="Spectrum"/> is null.
+    /// <see cref="Types"/> contains <c>spectrum</c> but <see cref="Spectrum"/> is null, or it
+    /// requests a periodic type while <see cref="RateMax"/> is not positive.
     /// </exception>
     internal void Validate()
     {
@@ -57,6 +58,15 @@ public sealed class VisualizerRoleSupport
                 + "Spectrum configuration. A visualizer client/state object that lists "
                 + "'spectrum' must also carry the spectrum object.",
                 nameof(Spectrum));
+        }
+
+        if (RateMax <= 0 && VisualizerTypes.ContainsPeriodic(Types))
+        {
+            throw new ArgumentException(
+                "ClientCapabilities.VisualizerRoleSupport requests a periodic type (loudness, "
+                + "f_peak, spectrum) but sets a non-positive RateMax. rate_max is the per-second "
+                + "ceiling for periodic frames and must be positive when any is requested.",
+                nameof(RateMax));
         }
     }
 }
