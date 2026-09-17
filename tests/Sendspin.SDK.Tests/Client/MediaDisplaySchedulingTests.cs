@@ -665,7 +665,8 @@ public class MediaDisplaySchedulingTests
         timer.CurrentTime = Now + 1_000;
         await WaitUntilAsync(() => applied.Contains("Second"), "the scheduled metadata");
 
-        // Applied as a merge onto the current state, not as a replacement of it.
+        // Applied from the scheduled object alone (spec #175 full state), not merged onto what
+        // was showing.
         var meta = client.CurrentGroup!.Metadata!;
         Assert.Equal("Second", meta.Title);
         Assert.Equal("Later", meta.Album);
@@ -834,6 +835,59 @@ public class MediaDisplaySchedulingTests
 
         await DrainPastAsync(client, connection, timer, Now + 1_000);
         Assert.Equal("First", client.CurrentGroup!.Metadata!.Title);
+    }
+
+    [Fact]
+    public async Task Activate_DroppingMetadata_DiscardsItsPendingUpdate_LeavingColourScheduled()
+    {
+        // Spec PR #275: when metadata leaves active_roles, its current state AND any update it left
+        // scheduled for the future are discarded. A still-active color update, scheduled even
+        // later, is the marker that proves the loop ran past the metadata update's moment without
+        // applying it.
+        var timer = new FakePrecisionTimer { CurrentTime = Now };
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options with
+            {
+                PrecisionTimer = timer,
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
+                Capabilities = new ClientCapabilities
+                {
+                    Roles = new List<string> { "metadata@v1", "color@v1" },
+                },
+            });
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "metadata@v1", "color@v1");
+
+        // Current metadata (applies now), then a metadata update held for the future.
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now - 1}},"title":"Now Playing"}"""));
+        connection.RaiseTextMessageReceived(
+            MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Scheduled"}"""));
+        Assert.Equal("Now Playing", client.CurrentGroup!.Metadata!.Title);
+
+        var colourApplied = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.ColorChanged += (_, p) =>
+        {
+            if (p.Primary == new RgbColor(9, 9, 9)) colourApplied.TrySetResult();
+        };
+        connection.RaiseTextMessageReceived(
+            ColorState($$"""{"timestamp":{{Now + 2_000}},"primary":[9,9,9]}"""));
+
+        // metadata leaves active_roles; color stays.
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["color@v1"]}}
+            """);
+
+        // The current metadata is cleared at once.
+        Assert.Null(client.CurrentGroup!.Metadata);
+
+        // Once the loop has run past both scheduled moments, the color update fired but the
+        // discarded metadata one never did.
+        timer.CurrentTime = Now + 2_000;
+        await colourApplied.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(new RgbColor(9, 9, 9), client.CurrentGroup!.Colors.Primary);
+        Assert.Null(client.CurrentGroup.Metadata);
     }
 
     // -- Artwork rules of spec #135 not already covered above -------------------------------

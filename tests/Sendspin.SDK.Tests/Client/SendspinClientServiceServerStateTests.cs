@@ -3,10 +3,10 @@ using Sendspin.SDK.Models;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Coverage for server/state handling: repeat/shuffle in controller, Optional-field merge
-/// semantics (absent = keep, explicit null = clear) for all metadata string/numeric fields,
-/// the same three states one level up on the role objects themselves, and the
-/// reference-identity contract for the merged progress object.
+/// Coverage for server/state handling: repeat/shuffle in controller, the full-state metadata
+/// object of spec #175 (a leaf the object omits is unset, exactly as an explicit null), the three
+/// states one level up on the role objects themselves (absent = no change, null = clear, present =
+/// full state), and discarding a deactivated role's state on server/activate (spec #275).
 /// </summary>
 public class SendspinClientServiceServerStateTests
 {
@@ -219,10 +219,11 @@ public class SendspinClientServiceServerStateTests
     }
 
     [Fact]
-    public void MetadataLeafNull_StillClearsOnlyThatLeaf()
+    public void MetadataObject_OmittingALeaf_UnsetsItButKeepsTheRoleObject()
     {
-        // Regression guard for the level the role-object fix sits above: wrapping the role
-        // objects must not turn a leaf null into a whole-role clear.
+        // Full state per spec #175: the second object carries only artist (null), so title —
+        // absent — is unset too, not kept from the first object. The role object itself is still
+        // present, though: a leaf null is not a whole-role clear (that needs `metadata: null`).
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
@@ -235,7 +236,7 @@ public class SendspinClientServiceServerStateTests
 
         var meta = client.CurrentGroup?.Metadata;
         Assert.NotNull(meta);
-        Assert.Equal("Track A", meta.Title);
+        Assert.Null(meta.Title);
         Assert.Null(meta.Artist);
     }
 
@@ -289,7 +290,7 @@ public class SendspinClientServiceServerStateTests
     }
 
     [Fact]
-    public void Metadata_ArtworkUrl_Absent_RetainsPreviousValue()
+    public void Metadata_ArtworkUrl_Absent_IsUnset()
     {
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
@@ -303,7 +304,8 @@ public class SendspinClientServiceServerStateTests
             }
             """);
 
-        // Partial update: artwork_url absent means "no change"
+        // Full state per spec #175: the object omits artwork_url, so it is unset — the previous URL
+        // is not carried forward.
         connection.RaiseTextMessageReceived("""
             {
                 "type": "server/state",
@@ -313,7 +315,8 @@ public class SendspinClientServiceServerStateTests
             }
             """);
 
-        Assert.Equal("https://art.example.com/cover.jpg", client.CurrentGroup?.Metadata?.ArtworkUrl);
+        Assert.Equal("Track A updated", client.CurrentGroup?.Metadata?.Title);
+        Assert.Null(client.CurrentGroup?.Metadata?.ArtworkUrl);
     }
 
     // --- Optional-field merge: all string fields (cleared_update() scenario) ---
@@ -395,15 +398,14 @@ public class SendspinClientServiceServerStateTests
         Assert.Null(meta.Track);
     }
 
-    // --- Optional-field merge: progress (reference identity) ---
+    // --- Full-state progress (spec #175) ---
 
     [Fact]
-    public void Metadata_Progress_Absent_CarriesForwardSameInstance()
+    public void Metadata_Progress_Absent_IsUnsetAndClearsPosition()
     {
-        // Consumers use ReferenceEquals to distinguish fresh progress from progress carried
-        // forward by the merge (e.g. the Windows client's seek bar only re-anchors on a fresh
-        // instance). A partial update without the progress field must reuse the previous
-        // PlaybackProgress instance — not clone it or copy its values.
+        // Full state per spec #175: a metadata object that omits progress leaves it unset, so the
+        // exposed Position clears too — no extrapolation continues from a stale progress instance
+        // (e.g. the Windows client's seek bar stops advancing rather than drifting).
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
@@ -419,10 +421,8 @@ public class SendspinClientServiceServerStateTests
             }
             """);
 
-        var firstProgress = client.CurrentGroup?.Metadata?.Progress;
-        Assert.NotNull(firstProgress);
+        Assert.NotNull(client.CurrentGroup?.Metadata?.Progress);
 
-        // Partial update: progress absent means "no change"
         connection.RaiseTextMessageReceived("""
             {
                 "type": "server/state",
@@ -433,11 +433,12 @@ public class SendspinClientServiceServerStateTests
             """);
 
         // Guard against a vacuous pass: prove the second message was actually processed
-        // (a silently dropped message would leave the old instance in place too).
+        // (a silently dropped message would leave the old progress in place too).
         var meta = client.CurrentGroup?.Metadata;
         Assert.NotNull(meta);
         Assert.Equal("Track A updated", meta.Title);
-        Assert.Same(firstProgress, meta.Progress);
+        Assert.Null(meta.Progress);
+        Assert.Null(meta.Position);
     }
 
     [Fact]
@@ -514,12 +515,11 @@ public class SendspinClientServiceServerStateTests
     }
 
     [Fact]
-    public void Metadata_Timestamp_UpdatesWhileAbsentProgressIsCarriedForward()
+    public void Metadata_Timestamp_Present_WithAbsentProgress_UnsetsProgress()
     {
-        // Timestamp merges independently of progress: a partial update carrying a new
-        // timestamp but no progress field yields a fresh Timestamp alongside the
-        // carried-forward Progress instance. Consumers must not treat a newer timestamp
-        // as evidence that the progress object itself is fresh.
+        // Each leaf comes from the object alone (spec #175): a later object carrying a new
+        // timestamp but no progress sets the timestamp and unsets progress. A newer timestamp is
+        // never evidence that a progress object survived — there is nothing to carry it.
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
@@ -535,8 +535,7 @@ public class SendspinClientServiceServerStateTests
             }
             """);
 
-        var firstProgress = client.CurrentGroup?.Metadata?.Progress;
-        Assert.NotNull(firstProgress);
+        Assert.NotNull(client.CurrentGroup?.Metadata?.Progress);
 
         connection.RaiseTextMessageReceived("""
             {
@@ -550,6 +549,93 @@ public class SendspinClientServiceServerStateTests
         var meta = client.CurrentGroup?.Metadata;
         Assert.NotNull(meta);
         Assert.Equal(2000000, meta.Timestamp);
-        Assert.Same(firstProgress, meta.Progress);
+        Assert.Null(meta.Progress);
+    }
+
+    // --- Discarding a deactivated role's state on server/activate (spec #275) ---
+
+    [Fact]
+    public void Activate_DroppingMetadata_ClearsItAndAnnounces_LeavingColourAndControllerAlone()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "metadata@v1", "controller@v1", "color@v1");
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": { "title": "Track A" },
+                    "controller": { "volume": 40 },
+                    "color": { "primary": [1, 2, 3] }
+                }
+            }
+            """);
+        Assert.NotNull(client.CurrentGroup?.Metadata);
+
+        GroupState? groupRaised = null;
+        var colourRaised = false;
+        client.GroupStateChanged += (_, g) => groupRaised = g;
+        client.ColorChanged += (_, _) => colourRaised = true;
+
+        // metadata leaves active_roles; controller and color stay (spec #275).
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["controller@v1","color@v1"]}}
+            """);
+
+        // The removed role's state is discarded and the clear announced...
+        Assert.Null(client.CurrentGroup?.Metadata);
+        Assert.Same(client.CurrentGroup, groupRaised);
+
+        // ...while the roles still active are untouched, and their own event does not fire.
+        Assert.Equal(40, client.CurrentGroup?.Volume);
+        Assert.Equal(new RgbColor(1, 2, 3), client.CurrentGroup?.Colors.Primary);
+        Assert.False(colourRaised);
+    }
+
+    [Fact]
+    public void Activate_DroppingController_ClearsControllerState_LeavingMetadataAlone()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "metadata@v1", "controller@v1");
+
+        connection.RaiseTextMessageReceived("""
+            {
+                "type": "server/state",
+                "payload": {
+                    "metadata": { "title": "Track A" },
+                    "controller": {
+                        "volume": 40, "muted": true, "repeat": "all", "shuffle": true,
+                        "supported_commands": ["play", "seek"], "seek_max_ms": 245000
+                    }
+                }
+            }
+            """);
+
+        GroupState? groupRaised = null;
+        client.GroupStateChanged += (_, g) => groupRaised = g;
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["metadata@v1"]}}
+            """);
+
+        var group = client.CurrentGroup;
+        Assert.NotNull(group);
+        Assert.Same(group, groupRaised);
+
+        // Controller state returns to a fresh group's defaults...
+        var unreported = new GroupState();
+        Assert.Equal(unreported.Volume, group.Volume);
+        Assert.Equal(unreported.Muted, group.Muted);
+        Assert.Null(group.Repeat);
+        Assert.False(group.Shuffle);
+        Assert.Null(group.SupportedCommands);
+        Assert.Null(group.SeekMaxMs);
+
+        // ...while metadata, still active, is left alone.
+        Assert.Equal("Track A", group.Metadata?.Title);
     }
 }
