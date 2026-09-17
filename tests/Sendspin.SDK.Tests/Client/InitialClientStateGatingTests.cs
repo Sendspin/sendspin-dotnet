@@ -246,8 +246,9 @@ public class InitialClientStateGatingTests
         var first = Assert.Single(ClientStates(connection));
         Assert.Equal(false, first.Payload.Available);
 
-        // The pipeline recovers, still before any convergence. The recovery ack (a player
-        // delta without `available`) may go out, but no available: true may reach the wire.
+        // The pipeline recovers, still before any convergence. The recovery acknowledgement
+        // still goes out — carrying the composed available: false since spec PR #175 made the
+        // field required — but no available: true may reach the wire.
         pipe.SetState(AudioPipelineState.Playing);
         await Task.Delay(200);
         Assert.DoesNotContain(ClientStates(connection), m => m.Payload.Available == true);
@@ -263,7 +264,8 @@ public class InitialClientStateGatingTests
 
         var states = ClientStates(connection);
         Assert.Single(states, m => m.Payload.Available == true);
-        Assert.Single(states, m => m.Payload.Available == false);
+        // The true is the last word: nothing re-asserts false after it.
+        Assert.Equal(states.Count - 1, states.FindLastIndex(m => m.Payload.Available == true));
     }
 
     [Fact]
@@ -291,8 +293,9 @@ public class InitialClientStateGatingTests
         await client.ExitExternalSourceAsync();
         Assert.Single(ClientStates(connection));
 
-        // The first convergence releases the withheld true — as an availability-only delta:
-        // one full initial message per connection.
+        // The first convergence releases the withheld true. Since spec PR #175 that is another
+        // full state message, not an availability-only delta — every client/state carries the
+        // complete state of each active role.
         connection.RespondToTimeSync = true;
         await WaitForAsync(() => ClientStates(connection).Count >= 2, TimeSpan.FromSeconds(8));
 
@@ -301,8 +304,8 @@ public class InitialClientStateGatingTests
         await WaitForAsync(() => clock.Measurements >= measured + 2, TimeSpan.FromSeconds(5));
 
         var states = ClientStates(connection);
-        Assert.Equal(new bool?[] { false, true }, states.Select(m => m.Payload.Available).ToArray());
-        Assert.Single(states, m => m.Payload.Player is not null);
+        Assert.Equal(new bool[] { false, true }, states.Select(m => m.Payload.Available).ToArray());
+        Assert.All(states, m => Assert.NotNull(m.Payload.Player));
     }
 
     [Fact]

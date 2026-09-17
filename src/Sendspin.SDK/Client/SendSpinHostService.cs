@@ -278,6 +278,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         // offer is a static app mistake, and surfacing it at construction puts the exception
         // where the app can still see which call built the options (#189).
         _options.Capabilities.ValidatePairingCodeMethods();
+        _options.Capabilities.ValidateVisualizerRoleSupport();
 
         // Explicit seed wins; otherwise fall back to the store (best-effort).
         LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();
@@ -1133,6 +1134,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     {
         if (e.NewState == ConnectionState.Disconnected)
         {
+            string? disconnectedServerId = null;
             lock (_connectionsLock)
             {
                 _openClients.Remove(client);
@@ -1142,9 +1144,19 @@ public sealed class SendspinHostService : IAsyncDisposable
                 if (entry.Key is not null)
                 {
                     _connections.Remove(entry.Key);
-                    _logger.LogInformation("Server disconnected: {ServerId}", entry.Key);
-                    ServerDisconnected?.Invoke(this, entry.Key);
+                    disconnectedServerId = entry.Key;
                 }
+            }
+
+            // Log and raise ServerDisconnected outside _connectionsLock, matching the arbitration
+            // path at DisconnectExistingAsync. A handler may reach back into the host's pairing
+            // surface (EnsurePairingPsk/RotatePairingPsk take _pairingStoreLock) while pairing
+            // finalization holds _pairingStoreLock and calls CollectLiveRecordPskIds, which takes
+            // _connectionsLock — raising the event under the lock would close that AB/BA cycle.
+            if (disconnectedServerId is not null)
+            {
+                _logger.LogInformation("Server disconnected: {ServerId}", disconnectedServerId);
+                ServerDisconnected?.Invoke(this, disconnectedServerId);
             }
         }
     }

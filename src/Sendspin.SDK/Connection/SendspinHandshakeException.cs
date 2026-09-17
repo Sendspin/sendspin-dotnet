@@ -53,7 +53,7 @@ public sealed class SendspinHandshakeException : Exception
     {
         HandshakeFailureKind.LegacyServer =>
             "Server closed the connection during client/init and does not support Sendspin "
-            + "encryption. Upgrade the server to aiosendspin >= 7.0.0, or pin Sendspin SDK 9.x.",
+            + "encryption. Upgrade the server to the aiosendspin 10.0.0 line, or pin Sendspin SDK 9.x.",
         HandshakeFailureKind.HandshakeRejected =>
             $"Sendspin handshake rejected: {detail ?? "no detail"}.",
         HandshakeFailureKind.ServerError =>

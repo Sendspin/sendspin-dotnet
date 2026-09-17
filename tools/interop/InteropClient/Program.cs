@@ -46,6 +46,11 @@ var caps = new ClientCapabilities
     UnpairedAccessEnabled = scenario == "unpaired",
 };
 
+// aiosendspin 9.1.1 still requires the retired artwork@v1_support object whenever
+// artwork@v1 is advertised. Artwork configuration is now state-based in the SDK, so
+// leave this role out of the interop harness until the reference server accepts that wire shape.
+caps.Roles.Remove("artwork@v1");
+
 if (scenario == "static-pin")
 {
     caps.PairingCodeMethods.Add("static_pairing_code");

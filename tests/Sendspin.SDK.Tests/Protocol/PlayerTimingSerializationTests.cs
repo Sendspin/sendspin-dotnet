@@ -13,13 +13,16 @@ public class PlayerTimingSerializationTests
     [Fact]
     public void ClientState_SerializesTimingFields()
     {
-        var msg = ClientStateMessage.CreatePlayerState(
-            volume: 80,
-            muted: false,
-            outputDelayMs: 0,
-            requiredLeadTimeMs: 200,
-            minBufferMs: 150,
-            supportedCommands: new List<string> { Commands.SetStaticDelay });
+        var msg = ClientStateMessage.Create(
+            available: true,
+            player: new PlayerStatePayload
+            {
+                Volume = 80,
+                Muted = false,
+                RequiredLeadTimeMs = 200,
+                MinBufferMs = 150,
+                SupportedCommands = [Commands.SetStaticDelay],
+            });
 
         var json = MessageSerializer.Serialize(msg);
 
@@ -34,8 +37,9 @@ public class PlayerTimingSerializationTests
         // All three are "REQUIRED for players", so all three must serialize even at zero.
         // static_delay_ms used to be omitted at its default — which is 0, the common case — so
         // essentially every player left a required field out of its initial state.
-        var msg = ClientStateMessage.CreatePlayerState(
-            volume: 100, muted: false, outputDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0);
+        var msg = ClientStateMessage.Create(
+            available: true,
+            player: new PlayerStatePayload { Volume = 100, Muted = false });
 
         var json = MessageSerializer.Serialize(msg);
 
@@ -50,7 +54,7 @@ public class PlayerTimingSerializationTests
         // The initial full state is where the presence requirement actually bites: aiosendspin
         // reads an omitted static_delay_ms as "unchanged", which on the first message leaves it
         // with no value at all rather than the 0 we meant.
-        var msg = ClientStateMessage.CreateInitial(
+        var msg = ClientStateMessage.Create(
             available: true, player: new PlayerStatePayload());
 
         Assert.Contains("\"static_delay_ms\":0", MessageSerializer.Serialize(msg));
@@ -62,8 +66,9 @@ public class PlayerTimingSerializationTests
         // The spec types static_delay_ms as an integer. The scheduler's own delay is a double,
         // so the factory takes the projected wire value rather than the raw one — this pins
         // that the wire field cannot carry a fraction.
-        var msg = ClientStateMessage.CreatePlayerState(
-            volume: 100, muted: false, outputDelayMs: 250, requiredLeadTimeMs: 0, minBufferMs: 0);
+        var msg = ClientStateMessage.Create(
+            available: true,
+            player: new PlayerStatePayload { Volume = 100, Muted = false, OutputDelayMs = 250 });
 
         string json = MessageSerializer.Serialize(msg);
 
@@ -72,15 +77,18 @@ public class PlayerTimingSerializationTests
     }
 
     [Fact]
-    public void ClientState_SupportedCommandsOmittedWhenNull()
+    public void ClientState_SupportedCommandsWrittenAsEmptyArray_NotOmitted()
     {
-        var msg = ClientStateMessage.CreatePlayerState(
-            volume: 100, muted: false, outputDelayMs: 0, requiredLeadTimeMs: 0, minBufferMs: 0,
-            supportedCommands: null);
+        // Spec PR #175 made the field required: a player that accepts no commands sends [].
+        // Omitting it once merging was removed left the server unable to tell "accepts none"
+        // from "unchanged".
+        var msg = ClientStateMessage.Create(
+            available: true,
+            player: new PlayerStatePayload { Volume = 100, Muted = false });
 
         var json = MessageSerializer.Serialize(msg);
 
-        Assert.DoesNotContain("supported_commands", json);
+        Assert.Contains("\"supported_commands\":[]", json);
     }
 
     [Fact]

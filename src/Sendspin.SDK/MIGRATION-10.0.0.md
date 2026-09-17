@@ -6,9 +6,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 **Why this matters**: before 10.0.0 the protocol was plaintext on the local network. Anyone on the same LAN could read metadata and audio, impersonate a server, or issue commands to a player. Encryption closes that, but it cannot be added transparently — both peers must speak it, so this is a hard break with no downgrade path.
 
-**Server requirement**: a 10.x client requires a server speaking the encrypted protocol — `aiosendspin >= 7.0.0`. There is no negotiation and no fallback: against an older server the handshake fails. **The 9.x line remains maintained** for deployments that need to talk to those servers.
-
-**Pairing requires `aiosendspin >= 9.0.0`**, a higher floor than connecting. 9.0.0 is the first release carrying the current pairing wire shape: `server/activate` names the chosen method inside a `pairing` object (with the emission `format` alongside it) rather than in a flat `selected_pair_method` field. 7.0.0 and 8.0.0 still send the old shape, so a 10.x client reads the offered method as absent and refuses every pairing attempt with `pair/abort` reason `method_not_supported`. Connecting and playback — including unpaired access — are unaffected and still work against `>= 7.0.0`.
+**Server requirement**: a 10.x client requires a server on the **10.0.0 line** of `aiosendspin`. There is one floor and it gates connecting as much as pairing — every encrypted `client/hello` carries the object-keyed `supported_pair_methods` from spec PR #179 (a map keyed by method name, not the older list of descriptors), so a server that does not accept that shape rejects the hello outright, before any playback path opens. There is no negotiation and no fallback. The 10.0.0 line is unpublished at the time of writing, so the interop workflow pins the draft commit it targets (see `.github/workflows/interop.yml`); the latest published release, 9.1.1, rejects the hello. **The 9.x line remains maintained** for deployments that need to talk to older, plaintext servers.
 
 ---
 
@@ -16,7 +14,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 | Area | Change | Impact |
 |------|--------|--------|
-| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin >= 7.0.0`, and `>= 9.0.0` to pair |
+| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be on the `aiosendspin` 10.0.0 line (object-keyed pair methods) |
 | Client identity | New required persistent Curve25519 identity | **High** — silent data loss if unpersisted |
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
 | Pairing | New: Pairing PSK, dynamic pairing code, static pairing code (at most one code method) | Medium — new UX surface |
@@ -29,14 +27,16 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Pairing | A `pairing` activity on a long-term (already paired) session is refused with `client/goodbye` reason `unauthorized` | Low — behavioural |
 | Pairing | `server/unpair` removes the pairing record for the server that sent it | Low — behavioural; a custom store sees a `Remove` |
 | Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
-| Visualizer | `RequestVisualizerFormatAsync` lost its `bufferCapacity` parameter | Low — compiler error only if passed positionally |
+| Visualizer | `RequestVisualizerFormatAsync` removed; use `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`. `ClientCapabilities.VisualizerSupport` is now `VisualizerRoleSupport` | **High** — compiler error, see §6 |
 | Output delay | "Static delay" renamed to "output delay" across the C# surface (spec PR #164); the wire is unchanged | Medium — compiler errors only, see §8 for the full table |
 | Output delay | `client/state` now always reports `static_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
 | Clock sync | `IClockSynchronizer` gains `ServerToClientTimeUncompensated` | Low — compiler error, one-line fix, and only for a custom synchronizer |
 | Clock sync | Filter constants, burst cadence and timestamping now match the reference implementation | Low — behavioural, no code change; see §11 |
 | Connection | `ISendspinConnection` gains `SendTimeMessageAsync`; `TextMessageReceived` carries `TextMessageReceivedEventArgs` | Low — compiler error, only for a custom connection or a raw event subscriber |
-| Handshake errors | `HandshakeFailureKind` gains `ServerError` (the server's `server/error` reason) and `PairingStateDiverged` (a stale pairing record) | Low — source-compatible; only an exhaustive `switch` over the enum gains cases |
-| `client/state` | Role objects follow `active_roles`; `ClientStateMessage.CreateInitial` takes payload objects | Low — compiler error only if you build the message yourself |
+| `client/state` | Role objects follow `active_roles`; every message carries the **full** state of each object it includes (merging removed); `ClientStateMessage` has one `Create(...)` factory | Medium — compiler error if you build the message yourself; see §17 |
+| `stream/request-format` | **Removed** from the wire, the serializer and the public API. `RequestPlayerFormatAsync` / `RequestArtworkFormatAsync` / `RequestVisualizerFormatAsync` are replaced by `SetPlayerFormatPreferenceAsync` / `SetArtworkChannelAsync` / `SetVisualizerConfigurationAsync` | **High** — compiler error at every call site; see §17 |
+| Artwork | `artwork@v1_support` removed from `client/hello`; `ArtworkChannelSpec` replaced by `ArtworkChannelState`, whose `MediaWidth`/`MediaHeight` are now `Width`/`Height` | **High** — compiler error; see §17 |
+| Binary data | A role's inbound binary data is dropped until that role's `client/state` object has been sent (spec PR #204) | Low — behavioural; a conformant server never gets ahead of the gate |
 | Stream teardown | `stream/end` and `stream/clear` honour `roles`; their payloads lost `Reason`, `StreamId` and `TargetTimestamp` | Low — compiler error, and the removed members never carried a value |
 | Undefined wire surface | `VisualizerTypes.Pitch` (and binary type 21), `PlayerStatePayload.BufferLevel`/`.Error`, and `AudioChunk.Slot` removed | Low — compiler error; none were spec-defined and nothing in the SDK populated them |
 | Sync correction | `MaxSpeedCorrection` defaults to `0.005`; a larger configured value is **clamped** to it, with a warning | Medium — no compiler error, but correction is slower than you configured |
@@ -142,7 +142,7 @@ Three methods, all optional to offer except the first:
 
 Enable a pairing-code method through `ClientCapabilities.PairingCodeMethods`.
 
-**The pairing-code wire changed with it.** The methods are `dynamic_pairing_code` and `static_pairing_code` on the wire (9.x sent `dynamic_pin` and `static_pin`), `client/hello` advertises them as a `supported_pair_methods` object keyed by method with a descriptor per entry, code lengths are fixed by the spec at 6 digits dynamic and 8 static so `ClientCapabilities.MinPairingCodeLength` is gone, and a dynamic attempt's `server/activate` carries the emission `format`. A code that does not match aborts with `pairing_code_mismatch` where 9.x said `pin_mismatch`. A 10.x client therefore pairs only with a server on the pairing-code wire; unpaired connect and an existing pairing record still work against older servers.
+**The pairing-code wire changed with it.** The methods are `dynamic_pairing_code` and `static_pairing_code` on the wire (9.x sent `dynamic_pin` and `static_pin`), `client/hello` advertises them as a `supported_pair_methods` object keyed by method with a descriptor per entry, code lengths are fixed by the spec at 6 digits dynamic and 8 static so `ClientCapabilities.MinPairingCodeLength` is gone, and a dynamic attempt's `server/activate` carries the emission `format`. A code that does not match aborts with `pairing_code_mismatch` where 9.x said `pin_mismatch`. A 10.x client therefore pairs only with a server on the pairing-code wire — and there is no older-server exemption for connecting either: every encrypted `client/hello` carries the object-keyed `supported_pair_methods` (spec PR #179), so a server that predates the 10.0.0 line rejects the hello before an unpaired connection or an existing pairing record can be used.
 
 **Two behaviours are new around an existing pairing.** A server that activates a `pairing` activity on a session authenticated by a long-term (paired) PSK is refused with `client/goodbye` reason `unauthorized`, because a paired session has nothing to pair. And `server/unpair` from a paired server removes the pairing record bound to that server: a custom `IPairingRecordStore` sees a `Remove` for it, and the next connection from that server starts unpaired.
 
@@ -212,21 +212,19 @@ The spec requires a source to run only on a paired connection, and the SDK enfor
 
 ## 6. Visualizer buffer capacity is announced, not renegotiated
 
-`RequestVisualizerFormatAsync` no longer takes `bufferCapacity`, and `VisualizerRequestFormat.BufferCapacity` is gone.
+`buffer_capacity` is the only field left in the `visualizer@v1_support` object of `client/hello`. The role's runtime configuration — `types`, `rate_max` and `spectrum` — moved to the `visualizer` object of `client/state` (spec PR #195, which also deleted `stream/request-format`).
 
-`buffer_capacity` is a `visualizer@v1_support` field of `client/hello`; the spec's `stream/request-format` visualizer object carries only `types`, `rate_max` and `spectrum`. Sending it there is a client deviation that `aiosendspin` names explicitly, and a server running `allow_noncompliant_clients=False` rejects the connection rather than ignoring the field.
-
-Set it once, before connecting:
+`ClientCapabilities.VisualizerSupport` (the wire type `VisualizerSupport`) is replaced by `ClientCapabilities.VisualizerRoleSupport`, one app-facing class spanning both wire objects. Set it once, before connecting:
 
 ```csharp
 Capabilities = new ClientCapabilities
 {
     Roles = { "visualizer@v1" },
-    VisualizerSupport = new VisualizerSupport { BufferCapacity = 65536, RateMax = 30, /* ... */ },
+    VisualizerRoleSupport = new VisualizerRoleSupport { BufferCapacity = 65536, RateMax = 30, /* ... */ },
 }
 ```
 
-Callers using named arguments — the shape the docs have always shown — are unaffected. Only a positional call breaks, and it breaks at compile time.
+To reconfigure at runtime, call `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`; it updates that client's own visualizer configuration (the `ClientCapabilities` you supplied is left untouched) and resends the full `client/state`. See §17.
 
 ---
 
@@ -267,7 +265,7 @@ The rename is mechanical: every renamed member is a compiler error at your call 
 | `ISendspinClient.SendPlayerStateAsync(int, bool, double? staticDelayMs)` | `…, double? outputDelayMs` |
 | `SendspinHostService.SendPlayerStateAsync(int, bool, double? staticDelayMs, string?)` | `…, double? outputDelayMs, string?` |
 | `PlayerStatePayload.StaticDelayMs` | `PlayerStatePayload.OutputDelayMs` — still `[JsonPropertyName("static_delay_ms")]` |
-| `ClientStateMessage.CreatePlayerState(int, bool, int staticDelayMs, …)` | `…, int outputDelayMs, …` |
+| `ClientStateMessage.CreatePlayerState(int, bool, int staticDelayMs, …)` | Removed — build a `PlayerStatePayload { OutputDelayMs = … }` and pass it to `ClientStateMessage.Create` |
 
 Two names deliberately keep the old spelling, because each is named for its own wire literal and both literals exist while servers migrate: `Commands.SetStaticDelay` (`"set_static_delay"`, alongside `Commands.SetOutputDelay`) and `PlayerCommand.StaticDelayMs` (`static_delay_ms`, alongside `PlayerCommand.OutputDelayMs`).
 
@@ -283,7 +281,7 @@ Three things changed, all on what goes out on the wire:
 
 `IClockSynchronizer.OutputDelayMs` is **unchanged**: still a `double`, still accepting −5000…5000. Negative values still schedule audio *later*, and that is still applied to playback. Only the report is constrained, and the SDK logs a warning naming both values when a configured delay does not survive the projection — because the server's group calibration is then working from a different number than your playback is.
 
-`ClientStateMessage.CreateInitial` / `CreatePlayerState` take `int outputDelayMs` rather than `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
+`PlayerStatePayload.OutputDelayMs` is an `int` rather than a `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
 
 ### `SendPlayerStateAsync`'s delay parameter is now nullable, and applies
 
@@ -325,16 +323,16 @@ A `player` object used to go out on every `client/state`, and a `source` object 
 - **`player` is now sent only when the server activated the player role.** A state object for an inactive role is a client deviation the reference server rejects outright under `allow_noncompliant_clients=False`, so a source-only or artwork-only client was previously non-conformant on its very first message.
 - **`source` is now built.** If your app calls `SetSourceSignalAsync` before the initial `client/state` goes out — a line-sense client sensing signal at boot — the signal is remembered and carried by that message instead of being discarded. A client that reports only *transitions* previously left the server never knowing there was signal until it changed. The remembered signal also survives reconnects, since it describes the input, not the session.
 
-`ClientStateMessage.CreateInitial` now takes the role payloads rather than loose player fields, because which objects belong depends on `active_roles`, which the message type cannot see:
+`ClientStateMessage` now has a single `Create(...)` factory taking the role payloads rather than loose player fields, because which objects belong depends on `active_roles`, which the message type cannot see:
 
 ```csharp
-ClientStateMessage.CreateInitial(
+ClientStateMessage.Create(
     available: true,
     player: new PlayerStatePayload { Volume = 42, Muted = false, /* ... */ },
     source: new SourceStatePayload { Signal = "present" });
 ```
 
-Only relevant if you construct these messages yourself; both parameters default to null.
+Only relevant if you construct these messages yourself; every role parameter defaults to null. `CreateInitial`, `CreateAvailability` and `CreatePlayerState` are gone — see §17, which also covers the removal of merging.
 
 ---
 
@@ -734,10 +732,58 @@ If you need the 9.x line, `Auto` is still present there but `[Obsolete]` as of 9
 
 ---
 
-## 17. Checklist
+## 17. `stream/request-format` is gone; role configuration lives in `client/state`
 
-- [ ] Server is `aiosendspin >= 7.0.0`, or stay on the 9.x line
-- [ ] Server is `aiosendspin >= 9.0.0` if you need to pair — 7.0.0 and 8.0.0 refuse every pairing attempt
+Spec PR #195 removed `stream/request-format` from the protocol, and spec PR #175 removed server-side merging of `client/state`. Together they make `client/state` the single place a client describes its roles, and make every such message carry the **full** state of each role object it includes.
+
+`StreamRequestFormatMessage` and the `stream/request-format` wire type are gone from the message vocabulary and the source-generated serializer — an inbound message of that type now deserializes to `null`. The three public methods that built it are replaced:
+
+| Was | Now |
+|---|---|
+| `RequestPlayerFormatAsync(codec, sampleRate, channels, bitDepth)` | `SetPlayerFormatPreferenceAsync(AudioFormat?)` |
+| `RequestArtworkFormatAsync(channel, source, format, mediaWidth, mediaHeight)` | `SetArtworkChannelAsync(channel, source, format, width, height)` |
+| `RequestVisualizerFormatAsync(types, rateMax, spectrum)` | `SetVisualizerConfigurationAsync(types, rateMax, spectrum)` |
+
+Each new method updates the connection's own copied role configuration and resends the whole `client/state`, so the role's configuration and the message describing it can no longer disagree. The app-owned `ClientCapabilities` object is left unchanged, which matters when one host shares it across multiple connections. The server still replies with a new `stream/start`.
+
+### Player format preference
+
+A format preference is one whole `supported_formats` entry or nothing — the spec requires all four fields, and a server MAY close the connection over a format it never advertised. `SetPlayerFormatPreferenceAsync` throws `ArgumentException` for a format that is not in `ClientCapabilities.AudioFormats`; pass `null` to withdraw the preference and let the server choose.
+
+### Artwork
+
+`artwork@v1_support` is gone from `client/hello`; the channel list is reported in the `artwork` object of `client/state`. `ArtworkChannelSpec` is replaced by `ArtworkChannelState`, and its size fields follow the spec's wire names:
+
+| Was | Now |
+|---|---|
+| `ArtworkChannelSpec` | `ArtworkChannelState` |
+| `ArtworkChannelSpec.MediaWidth` | `ArtworkChannelState.Width` |
+| `ArtworkChannelSpec.MediaHeight` | `ArtworkChannelState.Height` |
+| `ClientCapabilities.ArtworkChannels` (`List<ArtworkChannelSpec>`) | `List<ArtworkChannelState>` |
+| `ClientHelloMessage.Create(…, artworkSupport, …)` | parameter removed |
+
+The list is positional from channel 0, holds 1–4 entries, and any channel you do not cover is reported as `source: "none"`.
+
+### Visualizer
+
+See §6: `buffer_capacity` stays in `client/hello`, everything else moved to the `visualizer` state object, and `ClientCapabilities.VisualizerSupport` became `VisualizerRoleSupport`.
+
+### Full state, and what gates binary data
+
+Because merging is gone, the SDK rebuilds each role object from its current values on every send and never emits a partial object. Player `supported_commands` is always written — `[]` means "accepts no commands" — rather than being omitted.
+
+Two related rules the SDK now enforces:
+
+- A client whose `active_roles` are non-empty sends its initial `client/state` even when none of its roles defines a state object (spec PR #181).
+- A role's binary data is only in play once the server has received that role's state object (spec PR #204). Inbound player/artwork/visualizer frames that arrive before the object has gone out are dropped, with one warning per role per connection. When `server/activate` adds a role mid-connection, the SDK reannounces the full state — now carrying the new role's object — before that role's streams can be used.
+
+Neither is a compiler error, and a conformant server never trips the gate.
+
+---
+
+## 18. Checklist
+
+- [ ] Server is on the `aiosendspin` 10.0.0 line — the draft commit pinned in `.github/workflows/interop.yml` until it ships — for both connecting and pairing, or stay on the 9.x line
 - [ ] `Identity` comes from a **store**, not `Generate()` — verify by restarting the app twice and confirming the pairing survives
 - [ ] The same identity and pairing store are shared across dial and listen modes
 - [ ] `PairingRecordStore` is configured and writes somewhere durable
@@ -759,6 +805,11 @@ If you need the 9.x line, `Auto` is still present there but `[Obsolete]` as of 9
       and `ReadRaw` has already credited what it handed you
 - [ ] Any persisted `ConnectionMode` is migrated — a stored `"Auto"` no longer parses, and the
       remaining members' ordinals have shifted
+- [ ] Every `Request*FormatAsync` call site moved to the matching `Set*` method (§17)
+- [ ] `ArtworkChannelSpec` / `MediaWidth` / `MediaHeight` renamed to `ArtworkChannelState` /
+      `Width` / `Height`, and `ClientCapabilities.VisualizerSupport` to `VisualizerRoleSupport`
+- [ ] Nothing builds a partial `client/state` by hand — merging is gone, so every role object must
+      be complete
 
 ---
 

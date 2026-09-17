@@ -35,10 +35,9 @@ jobs:
       # (client_stream/*, static_delay_ms, set_static_delay) are held only until the
       # reference server adopts them. The 9.x line keeps its own pin on 9.1.1.
       #
-      # 9.0.0 is the pairing floor for the 9.x line, not a pin: the first release with the
-      # server/activate 'pairing' object, the pairing window and client/pair-pending. The
-      # split floor (playback >= 7.0.0, pairing >= 9.0.0) is documented in the README
-      # compatibility matrix; neither floor is exercised here any more.
+      # The compatibility floor is a single one — the aiosendspin 10.0.0 line — and is
+      # documented in the README matrix, not exercised here: this job runs only against the
+      # pinned draft commit above, patched below to accept the object-keyed pair methods.
       - name: Install aiosendspin reference server
         run: pip install "aiosendspin[server] @ git+https://github.com/Sendspin/aiosendspin@892af8c87b453442600a4d17f9eb32862fdb5593"
 

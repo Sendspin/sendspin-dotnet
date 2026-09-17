@@ -23,7 +23,7 @@
 v10.0.0 - Encrypted Transport (BREAKING):
 - The transport is now encrypted end to end (Noise KKpsk2). Plaintext is gone, and there
   is no downgrade negotiation: a 10.x client requires a server speaking the encrypted
-  protocol (aiosendspin >= 7.0.0). Use the 9.x line for older servers.
+  protocol (the aiosendspin 10.0.0 line). Use the 9.x line for older servers.
 - Clients now have a persistent Curve25519 identity. SendspinClientOptions.Identity is
   required; build it with SendspinIdentity.FromStore(store), NOT Generate(), or the client
   gets a new client_id every launch and silently loses every pairing on restart.
