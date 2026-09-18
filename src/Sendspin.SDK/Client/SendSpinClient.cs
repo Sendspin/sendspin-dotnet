@@ -1415,8 +1415,40 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _currentGroup = null;
     }
 
+    /// <summary>
+    /// Whether a controller <c>client/command</c> named <paramref name="command"/> may be put on
+    /// the wire: the <c>controller@v1</c> role must be active and the command must appear in the
+    /// group's latest <c>supported_commands</c>. Until a <c>server/state</c> controller object has
+    /// populated that list it is treated as empty — nothing is permitted until the server says so.
+    /// Drops with a warning naming the command and the reason rather than throwing, the same way
+    /// the seek path drops a seek without its argument: a server ignores such a command anyway.
+    /// </summary>
+    private bool MaySendControllerCommand(string command)
+    {
+        if (!IsRoleActive("controller"))
+        {
+            _logger.LogWarning("Dropping controller command '{Command}': controller@v1 is not active", command);
+            return false;
+        }
+
+        var supported = _currentGroup?.SupportedCommands;
+        if (supported is null || !supported.Contains(command))
+        {
+            _logger.LogWarning(
+                "Dropping controller command '{Command}': not in the group's supported_commands", command);
+            return false;
+        }
+
+        return true;
+    }
+
     public async Task SendCommandAsync(string command, Dictionary<string, object>? parameters = null)
     {
+        if (!MaySendControllerCommand(command))
+        {
+            return;
+        }
+
         // Extract the typed controller parameters from the loosely-typed dictionary
         int? volume = null;
         bool? mute = null;
@@ -1488,6 +1520,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     public async Task SetVolumeAsync(int volume)
     {
+        if (!MaySendControllerCommand(Commands.Volume))
+        {
+            return;
+        }
+
         var clampedVolume = Math.Clamp(volume, 0, 100);
         var message = ClientCommandMessage.Create(Commands.Volume, volume: clampedVolume);
 
@@ -1498,6 +1535,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task SetMuteAsync(bool muted)
     {
+        if (!MaySendControllerCommand(Commands.Mute))
+        {
+            return;
+        }
+
         var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
 
         _logger.LogDebug("Setting mute to {Muted}", muted);
@@ -1507,6 +1549,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task SeekAsync(int positionMs)
     {
+        if (!MaySendControllerCommand(Commands.Seek))
+        {
+            return;
+        }
+
         var message = ClientCommandMessage.Create(Commands.Seek, positionMs: positionMs);
 
         _logger.LogDebug("Seeking to {PositionMs} ms", positionMs);
@@ -1516,6 +1563,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task SeekRelativeAsync(int offsetMs)
     {
+        if (!MaySendControllerCommand(Commands.SeekRelative))
+        {
+            return;
+        }
+
         var message = ClientCommandMessage.Create(Commands.SeekRelative, offsetMs: offsetMs);
 
         _logger.LogDebug("Seeking by {OffsetMs} ms", offsetMs);
@@ -4480,13 +4532,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _currentGroup.Repeat = controller.Repeat;
                 if (controller.Shuffle.HasValue)
                     _currentGroup.Shuffle = controller.Shuffle.Value;
-                if (controller.SupportedCommands is not null)
-                    _currentGroup.SupportedCommands = controller.SupportedCommands;
 
-                // Full state per spec #175: an absent seek_max_ms is unset, not the last bound
-                // kept. Absence and an explicit null both read as unset here. The always-reported
-                // siblings above stay keep-on-absent — a conformant server never omits them, and
-                // Volume/Muted are non-nullable with no "unset" to clear to.
+                // Full state per spec #175: supported_commands and seek_max_ms are unset when the
+                // controller object omits them, not kept from the last one. This matters for the
+                // client/command gate (MaySendControllerCommand), which authorises a command only
+                // while it is in the current supported_commands — a stale list would let it send a
+                // command the latest state no longer advertises. Absence and an explicit null both
+                // read as unset. The always-reported siblings above stay keep-on-absent: a
+                // conformant server never omits them, and Volume/Muted are non-nullable with no
+                // "unset" to clear to.
+                _currentGroup.SupportedCommands = controller.SupportedCommands;
                 _currentGroup.SeekMaxMs = controller.SeekMaxMs.GetValueOrDefault();
             }
         }

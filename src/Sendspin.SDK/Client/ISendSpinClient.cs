@@ -134,22 +134,34 @@ public interface ISendspinClient : IAsyncDisposable
     /// missing or unusable is logged and dropped rather than sent, since the spec requires those
     /// commands to carry it — prefer the typed <see cref="SeekAsync"/> and
     /// <see cref="SeekRelativeAsync"/>, which cannot get this wrong.
+    /// <para>
+    /// The command is sent only while the <c>controller@v1</c> role is active and it appears in
+    /// the group's latest <c>supported_commands</c>; otherwise it is logged and dropped. Until a
+    /// <c>server/state</c> controller object has reported that list it is treated as empty —
+    /// nothing is permitted until the server says so.
+    /// </para>
     /// </summary>
     Task SendCommandAsync(string command, Dictionary<string, object>? parameters = null);
 
     /// <summary>
-    /// Sets the volume level (0-100).
+    /// Sets the volume level (0-100). Subject to the same controller-role and
+    /// <c>supported_commands</c> gate as <see cref="SendCommandAsync"/>: dropped with a warning
+    /// when the role is inactive or <c>volume</c> is unlisted.
     /// </summary>
     Task SetVolumeAsync(int volume);
 
     /// <summary>
-    /// Sets the group mute state via a controller <c>mute</c> command.
+    /// Sets the group mute state via a controller <c>mute</c> command. Subject to the same
+    /// controller-role and <c>supported_commands</c> gate as <see cref="SendCommandAsync"/>:
+    /// dropped with a warning when the role is inactive or <c>mute</c> is unlisted.
     /// </summary>
     /// <param name="muted">True to mute, false to unmute.</param>
     Task SetMuteAsync(bool muted);
 
     /// <summary>
-    /// Seeks to an absolute position via a controller <c>seek</c> command.
+    /// Seeks to an absolute position via a controller <c>seek</c> command. Subject to the same
+    /// controller-role and <c>supported_commands</c> gate as <see cref="SendCommandAsync"/>:
+    /// dropped with a warning when the role is inactive or <c>seek</c> is unlisted.
     /// </summary>
     /// <param name="positionMs">
     /// Absolute position in milliseconds. Not clamped here: the valid range is 0 to the server's
@@ -160,6 +172,9 @@ public interface ISendspinClient : IAsyncDisposable
 
     /// <summary>
     /// Seeks by an offset from the current position via a controller <c>seek_relative</c> command.
+    /// Subject to the same controller-role and <c>supported_commands</c> gate as
+    /// <see cref="SendCommandAsync"/>: dropped with a warning when the role is inactive or
+    /// <c>seek_relative</c> is unlisted.
     /// </summary>
     /// <param name="offsetMs">
     /// Signed offset in milliseconds (positive forward, negative backward). The server applies it
