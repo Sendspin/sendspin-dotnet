@@ -1,5 +1,6 @@
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
+using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Tests.Audio;
 
@@ -251,6 +252,38 @@ public class SendspinClientServiceArtworkTests
         Assert.Equal(1, image.Channel);
         Assert.Equal(777, image.Timestamp);
         Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, image.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void OverSizeAnnounce_IsCountedAndDiscarded_AndTheNextImageIsDelivered()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        var oversize = ArtworkTransfer.MaxImageBytes + 1;
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, oversize));
+
+        // A part is at most MaxArtworkMessageSize bytes, so the image arrives in many.
+        var part = new byte[BinaryMessageParser.MaxArtworkMessageSize - BinaryMessageParser.ArtworkPrefixSize];
+        for (long sent = 0; sent < oversize;)
+        {
+            var next = (int)Math.Min(part.Length, oversize - sent);
+            connection.RaiseBinaryMessageReceived(
+                ArtworkWire.Part(BinaryMessageTypes.Artwork0, part.AsSpan(0, next).ToArray()));
+            sent += next;
+        }
+
+        Assert.Empty(received);
+        Assert.Null(connection.LastDisconnectReason);
+
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 2, new byte[] { 7, 8 });
+
+        var image = Assert.Single(received);
+        Assert.Equal(new byte[] { 7, 8 }, image.ImageData);
         Assert.Null(connection.LastDisconnectReason);
     }
 

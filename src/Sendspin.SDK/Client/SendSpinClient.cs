@@ -5536,6 +5536,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     return;
                 }
 
+                if (message.TotalSize > ArtworkTransfer.MaxImageBytes)
+                {
+                    _logger.LogWarning(
+                        "Refusing artwork image of {Size} bytes on channel {Channel}: over the {Max} byte limit",
+                        message.TotalSize, message.Channel, ArtworkTransfer.MaxImageBytes);
+                }
+
                 _displayScheduler.FlushArtworkChannel(message.Channel);
                 break;
 
