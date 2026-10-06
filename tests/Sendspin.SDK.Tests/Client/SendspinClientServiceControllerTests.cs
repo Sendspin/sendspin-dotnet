@@ -389,4 +389,30 @@ public class SendspinClientServiceControllerTests
 
         Assert.Equal(sentBefore, connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Count());
     }
+
+    [Fact]
+    public async Task SendCommandAsync_AfterGroupChangeBeforeServerState_Drops()
+    {
+        // supported_commands belongs to the group that reported it: a group/update that moves the
+        // client to a different group id clears the list until that group's server/state arrives,
+        // while one that keeps the id leaves it alone.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, ClientRoles.Controller);
+        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"group_id":"g1"}}""");
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"supported_commands":["play"]}}}
+            """);
+
+        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"group_id":"g1","playback_state":"playing"}}""");
+        await client.SendCommandAsync(Commands.Play);
+        int sent = connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Count();
+        Assert.Equal(1, sent);
+
+        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"group_id":"g2"}}""");
+        await client.SendCommandAsync(Commands.Play);
+
+        Assert.Equal(sent, connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Count());
+    }
 }
