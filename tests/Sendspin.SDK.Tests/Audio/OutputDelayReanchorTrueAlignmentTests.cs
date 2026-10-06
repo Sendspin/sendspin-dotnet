@@ -146,6 +146,84 @@ public class OutputDelayReanchorTrueAlignmentTests
     }
 
     /// <summary>
+    /// A live server answers a larger delay by moving its timeline later by the same amount, so
+    /// the audio that follows is due exactly when it would have been. What is already buffered
+    /// is stale and goes; nothing else should. A skip sized for a continuous timeline must not
+    /// carry on into audio the timestamp step has already put on schedule.
+    /// </summary>
+    [Theory]
+    [InlineData(40)]
+    [InlineData(500)]
+    public void DelayIncrease_WhenTheServerShiftsItsTimeline_LosesOnlyTheStaleAudio(int increaseMs)
+    {
+        using var player = new Player(wakeMs: 10, reportedLatencyMs: 0, jitter: false, initialDelayMs: 0, 180_000);
+
+        player.Run(3_000);
+        var before = player.Measure(500);
+        var buffered = player.Buffer.BufferedMilliseconds;
+        var audioBefore = player.AudioExitedMs;
+
+        player.ClockSync.OutputDelayMs = increaseMs;
+        player.ServerShiftsTimelineLater(increaseMs * 1000L);
+        player.Reanchor();
+        player.Run(4_000);
+        var after = player.Measure(500);
+        var lost = 4_000 - (player.AudioExitedMs - audioBefore);
+        var stats = player.Buffer.GetStats();
+
+        _output.WriteLine(
+            $"+{increaseMs}ms with {buffered:F0}ms buffered: true lateness {before.Median / 1000.0:+0.00;-0.00}ms -> " +
+            $"{after.Median / 1000.0:+0.00;-0.00}ms, audio lost {lost:F0}ms, re-anchors {stats.ReanchorCount}");
+        foreach (var entry in player.Log.Entries.Where(e => e.Message.Contains("[Correction]") || e.Message.Contains("timeline")))
+        {
+            _output.WriteLine("  log: " + entry.Message);
+        }
+
+        Assert.Equal(0, stats.ReanchorCount);
+        Assert.InRange(after.Median - before.Median, -1_000, 1_000);
+
+        // The stale audio goes, and the same stretch of wall clock is silent before the shifted
+        // audio falls due: twice the smaller of the change and what was buffered, plus margin.
+        var unavoidable = 2 * Math.Min(increaseMs, buffered);
+        Assert.InRange(lost, 0, unavoidable + 40);
+    }
+
+    /// <summary>
+    /// A delay decrease early in a stream plays silence for longer than the startup grace
+    /// lasts. The baseline is taken at the end of that grace and absorbs whatever error it
+    /// finds, so taking it part way through the silence would keep the unplayed remainder as
+    /// a constant.
+    /// </summary>
+    [Theory]
+    [InlineData(400, 200, 10)]
+    [InlineData(280, 250, 10)]
+    [InlineData(280, 250, 2)]
+    [InlineData(400, 100, 2)]
+    [InlineData(200, 300, 1)]
+    public void DelayDecreaseDuringTheStartupGrace_IsNotAbsorbedIntoTheBaseline(int initialDelayMs, int changeAtMs, int wakeMs)
+    {
+        using var player = new Player(wakeMs, reportedLatencyMs: 0, jitter: false, initialDelayMs);
+
+        player.Run(changeAtMs);
+        player.ClockSync.OutputDelayMs = 0;
+        player.Reanchor();
+        player.Run(5_000);
+        var after = player.Measure(500);
+        var stats = player.Buffer.GetStats();
+
+        _output.WriteLine(
+            $"true lateness {after.Median / 1000.0:+0.00;-0.00}ms, reported {stats.SyncErrorMicroseconds / 1000.0:+0.00;-0.00}ms, " +
+            $"hard syncs {stats.HardSyncCount}, re-anchors {stats.ReanchorCount}");
+        foreach (var entry in player.Log.Entries.Where(e => e.Message.Contains("[Correction]")))
+        {
+            _output.WriteLine("  log: " + entry.Message);
+        }
+
+        Assert.Equal(0, stats.ReanchorCount);
+        Assert.InRange(after.Median, -1_000, 1_000);
+    }
+
+    /// <summary>
     /// The device is a FIFO of frame identities drained at exactly the nominal rate on the wall
     /// clock. Each frame carries the index of the stream frame it came from (0 for silence), so a
     /// frame's lateness at the moment it leaves is exit time minus ServerToClientTime(its
@@ -202,6 +280,28 @@ public class OutputDelayReanchorTrueAlignmentTests
 
         private long ServerNow => WallNow + ClockSync.OffsetMicroseconds;
 
+        /// <summary>Milliseconds of audio (not silence) that have left the device.</summary>
+        public double AudioExitedMs => _exits.Count * FrameUs / 1000.0;
+
+        private long _rebaseIndex = long.MaxValue;
+        private long _rebaseShiftUs;
+
+        /// <summary>
+        /// The server moves its timeline later by <paramref name="shiftUs"/> from the next chunk
+        /// on, and holds its lead that much further ahead: what a live stream does when a
+        /// player's send-ahead floor rises by a larger output delay. The audio itself keeps
+        /// arriving in real time; only its timestamps step.
+        /// </summary>
+        public void ServerShiftsTimelineLater(long shiftUs)
+        {
+            _rebaseIndex = _nextFrameIndex;
+            _rebaseShiftUs = shiftUs;
+            LeadMicroseconds += shiftUs;
+        }
+
+        private long TimestampOf(long frameIndex) =>
+            ServerT0 + (long)Math.Round(frameIndex * FrameUs) + (frameIndex >= _rebaseIndex ? _rebaseShiftUs : 0);
+
         public void Run(int milliseconds)
         {
             var until = WallNow + (milliseconds * 1000L);
@@ -242,7 +342,7 @@ public class OutputDelayReanchorTrueAlignmentTests
         private void PumpProducer()
         {
             var chunk = new float[ChunkMs * SamplesPerMs];
-            while (ServerT0 + (long)Math.Round(_nextFrameIndex * FrameUs) < ServerNow + LeadMicroseconds)
+            while (TimestampOf(_nextFrameIndex) < ServerNow + LeadMicroseconds)
             {
                 for (var f = 0; f < chunk.Length / Channels; f++)
                 {
@@ -251,7 +351,7 @@ public class OutputDelayReanchorTrueAlignmentTests
                     chunk[(f * Channels) + 1] = id;
                 }
 
-                Buffer.Write(chunk, ServerT0 + (long)Math.Round(_nextFrameIndex * FrameUs));
+                Buffer.Write(chunk, TimestampOf(_nextFrameIndex));
                 _nextFrameIndex += chunk.Length / Channels;
             }
         }
@@ -281,7 +381,7 @@ public class OutputDelayReanchorTrueAlignmentTests
         {
             // Recover the frame index: the encoded id, unwrapped to the candidate nearest "now".
             var residue = (long)Math.Round((value * IdModulus * 2) - 1);
-            var nowIndex = (long)((ServerNow - ServerT0) / FrameUs);
+            var nowIndex = (long)((ServerNow - ServerT0 - (_rebaseIndex == long.MaxValue ? 0 : _rebaseShiftUs)) / FrameUs);
             var d = (((nowIndex - residue) % IdModulus) + IdModulus) % IdModulus;
             if (d > IdModulus / 2)
             {
@@ -289,7 +389,7 @@ public class OutputDelayReanchorTrueAlignmentTests
             }
 
             var index = nowIndex - d;
-            return ClockSync.ServerToClientTime(ServerT0 + (long)Math.Round(index * FrameUs));
+            return ClockSync.ServerToClientTime(TimestampOf(index));
         }
 
         private void Refill(int frames)

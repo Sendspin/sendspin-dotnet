@@ -755,8 +755,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 // forever (pinning the resampler at its max slow rate). See
                 // CaptureSyncErrorBaseline.
                 var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
+                // Not while a snap is in flight: the baseline absorbs whatever error it finds,
+                // and part way through a snap that includes the part not yet applied.
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
-                    && !_syncErrorBaselineCaptured)
+                    && !_syncErrorBaselineCaptured
+                    && _pendingHardSyncSamples == 0)
                 {
                     CaptureSyncErrorBaseline("startup (raw)", startup: true);
                 }
@@ -967,15 +970,28 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             // close it in one step; a snap already in flight is folded into the same splice.
             _outputDelayAtAnchorMicroseconds = delay;
             _playbackStartLocalTime -= shift;
-            ScheduleSnap(shift + SamplesToMicroseconds(_pendingHardSyncSamples), "output delay");
+
+            // Taken out before the new one is scheduled: a shift that exactly cancels the snap in
+            // flight schedules nothing, and must not leave the old one to run against the moved
+            // anchor.
+            var inFlight = SamplesToMicroseconds(_pendingHardSyncSamples);
+            _pendingHardSyncSamples = 0;
+            ScheduleSnap(shift + inFlight, "output delay");
         }
     }
 
     /// <summary>
     /// The output delay the clock conversion currently applies, in microseconds.
     /// </summary>
+    /// <remarks>
+    /// Read from the synchronizer directly. Deriving it as the difference of a compensated and an
+    /// uncompensated conversion takes the synchronizer's lock twice, and a clock update landing
+    /// between the two leaks into the result: the conversions extrapolate drift over the whole
+    /// span back to the server's epoch, so a small change in the drift estimate becomes tens or
+    /// hundreds of milliseconds of "delay" that was never asked for.
+    /// </remarks>
     private long AppliedOutputDelayMicroseconds() =>
-        _clockSync.ServerToClientTimeUncompensated(0) - _clockSync.ServerToClientTime(0);
+        (long)Math.Round(_clockSync.OutputDelayMs * 1000.0);
 
     /// <summary>
     /// Returns every piece of timing and correction state to its post-construction value,
@@ -1752,7 +1768,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // the corrector ever sees it. Without this, an undeclared backend prefill
         // (WASAPI gulps its full output buffer at Play()) reads as a persistent
         // ~-100ms error and is audibly ground out via drop/insert on every start.
-        if (!_syncErrorBaselineCaptured)
+        // Not while a snap is in flight: see the raw path's capture.
+        if (!_syncErrorBaselineCaptured && _pendingHardSyncSamples == 0)
         {
             CaptureSyncErrorBaseline("startup", startup: true);
         }
@@ -1946,11 +1963,24 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         if (_pendingHardSyncSamples > 0)
         {
-            var toSkip = (int)Math.Min(_pendingHardSyncSamples, _count);
-            toSkip -= toSkip % frameSamples;
-
-            if (toSkip > 0)
+            // One segment at a time, so a forward step in the content is seen at the boundary
+            // it sits on and not skipped across.
+            while (_pendingHardSyncSamples >= frameSamples && _count > 0 && _segments.Count > 0)
             {
+                SettleSkipAgainstTimelineStep();
+                if (_pendingHardSyncSamples < frameSamples)
+                {
+                    break;
+                }
+
+                var leftInSegment = _segments.Peek().SampleCount - _headConsumedSamples;
+                var toSkip = (int)Math.Min(Math.Min(_pendingHardSyncSamples, _count), leftInSegment);
+                toSkip -= toSkip % frameSamples;
+                if (toSkip <= 0)
+                {
+                    break;
+                }
+
                 _readPos = (_readPos + toSkip) % _buffer.Length;
                 _count -= toSkip;
 
@@ -1986,6 +2016,38 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         }
 
         return toInsert;
+    }
+
+    /// <summary>
+    /// Reduces a skip still owed by a forward step in the content timeline at the head of the
+    /// buffer. Must be called under lock, with a positive snap pending.
+    /// </summary>
+    /// <remarks>
+    /// A skip is sized for a continuous timeline: "we are this late, so jump this far ahead in
+    /// the content". When the next segment's timestamp already sits ahead of the read cursor,
+    /// the content has made that much of the jump itself, and skipping the full amount on top
+    /// discards audio that is on schedule. It happens whenever a skip outlasts the buffered
+    /// audio and the server then moves its timeline later, which is how a live stream answers
+    /// a larger output delay. The step itself is still folded into the sync error when the
+    /// segment is consumed (<see cref="ObserveSegmentBoundary"/>); this only stops the skip
+    /// from being paid twice.
+    /// </remarks>
+    private void SettleSkipAgainstTimelineStep()
+    {
+        if (!_readCursorValid || _headConsumedSamples != 0 || _segments.Count == 0)
+        {
+            return;
+        }
+
+        var step = _segments.Peek().ServerTimestamp - _readCursorServerTimestamp;
+        if (step <= SegmentTimestampToleranceMicroseconds)
+        {
+            return;
+        }
+
+        var stepSamples = (long)Math.Round(step / _microsecondsPerSample);
+        stepSamples -= stepSamples % _channels;
+        _pendingHardSyncSamples -= Math.Min(_pendingHardSyncSamples, stepSamples);
     }
 
     /// <summary>
