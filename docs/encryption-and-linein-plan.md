@@ -1,5 +1,16 @@
 # Sendspin .NET SDK — Implementation Plan: Encryption & Line-In (Source Role)
 
+> **Status: historical planning artifact, superseded.** This plan was written against a pre-1.0
+> draft of the spec and is kept as the record of how the encryption and source work was
+> planned. It is not maintained, and parts of it have been overtaken: the `management/*`
+> message family and the `dynamic_pin` / `static_pin` names are gone from the spec, the Phase 0
+> Noise library evaluation and the `client/state` reshape it lists as outstanding are done, and
+> it uses `#91` / `#92` for audit findings that are not this repository's issues of those
+> numbers. For the current state read [SPEC-VERSION.md](SPEC-VERSION.md) (spec pin,
+> compatibility floor, known deviations),
+> [MIGRATION-10.0.0.md](../src/Sendspin.SDK/MIGRATION-10.0.0.md) (what shipped in 10.0.0) and
+> the compatibility matrix in the [README](../README.md#compatibility).
+
 *Research basis: `Sendspin/spec` @ `7c04eb7` (2026-07-14, "Keep the connection open across pairing attempts (#120)") — designated source of truth. The public website and older SDK docs describe a superseded pre-encryption draft.*
 
 ---
