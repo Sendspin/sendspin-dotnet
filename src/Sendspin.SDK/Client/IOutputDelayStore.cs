@@ -25,12 +25,11 @@ public interface IOutputDelayStore
 
     /// <summary>
     /// Persists the output delay in milliseconds. Called whenever the delay changes (e.g. an
-    /// inbound <c>set_output_delay</c> command or a GroupSync calibration offset).
+    /// inbound <c>set_output_delay</c> command).
     /// </summary>
     /// <param name="outputDelayMs">
-    /// The output delay to persist, in milliseconds. May be negative when sourced from a GroupSync
-    /// calibration offset (which schedules audio later); the <c>set_output_delay</c> command path is
-    /// always non-negative. Store and round-trip the value as-is.
+    /// The output delay to persist, in milliseconds, within the spec's <c>output_delay_ms</c> range
+    /// of 0-5000 (the SDK clamps the applied value before persisting). Store and round-trip it as-is.
     /// </param>
     void Save(double outputDelayMs);
 }
