@@ -23,6 +23,7 @@ public static class MessageTypes
     public const string ClientPairAuth = "client/pair-auth";
     public const string ServerPairConfirm = "server/pair-confirm";
     public const string ClientPairConfirm = "client/pair-confirm";
+    public const string ClientPairRetry = "client/pair-retry";
 
     // Unpairing (a paired server dropping its own record from this client)
     public const string ServerUnpair = "server/unpair";

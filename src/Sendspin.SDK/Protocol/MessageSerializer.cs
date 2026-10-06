@@ -106,6 +106,7 @@ public static class MessageSerializer
             MessageTypes.ClientPairAuth => JsonSerializer.Deserialize(json, s_context.ClientPairAuthMessage),
             MessageTypes.ServerPairConfirm => JsonSerializer.Deserialize(json, s_context.ServerPairConfirmMessage),
             MessageTypes.ClientPairConfirm => JsonSerializer.Deserialize(json, s_context.ClientPairConfirmMessage),
+            MessageTypes.ClientPairRetry => JsonSerializer.Deserialize(json, s_context.ClientPairRetryMessage),
 
             // Unpairing
             MessageTypes.ServerUnpair => JsonSerializer.Deserialize(json, s_context.ServerUnpairMessage),
