@@ -976,7 +976,12 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             // anchor.
             var inFlight = SamplesToMicroseconds(_pendingHardSyncSamples);
             _pendingHardSyncSamples = 0;
-            ScheduleSnap(shift + inFlight, "output delay");
+            if (!ScheduleSnap(shift + inFlight, "output delay") && inFlight != 0)
+            {
+                // The two cancelled out, so the snap that was in flight has ended here: re-seed
+                // the smoothed error as any completed snap does.
+                CompleteHardSync();
+            }
         }
     }
 
