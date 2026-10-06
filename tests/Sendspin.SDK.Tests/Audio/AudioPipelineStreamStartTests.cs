@@ -9,9 +9,9 @@ namespace Sendspin.SDK.Tests.Audio;
 /// <summary>
 /// A <c>stream/start</c> for a stream that is already running is a configuration update, not a
 /// restart (#201): the pipeline must keep buffered audio, the running timeline and the readiness
-/// gate. These tests pin what is applied in place — a re-announced format and a decode-side change
-/// at an unchanged sample rate and channel count — and the one case that still restarts, a sample
-/// rate or channel change, which is the documented deviation.
+/// gate. These tests pin what is applied in place — a re-announced format, a decode-side change
+/// at an unchanged sample rate and channel count, and a sample rate or channel change, which plays
+/// out what was buffered before the output moves to the new format.
 /// </summary>
 public class AudioPipelineStreamStartTests
 {
@@ -25,6 +25,9 @@ public class AudioPipelineStreamStartTests
     // TimedAudioBuffer reports ready at the lesser of 80% of its 250ms target and its 150ms
     // negotiated minimum buffer (#233), so 8 chunks (160ms) start playback.
     private const int ChunksToPlayback = 8;
+
+    // A 16-bit sample value no chunk of the first format carries.
+    private const short NewFormatValue = 16_000;
 
     private static AudioFormat Pcm(int bitDepth = 16, int sampleRate = SampleRate, int channels = Channels) =>
         new AudioFormat { Codec = "pcm", SampleRate = sampleRate, Channels = channels, BitDepth = bitDepth };
@@ -166,46 +169,145 @@ public class AudioPipelineStreamStartTests
     }
 
     [Fact]
-    public async Task StartAsync_SampleRateChange_RestartsPipeline()
+    public async Task StartAsync_SampleRateChange_KeepsBufferedAudioPlaying()
     {
         await using var harness = new Harness();
         await harness.Pipeline.StartAsync(Pcm());
         harness.Feed(5);
 
         var firstPlayer = harness.Player;
+        var firstBuffer = harness.Buffer;
+        var buffered = firstBuffer.BufferedMilliseconds;
         harness.States.Clear();
 
-        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        var outcome = await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
 
-        // The documented deviation: buffered audio here is already-decoded PCM at the old rate,
-        // so the restart drops it rather than resampling it into the new buffer.
+        // Spec: "Clients MUST keep buffered chunks and decode each chunk in the format that was
+        // in effect when it was received." The first buffer keeps its audio and its player; the
+        // second takes the chunks that follow. Nothing more is coming for the first, so it starts
+        // playing without waiting for a readiness gate it can no longer reach.
+        Assert.Equal(AudioPipelineStartOutcome.DecoderReplaced, outcome);
         Assert.Equal(2, harness.Buffers.Count);
-        Assert.Equal(2, harness.Players.Count);
-        Assert.Equal(
-            new[]
-            {
-                AudioPipelineState.Stopping,
-                AudioPipelineState.Idle,
-                AudioPipelineState.Starting,
-                AudioPipelineState.Buffering,
-            },
-            harness.States);
-        Assert.Equal(0, harness.Buffer.BufferedMilliseconds);
-        Assert.True(firstPlayer.Disposed);
+        Assert.Single(harness.Players);
+        Assert.False(firstPlayer.Disposed);
+        Assert.Equal(1, firstPlayer.PlayCalls);
+        Assert.Equal(buffered, firstBuffer.BufferedMilliseconds);
+        Assert.Equal(new[] { AudioPipelineState.Playing }, harness.States);
         Assert.Equal(44_100, harness.Pipeline.CurrentFormat?.SampleRate);
     }
 
     [Fact]
-    public async Task StartAsync_ChannelChange_RestartsPipeline()
+    public async Task StartAsync_ChannelChange_KeepsBufferedAudioPlaying()
     {
         await using var harness = new Harness();
         await harness.Pipeline.StartAsync(Pcm());
         harness.Feed(5);
 
+        var firstBuffer = harness.Buffer;
+        var buffered = firstBuffer.BufferedMilliseconds;
+
         await harness.Pipeline.StartAsync(Pcm(channels: 1));
 
         Assert.Equal(2, harness.Buffers.Count);
-        Assert.Equal(0, harness.Buffer.BufferedMilliseconds);
+        Assert.Single(harness.Players);
+        Assert.Equal(buffered, firstBuffer.BufferedMilliseconds);
+    }
+
+    [Fact]
+    public async Task StartAsync_SampleRateChange_PlaysBufferedAudioInOrderBeforeTheNewFormat()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+
+        // Chunk n decodes to n/32.768, so what comes out says which chunk it came from.
+        for (var chunk = 1; chunk <= ChunksToPlayback; chunk++)
+        {
+            harness.Feed(1, value: (short)(chunk * 1000));
+        }
+
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        harness.Feed(ChunksToPlayback, sampleRate: 44_100, value: NewFormatValue);
+
+        var firstPlayer = harness.Player;
+        var played = harness.PullUntilEmpty(harness.Buffers[0], harness.Sources[0]);
+
+        Assert.Equal(Enumerable.Range(1, ChunksToPlayback), played);
+        Assert.Single(harness.Players);
+
+        await harness.WaitForAsync(() => harness.Players.Count == 2 && harness.Player.PlayCalls == 1);
+
+        Assert.True(firstPlayer.Disposed);
+        Assert.Equal(AudioPipelineState.Playing, harness.Pipeline.State);
+
+        played = harness.PullUntilEmpty(harness.Buffers[1], harness.Sources[1]);
+
+        Assert.Equal(new[] { NewFormatValue / 1000 }, played);
+    }
+
+    [Fact]
+    public async Task StartAsync_SampleRateChangeWithNothingBuffered_Restarts()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+
+        var outcome = await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+
+        Assert.Equal(AudioPipelineStartOutcome.Restarted, outcome);
+        Assert.Equal(2, harness.Players.Count);
+        Assert.Equal(AudioPipelineState.Buffering, harness.Pipeline.State);
+    }
+
+    [Fact]
+    public async Task StartAsync_SecondSampleRateChangeBeforeTheFirstHasSwitched_Restarts()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(5);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+
+        var outcome = await harness.Pipeline.StartAsync(Pcm(sampleRate: 96_000));
+
+        Assert.Equal(AudioPipelineStartOutcome.Restarted, outcome);
+        Assert.Equal(2, harness.Players.Count);
+        Assert.True(harness.Players[0].Disposed);
+        Assert.Equal(96_000, harness.Pipeline.CurrentFormat?.SampleRate);
+    }
+
+    [Fact]
+    public async Task Clear_BeforeASampleRateChangeHasSwitched_DiscardsTheOldFormatAudioToo()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        harness.Feed(1, sampleRate: 44_100);
+
+        harness.Pipeline.Clear();
+
+        Assert.Equal(0, harness.Buffers[0].BufferedMilliseconds);
+        Assert.Equal(0, harness.Buffers[1].BufferedMilliseconds);
+        Assert.Equal(AudioPipelineState.Buffering, harness.Pipeline.State);
+
+        // With nothing left to play out the output moves straight away, and waits for the
+        // readiness gate like any other stream/clear.
+        await harness.WaitForAsync(() => harness.Players.Count == 2 && harness.Players[0].Disposed);
+        Assert.Equal(0, harness.Player.PlayCalls);
+    }
+
+    [Fact]
+    public async Task StopAsync_BeforeASampleRateChangeHasSwitched_OpensNoSecondOutput()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+
+        await harness.Pipeline.StopAsync();
+        await Task.Delay(100);
+
+        Assert.Equal(AudioPipelineState.Idle, harness.Pipeline.State);
+        Assert.Single(harness.Players);
+        Assert.True(harness.Player.Disposed);
     }
 
     [Fact]
@@ -229,7 +331,10 @@ public class AudioPipelineStreamStartTests
 
     private sealed class Harness : IAsyncDisposable
     {
-        private long _nextTimestamp = 1_000_000;
+        private const long FirstTimestamp = 1_000_000;
+
+        private readonly StubTimer _timer = new StubTimer();
+        private long _nextTimestamp = FirstTimestamp;
 
         public Harness()
         {
@@ -249,8 +354,13 @@ public class AudioPipelineStreamStartTests
                     Players.Add(player);
                     return player;
                 },
-                (buffer, _) => new StubSampleSource(buffer),
-                precisionTimer: new StubTimer(),
+                (buffer, time) =>
+                {
+                    var source = new StubSampleSource(buffer, time);
+                    Sources.Add(source);
+                    return source;
+                },
+                precisionTimer: _timer,
                 useMonotonicTimer: false);
 
             Pipeline.StateChanged += (_, state) => States.Add(state);
@@ -262,16 +372,29 @@ public class AudioPipelineStreamStartTests
 
         public List<StubAudioPlayer> Players { get; } = new List<StubAudioPlayer>();
 
+        public List<StubSampleSource> Sources { get; } = new List<StubSampleSource>();
+
         public List<AudioPipelineState> States { get; } = new List<AudioPipelineState>();
 
         public TimedAudioBuffer Buffer => Buffers[^1];
 
         public StubAudioPlayer Player => Players[^1];
 
-        /// <summary>Feeds <paramref name="chunkCount"/> chunks of silence of one chunk duration each.</summary>
-        public void Feed(int chunkCount, int bitDepth = 16)
+        /// <summary>
+        /// Feeds <paramref name="chunkCount"/> chunks of one chunk duration each, every sample
+        /// of them <paramref name="value"/> (silence by default; 16-bit only).
+        /// </summary>
+        public void Feed(int chunkCount, int bitDepth = 16, int sampleRate = SampleRate, short value = 0)
         {
-            var encoded = new byte[ChunkSamples * (bitDepth / 8)];
+            var encoded = new byte[ChunkMs * sampleRate / 1000 * Channels * (bitDepth / 8)];
+            if (value != 0)
+            {
+                for (var i = 0; i < encoded.Length; i += 2)
+                {
+                    BitConverter.TryWriteBytes(encoded.AsSpan(i), value);
+                }
+            }
+
             for (var i = 0; i < chunkCount; i++)
             {
                 Pipeline.ProcessAudioChunk(new AudioChunk { EncodedData = encoded, ServerTimestamp = _nextTimestamp });
@@ -279,25 +402,73 @@ public class AudioPipelineStreamStartTests
             }
         }
 
+        /// <summary>
+        /// Plays <paramref name="buffer"/> out through <paramref name="source"/> as an output
+        /// device would, 10 ms of local time per read, and returns the sample values heard in
+        /// thousands, each run of one value once and silence left out.
+        /// </summary>
+        public List<int> PullUntilEmpty(TimedAudioBuffer buffer, StubSampleSource source)
+        {
+            _timer.Now = Math.Max(_timer.Now, FirstTimestamp);
+
+            var heard = new List<int>();
+            var samples = new float[source.Format.SampleRate / 100 * source.Format.Channels];
+            for (var pull = 0; pull < 200 && buffer.BufferedMilliseconds > 0; pull++)
+            {
+                source.Read(samples, 0, samples.Length);
+                _timer.Now += 10_000;
+
+                foreach (var sample in samples)
+                {
+                    var value = (int)Math.Round(sample * 32_768 / 1000);
+                    if (value != 0 && (heard.Count == 0 || heard[^1] != value))
+                    {
+                        heard.Add(value);
+                    }
+                }
+            }
+
+            return heard;
+        }
+
+        /// <summary>Waits for something the pipeline does on its own time.</summary>
+        public async Task WaitForAsync(Func<bool> condition)
+        {
+            for (var i = 0; i < 500 && !condition(); i++)
+            {
+                await Task.Delay(10);
+            }
+
+            Assert.True(condition());
+        }
+
         public ValueTask DisposeAsync() => Pipeline.DisposeAsync();
     }
 
     private sealed class StubTimer : IHighPrecisionTimer
     {
-        public long GetCurrentTimeMicroseconds() => 0;
+        public long Now { get; set; }
 
-        public long GetElapsedMicroseconds(long fromTimeMicroseconds) => 0;
+        public long GetCurrentTimeMicroseconds() => Now;
+
+        public long GetElapsedMicroseconds(long fromTimeMicroseconds) => Now - fromTimeMicroseconds;
     }
 
     private sealed class StubSampleSource : IAudioSampleSource
     {
         private readonly ITimedAudioBuffer _buffer;
+        private readonly Func<long> _time;
 
-        internal StubSampleSource(ITimedAudioBuffer buffer) => _buffer = buffer;
+        internal StubSampleSource(ITimedAudioBuffer buffer, Func<long> time)
+        {
+            _buffer = buffer;
+            _time = time;
+        }
 
         public AudioFormat Format => _buffer.Format;
 
-        public int Read(float[] buffer, int offset, int count) => 0;
+        public int Read(float[] buffer, int offset, int count) =>
+            _buffer.Read(buffer.AsSpan(offset, count), _time());
     }
 
     /// <summary>Counts the lifecycle calls a restart makes and an in-place update must not.</summary>
