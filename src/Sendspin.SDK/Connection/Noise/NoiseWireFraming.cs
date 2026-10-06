@@ -457,12 +457,6 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (_reassemblyBuffer is not null)
             return Fail("non-fragment frame received while a fragmented message is in flight");
 
-        // IDs 2 and 3 were the pre-1.0 fragment types and are now reserved (spec messaging.md).
-        // A reserved ID is not a valid application binary type, so it is a silent failure like a
-        // malformed fragment rather than something surfaced to BinaryMessageParser as a message.
-        if (type is 2 or 3)
-            return Fail($"reserved binary message id {type}");
-
         return DispatchMessage(type, plainBuf.AsMemory(1, plainLen - 1));
     }
 
@@ -477,10 +471,11 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             if (plaintext.Length < 3)
                 return Fail("opening fragment missing orig_type");
             _reassemblyOrigType = plaintext.Span[2];
-            // orig_type must be a real message type: the fragment id (1) and the reserved ids
-            // (2, 3) are malformed here, the same as receiving them as a top-level frame.
-            if (_reassemblyOrigType is NoiseConstants.MessageTypeFragment or 2 or 3)
-                return Fail($"orig_type is a reserved id {_reassemblyOrigType}");
+            // An orig_type of 1 is the one malformed value (messaging.md § Fragmentation). The
+            // reserved ids 2 and 3 are merely unimplemented: they reassemble and are dropped at
+            // dispatch, so the fragment sequence is still tracked.
+            if (_reassemblyOrigType == NoiseConstants.MessageTypeFragment)
+                return Fail("orig_type is the fragment id 1");
             _reassemblyBuffer = new MemoryStream();
             data = plaintext[3..];
         }
@@ -532,6 +527,12 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
 
     private InboundFrameResult DispatchMessage(byte type, ReadOnlyMemory<byte> payload)
     {
+        // IDs 2 and 3 were the pre-1.0 fragment types and are now reserved (messaging.md). The
+        // SDK does not implement them, so they are ignored ("MUST also ignore binary messages
+        // whose ID they do not implement") rather than surfaced to BinaryMessageParser.
+        if (type is 2 or 3)
+            return InboundFrameResult.None;
+
         if (type == NoiseConstants.MessageTypeJsonBody)
         {
             string json = Encoding.UTF8.GetString(payload.Span);

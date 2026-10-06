@@ -50,20 +50,17 @@ public class FragmentationConformanceTests
         Assert.Equal(new byte[] { 8, 0x01, 0x02, 0x03 }, reassembled.Binary!.Value.ToArray());
     }
 
-    [Theory]
-    [InlineData((byte)1)]  // the fragment id itself
-    [InlineData((byte)2)]  // reserved
-    [InlineData((byte)3)]  // reserved
-    public void OpeningFragment_WithReservedOrigType_IsFatal_AndSurfacesNothing(byte origType)
+    [Fact]
+    public void OpeningFragment_WithOrigTypeOfTheFragmentId_IsFatal_AndSurfacesNothing()
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity);
         var server = CompleteHandshake(framing, identity);
 
-        // Spec: orig_type must be a real message type; the fragment id (1) and the reserved ids
-        // (2, 3) are malformed and MUST close the connection without surfacing anything.
+        // Spec: an orig_type of 1 is a malformed sequence and MUST close the connection
+        // without surfacing anything.
         var opening = Feed(framing, server,
-            [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, origType, 0xAA]);
+            [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, NoiseConstants.MessageTypeFragment, 0xAA]);
         Assert.NotNull(opening.FatalReason);
         Assert.Null(opening.Text);
         Assert.Null(opening.Binary);
@@ -74,6 +71,28 @@ public class FragmentationConformanceTests
         var end = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 0xBB]);
         Assert.Null(end.Text);
         Assert.Null(end.Binary);
+    }
+
+    [Theory]
+    [InlineData((byte)2)]
+    [InlineData((byte)3)]
+    public void FragmentedMessage_WithReservedOrigType_IsIgnored_AndConnectionStaysOpen(byte origType)
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // Spec: "The ignore rules also apply to fragmented messages." Only an orig_type of 1 is
+        // malformed; a reserved id is one the SDK does not implement, so the sequence is tracked
+        // to its last fragment and the message is not dispatched.
+        var opening = Feed(framing, server,
+            [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, origType, 0xAA]);
+        AssertIgnored(opening);
+        var end = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 0xBB]);
+        AssertIgnored(end);
+
+        // The last fragment cleared the sequence state: an ordinary message still gets through.
+        Assert.Equal(HelloJson, Feed(framing, server, [NoiseConstants.MessageTypeJsonBody, .. Encoding.UTF8.GetBytes(HelloJson)]).Text);
     }
 
     [Fact]
@@ -119,20 +138,18 @@ public class FragmentationConformanceTests
     [Theory]
     [InlineData((byte)2)]
     [InlineData((byte)3)]
-    public void ReservedBinaryId_IsSilentlyDiscarded_NotSurfaced(byte reservedId)
+    public void ReservedBinaryId_IsIgnored_AndConnectionStaysOpen(byte reservedId)
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity);
         var server = CompleteHandshake(framing, identity);
 
-        // IDs 2 and 3 were the pre-1.0 fragment types; now reserved. A reserved ID is a silent
-        // failure like a malformed fragment — the connection closes and nothing is surfaced to
-        // BinaryMessageReceived, rather than being dispatched as an application binary message.
-        var result = Feed(framing, server, [reservedId, 0xAA, 0xBB]);
+        // IDs 2 and 3 were the pre-1.0 fragment types; now reserved. Spec: "They MUST also
+        // ignore binary messages whose ID they do not implement" — nothing is surfaced to
+        // BinaryMessageReceived and the connection is not closed.
+        AssertIgnored(Feed(framing, server, [reservedId, 0xAA, 0xBB]));
 
-        Assert.NotNull(result.FatalReason);
-        Assert.Null(result.Text);
-        Assert.Null(result.Binary);
+        Assert.Equal(HelloJson, Feed(framing, server, [NoiseConstants.MessageTypeJsonBody, .. Encoding.UTF8.GetBytes(HelloJson)]).Text);
     }
 
     [Fact]
@@ -324,6 +341,13 @@ public class FragmentationConformanceTests
 
     private static InboundFrameResult Feed(NoiseWireFraming framing, TestNoiseServer server, byte[] plaintext) =>
         framing.ProcessInbound(new WireFrame(WireFrameKind.Binary, server.EncryptFrame(plaintext)));
+
+    private static void AssertIgnored(InboundFrameResult result)
+    {
+        Assert.Null(result.FatalReason);
+        Assert.Null(result.Text);
+        Assert.Null(result.Binary);
+    }
 
     private static void SurfaceFirstApplicationMessage(NoiseWireFraming framing, TestNoiseServer server)
     {
