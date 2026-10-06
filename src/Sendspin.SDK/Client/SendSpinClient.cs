@@ -506,7 +506,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger,
                 IsSourceStreamingPermitted,
                 _sourceEncoderFactory,
-                _capabilities.SourceRoleSupport?.Codec);
+                _capabilities.SourceRoleSupport?.Codec,
+                () => LastServerHello?.SourceV1Support?.SupportedCodecs);
         }
         _audioPipeline = options.AudioPipeline;
         _outputDelayStore = options.OutputDelayStore;
