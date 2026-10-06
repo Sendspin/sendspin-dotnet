@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
@@ -62,10 +63,11 @@ public class MediaDisplaySchedulingTests
             long now = Now,
             int bufferCapacity = 65_536,
             IClockSynchronizer? clockSynchronizer = null,
-            FakeAudioPipeline? audioPipeline = null)
+            FakeAudioPipeline? audioPipeline = null,
+            ILogger<SendspinClientService>? logger = null)
     {
         var timer = new FakePrecisionTimer { CurrentTime = now };
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(logger: logger, configure: options =>
             options with
             {
                 PrecisionTimer = timer,
@@ -964,6 +966,31 @@ public class MediaDisplaySchedulingTests
 
         await DrainPastAsync(client, connection, timer, Now + 1_000);
         Assert.Empty(received);
+    }
+
+    [Fact]
+    public void DisplayDropWhileUnavailable_IsLoggedOncePerUnavailablePeriod()
+    {
+        var pipe = new FakeAudioPipeline();
+        var logger = new CapturingLogger<SendspinClientService>();
+        var (client, connection, _) = SchedulingClient(audioPipeline: pipe, logger: logger);
+        using var _c = client;
+
+        // First unavailable period: two drops, one notice.
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 100));
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 200));
+
+        // Available again with no display frame in the window, then unavailable again. The latch
+        // re-arms on the availability transition, not on a frame, so the second period logs too.
+        pipe.SetState(AudioPipelineState.Playing);
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 300));
+
+        Assert.Equal(
+            2,
+            logger.MessagesAt(LogLevel.Debug)
+                .Count(m => m.Contains("Dropping artwork/visualizer binary data while unavailable", StringComparison.Ordinal)));
     }
 
     [Fact]

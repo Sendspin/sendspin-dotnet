@@ -206,8 +206,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _warnedUndefinedPlayerAudioTypes;
 
     // True once this unavailable period has logged a dropped display frame, so the drop (spec
-    // #266/#271) is reported once rather than at frame rate. Re-armed when a display frame flows
-    // again while available. A lost race costs a duplicate debug line and nothing else.
+    // #266/#271) is reported once rather than at frame rate. Re-armed when the client becomes
+    // available again and on each new connection. A lost race costs a duplicate debug line and
+    // nothing else.
     private bool _loggedDisplayDropWhileUnavailable;
 
     // Tail of the stream-lifecycle chain: the task the next lifecycle handler waits for. See
@@ -1644,8 +1645,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (rateMax <= 0)
         {
             throw new ArgumentException(
-                "A visualizer configuration that requests a periodic type (loudness, f_peak, "
-                + "spectrum) must set a positive rate_max.",
+                "A visualizer configuration must set a positive rate_max, whatever types it requests.",
                 nameof(rateMax));
         }
 
@@ -1920,6 +1920,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // to end the source stream from one read and publishing another would be the same
         // drift between a flag and the thing it describes that this publisher exists to stop.
         var current = CurrentAvailability;
+
+        // Re-arm the display-drop log when the client is available again, so the next unavailable
+        // period logs its first dropped frame even if none arrived while available.
+        if (current)
+        {
+            _loggedDisplayDropWhileUnavailable = false;
+        }
 
         // An availability input flipped while the initial client/state is still deferred (e.g. a
         // pipeline error or external-source enter inside the converging window). Send the
@@ -3825,6 +3832,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _initialClientStateSent = false;
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
+        _loggedDisplayDropWhileUnavailable = false;
 
         // Role-state readiness is per connection too (spec PR #204): the new server has received
         // nothing yet, so every role's binary channel starts closed until this connection sends
@@ -5366,8 +5374,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 DropDisplayBinaryWhileUnavailable();
                 return;
             }
-
-            _loggedDisplayDropWhileUnavailable = false;
         }
 
         switch (category)
@@ -5483,8 +5489,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Logs the first artwork/visualizer frame dropped in each unavailable period, so a server
     /// that keeps streaming display data to an unavailable client says so once rather than at
-    /// frame rate. Re-armed in <see cref="DispatchBinaryMessage"/> when a display frame flows again
-    /// while available.
+    /// frame rate. Re-armed in <see cref="PublishAvailabilityAsync"/> when the client becomes
+    /// available again, and on each new connection.
     /// </summary>
     private void DropDisplayBinaryWhileUnavailable()
     {
