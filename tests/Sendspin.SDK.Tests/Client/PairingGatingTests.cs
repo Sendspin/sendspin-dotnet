@@ -127,7 +127,7 @@ public class PairingGatingTests
 
         var init = await h.NextMessageAsync<ClientPairInitMessage>();
         Assert.Equal(1, init.Payload.PairingIndex);
-        Assert.False(window.IsOpen); // consumed by the attempt
+        Assert.True(window.IsOpen); // admits the attempt without closing
     }
 
     [Fact]
@@ -144,12 +144,12 @@ public class PairingGatingTests
     }
 
     [Fact]
-    public async Task PendingGatedAttempt_WhenTheConnectionLeavesPairing_IsDiscardedWithoutConsumingTheWindow()
+    public async Task PendingGatedAttempt_WhenTheConnectionLeavesPairing_IsDiscardedWithoutClaimingTheWindow()
     {
         // A pending attempt belongs to the activation that deferred it. Left standing, the next
         // opening makes this connection send client/pair-init outside any pairing activation
-        // AND consume the shared window -- so the operator's gesture silently does nothing for
-        // whichever connection is still legitimately pending.
+        // AND bind the shared window to itself -- so the operator's gesture silently does
+        // nothing for whichever connection is still legitimately pending.
         var window = new PairingWindow();
         await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
         h.SendPairingActivate(method: "static_pairing_code");
@@ -162,7 +162,7 @@ public class PairingGatingTests
         // path (SafeFireAndForget) time to produce the init this test says must not exist.
         await Task.Delay(200);
         Assert.Empty(h.SentOfType<ClientPairInitMessage>());
-        Assert.True(window.IsOpen);
+        Assert.True(window.TryAdmit(new object()), "the opening must still be free for another connection");
     }
 
     [Fact]
@@ -178,10 +178,10 @@ public class PairingGatingTests
     }
 
     [Fact]
-    public async Task UngatedActivation_DoesNotConsumeAnOpenWindow()
+    public async Task UngatedActivation_DoesNotClaimAnOpenWindow()
     {
         // The window is shared across every connection, and an opening is an operator gesture
-        // spent on whoever actually needs one. An ungated attempt must not claim it in passing:
+        // made for whoever actually needs one. An ungated attempt must not claim it in passing:
         // doing so would silently swallow the gesture another connection is waiting for.
         var window = new PairingWindow();
         window.Open();
@@ -190,7 +190,7 @@ public class PairingGatingTests
         h.SendPairingActivate(method: "dynamic_pairing_code");
 
         await h.NextMessageAsync<ClientPairInitMessage>();
-        Assert.True(window.IsOpen, "an ungated attempt must leave the opening for a gated one");
+        Assert.True(window.TryAdmit(new object()), "an ungated attempt must leave the opening for a gated one");
     }
 
     [Fact]
@@ -292,6 +292,89 @@ public class PairingGatingTests
         Assert.Equal(0, lockouts.GetFailures("dynamic_pairing_code"));
     }
 
+    [Fact]
+    public async Task OpenWindow_AdmitsTheNextAttemptOnTheSameConnection_WithoutAnotherGesture()
+    {
+        // An attempt the server cancels "does not count against a pairing window".
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
+        h.SendPairingActivate(method: "static_pairing_code");
+        await h.NextMessageAsync<ClientPairInitMessage>();
+
+        h.SendNonPairingActivate();
+        h.SendPairingActivate(method: "static_pairing_code");
+
+        var init = await h.NextMessageAsync<ClientPairInitMessage>();
+        Assert.Equal(2, init.Payload.PairingIndex);
+        Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
+    }
+
+    [Fact]
+    public async Task OpenWindow_AdmitsAttemptsOnlyOnTheConnectionThatCarriesItsFirst()
+    {
+        var window = new PairingWindow();
+        window.Open();
+        await using var first = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
+        await using var second = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
+
+        first.SendPairingActivate(method: "static_pairing_code");
+        await first.NextMessageAsync<ClientPairInitMessage>();
+        second.SendPairingActivate(method: "static_pairing_code");
+
+        await second.NextMessageAsync<ClientPairPendingMessage>();
+        Assert.Empty(second.SentOfType<ClientPairInitMessage>());
+    }
+
+    [Fact]
+    public async Task FifthFailedAttempt_ClosesTheWindow()
+    {
+        // The window closes on "its fifth failed attempt (the client's verification of
+        // server_kc fails)" -- and not on any of the four before it.
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
+
+        for (int attempt = 1; attempt <= 5; attempt++)
+        {
+            Assert.True(window.IsOpen, $"the window must still be open before failed attempt {attempt}");
+            h.SendPairingActivate(method: "static_pairing_code");
+            var init = await h.NextMessageAsync<ClientPairInitMessage>();
+            await h.RunServerPakeAsync("00000000", init.Payload.PairingIndex, round: 1);
+            var abort = await h.NextMessageAsync<PairAbortMessage>();
+            Assert.Equal("pairing_code_mismatch", abort.Payload.Reason);
+        }
+
+        Assert.False(window.IsOpen);
+        h.SendPairingActivate(method: "static_pairing_code");
+        await h.NextMessageAsync<ClientPairPendingMessage>();
+    }
+
+    [Fact]
+    public async Task DropOfTheConnectionCarryingTheAttempts_ClosesTheWindow()
+    {
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
+        h.SendPairingActivate(method: "static_pairing_code");
+        await h.NextMessageAsync<ClientPairInitMessage>();
+
+        h.SimulateConnectionLoss();
+
+        Assert.False(window.IsOpen);
+    }
+
+    [Fact]
+    public async Task DropOfAnotherConnection_LeavesTheWindowOpen()
+    {
+        var window = new PairingWindow();
+        window.Open();
+        await using var other = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
+
+        other.SimulateConnectionLoss();
+
+        Assert.True(window.IsOpen);
+    }
 }
 
 /// <summary>
@@ -335,6 +418,9 @@ internal sealed class PairingHarness : IAsyncDisposable
     }
 
     public ISendspinClient Client { get; }
+
+    /// <summary>The reason of the last disconnect this client asked for, if any.</summary>
+    public string? LastDisconnectReason => _connection.LastDisconnectReason;
 
     /// <summary>
     /// All parameters optional. <paramref name="dynamicPairingCode"/>/
@@ -476,6 +562,49 @@ internal sealed class PairingHarness : IAsyncDisposable
         _connection.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":[],"active_roles":[]}}""");
 
+    /// <summary>Drops the connection, as a lost socket would.</summary>
+    public void SimulateConnectionLoss() => _connection.SimulateConnectionLoss();
+
+    /// <summary>
+    /// Feeds a server/pair-init, which begins a dynamic-pairing code round. Only the first
+    /// round's carries nonce_A.
+    /// </summary>
+    public void SendServerPairInit(bool withNonce = true) =>
+        _connection.RaiseTextMessageReceived(withNonce
+            ? $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{B64Url(RandomNumberGenerator.GetBytes(32))}}}"}}"""
+            : """{"type":"server/pair-init","payload":{}}""");
+
+    /// <summary>Feeds a server/pair-auth carrying a well-formed share for an arbitrary code.</summary>
+    public void SendServerPairAuth()
+    {
+        var server = CPace.Start(
+            CPaceRole.Initiator, Encoding.ASCII.GetBytes("000000"), new byte[32], ad: PairingCodes.AdServer);
+        _connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64Url(server.PublicShare)}}}"}}""");
+    }
+
+    /// <summary>
+    /// Runs the server's half of one CPace round with <paramref name="code"/> as the code the
+    /// operator entered, up to and including server/pair-confirm. What the client answers --
+    /// client/pair-confirm, client/pair-retry or pair/abort -- is the caller's to assert on;
+    /// the returned instance verifies a client/pair-confirm.
+    /// </summary>
+    public async Task<CPace> RunServerPakeAsync(string code, int pairingIndex, uint round)
+    {
+        byte[] sid = PairingCodes.BuildSid(_session.HandshakeHash!.Value.ToArray(), (uint)pairingIndex, round);
+        var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(code), sid, ad: PairingCodes.AdServer);
+
+        _connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64Url(server.PublicShare)}}}"}}""");
+
+        var auth = await NextMessageAsync<ClientPairAuthMessage>();
+        server.Derive(Base64UrlText.Decode(auth.Payload.PakeMsg2), PairingCodes.AdClient);
+
+        _connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-confirm","payload":{"server_kc":"{{{B64Url(server.Tag())}}}"}}""");
+        return server;
+    }
+
     /// <summary>Feeds a bare server/pair-finalize, the message that persists the record.</summary>
     public void SendServerPairFinalize() =>
         _connection.RaiseTextMessageReceived("""{"type":"server/pair-finalize","payload":{}}""");
@@ -609,7 +738,7 @@ internal sealed class PairingHarness : IAsyncDisposable
     }
 
     /// <summary>Waits for the next dynamic-pairing code presentation and returns its derived pairing code.</summary>
-    private async Task<string> WaitForNextPresentedPairingCodeAsync()
+    public async Task<string> WaitForNextPresentedPairingCodeAsync()
     {
         var deadline = DateTime.UtcNow + DefaultTimeout;
         while (true)

@@ -52,7 +52,7 @@ public class PeerNullRejectionTests
     [InlineData("""{"type":"server/activate","payload":{"activities":null}}""")]
     [InlineData("""{"type":"server/activate","payload":{"activities":[],"pairing":{"method":null}}}""")]
     [InlineData("""{"type":"pair/abort","payload":{"reason":null}}""")]
-    [InlineData("""{"type":"server/pair-init","payload":{"nonce_A":null}}""")]
+    [InlineData("""{"type":"server/pair-init","payload":null}""")]
     [InlineData("""{"type":"server/pair-auth","payload":{"pake_msg_1":null}}""")]
     [InlineData("""{"type":"server/pair-confirm","payload":{"server_kc":null}}""")]
     [InlineData("""{"type":"group/update","payload":{"group_id":null}}""")]

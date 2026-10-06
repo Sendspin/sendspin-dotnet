@@ -25,6 +25,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Pairing | `ClientCapabilities.MinPairingCodeLength` removed; code lengths are fixed by the spec (6 digits dynamic, 8 static) | Low — compiler error where it was set |
 | Pairing | On the wire, `dynamic_pin` / `static_pin` are `dynamic_pairing_code` / `static_pairing_code`, `pin_length` is gone and `server/activate` carries the emission `format`; the `pair/abort` reason `pin_mismatch` is `pairing_code_mismatch` | Low — compiler error only if you matched the reason string; requires a server on the pairing-code wire |
 | Pairing | `ClientPairConfirmPayload.NonceB` renamed to `WrappedNonceB` (wire `nonce_B` → `wrapped_nonce_B`); the value is now the wrapped nonce_B — 48 bytes, base64url — not the raw nonce | Low — compiler error only if you construct `client/pair-confirm` yourself (dynamic pairing code) |
+| Pairing | A mistyped dynamic pairing code is retried in place (`client/pair-retry`) instead of aborting: `PresentPairingCodeAsync` is invoked once per round with the same code, and `ServerPairInitPayload.NonceA` is nullable (present in the first round only) | Low — a presenter must tolerate being called again for the same attempt |
 | Pairing | A `pairing` activity on a long-term (already paired) session is refused with `client/goodbye` reason `unauthorized` | Low — behavioural |
 | Pairing | `server/unpair` removes the pairing record for the server that sent it | Low — behavioural; a custom store sees a `Remove` |
 | Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
@@ -165,9 +166,9 @@ This is the same discipline `pairing_psk` has always had. **It is silent when yo
 The spec gates some pairing-code attempts on a deliberate operator gesture, and the SDK will not complete those attempts without one. Gated attempts are:
 
 - **every `static_pairing_code` attempt**;
-- a `dynamic_pairing_code` attempt once the method has **escalated** (10 recorded failures) — escalation replaces the terminal lockout earlier 10.0.0 pre-releases applied, so a method that used to become permanently unusable now becomes gesture-gated instead, and a success resets it;
+- a `dynamic_pairing_code` attempt once the method has **escalated** (10 rounds since the last verified one, counted from the moment a round's code is emitted) — escalation replaces the terminal lockout earlier 10.0.0 pre-releases applied, so a method that used to become permanently unusable now becomes gesture-gated instead, and a success resets it;
 
-The window is a property of the **device**, not of a connection: one instance is shared by every connection, and it admits exactly one attempt per opening no matter how many servers are connected.
+The window is a property of the **device**, not of a connection: one instance is shared by every connection, and an opening admits attempts only on the connection that carries its first. It stays open across attempts and closes on a completed pairing, its fifth failed attempt, the drop of that connection, `Close()`, or the expiry of its lifetime; an attempt that times out or is cancelled does not close it.
 
 ```csharp
 var window = new PairingWindow();   // one per device — share it across every connection

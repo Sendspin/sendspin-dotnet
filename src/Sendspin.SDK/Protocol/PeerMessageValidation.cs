@@ -68,7 +68,6 @@ internal static class PeerMessageValidation
 
             case ServerPairInitMessage m:
                 Require(m.Payload, "server/pair-init", "payload");
-                Require(m.Payload.NonceA, "server/pair-init", "payload.nonce_A");
                 break;
 
             case ServerPairAuthMessage m:

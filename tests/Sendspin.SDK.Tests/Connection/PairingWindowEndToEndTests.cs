@@ -59,7 +59,7 @@ public class PairingWindowEndToEndTests
         var init = await link.NextMessageAsync<ClientPairInitMessage>();
         Assert.Equal(1, init.Payload.PairingIndex);
         Assert.Null(init.Payload.CommitB); // static pairing code never commits to a nonce
-        Assert.False(window.IsOpen, "the opening is consumed by the attempt it started");
+        Assert.True(window.IsOpen, "an attempt in progress does not close the window");
 
         // The PAKE round. sid is built exactly as HandleServerPairAuth builds it (same
         // handshake hash, same pairing_index), and CPace.Start(CPaceRole.Initiator, ...) is
@@ -93,7 +93,7 @@ public class PairingWindowEndToEndTests
         await WaitUntilAsync(() => store.List().Count == 1, "the pairing record to be persisted");
         var record = Assert.Single(store.List());
         Assert.Equal(PskCategory.LongTerm, record.Category);
-        Assert.False(window.IsOpen, "the window must stay closed once the attempt has completed");
+        Assert.False(window.IsOpen, "a completed pairing closes the window");
     }
 
     // --- Harness ---

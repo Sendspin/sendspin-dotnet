@@ -825,6 +825,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         is ClientPairInitMessage
         or ClientPairAuthMessage
         or ClientPairConfirmMessage
+        or ClientPairRetryMessage
         or ClientPairFinalizeMessage
         or ClientPairPendingMessage
         or PairAbortMessage
@@ -2260,6 +2261,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // hash reset with it), so release a presenter still showing the pairing code.
             ClearPairingCodeState();
 
+            // The window closes on "drop of that connection" — the one carrying its attempts.
+            _pairingWindow?.CloseFor(this);
+
             // Streaming state is per-connection (spec): a start from the old connection
             // must not survive into the next one, so tear capture down now, without a
             // client-stream/end — the stream it would end died with the connection.
@@ -3226,17 +3230,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         bool deferred = false;
         if (gated)
         {
-            // Claiming the opening and marking this connection pending must be one step. Split,
+            // Asking for admission and marking this connection pending must be one step. Split,
             // a window opened in the gap raised StateChanged while _pendingGatedMethod was still
             // null, so OnPairingWindowStateChanged found nothing pending and returned — and this
             // connection then waited for an opening that had already been and gone (#148).
             //
-            // Locking across TryConsume is safe in this order: PairingWindow releases its own
+            // Locking across TryAdmit is safe in this order: PairingWindow releases its own
             // gate before raising StateChanged (see Open/Close), so the reverse nesting —
             // window gate held while a handler takes _attemptLock — does not exist.
             lock (_attemptLock)
             {
-                if (_pairingWindow?.TryConsume() != true)
+                if (_pairingWindow?.TryAdmit(this) != true)
                 {
                     // Signals the wait without starting the attempt, so no timeout is armed.
                     _pendingGatedMethod = method;
@@ -3270,7 +3274,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// A window opened while this connection was waiting on a gesture. Exactly one waiting
-    /// connection can claim any opening; the losers stay pending and send nothing.
+    /// connection is admitted by any opening; the losers stay pending and send nothing.
     /// </summary>
     private void OnPairingWindowStateChanged(object? sender, EventArgs e)
     {
@@ -3285,8 +3289,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             string method;
 
             // The claim — "is this connection still pending, and can it take the opening?" — has
-            // to be atomic, or two raises on different threads both consume for the same
-            // connection. TryConsume takes the window's own lock, which is safe here: the window
+            // to be atomic, or two raises on different threads both start an attempt for the
+            // same connection. TryAdmit takes the window's own lock, which is safe here: the window
             // raises this event after releasing that lock, so the two are never taken in the
             // other order.
             lock (_attemptLock)
@@ -3296,7 +3300,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     return;
                 }
 
-                if (_pairingWindow?.TryConsume() != true)
+                if (_pairingWindow?.TryAdmit(this) != true)
                 {
                     return;
                 }
@@ -3309,9 +3313,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (Exception ex)
         {
-            // The opening may already have been consumed by the time this throws, in which case
-            // the operator's gesture is spent and the attempt did not start. Nothing here can
-            // recover that; the point is that it stops being silent.
+            // The opening may already be bound to this connection by the time this throws, in
+            // which case the attempt did not start. Nothing here can recover that; the point is
+            // that it stops being silent.
             _logger.LogError(
                 ex,
                 "Pairing window state-changed handler failed; a gated attempt may not have resumed");
@@ -3319,15 +3323,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Drops a gated attempt still waiting on a gesture, without consuming the window.
+    /// Drops a gated attempt still waiting on a gesture, without claiming the window.
     /// </summary>
     /// <remarks>
     /// A pending attempt belongs to the activation that deferred it. An activation that does
     /// not declare the pairing activity ends that one, so the wait ends with it: left standing,
     /// the next opening would make this connection send client/pair-init outside any pairing
-    /// activation — and consume the shared window while doing it, so the gesture the operator
-    /// made for whichever connection is still legitimately pending would silently do nothing
-    /// for them. Not consuming the window is the other half: the opening stays available.
+    /// activation — and bind the shared window to itself while doing it, so the gesture the
+    /// operator made for whichever connection is still legitimately pending would silently do
+    /// nothing for them. Not claiming the window is the other half: the opening stays available.
     /// The superseded-by-a-newer-pairing-activation case is <see cref="HandlePairingActivate"/>'s
     /// own ClearPairingCodeState.
     /// </remarks>
@@ -3350,7 +3354,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Begins a pairing code attempt by sending client/pair-init. For dynamic pairing code it includes
     /// commit_B over a fresh nonce_B. Any gesture gating has already been satisfied by
-    /// <see cref="BeginOrDeferPairingCodeAttempt"/>, which consumed the pairing window.
+    /// <see cref="BeginOrDeferPairingCodeAttempt"/>, which had the pairing window admit it.
     /// </summary>
     private void StartPairingCodeAttempt(bool dynamic)
     {
@@ -3408,7 +3412,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 _logger.LogWarning("Pairing attempt timed out; aborting");
                 AbortPairingCode(PairAbortReasons.AttemptTimeout);
-                _pairingWindow?.Close();
             },
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
@@ -3421,18 +3424,35 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (msg is null || _pairingCodeState is not { Dynamic: true } state)
             return;
 
-        state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
-        var h = _session.HandshakeHash!.Value.ToArray();
-        string pin = PairingCodes.DerivePairingCode(
-            h, state.NonceA, state.NonceB!, PairingCodes.DynamicPairingCodeLength);
-        state.PairingCode = pin;
+        // nonce_A is "present in the first round only": that round derives the pairing code,
+        // and the binding values, and so the code, are unchanged across the rounds after it.
+        if (state.PairingCode is null)
+        {
+            if (msg.Payload.NonceA is null)
+            {
+                throw new System.Text.Json.JsonException(
+                    "the first round's server/pair-init is missing nonce_A");
+            }
 
-        // Present the pairing code through the app's out-channel. Started here (this method runs on
-        // the connection's synchronous receive dispatch, which cannot await); its completion
-        // gates client/pair-auth in SendPairAuthAfterPairingCodePresentedAsync, and its token is
-        // cancelled by ClearPairingCodeState when the attempt or the connection is torn down.
-        state.PresentPairingCodeCts = new CancellationTokenSource();
-        state.PairingCodePresented = InvokePairingCodePresenterAsync(pin, state.PresentPairingCodeCts.Token);
+            state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
+            var h = _session.HandshakeHash!.Value.ToArray();
+            state.PairingCode = PairingCodes.DerivePairingCode(
+                h, state.NonceA, state.NonceB!, PairingCodes.DynamicPairingCodeLength);
+        }
+
+        // The round counts toward the hold-back from here, where its code is emitted, so a
+        // round abandoned afterwards still counts.
+        RecordPairingCodeFailure(state.Method);
+        state.RoundBegun = true;
+
+        // Present the pairing code through the app's out-channel, again in each round. Started
+        // here (this method runs on the connection's synchronous receive dispatch, which cannot
+        // await); its completion gates client/pair-auth in
+        // SendPairAuthAfterPairingCodePresentedAsync, and its token is cancelled by
+        // ClearPairingCodeState when the attempt or the connection is torn down.
+        state.PresentPairingCodeCts ??= new CancellationTokenSource();
+        state.PairingCodePresented = InvokePairingCodePresenterAsync(
+            state.PairingCode, state.PresentPairingCodeCts.Token);
         // The PAKE begins when server/pair-auth arrives (server has the pairing code by then).
     }
 
@@ -3467,19 +3487,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // reached Encoding.ASCII.GetBytes(null) and threw ArgumentNullException, which the catch
         // filter does not name — so it escaped to the receive loop as an unexplained lost
         // connection rather than a deliberate one (#106).
-        if (state.Dynamic && state.PairingCode is null)
+        //
+        // The same holds in every later round, where the code is already derived: each CPace
+        // run is one guess at the pairing code, and server/pair-init is where the round is
+        // counted toward the hold-back. A server/pair-auth accepted without one would be a
+        // guess that is never counted.
+        if (state.Dynamic && !state.RoundBegun)
         {
             throw new System.Text.Json.JsonException(
-                "server/pair-auth arrived before server/pair-init; no dynamic pairing code has been derived");
+                "server/pair-auth arrived without the server/pair-init that begins its round");
         }
+
+        state.RoundBegun = false;
 
         // Static pairing code: the pairing code is device-printed and known from the start.
         string pin = state.Dynamic ? state.PairingCode! : (_effectiveStaticPairingCode ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
 
-        // Round 1: the static flow is always round 1, and the dynamic flow has no
-        // client/pair-retry yet (separate task), so every attempt is a single round.
-        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter, 1);
+        // Each round is a separate CPace run under its own sid. The static flow is always
+        // round 1; the dynamic flow advances the round with each client/pair-retry.
+        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter, state.Round);
 
         var cpace = CPace.Start(
             CPaceRole.Responder,
@@ -3556,7 +3583,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (!cpace.Verify(Base64UrlText.Decode(msg.Payload.ServerKc)))
         {
-            RecordPairingCodeFailure(state.Method);
+            if (state.Dynamic && !IsMethodEscalated(state.Method))
+            {
+                // "The client SHOULD retry": another round against the same pairing code. The
+                // attempt, its code and its running timeout stay in place; the server begins
+                // the next round with a new server/pair-init.
+                cpace.Dispose();
+                state.CPace = null;
+                state.Round++;
+                SendAsync(new ClientPairRetryMessage()).SafeFireAndForget(_logger);
+                return;
+            }
+
+            // A dynamic round was already counted when its code was emitted.
+            if (!state.Dynamic)
+            {
+                RecordPairingCodeFailure(state.Method);
+            }
+
+            _pairingWindow?.RecordFailedAttempt(this);
             AbortPairingCode(PairAbortReasons.PairingCodeMismatch);
             return;
         }
@@ -3602,10 +3647,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Whether the method's failure counter has reached the spec's escalation threshold. An
-    /// escalated method stays offered and still runs; every attempt is gesture-gated until a
-    /// successful server_kc verification resets the counter.
+    /// Whether the method's failure counter has reached the escalation threshold. An escalated
+    /// method stays offered and still runs; every attempt is gesture-gated, and a failed round
+    /// aborts rather than retries, until a successful server_kc verification resets the counter.
     /// </summary>
+    /// <remarks>
+    /// The counter holds failed server_kc verifications for static_pairing_code and rounds since
+    /// the last verified server_kc for dynamic_pairing_code. The spec's round limit is 20 and
+    /// lets a client hold attempts back earlier; this one does so at 10.
+    /// </remarks>
     private bool IsMethodEscalated(string method)
         => (_pairingCodeLockoutStore?.GetFailures(method) ?? 0) >= 10;
 
@@ -3625,6 +3675,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         public string? PairingCode;
         public byte[]? Sid;
         public CPace? CPace;
+
+        // The round within the attempt, 1 for the first; advanced by each client/pair-retry.
+        public uint Round = 1;
+
+        // Set by the server/pair-init that begins a dynamic round and spent by that round's
+        // server/pair-auth, so each counted round admits exactly one CPace run.
+        public bool RoundBegun;
 
         // Set for a dynamic attempt when server/pair-init arrives: the app's pairing code
         // presentation, awaited before client/pair-auth is sent, and the cancellation
@@ -3734,6 +3791,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
+        _pairingWindow?.CloseFor(this);
         PairingCompleted?.Invoke(this, ServerId);
     }
 
@@ -5656,6 +5714,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (_pairingWindow is not null)
         {
             _pairingWindow.StateChanged -= OnPairingWindowStateChanged;
+
+            // Disposal is a drop of the connection too, and no state change reports it once
+            // the handlers above are gone.
+            _pairingWindow.CloseFor(this);
         }
     }
 
