@@ -474,6 +474,7 @@ public sealed class AudioPipeline : IAudioPipeline
         await _player.InitializeAsync(format, cancellationToken);
 
         buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+        BindOutputLatencyMeasurement(buffer);
         PublishOutputLatency();
 
         // Used by push-model backends to compensate sync error for the calibrated startup latency.
@@ -887,6 +888,7 @@ public sealed class AudioPipeline : IAudioPipeline
             if (playingBuffer != null)
             {
                 playingBuffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+                BindOutputLatencyMeasurement(playingBuffer);
                 playingBuffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
                 PublishOutputLatency();
                 _logger.LogDebug(
@@ -1202,6 +1204,24 @@ public sealed class AudioPipeline : IAudioPipeline
         _decodeBuffer = Array.Empty<float>();
         _currentFormat = null;
     }
+
+    /// <summary>
+    /// Lets <paramref name="buffer"/> ask the output how long a sample handed over now will wait,
+    /// for outputs whose answer depends on how full they are.
+    /// </summary>
+    /// <remarks>
+    /// Bound to the pipeline rather than to one player instance, so it follows the player through
+    /// a restart or a format switch and answers "use the reported latency" while there is none.
+    /// </remarks>
+    private void BindOutputLatencyMeasurement(ITimedAudioBuffer buffer)
+    {
+        if (buffer is TimedAudioBuffer timedBuffer)
+        {
+            timedBuffer.CurrentOutputLatency = MeasureOutputLatencyMicroseconds;
+        }
+    }
+
+    private long? MeasureOutputLatencyMicroseconds() => _player?.GetCurrentOutputLatencyMicroseconds();
 
     private async Task DisposePlayerAsync()
     {
