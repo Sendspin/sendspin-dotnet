@@ -26,6 +26,7 @@ public class ClientHelloSupportRoleGatingTests
                     VisualizerRoleSupport = new VisualizerRoleSupport
                     {
                         BufferCapacity = 65536,
+                        RateMax = 30,
                         Types = new List<string> { VisualizerTypes.Beat },
                     },
                 },
