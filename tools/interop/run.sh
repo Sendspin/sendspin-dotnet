@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Live interop harness: runs the .NET SDK host against the aiosendspin reference server
-# pinned in .github/workflows/interop.yml (the 10.0.0 draft's commit) for one scenario. Starts the .NET host (it prints its listening port), then
+# pinned in .github/workflows/interop.yml (10.0.0) for one scenario. Starts the .NET host (it prints its listening port), then
 # dials it from the Python server, and checks both sides report success.
 #
 # Usage: run.sh <scenario>              scenario: unpaired | pairing | static-pin
@@ -42,6 +42,10 @@ grep -q '"event":"host_ready"' "$CLIENT_OUT" || { cat "$CLIENT_OUT"; fail "host 
 
 server_args=("$SCENARIO" "ws://127.0.0.1:${PORT}/sendspin")
 [ -n "$SECRET" ] && server_args+=("$SECRET")
+# A Pairing PSK attempt is bound to the client that issued the token, so the server side
+# needs the id the host announced.
+CLIENT_ID="$(grep -o '"client_id":"[^"]*"' "$CLIENT_OUT" | head -1 | cut -d'"' -f4)"
+case "$SCENARIO" in pairing|source) server_args+=("$CLIENT_ID") ;; esac
 
 # Dial from the reference server.
 if ! "$PYTHON" "$HERE/server.py" "${server_args[@]}"; then

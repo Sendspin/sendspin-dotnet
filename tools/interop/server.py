@@ -16,7 +16,7 @@ and drives one scenario against it:
                real audio over the wire.
 
 Prints JSON result lines; exits non-zero on failure. Requires the pinned aiosendspin 10.0.0
-draft commit (see .github/workflows/interop.yml).
+release (see .github/workflows/interop.yml).
 
 Usage: server.py <scenario> <client_url> [secret]
        secret is the pairing PSK as hex for 'pairing', or the 8-digit PIN for 'static-pin'.
@@ -128,6 +128,7 @@ async def main() -> int:
     scenario = sys.argv[1] if len(sys.argv) > 1 else "unpaired"
     client_url = sys.argv[2]
     secret = sys.argv[3] if len(sys.argv) > 3 else None
+    client_id = sys.argv[4] if len(sys.argv) > 4 else None
 
     loop = asyncio.get_running_loop()
     store = InMemoryServerPairingStore()
@@ -145,6 +146,9 @@ async def main() -> int:
                 attempt = PairingAttempt(
                     method=PairMethod.PAIRING_PSK,
                     pairing_psk=bytes.fromhex(secret),
+                    # A Pairing PSK token names the client it was issued by; the attempt
+                    # runs only on a connection presenting that client_id.
+                    client_id=client_id,
                 )
             else:
                 # The operator would type this in; here both sides already know it.
@@ -154,7 +158,7 @@ async def main() -> int:
                 attempt = PairingAttempt(
                     method=PairMethod.STATIC_PAIRING_CODE,
                     pairing_code_provider=supply_code,
-                    on_pair_pending=gated.set,
+                    on_pair_pending=lambda _message: gated.set(),
                 )
             server.connect_to_client(
                 client_url,
