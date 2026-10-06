@@ -449,9 +449,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         _logger.LogInformation(
             "[Buffer] Playback starting ({Path}): timeUntilStart={TimeUntilStart:F1}ms, " +
-            "buffered={BufferedMs:F0}ms, segments={Segments}, scheduledStart={Scheduled}",
+            "buffered={BufferedMs:F0}ms, segments={Segments}, scheduledStart={Scheduled}, " +
+            "preRoll={PreRollMs:F1}ms (output latency {LatencyMs:F0}ms)",
             path, timeUntilStart / 1000.0, _count / (double)_samplesPerMs,
-            _segments.Count, _scheduledStartLocalTime);
+            _segments.Count, _scheduledStartLocalTime,
+            _outputPreRollMicroseconds / 1000.0, OutputLatencyMicroseconds / 1000.0);
 
         _playbackStarted = true;
 
