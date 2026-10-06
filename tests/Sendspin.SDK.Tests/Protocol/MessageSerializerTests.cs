@@ -174,8 +174,8 @@ public class MessageSerializerTests
             ["""{"type":"client/pair-init","payload":{}}"""] = typeof(ClientPairInitMessage),
             ["""{"type":"client/pair-auth","payload":{}}"""] = typeof(ClientPairAuthMessage),
             ["""{"type":"client/pair-confirm","payload":{}}"""] = typeof(ClientPairConfirmMessage),
-            ["""{"type":"client_stream/start","payload":{}}"""] = typeof(ClientStreamStartMessage),
-            ["""{"type":"client_stream/end","payload":{}}"""] = typeof(ClientStreamEndMessage),
+            ["""{"type":"client-stream/start","payload":{}}"""] = typeof(ClientStreamStartMessage),
+            ["""{"type":"client-stream/end","payload":{}}"""] = typeof(ClientStreamEndMessage),
         };
 
         foreach (var (json, expectedType) in testCases)
@@ -488,12 +488,12 @@ public class MessageSerializerTests
         // The source role's send delegate is Func<IMessage, Task>, so T binds to the
         // interface. Resolving metadata from typeof(T) asked the source-generated context
         // for IMessage, which has no entry, and serialization died on null metadata — so
-        // client_stream/start could never be sent and the source role never streamed.
+        // client-stream/start could never be sent and the source role never streamed.
         IMessage message = new ClientStreamStartMessage();
 
         string json = MessageSerializer.Serialize(message);
 
-        Assert.Contains("\"type\":\"client_stream/start\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"type\":\"client-stream/start\"", json, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -7,7 +7,7 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Coverage for the source (line-in) role: server-driven start/stop, client_stream
+/// Coverage for the source (line-in) role: server-driven start/stop, client-stream
 /// framing, server-domain chunk timestamps (type 12), line-sense reporting, trust
 /// gating, and role deactivation.
 /// </summary>
@@ -137,7 +137,7 @@ public class SendspinClientServiceSourceTests
         // lands asynchronously.
         await WaitUntilAsync(
             () => connection.SnapshotSentMessages().Any(m => m is ClientStreamEndMessage),
-            "client_stream/end after the stop");
+            "client-stream/end after the stop");
 
         int binaryBefore = connection.SnapshotSentBinary().Count;
         capture.Emit([9, 9], 6000);
@@ -148,7 +148,7 @@ public class SendspinClientServiceSourceTests
     public async Task AvailabilityGoingFalseWhileStreaming_EndsTheStreamBeforeReportingUnavailable()
     {
         // The server rejects chunks whenever the client is not available, and it treats
-        // client_stream/end as an implicit stop. So losing availability has to close the
+        // client-stream/end as an implicit stop. So losing availability has to close the
         // input stream first: a client/state carrying available: false ahead of the end
         // leaves the server holding an open stream it has already decided to reject audio
         // for, and the chunks still in flight behind the drain are exactly that audio.
@@ -166,7 +166,7 @@ public class SendspinClientServiceSourceTests
 
         Assert.True(end >= 0, "losing availability must end the open input stream");
         Assert.True(unavailable >= 0, "the availability drop must still be reported");
-        Assert.True(end < unavailable, "client_stream/end must precede the client/state carrying available: false");
+        Assert.True(end < unavailable, "client-stream/end must precede the client/state carrying available: false");
         Assert.False(capture.Capturing, "the capture device must actually close, not merely be announced closed");
 
         // Regaining availability is not a start: the server is the only initiator, so
@@ -208,7 +208,7 @@ public class SendspinClientServiceSourceTests
         Assert.False(capture.Capturing);
         await WaitUntilAsync(
             () => connection.SnapshotSentMessages().Any(m => m is ClientStreamEndMessage),
-            "client_stream/end after the role deactivation");
+            "client-stream/end after the role deactivation");
     }
 
     [Fact]
@@ -238,7 +238,7 @@ public class SendspinClientServiceSourceTests
         Activate(connection);
 
         // Nothing streams on the strength of the previous connection's start: no
-        // capture, no unsolicited client_stream/start (a protocol error the server
+        // capture, no unsolicited client-stream/start (a protocol error the server
         // should close on), and a captured buffer goes nowhere.
         Assert.False(capture.Capturing);
         Assert.Equal(announcesBefore, connection.SnapshotSentMessages().OfType<ClientStreamStartMessage>().Count());
@@ -246,7 +246,7 @@ public class SendspinClientServiceSourceTests
         capture.Emit([5, 5], 7000);
         Assert.Equal(binaryBefore, connection.SnapshotSentBinary().Count);
 
-        // No client_stream/end either: the old stream died with its connection, and
+        // No client-stream/end either: the old stream died with its connection, and
         // this connection never opened one to end.
         Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientStreamEndMessage);
 
@@ -332,13 +332,13 @@ public class SendspinClientServiceSourceTests
         Assert.True(capture.Capturing);
         connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"stop"}}}""");
 
-        // The stop's own drain is fire-and-forget too; wait for its client_stream/end so the
+        // The stop's own drain is fire-and-forget too; wait for its client-stream/end so the
         // pipeline's serial command chain is settled before the next command is enqueued —
         // otherwise a stray "start" queued right behind an unsettled "stop" could still be
         // pending, not yet refused, when the assertion below runs.
         await WaitUntilAsync(
             () => connection.SnapshotSentMessages().Any(m => m is ClientStreamEndMessage),
-            "client_stream/end after the stop");
+            "client-stream/end after the stop");
         Assert.False(capture.Capturing);
 
         // An in-band re-key installs a fresh handshake hash. Nothing else about the

@@ -503,7 +503,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// The conversion the spec asks for wherever a server timestamp schedules something that is
     /// not audio leaving the speakers: the visualizer and artwork roles translate their display
     /// timestamps with "the offset computed from clock synchronization", and only the player
-    /// role goes on to subtract <c>static_delay_ms</c>. A visual scheduled by
+    /// role goes on to subtract <c>output_delay_ms</c>. A visual scheduled by
     /// <see cref="ServerToClientTime"/> would be shown early by exactly the hardware delay the
     /// audio is compensating for, so it would run ahead of the sound it belongs to.
     /// </remarks>

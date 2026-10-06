@@ -25,27 +25,11 @@ jobs:
         with:
           python-version: '3.13'
 
-      # Pinned to the aiosendspin commit the 10.0.0 draft release targets, because this
-      # line's pairing wire (object-keyed pair_methods, dynamic_pairing_code /
-      # static_pairing_code, fixed code lengths, the emission format on server/activate)
-      # exists only there: 9.1.1, the latest published release, rejects the client/hello
-      # outright. Move this to "aiosendspin[server]==10.0.0" the moment it is published, and
-      # thereafter bump deliberately on each release, since a release is where a spec wire
-      # change first becomes observable and the SDK's remaining deliberate wire deviations
-      # (client_stream/*, static_delay_ms, set_static_delay) are held only until the
-      # reference server adopts them. The 9.x line keeps its own pin on 9.1.1.
-      #
-      # The compatibility floor is a single one — the aiosendspin 10.0.0 line — and is
-      # documented in the README matrix, not exercised here: this job runs only against the
-      # pinned draft commit above, patched below to accept the object-keyed pair methods.
+      # Pinned to the published aiosendspin release that implements the 1.0.0-rc1 wire, the
+      # same one Music Assistant ships. Bump deliberately on each release: a release is where a
+      # spec wire change first becomes observable. The 9.x line keeps its own pin on 9.1.1.
       - name: Install aiosendspin reference server
-        run: pip install "aiosendspin[server] @ git+https://github.com/Sendspin/aiosendspin@892af8c87b453442600a4d17f9eb32862fdb5593"
-
-      # The reference server still declares supported_pair_methods as a list of
-      # descriptors; the spec (PR #179) keys them by method, which is what the SDK sends.
-      # Until aiosendspin adopts the object shape, teach the installed copy to accept it.
-      - name: Accept the spec's object-keyed pair methods in the reference server
-        run: python tools/interop/patch_aiosendspin_pair_methods.py
+        run: pip install "aiosendspin[server]==10.0.0"
 
       - name: Build interop client
         run: dotnet build tools/interop/InteropClient -c Release
@@ -59,11 +43,11 @@ jobs:
       # The only live cover for the CPace round, PSK wrapping, and the pairing window. The
       # server side fails the run if the client did not gesture-gate the attempt first, so
       # this also pins the gating policy rather than just "pairing worked".
-      - name: Static PIN round-trip (gesture-gated attempt, CPace, wrapped PSK)
+      - name: Static pairing code round-trip (gesture-gated attempt, CPace, wrapped PSK)
         run: bash tools/interop/run.sh static-pin
 
       # Slower than the others by design: the client withholds its initial client/state
       # until clock sync converges, which takes ~30s of burst sampling, and the server
       # discards source chunks until that state arrives.
-      - name: Source streaming (server start command, client_stream/start, decoded audio)
+      - name: Source streaming (server start command, client-stream/start, decoded audio)
         run: bash tools/interop/run.sh source

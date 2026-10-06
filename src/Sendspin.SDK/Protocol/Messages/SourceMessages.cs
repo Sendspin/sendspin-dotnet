@@ -16,7 +16,7 @@ public sealed class ClientStreamStartMessage : IMessageWithPayload<ClientStreamS
     public ClientStreamStartPayload Payload { get; set; } = new();
 }
 
-/// <summary>Payload of <c>client_stream/start</c>.</summary>
+/// <summary>Payload of <c>client-stream/start</c>.</summary>
 public sealed class ClientStreamStartPayload
 {
     /// <summary>The source stream format.</summary>
@@ -24,7 +24,7 @@ public sealed class ClientStreamStartPayload
     public SourceStreamFormat Source { get; set; } = new();
 }
 
-/// <summary>The captured-input format announced in <c>client_stream/start</c>.</summary>
+/// <summary>The captured-input format announced in <c>client-stream/start</c>.</summary>
 public sealed class SourceStreamFormat
 {
     /// <summary>Codec: 'opus', 'flac', or 'pcm'.</summary>
@@ -51,7 +51,7 @@ public sealed class SourceStreamFormat
 
 /// <summary>
 /// Ends the current input stream. No more source audio chunks are sent until the next
-/// <c>client_stream/start</c>.
+/// <c>client-stream/start</c>.
 /// </summary>
 public sealed class ClientStreamEndMessage : IMessage
 {

@@ -9,9 +9,18 @@ namespace Sendspin.SDK.Protocol;
 public static class BinaryMessageParser
 {
     /// <summary>
-    /// Minimum binary message size (1 byte type + 8 bytes timestamp).
+    /// Minimum binary message size (1 byte type + 8 bytes timestamp). The header shared by the
+    /// artwork and visualizer roles; the player audio chunk adds <c>send_ahead</c> on top of it
+    /// (see <see cref="PlayerAudioHeaderSize"/>).
     /// </summary>
     public const int MinimumMessageSize = 9;
+
+    /// <summary>
+    /// Player audio chunk header size: 1 byte type + 8 bytes timestamp + 4 bytes
+    /// <c>send_ahead</c> (spec roles/player/v1.md). Only the player role carries
+    /// <c>send_ahead</c>; artwork and visualizer keep the <see cref="MinimumMessageSize"/> header.
+    /// </summary>
+    public const int PlayerAudioHeaderSize = 13;
 
     /// <summary>
     /// Parses a binary message header.
@@ -48,22 +57,28 @@ public static class BinaryMessageParser
     /// audio chunk: <c>player@v1</c> defines a single slot, so types 5-7 — allocated to the role
     /// but undefined — return null rather than a chunk claiming to be playable.
     /// </summary>
+    /// <remarks>
+    /// The player chunk header is <c>[type][timestamp int64 BE][send_ahead uint32 BE]</c> with
+    /// audio from byte 13 (spec PR #167), so it does not go through <see cref="TryParse"/> (the
+    /// 9-byte artwork/visualizer header). A chunk shorter than the header is rejected.
+    /// </remarks>
     public static AudioChunk? ParseAudioChunk(ReadOnlySpan<byte> data)
     {
-        if (!TryParse(data, out var type, out var timestamp, out var payload))
+        if (data.Length < PlayerAudioHeaderSize)
         {
             return null;
         }
 
-        if (type != BinaryMessageTypes.PlayerAudio0)
+        if (data[0] != BinaryMessageTypes.PlayerAudio0)
         {
             return null;
         }
 
         return new AudioChunk
         {
-            ServerTimestamp = timestamp,
-            EncodedData = payload.ToArray()
+            ServerTimestamp = BinaryPrimitives.ReadInt64BigEndian(data.Slice(1, 8)),
+            SendAhead = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(9, 4)),
+            EncodedData = data.Slice(PlayerAudioHeaderSize).ToArray()
         };
     }
 
@@ -190,6 +205,15 @@ public sealed class AudioChunk
     /// Server timestamp when this audio should be played (microseconds).
     /// </summary>
     public long ServerTimestamp { get; init; }
+
+    /// <summary>
+    /// Microseconds from the server's transmission of this chunk to its
+    /// <see cref="ServerTimestamp"/> (spec <c>send_ahead</c>). Saturates rather than wrapping:
+    /// <c>0</c> when the server transmits at or after the timestamp, <c>0xFFFFFFFF</c> when the
+    /// true lead exceeds the field. Per spec it carries no scheduling meaning — players use it
+    /// only to measure arrival delay — so it is exposed here and fed to nothing else.
+    /// </summary>
+    public uint SendAhead { get; init; }
 
     /// <summary>
     /// Encoded audio data (Opus/FLAC/PCM).
