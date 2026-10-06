@@ -28,7 +28,7 @@ public class DisabledPairingMethodPskTests
         store.Upsert(new PairingRecord(psk, PskCategory.Pairing));
         var resolver = new RecordPskResolver(store, () => false);
 
-        var result = Handshake(SendspinIdentity.Generate(), resolver, psk, out var framing);
+        var result = Handshake(SendspinIdentity.Generate(), resolver, psk, out var framing, pskCategory: "pr");
 
         // A lookup miss, not a late refusal: the excluded record never keys the session, so
         // there is no Pairing-trust channel to refuse a pairing activation on later.
@@ -49,11 +49,11 @@ public class DisabledPairingMethodPskTests
         var resolver = new RecordPskResolver(store, () => enabled);
         var identity = SendspinIdentity.Generate();
 
-        Handshake(identity, resolver, psk, out var disabled);
+        Handshake(identity, resolver, psk, out var disabled, pskCategory: "pr");
         Assert.Equal(PskCategory.Sentinel, disabled.MatchedPsk!.Category);
 
         enabled = true;
-        var result = Handshake(identity, resolver, psk, out var framing);
+        var result = Handshake(identity, resolver, psk, out var framing, pskCategory: "pr");
 
         Assert.Null(result.FatalReason);
         Assert.Equal(PskCategory.Pairing, framing.MatchedPsk!.Category);
@@ -87,7 +87,7 @@ public class DisabledPairingMethodPskTests
         var store = new InMemoryPairingRecordStore();
         store.Upsert(new PairingRecord(psk, PskCategory.Pairing));
 
-        var resolved = new RecordPskResolver(store).Resolve(NoiseConstants.DerivePskId(psk));
+        var resolved = new RecordPskResolver(store).Resolve(NoiseConstants.DerivePskId(psk), PskCategory.Pairing);
 
         Assert.Equal(PskCategory.Pairing, resolved!.Category);
     }
@@ -116,7 +116,7 @@ public class DisabledPairingMethodPskTests
         await using (client)
         {
             var framing = (NoiseWireFraming)client.Session;
-            var server = new TestNoiseServer(identity.PublicKey, psk);
+            var server = new TestNoiseServer(identity.PublicKey, psk, pskCategory: "pr");
             var clientInit = Assert.Single(framing.Start());
             var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
             framing.ProcessInbound(WireFrame.FromText(serverInit));
@@ -136,10 +136,10 @@ public class DisabledPairingMethodPskTests
     /// message whose psk_id the resolver is asked about.
     /// </summary>
     private static InboundFrameResult Handshake(
-        SendspinIdentity identity, INoisePskResolver resolver, byte[] serverPsk, out NoiseWireFraming framing)
+        SendspinIdentity identity, INoisePskResolver resolver, byte[] serverPsk, out NoiseWireFraming framing, string? pskCategory = null)
     {
         framing = new NoiseWireFraming(identity, resolver);
-        var server = new TestNoiseServer(identity.PublicKey, serverPsk);
+        var server = new TestNoiseServer(identity.PublicKey, serverPsk, pskCategory: pskCategory);
         var clientInit = Assert.Single(framing.Start());
         var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
         framing.ProcessInbound(WireFrame.FromText(serverInit));

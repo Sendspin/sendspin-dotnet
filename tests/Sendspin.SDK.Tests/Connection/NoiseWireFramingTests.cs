@@ -120,6 +120,87 @@ public class NoiseWireFramingTests
     }
 
     /// <summary>
+    /// messaging.md § noise/handshake: a <c>psk_category</c> outside the three defined codes is a
+    /// malformed inner payload — a silent failure, so the client sends no message 2.
+    /// </summary>
+    [Fact]
+    public void InitialHandshake_UnknownPskCategory_IsFatal_AndSendsNothing()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = new TestNoiseServer(
+            identity.PublicKey, NoiseConstants.SentinelPsk.ToArray(), pskCategory: "xx");
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var result = framing.ProcessInbound(WireFrame.FromText(msg1));
+
+        Assert.Contains("unknown psk_category xx", result.FatalReason);
+        Assert.Null(result.FatalKind);
+        Assert.Null(result.Replies);
+        Assert.False(framing.IsTransportReady);
+    }
+
+    /// <summary>
+    /// connection.md § Sentinel Fallback: holding the referenced PSK "under a different category
+    /// than the declared <c>psk_category</c>" is a lookup miss, so the initial handshake falls
+    /// back to the Sentinel instead of keying the session with the mis-categorised record.
+    /// </summary>
+    [Fact]
+    public void InitialHandshake_PskHeldUnderDifferentCategory_FallsBackToTheSentinel()
+    {
+        var identity = SendspinIdentity.Generate();
+        byte[] psk = RandomNumberGenerator.GetBytes(32);
+        var store = new InMemoryPairingRecordStore();
+        store.Upsert(new PairingRecord(psk, PskCategory.Pairing));
+        var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
+
+        // The server names the client's pairing PSK but declares it long-term, then verifies
+        // message 2 against the Sentinel as the spec has it do on a mismatch.
+        var server = new TestNoiseServer(
+            identity.PublicKey,
+            NoiseConstants.SentinelPsk.ToArray(),
+            advertisedPskId: NoiseConstants.DerivePskId(psk),
+            pskCategory: "lt");
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var result = framing.ProcessInbound(WireFrame.FromText(msg1));
+
+        Assert.Null(result.FatalReason);
+        server.CompleteHandshake(Assert.Single(result.Replies!).PayloadAsText());
+        Assert.Equal(PskCategory.Sentinel, framing.MatchedPsk!.Category);
+    }
+
+    /// <summary>
+    /// The same category miss during a re-handshake fails, as any other miss there does.
+    /// </summary>
+    [Fact]
+    public void Rehandshake_PskHeldUnderDifferentCategory_IsFatal()
+    {
+        var identity = SendspinIdentity.Generate();
+        byte[] psk = RandomNumberGenerator.GetBytes(32);
+        var store = new InMemoryPairingRecordStore();
+        store.Upsert(new PairingRecord(psk, PskCategory.LongTerm));
+        var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+
+        var clientInit = Assert.Single(framing.Start());
+        var (serverInit, msg1) = server.Respond(clientInit.PayloadAsText());
+        framing.ProcessInbound(WireFrame.FromText(serverInit));
+        var hs = framing.ProcessInbound(WireFrame.FromText(msg1));
+        server.CompleteHandshake(Assert.Single(hs.Replies!).PayloadAsText());
+
+        var result = framing.ProcessInbound(
+            new WireFrame(WireFrameKind.Binary, server.StartRehandshake(psk, pskCategory: "pr")));
+
+        Assert.Contains($"no PSK matches psk_id {NoiseConstants.DerivePskId(psk)}", result.FatalReason);
+        Assert.False(framing.IsTransportReady);
+    }
+
+    /// <summary>
     /// The fallback is scoped to the initial handshake: connection.md § Sentinel Fallback has a
     /// miss during a re-handshake fail as before. The channel is already authenticated by then,
     /// so there is nothing for the Sentinel to rescue — substituting it would silently downgrade
@@ -622,7 +703,7 @@ public class NoiseWireFramingTests
 
     private sealed class BoundResolver(string serverId) : INoisePskResolver
     {
-        public NoisePsk? Resolve(string pskId) =>
+        public NoisePsk? Resolve(string pskId, PskCategory category) =>
             new(NoiseConstants.SentinelPsk.ToArray(), PskCategory.LongTerm, serverId);
     }
 }

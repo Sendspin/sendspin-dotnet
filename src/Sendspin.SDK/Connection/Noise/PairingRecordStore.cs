@@ -521,17 +521,17 @@ internal sealed class RecordPskResolver : INoisePskResolver
     /// marked used by the client once a decrypted message proves the session
     /// authenticated.
     /// </remarks>
-    public NoisePsk? Resolve(string pskId)
+    public NoisePsk? Resolve(string pskId, PskCategory category)
     {
         foreach (var record in _store.List())
         {
-            if (record.PskId == pskId && IsCandidate(record))
+            if (record.PskId == pskId && record.Category == category && IsCandidate(record))
             {
                 return new NoisePsk(record.Psk, record.Category, record.ServerId);
             }
         }
 
-        return SentinelPskResolver.Instance.Resolve(pskId);
+        return SentinelPskResolver.Instance.Resolve(pskId, category);
     }
 
     /// <summary>

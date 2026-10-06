@@ -309,6 +309,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         // a malformed message 1, an unresolvable psk_id, a psk_id bound to another server --
         // otherwise leaves a live Curve25519 private key on the heap until GC (#102).
         string pskId;
+        PskCategory pskCategory;
         byte[] probeKey = _identity.PrivateKey.ToArray();
         try
         {
@@ -322,18 +323,30 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             using var payloadDoc = JsonDocument.Parse(Encoding.UTF8.GetString(probeBuf, 0, probeLen));
             pskId = payloadDoc.RootElement.GetProperty("psk_id").GetString()
                 ?? throw new FormatException("psk_id missing");
+
+            // messaging.md § noise/handshake: a psk_category outside the three defined codes is
+            // a malformed inner payload, hence a silent failure like any other throw in here.
+            string? categoryCode = payloadDoc.RootElement.GetProperty("psk_category").GetString();
+            pskCategory = categoryCode switch
+            {
+                "lt" => PskCategory.LongTerm,
+                "pr" => PskCategory.Pairing,
+                "sn" => PskCategory.Sentinel,
+                _ => throw new FormatException($"unknown psk_category {categoryCode}"),
+            };
         }
         finally
         {
             CryptographicOperations.ZeroMemory(probeKey);
         }
 
-        var resolved = _pskResolver.Resolve(pskId);
+        var resolved = _pskResolver.Resolve(pskId, pskCategory);
         if (resolved is null)
         {
             // Sentinel Fallback (connection.md § Sentinel Fallback): a psk_id that matches
             // nothing means the server referenced a credential this client cannot use -- a lost
-            // pairing record, an interrupted pairing finalize, or a PSK for a pairing method the
+            // pairing record, an interrupted pairing finalize, a PSK held under a different
+            // category than the declared psk_category, or a PSK for a pairing method the
             // client has disabled. On the INITIAL handshake the client completes message 2 with
             // the published Sentinel PSK instead of failing; the server recognises that as an
             // authenticated credential-mismatch signal and the session proceeds as an ordinary
@@ -348,7 +361,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             if (!isInitialHandshake)
                 return Fail($"no PSK matches psk_id {pskId}");
 
-            resolved = SentinelPskResolver.Instance.Resolve(NoiseConstants.SentinelPskId)!;
+            resolved = SentinelPskResolver.Instance.Resolve(NoiseConstants.SentinelPskId, PskCategory.Sentinel)!;
         }
 
         // A misbinding, not a miss: the psk_id DID match a stored-pubkey record, but that record
