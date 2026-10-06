@@ -100,8 +100,9 @@ async def drive_player(server, state_timeout: StateTimeoutWatch) -> int:
         emit(event="client_never_became_available")
         return 1
 
-    # The wait above approximates the client's initial client/state delay: it starts up to
-    # one polling interval after the activation went out, and ends up to one after the state.
+    # seconds_after_pairing is the time elapsed since the pairing record was persisted. It
+    # over-states the activation-to-client/state latency by the re-handshake that precedes the
+    # activation.
     emit(event="client_available", seconds_after_pairing=round(time.monotonic() - paired_at, 2))
     if state_timeout.fired:
         emit(event="initial_client_state_late")
