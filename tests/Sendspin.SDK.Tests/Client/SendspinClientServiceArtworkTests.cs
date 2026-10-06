@@ -1,30 +1,56 @@
-using System.Buffers.Binary;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
+using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
+using Sendspin.SDK.Tests.Audio;
 
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Coverage for the artwork role: multi-channel client/state declaration, per-channel binary
-/// dispatch (image + clear) with channel/timestamp, and the dynamic channel reconfiguration path
-/// that spec PR #195 moved out of stream/request-format.
+/// Coverage for the artwork role: multi-channel client/state declaration, the announce/part/cancel
+/// image transfer (spec PRs #188, #266) with its channel/timestamp plumbing and protocol errors,
+/// and the dynamic channel reconfiguration path that spec PR #195 moved out of
+/// stream/request-format.
 /// </summary>
 public class SendspinClientServiceArtworkTests
 {
-    private static byte[] ArtworkBinary(byte type, long timestamp, byte[] image)
-    {
-        var buf = new byte[9 + image.Length];
-        buf[0] = type;
-        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1, 8), timestamp);
-        image.CopyTo(buf, 9);
-        return buf;
-    }
-
     private static List<ArtworkChannelState> StateChannels(FakeSendspinConnection connection)
     {
         var state = connection.SentMessages.OfType<ClientStateMessage>().Last();
         Assert.NotNull(state.Payload.Artwork);
         return state.Payload.Artwork.Channels;
+    }
+
+    /// <summary>
+    /// Client whose local clock is frozen at zero and maps server time to itself, so an image
+    /// stamped ahead of zero stays pending until the test moves the clock.
+    /// </summary>
+    private static (SendspinClientService Client, FakeSendspinConnection Connection, FakePrecisionTimer Timer)
+        SchedulingClient()
+    {
+        var timer = new FakePrecisionTimer();
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options with { PrecisionTimer = timer, ClockSynchronizer = new ConvergedClockSynchronizer() });
+        return (client, connection, timer);
+    }
+
+    /// <summary>
+    /// Client whose clock is converged, so it is available — an unavailable client discards image
+    /// data — and the external-source flag alone decides otherwise.
+    /// </summary>
+    private static (SendspinClientService Client, FakeSendspinConnection Connection) SyncedClient()
+    {
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options with { ClockSynchronizer = new FakeClockSynchronizer { IsConverged = true } });
+        return (client, connection);
+    }
+
+    private static void AssertClosedOnProtocolError(FakeSendspinConnection connection)
+    {
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+
+        // The goodbye reason list has no protocol-error value; see InboundMessageHardeningTests.
+        Assert.Equal("unauthorized", connection.LastDisconnectReason);
     }
 
     /// <summary>
@@ -196,7 +222,7 @@ public class SendspinClientServiceArtworkTests
         client.ArtworkReceived += (_, e) => received = e;
 
         var image = new byte[] { 1, 2, 3, 4 };
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(type, timestamp, image));
+        connection.RaiseArtwork(type, timestamp, image);
 
         Assert.NotNull(received);
         Assert.Equal(expectedChannel, received.Channel);
@@ -205,24 +231,64 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
-    public void MalformedArtworkBinary_RaisesNoEvent()
+    public void MultiPartImage_IsRaisedOnceTheReceivedDataReachesTotalSize()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
-        var fired = false;
-        client.ArtworkReceived += (_, _) => fired = true;
-        client.ArtworkCleared += (_, _) => fired = true;
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
 
-        // Shorter than the 9-byte header (type + 8-byte timestamp): not a valid frame, and
-        // distinct from a valid empty (clear) frame which is exactly 9 bytes.
-        connection.RaiseBinaryMessageReceived(new byte[] { BinaryMessageTypes.Artwork0, 1, 2, 3 });
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork1, 777, 5));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork1, 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork1, 3, 4));
 
-        Assert.False(fired);
+        // "The transfer is complete when the received data reaches total_size", and not before.
+        Assert.Empty(received);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork1, 5));
+
+        var image = Assert.Single(received);
+        Assert.Equal(1, image.Channel);
+        Assert.Equal(777, image.Timestamp);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, image.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
     }
 
     [Fact]
-    public void EmptyArtworkBinary_RaisesClearedWithChannel()
+    public void OverSizeAnnounce_IsCountedAndDiscarded_AndTheNextImageIsDelivered()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        var oversize = ArtworkTransfer.MaxImageBytes + 1;
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, oversize));
+
+        // A part is at most MaxArtworkMessageSize bytes, so the image arrives in many.
+        var part = new byte[BinaryMessageParser.MaxArtworkMessageSize - BinaryMessageParser.ArtworkPrefixSize];
+        for (long sent = 0; sent < oversize;)
+        {
+            var next = (int)Math.Min(part.Length, oversize - sent);
+            connection.RaiseBinaryMessageReceived(
+                ArtworkWire.Part(BinaryMessageTypes.Artwork0, part.AsSpan(0, next).ToArray()));
+            sent += next;
+        }
+
+        Assert.Empty(received);
+        Assert.Null(connection.LastDisconnectReason);
+
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 2, new byte[] { 7, 8 });
+
+        var image = Assert.Single(received);
+        Assert.Equal(new byte[] { 7, 8 }, image.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void ZeroSizeAnnounce_RaisesClearedWithChannel_AndLeavesNoTransferInFlight()
     {
         // A converged clock keeps this default (player) client available; display binary is
         // dropped while unavailable (spec #266/#271).
@@ -235,13 +301,288 @@ public class SendspinClientServiceArtworkTests
         client.ArtworkCleared += (_, e) => cleared = e;
         client.ArtworkReceived += (_, e) => received = e;
 
-        // Channel 2 clear: type byte + timestamp, no image data.
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(BinaryMessageTypes.Artwork2, 777, Array.Empty<byte>()));
+        // Channel 2 clear: an announce with total_size 0 "completes immediately, with no parts".
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork2, 777, 0));
 
         Assert.Null(received);
         Assert.NotNull(cleared);
         Assert.Equal(2, cleared.Channel);
         Assert.Equal(777, cleared.Timestamp);
+
+        // Nothing is in flight after it, so the next announce is in sequence.
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 778, new byte[] { 9 });
+
+        Assert.NotNull(received);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void Cancel_DiscardsACompletePendingImage()
+    {
+        // The local clock stays at zero, so an image stamped ahead of it is complete but pending.
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 5_000_000, new byte[] { 1 });
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Cancel(BinaryMessageTypes.Artwork0));
+
+        // A past-stamped image on another channel is raised inline only when nothing is still
+        // pending, so its arrival is also the proof that the cancelled image is gone.
+        timer.CurrentTime = 10_000_000;
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork1, 1, new byte[] { 2 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(1, only.Channel);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void Cancel_EndsTheTransferInFlightOnItsChannel()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 4));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Cancel(BinaryMessageTypes.Artwork0));
+
+        // "To replace an image still in flight, it cancels that transfer first": the announce
+        // that follows is in sequence, and the image it carries is not joined to the old parts.
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 2, new byte[] { 7, 8 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 7, 8 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void Cancel_OnAnotherChannel_LeavesTheTransferInFlight()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        ArtworkReceivedEventArgs? received = null;
+        client.ArtworkReceived += (_, e) => received = e;
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Cancel(BinaryMessageTypes.Artwork1));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2));
+
+        Assert.NotNull(received);
+        Assert.Equal(new byte[] { 1, 2 }, received.ImageData);
+    }
+
+    [Fact]
+    public void Announce_DiscardsTheChannelsPendingImage_BeforeItsOwnTransferCompletes()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 5_000_000, new byte[] { 1 });
+
+        // "An announce discards that channel's pending image" — the announce, not the image
+        // it opens, which here never arrives.
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 6_000_000, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Cancel(BinaryMessageTypes.Artwork0));
+
+        timer.CurrentTime = 10_000_000;
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork1, 1, new byte[] { 2 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(1, only.Channel);
+    }
+
+    [Fact]
+    public async Task UnavailableClient_DiscardsImageData_ButStillCountsItsBytes()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        await client.EnterExternalSourceAsync();
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 1, new byte[] { 1, 2, 3 });
+
+        Assert.Empty(received);
+
+        // The discarded image's bytes were counted toward total_size, so its transfer completed:
+        // were it still in flight, this announce would be a protocol error.
+        await client.ExitExternalSourceAsync();
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 2, new byte[] { 4 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 4 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public async Task ImageStartedWhileUnavailable_IsNotRaised_EvenIfTheClientReturnsMidTransfer()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var fired = false;
+        client.ArtworkReceived += (_, _) => fired = true;
+
+        await client.EnterExternalSourceAsync();
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1));
+        await client.ExitExternalSourceAsync();
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 2));
+
+        // Half the image was thrown away; what is left is not an image.
+        Assert.False(fired);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public async Task ImageStartedWhileAvailable_IsNotRaised_IfTheClientGoesUnavailableMidTransfer()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1));
+        await client.EnterExternalSourceAsync();
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 2));
+
+        Assert.Empty(received);
+
+        // The part that arrived while unavailable was still counted, so the transfer completed
+        // and the announce that follows is in sequence rather than a reason to close.
+        await client.ExitExternalSourceAsync();
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 2, new byte[] { 4 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 4 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public async Task UnavailableClient_StillAppliesAClear()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        ArtworkClearedEventArgs? cleared = null;
+        client.ArtworkCleared += (_, e) => cleared = e;
+
+        await client.EnterExternalSourceAsync();
+
+        // An empty image has no data to discard, and the server will not send the clear twice.
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 0));
+
+        Assert.NotNull(cleared);
+    }
+
+    [Fact]
+    public void PartWithNoTransferInFlight_ClosesTheConnection()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2, 3));
+
+        AssertClosedOnProtocolError(connection);
+    }
+
+    [Fact]
+    public void PartOnAChannelOtherThanTheTransfers_ClosesTheConnection()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 4));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork1, 1, 2));
+
+        AssertClosedOnProtocolError(connection);
+    }
+
+    [Fact]
+    public void PartExtendingPastTotalSize_ClosesTheConnection_AndRaisesNoImage()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var fired = false;
+        client.ArtworkReceived += (_, _) => fired = true;
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2, 3));
+
+        Assert.False(fired);
+        AssertClosedOnProtocolError(connection);
+    }
+
+    [Fact]
+    public void AnnounceWhileATransferIsInFlight_ClosesTheConnection()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 4));
+
+        // On any channel: at most one transfer is in flight across all of the role's channels.
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork1, 1, 4));
+
+        AssertClosedOnProtocolError(connection);
+    }
+
+    [Theory]
+    [InlineData(new byte[] { BinaryMessageTypes.Artwork0 })]
+    [InlineData(new byte[] { BinaryMessageTypes.Artwork0, 0x04 })]
+    [InlineData(new byte[] { BinaryMessageTypes.Artwork0, 0x03 })]
+    [InlineData(new byte[] { BinaryMessageTypes.Artwork0, 0x01, 0 })]
+    [InlineData(new byte[] { BinaryMessageTypes.Artwork0, 0x02, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0 })]
+    public void MalformedArtworkMessage_ClosesTheConnection(byte[] message)
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var fired = false;
+        client.ArtworkReceived += (_, _) => fired = true;
+        client.ArtworkCleared += (_, _) => fired = true;
+
+        connection.RaiseBinaryMessageReceived(message);
+
+        Assert.False(fired);
+        AssertClosedOnProtocolError(connection);
+    }
+
+    [Fact]
+    public void TransferInFlight_DoesNotSurviveTheConnection()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        ArtworkReceivedEventArgs? received = null;
+        client.ArtworkReceived += (_, e) => received = e;
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 4));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2));
+
+        connection.SimulateConnectionLoss();
+
+        // The next connection's server knows nothing of the old transfer: its first announce
+        // must be in sequence, and its image must not be joined to the old parts.
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 2, new byte[] { 7, 8 });
+
+        Assert.NotNull(received);
+        Assert.Equal(new byte[] { 7, 8 }, received.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
     }
 
     [Fact]

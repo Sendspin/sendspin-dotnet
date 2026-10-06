@@ -25,6 +25,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     // Holds visualizer frames and artwork until their display timestamps (#198, #199).
     private readonly MediaDisplayScheduler _displayScheduler;
+
+    // Reassembles the artwork image transfer in flight; a complete image goes to the scheduler.
+    private readonly ArtworkTransfer _artworkTransfer = new();
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IOutputDelayStore? _outputDelayStore;
     private readonly INoiseSessionInfo _session;
@@ -2275,6 +2278,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // metadata and color updates too — the first server/state of the next connection
             // has to carry each role's full state anyway.
             _displayScheduler.Flush();
+
+            // A transfer the old connection left partly received will never get its remaining
+            // parts, and would make the next connection's first announce a protocol error.
+            _artworkTransfer.Reset();
         }
 
         // Clean up client state on full disconnection
@@ -5270,6 +5277,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             if (!SameArtworkChannelConfiguration(wasConfigured, isConfigured))
             {
+                // The channel's pending image is the transfer in flight until it completes,
+                // and the one the scheduler holds after.
+                _artworkTransfer.Cancel((byte)channel);
                 _displayScheduler.FlushArtworkChannel(channel);
             }
         }
@@ -5437,7 +5447,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // hold no stream, and spec #135 (pending merge) ties a pending metadata or color
             // update to nothing a stream teardown says.
             _displayScheduler.FlushVisualizer();
-            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
+            FlushArtwork(endingStream);
             return;
         }
 
@@ -5448,12 +5458,43 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (roles.Contains("artwork"))
         {
-            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
+            FlushArtwork(endingStream);
         }
+    }
+
+    /// <summary>
+    /// Discards the pending artwork a <c>stream/end</c> or <c>stream/clear</c> reaches, and for a
+    /// <c>stream/end</c> also clears what is on display and ends the transfer in flight.
+    /// </summary>
+    /// <remarks>
+    /// "On <c>stream/end</c> for the artwork role, clients MUST clear the current image and
+    /// discard any pending image" — and a channel's pending image runs from its announce, so one
+    /// still arriving is discarded with the rest; left alone it would complete and go on display
+    /// after the application was told to clear. A <c>stream/clear</c> leaves the transfer be:
+    /// artwork is not in that message's role vocabulary, so the server goes on sending the
+    /// image's parts, and forgetting the transfer would turn each into a protocol error.
+    /// </remarks>
+    private void FlushArtwork(bool endingStream)
+    {
+        if (endingStream)
+        {
+            _artworkTransfer.Reset();
+        }
+
+        _displayScheduler.FlushArtwork(raiseCleared: endingStream);
     }
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
     {
+        // Artwork is routed on its type byte alone: it does not share the timestamped header
+        // TryParse reads — a cancel is two bytes — and a length that header would reject is,
+        // for artwork, a protocol error to close over rather than a frame to drop.
+        if (data.Length > 0 && BinaryMessageTypes.IsArtwork(data.Span[0]))
+        {
+            DispatchBinaryMessage(BinaryMessageCategory.Artwork, data.Span[0], 0, default, data);
+            return;
+        }
+
         if (!BinaryMessageParser.TryParse(data.Span, out var type, out var timestamp, out var payload))
         {
             _logger.LogWarning("Failed to parse binary message");
@@ -5463,11 +5504,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var category = BinaryMessageParser.GetCategory(type);
 
         // No catch here, deliberately: every binary parser is Try-style (a malformed frame
-        // parses to null and is dropped above or inside DispatchBinaryMessage), so nothing
-        // a hostile payload produces can throw. Anything that does throw — a buggy event
-        // subscriber or pipeline — is a bug in our own handling and must propagate so the
-        // receive loop surfaces it as a lost connection, not be collapsed into a log line
-        // (#88 item 2).
+        // parses to null and is dropped above or inside DispatchBinaryMessage, or for artwork
+        // closes the connection there), so nothing a hostile payload produces can throw.
+        // Anything that does throw — a buggy event subscriber or pipeline — is a bug in our own
+        // handling and must propagate so the receive loop surfaces it as a lost connection, not
+        // be collapsed into a log line (#88 item 2).
         DispatchBinaryMessage(category, type, timestamp, payload, data);
     }
 
@@ -5485,16 +5526,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         // Spec #266/#271 (SHOULD): while this client reports available: false the server should not
-        // stream it display data, so an artwork or visualizer frame that arrives anyway is dropped
-        // before it is scheduled — its timings belong to a state this client is not in. The
-        // connection stays open, and the player-audio arm keeps its own handling.
-        if (category is BinaryMessageCategory.Artwork or BinaryMessageCategory.Visualizer)
+        // stream it display data, so a visualizer frame that arrives anyway is dropped before it
+        // is scheduled — its timings belong to a state this client is not in. The connection
+        // stays open, and the player-audio arm keeps its own handling. So does the artwork arm:
+        // an image is a transfer of several messages, which has to be followed even while its
+        // data is being discarded (see HandleArtworkMessage).
+        if (category is BinaryMessageCategory.Visualizer && !CurrentAvailability)
         {
-            if (!CurrentAvailability)
-            {
-                DropDisplayBinaryWhileUnavailable();
-                return;
-            }
+            DropDisplayBinaryWhileUnavailable();
+            return;
         }
 
         switch (category)
@@ -5558,16 +5598,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 break;
 
             case BinaryMessageCategory.Artwork:
-                var artwork = BinaryMessageParser.ParseArtworkChunk(data.Span);
-                if (artwork is not null)
-                {
-                    _logger.LogDebug("Artwork on channel {Channel}: {Length} bytes @ {Timestamp}",
-                        artwork.Channel, artwork.ImageData.Length, artwork.Timestamp);
-
-                    // Held until the timestamp's local equivalent, or raised now if that has
-                    // already passed — artwork is never dropped for lateness (#199).
-                    _displayScheduler.SubmitArtwork(artwork);
-                }
+                HandleArtworkMessage(data.Span);
                 break;
 
             case BinaryMessageCategory.Visualizer:
@@ -5593,6 +5624,94 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// Applies one artwork binary message — an announce, a part, or a cancel — and hands the
+    /// display scheduler the image a transfer completes (spec roles/artwork/v1.md).
+    /// </summary>
+    /// <remarks>
+    /// The scheduler holds each channel's pending image once it is complete; until then the
+    /// pending image is the transfer in flight. So the two things the spec says discard a
+    /// channel's pending image — an announce and a cancel — are applied to both.
+    /// </remarks>
+    private void HandleArtworkMessage(ReadOnlySpan<byte> data)
+    {
+        if (!BinaryMessageParser.TryParseArtwork(data, out var message, out var partData))
+        {
+            CloseOnArtworkProtocolError("malformed message", data);
+            return;
+        }
+
+        // "Unavailable clients SHOULD discard otherwise valid image data", but "MUST still
+        // process announces and cancels and count each part's data bytes toward total_size":
+        // dropping the message whole would leave the next one out of sequence, which is a
+        // protocol error this client closes the connection over.
+        bool discard = !CurrentAvailability;
+        if (discard)
+        {
+            DropDisplayBinaryWhileUnavailable();
+        }
+
+        ArtworkChunk? complete;
+
+        switch (message.Kind)
+        {
+            case ArtworkMessageKind.Cancel:
+                _artworkTransfer.Cancel(message.Channel);
+                _displayScheduler.FlushArtworkChannel(message.Channel);
+                return;
+
+            case ArtworkMessageKind.Announce:
+                if (!_artworkTransfer.TryBegin(message, discard, out complete))
+                {
+                    CloseOnArtworkProtocolError("announce while a transfer is in flight", data);
+                    return;
+                }
+
+                if (message.TotalSize > ArtworkTransfer.MaxImageBytes)
+                {
+                    _logger.LogWarning(
+                        "Refusing artwork image of {Size} bytes on channel {Channel}: over the {Max} byte limit",
+                        message.TotalSize, message.Channel, ArtworkTransfer.MaxImageBytes);
+                }
+
+                _displayScheduler.FlushArtworkChannel(message.Channel);
+                break;
+
+            default:
+                if (!_artworkTransfer.TryAppend(message.Channel, partData, discard, out complete))
+                {
+                    CloseOnArtworkProtocolError(
+                        "part with no transfer in flight on its channel, or extending past total_size", data);
+                    return;
+                }
+
+                break;
+        }
+
+        if (complete is not null)
+        {
+            _logger.LogDebug("Artwork on channel {Channel}: {Length} bytes @ {Timestamp}",
+                complete.Channel, complete.ImageData.Length, complete.Timestamp);
+
+            // Held until the timestamp's local equivalent, or raised now if that has
+            // already passed — artwork is never dropped for lateness (#199).
+            _displayScheduler.SubmitArtwork(complete);
+        }
+    }
+
+    /// <summary>
+    /// Closes the connection over a malformed artwork message or sequence, as the spec requires
+    /// ("the client MUST close the connection"). The goodbye reason list has no protocol-error
+    /// value, so this reuses 'unauthorized' as the malformed-text-message close does.
+    /// </summary>
+    private void CloseOnArtworkProtocolError(string what, ReadOnlySpan<byte> data)
+    {
+        _logger.LogError(
+            "Artwork protocol error ({What}): type {Type}, {Length} bytes; closing connection",
+            what, data[0], data.Length);
+        DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
     }
 
     /// <summary>

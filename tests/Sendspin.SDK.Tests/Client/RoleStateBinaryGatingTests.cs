@@ -25,7 +25,7 @@ public class RoleStateBinaryGatingTests
 {
     private static byte[] Frame(byte type, long timestamp, params byte[] data)
     {
-        // Player audio carries send_ahead (13-byte header); artwork/visualizer keep the 9-byte one.
+        // Player audio carries send_ahead (13-byte header); the visualizer keeps the 9-byte one.
         int headerLen = BinaryMessageTypes.IsPlayerAudio(type) ? 13 : 9;
         var buf = new byte[headerLen + data.Length];
         buf[0] = type;
@@ -135,7 +135,7 @@ public class RoleStateBinaryGatingTests
         client.ArtworkReceived += (_, e) => received = e;
 
         // Stamped in the past, so nothing but the gate can be holding it back.
-        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.Artwork0, 1, 1, 2, 3));
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 1, new byte[] { 1, 2, 3 });
 
         Assert.Null(received);
     }
@@ -198,7 +198,7 @@ public class RoleStateBinaryGatingTests
         Assert.NotNull(latest.Artwork);
         Assert.NotNull(latest.Player);
 
-        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.Artwork0, 1, 4, 5, 6));
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 1, new byte[] { 4, 5, 6 });
 
         Assert.NotNull(received);
         Assert.Equal(new byte[] { 4, 5, 6 }, received.ImageData);
@@ -223,7 +223,7 @@ public class RoleStateBinaryGatingTests
 
         Assert.Equal(beforeReactivation, ClientStates(connection).Count);
 
-        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.Artwork0, 1, 4, 5, 6));
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 1, new byte[] { 4, 5, 6 });
 
         Assert.Null(received);
     }
@@ -262,7 +262,7 @@ public class RoleStateBinaryGatingTests
         ArtworkReceivedEventArgs? received = null;
         client.ArtworkReceived += (_, e) => received = e;
 
-        connection.RaiseBinaryMessageReceived(Frame(BinaryMessageTypes.Artwork0, 1, 4, 5, 6));
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 1, new byte[] { 4, 5, 6 });
 
         Assert.Null(received);
     }

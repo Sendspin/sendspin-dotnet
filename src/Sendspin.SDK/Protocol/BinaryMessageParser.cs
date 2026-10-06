@@ -9,18 +9,39 @@ namespace Sendspin.SDK.Protocol;
 public static class BinaryMessageParser
 {
     /// <summary>
-    /// Minimum binary message size (1 byte type + 8 bytes timestamp). The header shared by the
-    /// artwork and visualizer roles; the player audio chunk adds <c>send_ahead</c> on top of it
-    /// (see <see cref="PlayerAudioHeaderSize"/>).
+    /// Minimum binary message size (1 byte type + 8 bytes timestamp). The visualizer role's
+    /// header; the player audio chunk adds <c>send_ahead</c> on top of it (see
+    /// <see cref="PlayerAudioHeaderSize"/>), and artwork has a framing of its own (see
+    /// <see cref="TryParseArtwork"/>).
     /// </summary>
     public const int MinimumMessageSize = 9;
 
     /// <summary>
     /// Player audio chunk header size: 1 byte type + 8 bytes timestamp + 4 bytes
     /// <c>send_ahead</c> (spec roles/player/v1.md). Only the player role carries
-    /// <c>send_ahead</c>; artwork and visualizer keep the <see cref="MinimumMessageSize"/> header.
+    /// <c>send_ahead</c>; the visualizer keeps the <see cref="MinimumMessageSize"/> header.
     /// </summary>
     public const int PlayerAudioHeaderSize = 13;
+
+    /// <summary>
+    /// Size of the <c>[type][flags]</c> prefix every artwork message starts with (spec
+    /// roles/artwork/v1.md): the whole of a cancel, and the header of a part.
+    /// </summary>
+    public const int ArtworkPrefixSize = 2;
+
+    /// <summary>
+    /// Exact size of an artwork announce: <c>[type][flags][timestamp int64 BE][total_size uint32 BE]</c>.
+    /// </summary>
+    public const int ArtworkAnnounceSize = 14;
+
+    /// <summary>
+    /// Largest artwork message the spec allows, so that one fits in a single Noise transport
+    /// message without fragmentation.
+    /// </summary>
+    public const int MaxArtworkMessageSize = 65519;
+
+    private const byte ArtworkCancelFlag = 0x01;
+    private const byte ArtworkAnnounceFlag = 0x02;
 
     /// <summary>
     /// Parses a binary message header.
@@ -60,7 +81,7 @@ public static class BinaryMessageParser
     /// <remarks>
     /// The player chunk header is <c>[type][timestamp int64 BE][send_ahead uint32 BE]</c> with
     /// audio from byte 13 (spec PR #167), so it does not go through <see cref="TryParse"/> (the
-    /// 9-byte artwork/visualizer header). A chunk shorter than the header is rejected.
+    /// 9-byte visualizer header). A chunk shorter than the header is rejected.
     /// </remarks>
     public static AudioChunk? ParseAudioChunk(ReadOnlySpan<byte> data)
     {
@@ -83,26 +104,72 @@ public static class BinaryMessageParser
     }
 
     /// <summary>
-    /// Parses a binary artwork message.
+    /// Parses a binary artwork message: an announce, a part, or a cancel (spec
+    /// roles/artwork/v1.md, "Artwork (Binary)").
     /// </summary>
-    public static ArtworkChunk? ParseArtworkChunk(ReadOnlySpan<byte> data)
+    /// <remarks>
+    /// Returns false for exactly the messages the spec lists as malformed, which the receiver
+    /// MUST close the connection over: "a message shorter than 2 bytes or exceeding the size cap
+    /// above, an announce whose length is not 14 bytes, a cancel message longer than 2 bytes, a
+    /// nonzero reserved flag bit, and a message with bit 0 and bit 1 both set".
+    /// </remarks>
+    /// <param name="data">Raw binary message data.</param>
+    /// <param name="message">The parsed message.</param>
+    /// <param name="partData">The image bytes a part carries; empty for an announce or a cancel.</param>
+    /// <returns>True if <paramref name="data"/> is a well-formed artwork message.</returns>
+    public static bool TryParseArtwork(
+        ReadOnlySpan<byte> data,
+        out ArtworkMessage message,
+        out ReadOnlySpan<byte> partData)
     {
-        if (!TryParse(data, out var type, out var timestamp, out var payload))
+        message = default;
+        partData = default;
+
+        if (data.Length < ArtworkPrefixSize || data.Length > MaxArtworkMessageSize)
         {
-            return null;
+            return false;
         }
 
-        if (!BinaryMessageTypes.IsArtwork(type))
+        if (!BinaryMessageTypes.IsArtwork(data[0]))
         {
-            return null;
+            return false;
         }
 
-        return new ArtworkChunk
+        var channel = (byte)(data[0] - BinaryMessageTypes.Artwork0);
+
+        switch (data[1])
         {
-            Channel = (byte)(type - BinaryMessageTypes.Artwork0),
-            Timestamp = timestamp,
-            ImageData = payload.ToArray()
-        };
+            case ArtworkAnnounceFlag:
+                if (data.Length != ArtworkAnnounceSize)
+                {
+                    return false;
+                }
+
+                message = new ArtworkMessage(
+                    ArtworkMessageKind.Announce,
+                    channel,
+                    BinaryPrimitives.ReadInt64BigEndian(data.Slice(2, 8)),
+                    BinaryPrimitives.ReadUInt32BigEndian(data.Slice(10, 4)));
+                return true;
+
+            case ArtworkCancelFlag:
+                if (data.Length != ArtworkPrefixSize)
+                {
+                    return false;
+                }
+
+                message = new ArtworkMessage(ArtworkMessageKind.Cancel, channel, 0, 0);
+                return true;
+
+            case 0:
+                message = new ArtworkMessage(ArtworkMessageKind.Part, channel, 0, 0);
+                partData = data.Slice(ArtworkPrefixSize);
+                return true;
+
+            default:
+                // A reserved bit, or announce and cancel together.
+                return false;
+        }
     }
 
     /// <summary>
@@ -232,7 +299,36 @@ public sealed class AudioChunk
 }
 
 /// <summary>
-/// Represents a parsed artwork chunk.
+/// The three messages an artwork image transfer is made of.
+/// </summary>
+public enum ArtworkMessageKind
+{
+    /// <summary>The next bytes of the image the channel's announce opened.</summary>
+    Part,
+
+    /// <summary>Opens a transfer: carries the image's timestamp and total size, and no image data.</summary>
+    Announce,
+
+    /// <summary>Discards the channel's pending image.</summary>
+    Cancel,
+}
+
+/// <summary>
+/// A parsed artwork binary message. A part's image bytes are returned alongside it by
+/// <see cref="BinaryMessageParser.TryParseArtwork"/> rather than copied in here.
+/// </summary>
+/// <param name="Kind">Which of the three messages this is.</param>
+/// <param name="Channel">Artwork channel (0-3).</param>
+/// <param name="Timestamp">
+/// Announce only: server clock time in microseconds when the image should be displayed.
+/// </param>
+/// <param name="TotalSize">
+/// Announce only: size in bytes of the encoded image; <c>0</c> clears the channel.
+/// </param>
+public readonly record struct ArtworkMessage(ArtworkMessageKind Kind, byte Channel, long Timestamp, uint TotalSize);
+
+/// <summary>
+/// A complete artwork image, reassembled from the parts of its transfer.
 /// </summary>
 public sealed class ArtworkChunk
 {
@@ -242,12 +338,13 @@ public sealed class ArtworkChunk
     public byte Channel { get; init; }
 
     /// <summary>
-    /// Timestamp for this artwork.
+    /// Timestamp for this artwork, from the transfer's announce.
     /// </summary>
     public long Timestamp { get; init; }
 
     /// <summary>
-    /// Raw image data (JPEG/PNG).
+    /// Raw image data (JPEG/PNG). Empty when the transfer announced a size of zero, which
+    /// clears the channel.
     /// </summary>
     required public byte[] ImageData { get; init; }
 }

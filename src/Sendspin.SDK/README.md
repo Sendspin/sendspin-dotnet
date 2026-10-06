@@ -759,7 +759,7 @@ client.ArtworkReceived += (_, e) =>
     displays[e.Channel].Show(e.ImageData);
 };
 
-client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // empty binary message = clear that channel
+client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // an empty image (zero-size announce) = clear that channel
 ```
 
 `ArtworkCleared` is also raised, once per channel still showing an image, when a `stream/end` ends the artwork role. No clear message exists for that case, so `e.Timestamp` is then the timestamp of the image being cleared rather than a moment to clear at.
