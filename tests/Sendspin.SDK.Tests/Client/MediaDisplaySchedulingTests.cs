@@ -1004,7 +1004,7 @@ public class MediaDisplaySchedulingTests
 
         // Both due at the same future moment, so one pass takes them together.
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
         timer.CurrentTime = Now + 2_000;
         await WaitUntilAsync(() => frames.Count == 1, "the frame that ends the artwork role");
 
@@ -1025,10 +1025,8 @@ public class MediaDisplaySchedulingTests
         client.ArtworkCleared += (_, e) => cleared.Add(e);
 
         // Two channels showing an image now (past-stamped, so raised on arrival).
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now - 1, new byte[] { 2 }, BinaryMessageTypes.Artwork1));
+        SendArtwork(connection, Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now - 1, new byte[] { 2 }, BinaryMessageTypes.Artwork1);
         Assert.Equal(2, received.Count);
 
         // stream/end is playback termination, so every channel still showing an image is cleared
@@ -1054,8 +1052,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkCleared += (_, e) => cleared.Add(e);
 
         // An image on display now.
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+        SendArtwork(connection, Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
 
         // A seek clears buffered data but keeps playing the same track, so the cover already shown
         // must not be blanked — unlike a stream/end, it does not clear the display.
@@ -1097,6 +1094,106 @@ public class MediaDisplaySchedulingTests
         var only = Assert.Single(received);
         Assert.Equal(1, only.Channel);
         Assert.Equal(new byte[] { 2 }, only.ImageData);
+    }
+
+    [Fact]
+    public void StreamEnd_NamingArtwork_EndsTheTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 4));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2));
+
+        // A pending image runs from its announce, so the one still arriving is among those a
+        // stream/end discards. Were its transfer left in flight, the next stream's first
+        // announce would be a protocol error — and the image, once complete, would go on
+        // display after the application had been told to clear.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+        SendArtwork(connection, Now - 1, new byte[] { 7, 8 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 7, 8 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void StreamClear_NamingArtwork_LeavesTheTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1));
+
+        // Artwork is not in stream/clear's role vocabulary, so the server goes on sending the
+        // image's parts: forgetting the transfer here would make the next part a protocol error.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 2));
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 1, 2 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void StreamStart_ChangingAChannelsConfiguration_EndsThatChannelsTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":512,"height":512}"""));
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 4));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2));
+
+        // The partly received image was encoded for the old size; the server re-sends it for
+        // the new one, and that announce must find nothing in flight.
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":128,"height":128}"""));
+        SendArtwork(connection, Now - 1, new byte[] { 7, 8 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 7, 8 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void StreamStart_ChangingAnotherChannelsConfiguration_LeavesTheTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":512,"height":512}""",
+            """{"source":"artist","format":"jpeg","width":256,"height":256}"""));
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1));
+
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":512,"height":512}""",
+            """{"source":"artist","format":"jpeg","width":64,"height":64}"""));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 2));
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 1, 2 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
     }
 
     /// <summary>

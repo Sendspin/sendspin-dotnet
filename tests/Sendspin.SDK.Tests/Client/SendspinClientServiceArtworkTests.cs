@@ -34,8 +34,8 @@ public class SendspinClientServiceArtworkTests
     }
 
     /// <summary>
-    /// Client whose clock is converged, so the external-source flag alone decides the
-    /// availability it reports.
+    /// Client whose clock is converged, so it is available — an unavailable client discards image
+    /// data — and the external-source flag alone decides otherwise.
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection) SyncedClient()
     {
@@ -232,7 +232,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void MultiPartImage_IsRaisedOnceTheReceivedDataReachesTotalSize()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         var received = new List<ArtworkReceivedEventArgs>();
@@ -309,7 +309,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void Cancel_EndsTheTransferInFlightOnItsChannel()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         var received = new List<ArtworkReceivedEventArgs>();
@@ -331,7 +331,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void Cancel_OnAnotherChannel_LeavesTheTransferInFlight()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         ArtworkReceivedEventArgs? received = null;
@@ -432,7 +432,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void PartWithNoTransferInFlight_ClosesTheConnection()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2, 3));
@@ -443,7 +443,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void PartOnAChannelOtherThanTheTransfers_ClosesTheConnection()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 4));
@@ -455,7 +455,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void PartExtendingPastTotalSize_ClosesTheConnection_AndRaisesNoImage()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         var fired = false;
@@ -471,7 +471,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void AnnounceWhileATransferIsInFlight_ClosesTheConnection()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 4));
@@ -490,7 +490,7 @@ public class SendspinClientServiceArtworkTests
     [InlineData(new byte[] { BinaryMessageTypes.Artwork0, 0x02, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0 })]
     public void MalformedArtworkMessage_ClosesTheConnection(byte[] message)
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         var fired = false;
@@ -506,7 +506,7 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void TransferInFlight_DoesNotSurviveTheConnection()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection) = SyncedClient();
         using var _c = client;
 
         ArtworkReceivedEventArgs? received = null;

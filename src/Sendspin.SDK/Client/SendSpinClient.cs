@@ -5147,6 +5147,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             if (!SameArtworkChannelConfiguration(wasConfigured, isConfigured))
             {
+                // The channel's pending image is the transfer in flight until it completes,
+                // and the one the scheduler holds after.
+                _artworkTransfer.Cancel((byte)channel);
                 _displayScheduler.FlushArtworkChannel(channel);
             }
         }
@@ -5314,7 +5317,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // hold no stream, and spec #135 (pending merge) ties a pending metadata or color
             // update to nothing a stream teardown says.
             _displayScheduler.FlushVisualizer();
-            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
+            FlushArtwork(endingStream);
             return;
         }
 
@@ -5325,8 +5328,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (roles.Contains("artwork"))
         {
-            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
+            FlushArtwork(endingStream);
         }
+    }
+
+    /// <summary>
+    /// Discards the pending artwork a <c>stream/end</c> or <c>stream/clear</c> reaches, and for a
+    /// <c>stream/end</c> also clears what is on display and ends the transfer in flight.
+    /// </summary>
+    /// <remarks>
+    /// "On <c>stream/end</c> for the artwork role, clients MUST clear the current image and
+    /// discard any pending image" — and a channel's pending image runs from its announce, so one
+    /// still arriving is discarded with the rest; left alone it would complete and go on display
+    /// after the application was told to clear. A <c>stream/clear</c> leaves the transfer be:
+    /// artwork is not in that message's role vocabulary, so the server goes on sending the
+    /// image's parts, and forgetting the transfer would turn each into a protocol error.
+    /// </remarks>
+    private void FlushArtwork(bool endingStream)
+    {
+        if (endingStream)
+        {
+            _artworkTransfer.Reset();
+        }
+
+        _displayScheduler.FlushArtwork(raiseCleared: endingStream);
     }
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
@@ -5371,16 +5396,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         // Spec #266/#271 (SHOULD): while this client reports available: false the server should not
-        // stream it display data, so an artwork or visualizer frame that arrives anyway is dropped
-        // before it is scheduled — its timings belong to a state this client is not in. The
-        // connection stays open, and the player-audio arm keeps its own handling.
-        if (category is BinaryMessageCategory.Artwork or BinaryMessageCategory.Visualizer)
+        // stream it display data, so a visualizer frame that arrives anyway is dropped before it
+        // is scheduled — its timings belong to a state this client is not in. The connection
+        // stays open, and the player-audio arm keeps its own handling. So does the artwork arm:
+        // an image is a transfer of several messages, which has to be followed even while its
+        // data is being discarded (see HandleArtworkMessage).
+        if (category is BinaryMessageCategory.Visualizer && !CurrentAvailability)
         {
-            if (!CurrentAvailability)
-            {
-                DropDisplayBinaryWhileUnavailable();
-                return;
-            }
+            DropDisplayBinaryWhileUnavailable();
+            return;
         }
 
         switch (category)
@@ -5486,14 +5510,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        // "Unavailable clients SHOULD discard otherwise valid image data", while still
-        // following the transfer so the next announce is in sequence. Unavailable as the
-        // server was told, not as composed right now: a client still converging its clock has
-        // reported nothing yet, and the image a late join hands it is not sent twice.
-        bool discard;
-        lock (_availabilityLock)
+        // "Unavailable clients SHOULD discard otherwise valid image data", but "MUST still
+        // process announces and cancels and count each part's data bytes toward total_size":
+        // dropping the message whole would leave the next one out of sequence, which is a
+        // protocol error this client closes the connection over.
+        bool discard = !CurrentAvailability;
+        if (discard)
         {
-            discard = _lastAvailabilitySent == false;
+            DropDisplayBinaryWhileUnavailable();
         }
 
         ArtworkChunk? complete;
