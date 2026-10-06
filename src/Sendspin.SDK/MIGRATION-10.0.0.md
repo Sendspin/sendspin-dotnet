@@ -40,7 +40,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Connection | Fragmentation is binary ID `1` with a flags byte (`[1][flags][orig_type][data]` first, `[1][flags][data]` after); IDs 2 and 3 are reserved: never sent, and silently ignored when received, whole or as a fragmented message's `orig_type` (spec PRs #172, #289) | Low — wire-only; encrypted transport internals |
 | Connection | Noise message 1 must carry `psk_category` (`lt`, `pr` or `sn`), and a `psk_id` matches only a record of that category (spec PR #284) | Low — wire-only; a server that omits it no longer completes a handshake. `aiosendspin` 10.0.0 sends it |
 | Roles | A custom (`_`-prefixed) role must carry an explicit `@v…` version, or `ClientCapabilities` rejects it at construction (spec PR #243) | Low — compiler/argument error only if you advertise a versionless custom role |
-| Construction | `ClientCapabilities` values the spec does not allow on the wire throw `ArgumentException` at construction: a player with no `AudioFormats`, or none that is `flac` or `pcm`; a visualizer `BufferCapacity` or `RateMax` that is not positive; an artwork channel with an unknown `Source`/`Format` or a missing size; a `MacAddress` that is not lowercase colon-separated (spec PRs #238, #257) | Medium — nothing at compile time; a configuration that used to construct and then fail against the server now throws. See §18 |
+| Construction | `ClientCapabilities` values the spec does not allow on the wire throw `ArgumentException` at construction: a player with no `AudioFormats`, or none that is `flac` or `pcm`; a visualizer `BufferCapacity` or `RateMax` that is not positive, when a visualizer role is advertised; an artwork channel with an unknown `Source`/`Format` or a missing size; a `MacAddress` that is not lowercase colon-separated (spec PRs #238, #257) | Medium — nothing at compile time; a configuration that used to construct and then fail against the server now throws. See §18 |
 | Controller | `client/command` is sent only while `controller@v1` is active and the command is in the group's `supported_commands`; otherwise it is dropped with a warning (spec PRs #251, #268) | Medium — behavioural; `SetVolumeAsync` and friends send nothing until the server has offered the command. See §19 |
 | Artwork | Artwork binary is an announce/part/cancel transfer. `BinaryMessageParser.ParseArtworkChunk` is removed in favour of `TryParseArtwork`; `ArtworkChunk` is now a complete reassembled image; the pre-rc1 `[type][timestamp][image]` framing disconnects (spec PRs #188, #266) | Low for apps — `ArtworkReceived` / `ArtworkCleared` are unchanged; compiler error only if you parse artwork binary yourself. See §20 |
 | Artwork | A `stream/end` that reaches the artwork role, or the role's removal, raises `ArtworkCleared` for every channel still showing an image (spec PR #266) | Low — behavioural |
@@ -248,7 +248,7 @@ Capabilities = new ClientCapabilities
 }
 ```
 
-`BufferCapacity` and `RateMax` must both be **positive**, whatever `Types` lists — both default to 0, so a `VisualizerRoleSupport` that sets neither now throws `ArgumentException` at construction instead of being rejected by the server (§18).
+`BufferCapacity` and `RateMax` must both be **positive**, whatever `Types` lists — both default to 0, so a `VisualizerRoleSupport` that sets neither now throws `ArgumentException` at construction instead of being rejected by the server (§18). The check applies only when a `visualizer@` role is in `Roles`; a support object left in place while the role is switched off is not validated.
 
 To reconfigure at runtime, call `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`; it updates that client's own visualizer configuration (the `ClientCapabilities` you supplied is left untouched) and resends the full `client/state`. It applies the same rule: a `rateMax` that is not positive throws. See §17.
 
@@ -933,6 +933,9 @@ What did change:
   artwork messages and malformed sequences — an announce while a transfer is in flight, a part
   with none in flight or on another channel, a part running past `total_size` — are protocol
   errors the spec requires the client to close over. `aiosendspin` 10.0.0 sends the rc1 framing.
+- **An image over 16 MiB is not delivered.** The declared size comes from the server and the
+  spec sets no limit, so a larger transfer is followed to its end with none of it held, and no
+  `ArtworkReceived` is raised for it. The connection stays open.
 - **`ArtworkCleared` has a second trigger.** Besides a zero-size announce, it is raised once per
   channel still showing an image when a `stream/end` reaches the artwork role, or when the role
   is removed from `active_roles`: both are playback termination. No clear message exists for
@@ -1003,9 +1006,12 @@ alone, also watch the role leave.
 ### Data is discarded while unavailable
 
 While the client is unavailable (`available: false`) — clock sync not yet established, held by
-an external source, or after a pipeline error — inbound player audio, artwork and visualizer
-data are discarded rather than decoded or scheduled. The connection stays open, and one debug
-line is logged per unavailable period. A conformant server does not stream to an unavailable
+an external source, or after a pipeline error — inbound artwork and visualizer data are
+discarded rather than scheduled. Player audio is discarded while clock sync is not established
+or an external source holds the output, but not when the only reason is the pipeline's own
+reported error: a failed playback start is retried when audio arrives, so audio is what returns
+the client to available. The connection stays open, and one debug line is logged per
+unavailable period. A conformant server does not stream to an unavailable
 client, so this only matters in the window around a change of availability.
 
 Artwork is discarded more carefully than the other two, because an image is a transfer of
