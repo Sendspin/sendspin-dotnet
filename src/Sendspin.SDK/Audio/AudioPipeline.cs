@@ -719,14 +719,16 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public void ReanchorTiming()
     {
-        // Soft re-anchor: reset the sync-timing anchor (so the next callback re-derives the
-        // scheduled start with the current OutputDelayMs) while preserving buffered audio.
-        // Same primitive the device-switch path uses — deliberately NOT Clear(), which would
-        // dump the buffer and stall for the server's transmit-ahead window.
+        // Shift the schedule by the change in OutputDelayMs and snap by the same amount, keeping
+        // the buffered audio and the rest of the timing state. Deliberately neither Clear(), which
+        // would dump the buffer and stall for the server's transmit-ahead window, nor the reset the
+        // device-switch path uses: a fresh anchor taken while the output device is already full
+        // captures a different baseline than the cold start did, and moves playback by the
+        // difference as well as by the delay.
         if (_buffer is TimedAudioBuffer timedBuffer)
         {
-            timedBuffer.ResetSyncTracking();
-            _logger.LogDebug("Re-anchored sync timing (buffer preserved)");
+            timedBuffer.ApplyOutputDelayChange();
+            _logger.LogDebug("Applied output delay change to sync timing (buffer preserved)");
         }
 
         (_drainingBuffer as TimedAudioBuffer)?.ResetSyncTracking();
