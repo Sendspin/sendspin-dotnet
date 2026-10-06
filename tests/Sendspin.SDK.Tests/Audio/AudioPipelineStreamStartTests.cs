@@ -232,10 +232,11 @@ public class AudioPipelineStreamStartTests
         var played = harness.PullUntilEmpty(harness.Buffers[0], harness.Sources[0]);
 
         Assert.Equal(Enumerable.Range(1, ChunksToPlayback), played);
-        Assert.Single(harness.Players);
 
         await harness.WaitForAsync(() => harness.Players.Count == 2 && harness.Player.PlayCalls == 1);
 
+        // The second output was opened only once the first buffer had nothing left to play.
+        Assert.Equal(new[] { 0.0, 0.0 }, harness.FirstBufferLeftWhenOutputOpened);
         Assert.True(firstPlayer.Disposed);
         Assert.Equal(AudioPipelineState.Playing, harness.Pipeline.State);
 
@@ -351,6 +352,7 @@ public class AudioPipelineStreamStartTests
                 () =>
                 {
                     var player = new StubAudioPlayer();
+                    FirstBufferLeftWhenOutputOpened.Add(Buffers[0].BufferedMilliseconds);
                     Players.Add(player);
                     return player;
                 },
@@ -373,6 +375,9 @@ public class AudioPipelineStreamStartTests
         public List<StubAudioPlayer> Players { get; } = new List<StubAudioPlayer>();
 
         public List<StubSampleSource> Sources { get; } = new List<StubSampleSource>();
+
+        /// <summary>What the first buffer still held each time an output was opened.</summary>
+        public List<double> FirstBufferLeftWhenOutputOpened { get; } = new List<double>();
 
         public List<AudioPipelineState> States { get; } = new List<AudioPipelineState>();
 
