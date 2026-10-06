@@ -235,6 +235,30 @@ public class SendspinClientServiceVisualizerTests
         }));
     }
 
+    [Theory]
+    [InlineData(VisualizerTypes.Loudness)]
+    [InlineData(VisualizerTypes.Beat)]
+    [InlineData]
+    public void NonPositiveRateMax_ThrowsAtConstruction(params string[] types)
+    {
+        // rate_max is a positive integer in every visualizer state object, so a zero is rejected
+        // whatever the types: periodic, event-only, or none at all (spec #257). Rejected at
+        // construction, where a spectrum-without-config is.
+        Assert.Throws<ArgumentException>(() => TestClient.Create(configure: options => options with
+        {
+            Capabilities = new ClientCapabilities
+            {
+                Roles = new List<string> { "visualizer@v1" },
+                VisualizerRoleSupport = new VisualizerRoleSupport
+                {
+                    BufferCapacity = 65536,
+                    RateMax = 0,
+                    Types = types.ToList(),
+                },
+            },
+        }));
+    }
+
     [Fact]
     public void VisualizerRoleWithoutSupport_ThrowsAtConstruction()
     {
@@ -369,5 +393,22 @@ public class SendspinClientServiceVisualizerTests
 
         await Assert.ThrowsAsync<ArgumentException>(() => client.SetVisualizerConfigurationAsync(
             types: new List<string> { VisualizerTypes.Spectrum }, rateMax: 15, spectrum: null));
+    }
+
+    [Theory]
+    [InlineData(VisualizerTypes.Loudness)]
+    [InlineData(VisualizerTypes.Beat)]
+    [InlineData]
+    public async Task SetVisualizerConfigurationAsync_NonPositiveRateMax_Throws(params string[] types)
+    {
+        // The runtime twin of the construction check: a non-positive rate_max is rejected before
+        // it can reach the wire, whether the types are periodic, event-only, or empty.
+        var (client, connection) = VisualizerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SetVisualizerConfigurationAsync(
+            types: types.ToList(), rateMax: 0, spectrum: null));
     }
 }

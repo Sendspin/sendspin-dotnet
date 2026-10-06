@@ -755,12 +755,14 @@ Images arrive per channel, with the display timestamp and channel number:
 ```csharp
 client.ArtworkReceived += (_, e) =>
 {
-    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png/bmp bytes)
+    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png bytes)
     displays[e.Channel].Show(e.ImageData);
 };
 
 client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // empty binary message = clear that channel
 ```
+
+`ArtworkCleared` is also raised, once per channel still showing an image, when a `stream/end` ends the artwork role. No clear message exists for that case, so `e.Timestamp` is then the timestamp of the image being cleared rather than a moment to clear at.
 
 Change or disable a channel at runtime without reconnecting. The SDK updates that connection's own channel configuration — `ClientCapabilities` is yours and is left untouched, so a host sharing one across connections keeps them independent — and resends the whole `client/state` (the server replies with a new `stream/start`):
 
