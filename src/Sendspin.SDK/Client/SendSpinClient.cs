@@ -30,8 +30,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly INoiseSessionInfo _session;
     private bool _activateReceived;
 
-    // True from a pairing server/activate until the first non-pairing one. Gates every send
-    // (see SendAsync): the pairing exchange holds the wire alone (#118). Cleared with the rest
+    // True while the activation in effect declares 'pairing' without 'playback'. Gates every
+    // send (see SendAsync): the pairing exchange then holds the wire alone (#118); alongside
+    // playback it does not (pairing.md, "Entering and leaving pairing"). Cleared with the rest
     // of the per-connection state at handshake, so a reconnect never starts inside the window.
     private bool _pairingActivationActive;
     private readonly SourceStreamPipeline? _sourcePipeline;
@@ -2653,7 +2654,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             string.Join(", ", payload.ActivitiesList),
             string.Join(", ", payload.ActiveRoles ?? LastServerHello?.ActiveRoles ?? []));
 
+        // Pairing can run alongside playback (pairing.md, "Entering and leaving pairing"): the
+        // attempt starts on any activation declaring 'pairing', but the wire is held for the
+        // pairing exchange alone only when the activation does not also declare 'playback'.
         bool pairing = payload.ActivitiesList.Contains(Activities.Pairing);
+        bool pairingOnly = pairing && !payload.ActivitiesList.Contains(Activities.Playback);
         if (pairing)
         {
             HandlePairingActivate(payload);
@@ -2670,7 +2675,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // The initial activate completes the encrypted handshake; only now may the
             // client start sending (client/time, client/state).
-            if (!FinishHandshake(pairing))
+            if (!FinishHandshake(pairingOnly))
             {
                 // The connection was closed from inside its own promotion to Connected, so the
                 // rest of this activate — the hello notification, the time-sync loop, the
@@ -2686,8 +2691,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
         }
 
-        // The time-sync loop runs only outside a pairing activation. A pairing activate
-        // grants no roles, so there is nothing to synchronize a clock for — and the
+        // The time-sync loop runs only outside a pairing-only activation. Such an activate
+        // declares no playback, so there is nothing to synchronize a clock for — and the
         // reference server stops reading the socket while the operator enters the pairing code,
         // then treats the first buffered frame as the next pairing message, so a probe
         // sent during that window aborts the attempt as a protocol error. Stopping here
@@ -2700,10 +2705,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // resumes without re-converging.
         // Set before StopTimeSyncLoop so a probe racing the stop is dropped at the send choke
         // point rather than reaching a server that is about to treat it as a protocol error.
-        bool leavingPairing = _pairingActivationActive && !pairing;
-        _pairingActivationActive = pairing;
+        bool leavingPairing = _pairingActivationActive && !pairingOnly;
+        _pairingActivationActive = pairingOnly;
 
-        if (pairing)
+        if (pairingOnly)
         {
             StopTimeSyncLoop();
         }
@@ -2783,9 +2788,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return true;
         }
 
-        // Spec rule ordering: prefer 'pairing_required' when enabling unpaired access
-        // would make the activation admissible on a Sentinel-keyed session.
-        if (psk.Category == PskCategory.Sentinel
+        // Spec rule ordering: prefer 'pairing_required' when the session is unpaired and
+        // enabling unpaired access would make the activation admissible.
+        if (psk.Category != PskCategory.LongTerm
             && !_unpairedAccessEnabled
             && IsAdmissible(psk.Category, activities, hasRoles, unpairedAccessEnabled: true))
         {
@@ -2801,15 +2806,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         bool AllowedSet(IReadOnlyCollection<string> set) => category switch
         {
-            PskCategory.Pairing => set.Count == 1 && set.Contains(Activities.Pairing),
-
             // A paired session never carries a pairing activity: pairing runs on the Pairing
             // PSK (or, unpaired, on the Sentinel PSK), so a server declaring it on a long-term
             // session is asking this client to re-pair over a credential it already holds.
             PskCategory.LongTerm => set.All(a => a is Activities.Playback),
-            PskCategory.Sentinel => set.Count == 0
-                || (set.Count == 1 && set.Contains(Activities.Pairing))
-                || (set.Count == 1 && set.Contains(Activities.Playback) && unpairedAccessEnabled),
+
+            // The two unpaired rows are the same row: pairing always, playback only with
+            // unpaired access enabled.
+            PskCategory.Pairing or PskCategory.Sentinel => set.All(
+                a => a is Activities.Pairing || (a is Activities.Playback && unpairedAccessEnabled)),
             _ => false,
         };
 
@@ -3747,9 +3752,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// which is the point the encrypted handshake completes and the client may start sending.
     /// </summary>
     /// <param name="pairing">Whether the activate completing the handshake declares the
-    /// pairing activity. A pairing activation admits nothing but pairing messages onto the
-    /// wire, so the initial client/state is then withheld — even for roles that need no
-    /// clock sync — until the first non-pairing activate (see
+    /// pairing activity without playback. Such an activation admits nothing but pairing
+    /// messages onto the wire, so the initial client/state is then withheld — even for roles
+    /// that need no clock sync — until the first activate that is not pairing-only (see
     /// <see cref="_initialClientStateHeldForPairing"/>).</param>
     /// <returns>
     /// True when the connection survived its own promotion to Connected, so the rest of the
@@ -4990,7 +4995,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Smart sync burst: only trigger if clock isn't already synced
         // If we've been connected for a while, the continuous sync loop has already converged
-        if (LastServerActivate?.ActivitiesList.Contains(Activities.Pairing) == true)
+        if (_pairingActivationActive)
         {
             // Same rule as the time-sync loop's gate in HandleServerActivate: no
             // client/time may leave the client while a pairing activation is in effect —
