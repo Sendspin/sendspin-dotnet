@@ -312,6 +312,108 @@ public class AudioPipelineStreamStartTests
     }
 
     [Fact]
+    public async Task StartAsync_AfterAPlayerErrorDuringASampleRateChange_AbandonsThePendingSwitch()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        harness.Player.Fail();
+
+        Assert.Equal(AudioPipelineState.Error, harness.Pipeline.State);
+
+        await harness.Pipeline.StartAsync(Pcm());
+        var player = harness.Player;
+
+        // What would let a switch left over from the failed stream go ahead: its buffer emptying.
+        harness.Pipeline.Clear();
+        await Task.Delay(150);
+
+        Assert.Same(player, harness.Player);
+        Assert.False(player.Disposed);
+    }
+
+    [Fact]
+    public async Task StartAsync_BufferFactoryFailingOnASampleRateChange_LeavesNoDisposedBufferForTheNextStream()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(5);
+
+        harness.FailNextBuffer = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100)));
+
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(5);
+
+        Assert.Equal(5 * ChunkMs, harness.Pipeline.BufferStats?.BufferedMs);
+    }
+
+    [Fact]
+    public async Task Clear_BeforeASampleRateChangeHasSwitched_LeavesStartingPlaybackToTheSwitch()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        var firstPlayer = harness.Player;
+
+        harness.Pipeline.Clear();
+        harness.Feed(ChunksToPlayback, sampleRate: 44_100);
+
+        // The new buffer is ready, but the output it will play through does not exist yet: the
+        // player in place is the one about to be closed.
+        await harness.WaitForAsync(() => harness.Players.Count == 2 && harness.Player.PlayCalls == 1);
+
+        Assert.Equal(1, firstPlayer.PlayCalls);
+        Assert.Equal(AudioPipelineState.Playing, harness.Pipeline.State);
+    }
+
+    [Fact]
+    public async Task StartAsync_SampleRateChangeWithAnOutputThatStopsPulling_SwitchesAnyway()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+
+        // Nothing reads the first buffer, so it never runs dry.
+        await harness.WaitForAsync(() => harness.Players.Count == 2 && harness.Player.PlayCalls == 1);
+
+        Assert.True(harness.Players[0].Disposed);
+    }
+
+    [Fact]
+    public async Task SwitchDeviceAsync_BeforeASampleRateChangeHasSwitched_UpdatesTheBufferBeingPlayed()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(5);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+
+        harness.Player.OutputLatencyMs = 40;
+        await harness.Pipeline.SwitchDeviceAsync(null);
+
+        Assert.Equal(40_000, harness.Buffers[0].OutputLatencyMicroseconds);
+    }
+
+    [Fact]
+    public async Task StartAsync_SampleRateChangeWithANegativeOutputLatency_StillSwitches()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        harness.Player.OutputLatencyMs = -5;
+
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        harness.PullUntilEmpty(harness.Buffers[0], harness.Sources[0]);
+
+        await harness.WaitForAsync(() => harness.Players.Count == 2 && harness.Player.PlayCalls == 1);
+    }
+
+    [Fact]
     public async Task StartAsync_ReportsWhichOfTheThreePathsItTook()
     {
         // The decision is the pipeline's, and the caller acts on the answer rather than
@@ -345,6 +447,12 @@ public class AudioPipelineStreamStartTests
                 new FakeClockSynchronizer { HasMinimalSync = true, IsConverged = true },
                 (format, clockSync) =>
                 {
+                    if (FailNextBuffer)
+                    {
+                        FailNextBuffer = false;
+                        throw new InvalidOperationException("buffer factory failed");
+                    }
+
                     var buffer = new TimedAudioBuffer(format, clockSync, bufferCapacityMs: 2000);
                     Buffers.Add(buffer);
                     return buffer;
@@ -369,6 +477,8 @@ public class AudioPipelineStreamStartTests
         }
 
         public AudioPipeline Pipeline { get; }
+
+        public bool FailNextBuffer { get; set; }
 
         public List<TimedAudioBuffer> Buffers { get; } = new List<TimedAudioBuffer>();
 
@@ -479,12 +589,7 @@ public class AudioPipelineStreamStartTests
     /// <summary>Counts the lifecycle calls a restart makes and an in-place update must not.</summary>
     private sealed class StubAudioPlayer : IAudioPlayer
     {
-        /// <summary>Never raised: nothing under test observes the player's own signalling.</summary>
-        event EventHandler<AudioPlayerState>? IAudioPlayer.StateChanged
-        {
-            add => _ = value;
-            remove => _ = value;
-        }
+        public event EventHandler<AudioPlayerState>? StateChanged;
 
         /// <summary>Never raised: nothing under test observes the player's own signalling.</summary>
         event EventHandler<AudioPlayerError>? IAudioPlayer.ErrorOccurred
@@ -499,7 +604,7 @@ public class AudioPipelineStreamStartTests
 
         public bool IsMuted { get; set; }
 
-        public int OutputLatencyMs => 0;
+        public int OutputLatencyMs { get; set; }
 
         public int InitializeCalls { get; private set; }
 
@@ -527,6 +632,13 @@ public class AudioPipelineStreamStartTests
         }
 
         public void Pause() => State = AudioPlayerState.Paused;
+
+        /// <summary>Reports the output as failed, as a backend losing its device does.</summary>
+        public void Fail()
+        {
+            State = AudioPlayerState.Error;
+            StateChanged?.Invoke(this, State);
+        }
 
         public void Stop()
         {

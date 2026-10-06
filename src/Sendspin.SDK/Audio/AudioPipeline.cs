@@ -108,8 +108,10 @@ public sealed class AudioPipeline : IAudioPipeline
     private bool _usingAudioClock;
     private bool? _lastAudioClockAvailable; // For tracking timing source transitions
 
-    // How often a pending format switch looks at the buffer it is waiting on.
+    // How often a pending format switch looks at the buffer it is waiting on, and how long past
+    // that buffer's own duration it goes on waiting for an output that has stopped reading it.
     private const int FormatSwitchPollMilliseconds = 10;
+    private const int FormatSwitchDrainMarginMilliseconds = 1000;
 
     // How often to log sync status during playback (microseconds)
     private const long SyncLogIntervalMicroseconds = 5_000_000; // 5 seconds
@@ -339,6 +341,10 @@ public sealed class AudioPipeline : IAudioPipeline
 
         if (!decoderOnlyChange && !formatSwitch)
         {
+            // A start from Error does not go through StopCoreAsync below, and a switch left
+            // pending by the stream that failed would otherwise close this one's output.
+            DisposeDrainingBuffer();
+
             if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
             {
                 // The non-gated core: this already holds the lifecycle gate, and SemaphoreSlim
@@ -391,24 +397,16 @@ public sealed class AudioPipeline : IAudioPipeline
                 return AudioPipelineStartOutcome.DecoderReplaced;
             }
 
-            if (formatSwitch)
+            // No more audio is coming for the buffer being left behind, so it will never reach
+            // the readiness gate by itself: what it holds starts playing now, on its timestamps.
+            if (formatSwitch && State == AudioPipelineState.Buffering)
             {
-                // No more audio is coming for the buffer being left behind, so it will never reach
-                // the readiness gate by itself: what it holds starts playing now, on its timestamps.
-                if (State == AudioPipelineState.Buffering)
-                {
-                    StartPlayback();
-                }
-
-                // A re-anchor clears the pipeline's buffer, which from here on is the new one.
-                if (_buffer is TimedAudioBuffer draining)
-                {
-                    draining.ReanchorRequired -= OnReanchorRequired;
-                }
-
-                _drainingBuffer = _buffer;
+                StartPlayback();
             }
 
+            // Replaced only once its successor exists, like the decoder above: a factory failure
+            // leaves it in place for the catch below to retain intact.
+            var replacedBuffer = _buffer;
             _buffer = TakeOrCreateBuffer(format);
 
             if (_buffer is TimedAudioBuffer timedBuffer)
@@ -425,6 +423,13 @@ public sealed class AudioPipeline : IAudioPipeline
 
             if (formatSwitch)
             {
+                // A re-anchor clears the pipeline's buffer, which from here on is the new one.
+                if (replacedBuffer is TimedAudioBuffer draining)
+                {
+                    draining.ReanchorRequired -= OnReanchorRequired;
+                }
+
+                _drainingBuffer = replacedBuffer;
                 _formatSwitchCts = new CancellationTokenSource();
                 _ = CompleteFormatSwitchAsync(_formatSwitchCts.Token);
 
@@ -529,13 +534,19 @@ public sealed class AudioPipeline : IAudioPipeline
     {
         try
         {
-            while (_drainingBuffer is { BufferedMilliseconds: > 0 })
+            // An output that has stopped reading never empties the buffer, while the new one
+            // fills and overflows behind it, so the wait ends once this audio is overdue.
+            var deadline = Environment.TickCount64
+                + (long)(_drainingBuffer?.BufferedMilliseconds ?? 0)
+                + FormatSwitchDrainMarginMilliseconds;
+
+            while (_drainingBuffer is { BufferedMilliseconds: > 0 } && Environment.TickCount64 < deadline)
             {
                 await Task.Delay(FormatSwitchPollMilliseconds, cancellationToken);
             }
 
             // The ring is empty, but the last of it is still in the output device's own buffer.
-            await Task.Delay(DetectedOutputLatencyMs, cancellationToken);
+            await Task.Delay(Math.Max(0, DetectedOutputLatencyMs), cancellationToken);
 
             await _lifecycleGate.WaitAsync(cancellationToken);
             try
@@ -550,16 +561,17 @@ public sealed class AudioPipeline : IAudioPipeline
                 try
                 {
                     await DisposePlayerAsync();
-                    DisposeDrainingBuffer();
-
                     await AttachPlayerAsync(_buffer, _currentFormat, CancellationToken.None);
 
                     // An in-place update does not re-apply the startup lead. After a stream/clear
-                    // the pipeline is Buffering and the readiness gate starts the new output.
-                    if (State == AudioPipelineState.Playing)
+                    // the pipeline is Buffering, and ProcessAudioChunk has been leaving the start
+                    // to this while the output was being replaced.
+                    if (State == AudioPipelineState.Playing || _buffer.IsReadyForPlayback)
                     {
                         StartPlayback();
                     }
+
+                    DisposeDrainingBuffer();
                 }
                 catch (Exception ex)
                 {
@@ -758,7 +770,9 @@ public sealed class AudioPipeline : IAudioPipeline
 
                 // Start playback when buffer is ready AND (optionally) clock is synced
                 // JS client approach: wait for clock sync convergence to ensure accurate timing
-                if (State == AudioPipelineState.Buffering && _buffer.IsReadyForPlayback)
+                // Not while a format switch is pending: the player in place is the one being
+                // closed, and CompleteFormatSwitchAsync starts its replacement.
+                if (State == AudioPipelineState.Buffering && _drainingBuffer is null && _buffer.IsReadyForPlayback)
                 {
                     if (ShouldWaitForClockSync())
                     {
@@ -857,10 +871,12 @@ public sealed class AudioPipeline : IAudioPipeline
 
             // Update the buffer's latency values for the new device
             // The new device may have different latency characteristics
-            if (_buffer != null)
+            // During a format switch that is the buffer still draining, not the one filling.
+            var playingBuffer = _drainingBuffer ?? _buffer;
+            if (playingBuffer != null)
             {
-                _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
-                _buffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
+                playingBuffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+                playingBuffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
                 PublishOutputLatency();
                 _logger.LogDebug(
                     "Updated latencies after device switch: output={LatencyMs}ms, calibrated={CalibratedMs}ms",
@@ -869,7 +885,7 @@ public sealed class AudioPipeline : IAudioPipeline
 
                 // Trigger a soft re-anchor to reset sync error tracking
                 // This prevents the timing discontinuity from causing false sync corrections
-                if (_buffer is TimedAudioBuffer timedBuffer)
+                if (playingBuffer is TimedAudioBuffer timedBuffer)
                 {
                     timedBuffer.ResetSyncTracking();
                     _logger.LogDebug("Reset sync tracking after device switch");
