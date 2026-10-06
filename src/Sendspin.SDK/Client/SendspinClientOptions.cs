@@ -80,7 +80,9 @@ public sealed record SendspinClientOptions
     /// offered in <see cref="ClientCapabilities.PairingCodeMethods"/>; pairing fails closed
     /// without it. The <see cref="PairingCodePresentation"/> includes the derived digits, the
     /// server's language hint, and the activation's selected dynamic format. Awaited before the
-    /// client proceeds, so a slow presenter delays pairing rather than racing it.
+    /// client proceeds, so a slow presenter delays pairing rather than racing it. Invoked once
+    /// per round: after a mistyped code the attempt is retried and the same code is presented
+    /// again, under the same cancellation token.
     /// </summary>
     public Func<PairingCodePresentation, CancellationToken, ValueTask>? PresentPairingCodeAsync { get; init; }
 
