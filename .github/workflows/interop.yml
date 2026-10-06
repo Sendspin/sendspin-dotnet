@@ -13,11 +13,6 @@ jobs:
   interop:
     runs-on: ubuntu-latest
     steps:
-      # Interop matrix PARKED: the pinned draft server (892af8c) predates the 1.0 client/hello —
-      # its ClientHelloPayload still requires trust_level, which the spec deleted and aiosendspin
-      # removed in #355 — so every scenario fails at the hello with "Malformed client/hello". All
-      # scenarios below are skipped (if: false) until the pin moves to a server that accepts the
-      # 1.0 hello. Do not bump the pin or patch the server here.
       - uses: actions/checkout@v4
 
       - name: Setup .NET
@@ -30,70 +25,29 @@ jobs:
         with:
           python-version: '3.13'
 
-      # Pinned to the aiosendspin commit the 10.0.0 draft release targets, because this
-      # line's pairing wire (object-keyed pair_methods, dynamic_pairing_code /
-      # static_pairing_code, fixed code lengths, the emission format on server/activate)
-      # exists only there: 9.1.1, the latest published release, rejects the client/hello
-      # outright. Move this to "aiosendspin[server]==10.0.0" the moment it is published, and
-      # thereafter bump deliberately on each release, since a release is where a spec wire
-      # change first becomes observable. As of the 1.0 wire cut-over (#287) the SDK is AHEAD
-      # of this pinned draft commit: it sends client-stream/* (spec PR #163), output_delay_ms /
-      # set_output_delay (#164), drops trust_level (#158) and player supported_commands (#177)
-      # from client/hello, and frames fragments as binary ID 1 (#172). The source scenario
-      # below is skipped until aiosendspin adopts the client-stream/* rename. The 9.x line
-      # keeps its own pin on 9.1.1.
-      #
-      # The compatibility floor is a single one — the aiosendspin 10.0.0 line — and is
-      # documented in the README matrix, not exercised here: this job runs only against the
-      # pinned draft commit above, patched below to accept the object-keyed pair methods.
+      # Pinned to the published aiosendspin release that implements the 1.0.0-rc1 wire, the
+      # same one Music Assistant ships. Bump deliberately on each release: a release is where a
+      # spec wire change first becomes observable. The 9.x line keeps its own pin on 9.1.1.
       - name: Install aiosendspin reference server
-        run: pip install "aiosendspin[server] @ git+https://github.com/Sendspin/aiosendspin@892af8c87b453442600a4d17f9eb32862fdb5593"
-
-      # The reference server still declares supported_pair_methods as a list of
-      # descriptors; the spec (PR #179) keys them by method, which is what the SDK sends.
-      # Until aiosendspin adopts the object shape, teach the installed copy to accept it.
-      - name: Accept the spec's object-keyed pair methods in the reference server
-        run: python tools/interop/patch_aiosendspin_pair_methods.py
+        run: pip install "aiosendspin[server]==10.0.0"
 
       - name: Build interop client
         run: dotnet build tools/interop/InteropClient -c Release
 
-      # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
       - name: Unpaired connect (client admitted over unpaired access)
-        if: false
         run: bash tools/interop/run.sh unpaired
 
-      # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
-      # SKIPPED (spec #247 / aiosendspin#402): the client now sends client/pair-init before
-      # client/pair-finalize, and the pinned server predates that and rejects the leading init.
-      # Re-enable once the interop pin includes aiosendspin#402.
       - name: Pairing PSK round-trip (pair, persist, re-handshake to user trust)
-        if: false
         run: bash tools/interop/run.sh pairing
 
       # The only live cover for the CPace round, PSK wrapping, and the pairing window. The
       # server side fails the run if the client did not gesture-gate the attempt first, so
       # this also pins the gating policy rather than just "pairing worked".
-      # Skipped until the pin moves to a server that accepts the 1.0 hello (aiosendspin #355).
-      #
-      # SKIPPED (spec #237 / aiosendspin#415): the client now binds the round into the CPace
-      # sid, which the pinned server predates, so key confirmation fails against it. Re-enable
-      # once the interop pin includes aiosendspin#415.
-      - name: Static PIN round-trip (gesture-gated attempt, CPace, wrapped PSK)
-        if: false
+      - name: Static pairing code round-trip (gesture-gated attempt, CPace, wrapped PSK)
         run: bash tools/interop/run.sh static-pin
 
       # Slower than the others by design: the client withholds its initial client/state
       # until clock sync converges, which takes ~30s of burst sampling, and the server
       # discards source chunks until that state arrives.
-      #
-      # Skipped for the 1.0 wire cut-over (#287): the SDK now announces client-stream/start
-      # (spec PR #163), but this pinned draft server still expects client_stream/start and so
-      # never starts the stream. Re-enable when aiosendspin adopts the client-stream/* rename.
-      #
-      # SKIPPED (spec #247 / aiosendspin#402): this scenario pairs via Pairing PSK first, which
-      # now sends client/pair-init before client/pair-finalize — rejected by the pinned server
-      # that predates aiosendspin#402. Re-enable once the interop pin includes aiosendspin#402.
       - name: Source streaming (server start command, client-stream/start, decoded audio)
-        if: false
         run: bash tools/interop/run.sh source
