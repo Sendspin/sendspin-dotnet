@@ -4,7 +4,8 @@ Runs the .NET SDK against the pinned [`aiosendspin`](https://pypi.org/project/ai
 10.0.0 release (the one [`.github/workflows/interop.yml`](../../.github/workflows/interop.yml)
 installs) over a real WebSocket, exercising the encrypted protocol end to end.
 This is the conformance gate that turns the loopback/known-answer-vector confidence into
-real-server-verified confidence.
+real-server-verified confidence. `aiosendspin` 10.0.0 implements `Sendspin/spec` at
+`1.0.0-rc1`, the tag the SDK is pinned to; see [docs/SPEC-VERSION.md](../../docs/SPEC-VERSION.md).
 
 ## Topology
 
@@ -67,4 +68,9 @@ Use a different Python via `PYTHON=/path/to/python bash tools/interop/run.sh …
 
 ## Not yet covered
 
-The artwork, visualizer and controller roles have no scenario here yet.
+- The visualizer and controller roles have no scenario.
+- No scenario pushes an artwork image. The client advertises `artwork@v1` and the server
+  activates it in the paired scenarios, but the announce/part/cancel transfer itself is
+  covered only by unit tests.
+- `client/pair-retry`: `dynamic-pin` enters the right code first time.
+- Pairing alongside playback (`['playback', 'pairing']`).

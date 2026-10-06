@@ -11,6 +11,7 @@ Cross-platform .NET SDK implementing the [Sendspin Protocol](https://www.sendspi
 - **Microsecond-precision sync** - Kalman filter clock synchronization across devices
 - **Built-in codecs** - PCM, FLAC, and Opus decoding out of the box
 - **Server discovery** - mDNS-based automatic server finding
+- **Line-in source** - the `source@v1` role captures a local input (AUX, turntable, microphone) and streams it to the server; paired connections only
 - **Sync correction built in** - `TimedAudioBuffer.Read()` applies the spec's strategy; `ReadRaw()` hands the error out for platforms with their own rate-control mechanism
 - **NativeAOT & trimming** - Fully compatible with `PublishAot` for single-file native executables
 - **Cross-platform** - Windows, Linux, macOS (.NET 8.0 / .NET 10.0)
@@ -29,19 +30,19 @@ Pick the line that matches your server.
 
 | SDK | Transport | Requires | Status |
 |---|---|---|---|
-| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin` 10.0.0 line (object-keyed pair methods) | Current |
-| **9.x** | Plaintext | Any `aiosendspin` | Maintained for pre-encryption servers |
+| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin` 10.0.0 or later | Current |
+| **9.x** | Plaintext | Any `aiosendspin`, 10.0.0 included | Maintained for pre-encryption servers |
 
-There is one floor, and it gates connecting as much as pairing. Every encrypted
-`client/hello` carries the object-keyed `supported_pair_methods` introduced by spec PR #179
-(a map keyed by method name, replacing the older list of descriptors), so a server that does
-not accept that shape rejects the hello outright — which stops playback, not just pairing.
-Only the 10.0.0 line of `aiosendspin` accepts that shape — its `main` branch has done so
-since #354. The release is unpublished at the time of writing, and the draft commit the
-interop workflow pins predates that change and still parses the older list shape, so the
-workflow patches its pair-method parsing to match (see
-[`.github/workflows/interop.yml`](.github/workflows/interop.yml)); the latest published
-release, 9.1.1, rejects the hello.
+10.0.0 implements [`Sendspin/spec`](https://github.com/Sendspin/spec) at tag `1.0.0-rc1`.
+`aiosendspin` 10.0.0 is the reference server's release of that spec and the one Music
+Assistant ships, and it is the floor: it gates connecting as much as pairing, so an older
+server stops playback, not just pairing. The
+[interop workflow](.github/workflows/interop.yml) runs the SDK against that release on every
+pull request. [docs/SPEC-VERSION.md](docs/SPEC-VERSION.md) records the pin, what is checked
+against the server, and where the SDK is known to differ from the spec.
+
+A 9.x client keeps working against `aiosendspin` 10.0.0, which serves it on its legacy path,
+so a server can be upgraded before its clients are.
 
 The 9.x line stays maintained for now; it is not end-of-life. If you are on 9.x and your
 server supports the encrypted protocol, see
@@ -70,10 +71,11 @@ The encrypted transport protects a session's confidentiality and integrity, but 
   hardware-backed protection, implement `ISendspinIdentityStore` and `IPairingRecordStore`
   over DPAPI, Keychain, or the Android keystore; the identity blob is opaque, so the raw
   private key never leaves the SDK.
-- **A static PIN is a long-lived, low-entropy secret.** The X25519 implementation used by the
-  PAKE is not constant-time, so a local attacker able to measure the client precisely enough
-  may learn something from timing. This matters most for `static_pin`, where the same short
-  secret is reused indefinitely; dynamic PIN derives a fresh per-session value.
+- **A static pairing code is a long-lived, low-entropy secret.** The X25519 implementation used
+  by the PAKE is not constant-time, so a local attacker able to measure the client precisely
+  enough may learn something from timing. This matters most for `static_pairing_code`, where
+  the same short secret is reused indefinitely; a dynamic pairing code is a fresh per-session
+  value.
 
 ## Example
 
@@ -128,8 +130,8 @@ try
 }
 catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.LegacyServer)
 {
-    // The server predates the encrypted protocol. Upgrade it to the aiosendspin 10.0.0
-    // line, or pin this SDK to the 9.x line. Retrying cannot help.
+    // The server predates the encrypted protocol. Upgrade it to aiosendspin 10.0.0 or
+    // later, or pin this SDK to the 9.x line. Retrying cannot help.
     Console.Error.WriteLine(ex.Message);
     return;
 }
@@ -141,7 +143,9 @@ catch (SendspinHandshakeException ex)
     return;
 }
 
-// Send commands
+// Send commands. A command goes out only while the controller role is active and the group
+// lists it in GroupState.SupportedCommands (from server/state); otherwise it is dropped with
+// a warning, so issue commands once GroupStateChanged has reported them.
 await client.SendCommandAsync("play");
 await client.SetVolumeAsync(75);
 ```
@@ -169,15 +173,15 @@ dotnet pack src/Sendspin.SDK/Sendspin.SDK.csproj -c Release
 
 ### Branching & Releases
 
-- **`dev`** — development branch. PRs merge here. Pushes produce `7.2.1-dev.abc1234` pre-release packages (uploaded as build artifacts).
-- **`main`** — production branch. PRs from `dev` merge here. Merges build and test but do not publish.
+- **`main`** — the trunk, and the 10.x line. PRs merge here. Pushes build and test but do not publish.
+- **`release/*`** — maintained earlier lines (`release/9.3`). They take backports and never merge to `main`.
 - **Tags** (`v*.*.*`) — pushing a version tag triggers the publish to [nuget.org](https://www.nuget.org/packages/Sendspin.SDK/) and [GitHub Packages](https://github.com/orgs/Sendspin/packages) via [NuGet Trusted Publishing](https://learn.microsoft.com/en-us/nuget/nuget-org/trusted-publishing).
 
 To release a new version:
 
 ```bash
-git tag v7.3.0
-git push origin v7.3.0
+git tag v10.0.0
+git push origin v10.0.0
 ```
 
 ## License
