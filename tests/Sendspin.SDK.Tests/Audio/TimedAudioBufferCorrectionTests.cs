@@ -874,7 +874,7 @@ public class TimedAudioBufferCorrectionTests
     [Fact]
     public void MidSegmentResetSyncTracking_PreservesAlignment()
     {
-        // Every output-device switch and static-delay change goes through ResetSyncTracking,
+        // Every output-device switch goes through ResetSyncTracking,
         // which keeps the buffered audio and re-anchors on the next callback. When the head
         // segment is only half consumed, anchoring to the segment's START rather than to the
         // read cursor makes the schedule look one prefix too early, and the startup alignment

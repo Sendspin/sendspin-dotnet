@@ -125,6 +125,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     // on every pre-start poll (includes any output delay from IClockSynchronizer).
     // We wait until this time arrives before outputting audio.
     private long _scheduledStartLocalTime;      // Target local time when playback should start (μs)
+    private long _outputDelayAtAnchorMicroseconds; // Output delay the current anchor was derived with (μs)
 
     // Sync error tracking (CLI-style: track samples READ, not samples OUTPUT)
     // Key insight: We must track samples READ from buffer, not samples OUTPUT.
@@ -374,8 +375,8 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         }
 
         // Schedule from the read CURSOR, not from the head segment's start. After a mid-stream
-        // ResetSyncTracking — every output-device switch and static-delay change takes that
-        // path — the head segment is partly consumed, and anchoring to its start puts the
+        // ResetSyncTracking — every output-device switch takes that path — the head segment
+        // is partly consumed, and anchoring to its start puts the
         // schedule one consumed prefix too early. The startup alignment then "corrects" a
         // discrepancy that does not exist, shifting the audio permanently while the reported
         // error settles back to a contented zero.
@@ -441,6 +442,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         // This handles static buffer fill time architecturally, so sync correction
         // only needs to handle drift and fluctuations.
         _playbackStartLocalTime = _scheduledStartLocalTime - CalibratedStartupLatencyMicroseconds;
+        _outputDelayAtAnchorMicroseconds = AppliedOutputDelayMicroseconds();
         _samplesReadSinceStart = 0;
         _samplesOutputSinceStart = 0;
 
@@ -667,6 +669,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                 // But skip this check during startup grace period
                 var elapsedSinceStart = (long)(_samplesOutputSinceStart * _microsecondsPerSample);
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
+                    && _pendingHardSyncSamples == 0
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
                 {
                     RequestReanchor(currentLocalTime);
@@ -792,6 +795,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
                 // Check re-anchor threshold
                 if (elapsedSinceStart >= _syncOptions.StartupGracePeriodMicroseconds
+                    && _pendingHardSyncSamples == 0
                     && Math.Abs(_currentSyncErrorMicroseconds) > _syncOptions.ReanchorThresholdMicroseconds)
                 {
                     RequestReanchor(currentLocalTime);
@@ -926,6 +930,52 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             ResetSyncStateLocked();
         }
     }
+
+    /// <summary>
+    /// Applies an output-delay change to playback that is already running: moves the schedule
+    /// by exactly the change and snaps the read cursor by the same amount, keeping the buffered
+    /// audio and every other piece of timing state.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <see cref="ResetSyncTracking"/>. A reset forgets the baseline, and the
+    /// baseline is not a property of the stream: it is how far the output had read ahead of the
+    /// pace clock when the anchor was taken. A push-mode device takes its whole buffer on the
+    /// first read after a cold start and one wake's worth on the first read after a reset, so
+    /// re-deriving the anchor mid-stream captured a different baseline and moved playback by
+    /// the difference — some 90 ms on a 100 ms device woken every 10 ms — on top of the delay
+    /// that was asked for, with a reported error of zero either way. A delay change is a known
+    /// shift, so it is applied as one.
+    /// </remarks>
+    public void ApplyOutputDelayChange()
+    {
+        lock (_lock)
+        {
+            if (!_playbackStarted)
+            {
+                return; // The next start derives its schedule from the current delay anyway.
+            }
+
+            var delay = AppliedOutputDelayMicroseconds();
+            var shift = delay - _outputDelayAtAnchorMicroseconds;
+            if (shift == 0)
+            {
+                return;
+            }
+
+            // A larger delay schedules everything earlier, so playback is now late by the shift
+            // (and early by it when the delay shrank). Move the anchor so the error says so, and
+            // close it in one step; a snap already in flight is folded into the same splice.
+            _outputDelayAtAnchorMicroseconds = delay;
+            _playbackStartLocalTime -= shift;
+            ScheduleSnap(shift + SamplesToMicroseconds(_pendingHardSyncSamples), "output delay");
+        }
+    }
+
+    /// <summary>
+    /// The output delay the clock conversion currently applies, in microseconds.
+    /// </summary>
+    private long AppliedOutputDelayMicroseconds() =>
+        _clockSync.ServerToClientTimeUncompensated(0) - _clockSync.ServerToClientTime(0);
 
     /// <summary>
     /// Returns every piece of timing and correction state to its post-construction value,
