@@ -70,6 +70,17 @@ public class CapabilitiesWireValueValidationTests
     }
 
     [Fact]
+    public void InvalidVisualizerSupportWithoutVisualizerRole_IsAccepted()
+    {
+        // The support object only travels with the visualizer role, so one kept around while the
+        // role is switched off never reaches the wire and is not validated.
+        var capabilities = VisualizerCapabilities(bufferCapacity: 0);
+        capabilities.Roles = new List<string> { "controller@v1" };
+
+        using var client = Create(capabilities);
+    }
+
+    [Fact]
     public void VisualizerWithPositiveBufferCapacity_IsAccepted()
     {
         using var client = Create(VisualizerCapabilities(bufferCapacity: 65536));
