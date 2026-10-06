@@ -214,7 +214,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
 
     // Whether the "discarding audio while unavailable" line has already been logged for the
-    // current unavailable period. Set on the first dropped chunk and cleared when availability
+    // current unavailable period (external source or unsynchronized clock; a pipeline error alone
+    // does not discard). Set on the first dropped chunk and cleared when availability
     // returns to true (in PublishAvailabilityAsync), so a false->true->false sequence logs once
     // per period even when no audio arrives while available. Written from the receive loop and the
     // availability publisher; a stale read only ever costs a duplicated or skipped debug line, so
@@ -5331,7 +5332,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 // consuming, so discard inbound audio rather than decode it — the connection stays
                 // open (the spec says discard, MUST NOT close). Logged once per unavailable period,
                 // not per chunk, since a live stream would otherwise flood the log.
-                if (!CurrentAvailability)
+                // The pipeline's own reported error is deliberately not a reason to discard: a
+                // failed playback start is retried from ProcessAudioChunk, so audio is the only
+                // thing that returns the pipeline to Playing and clears that error.
+                if (IsExternalSource || (RequiresClockSync() && !ClockSyncEstablished))
                 {
                     if (!_audioDroppedWhileUnavailable)
                     {
