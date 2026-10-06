@@ -739,7 +739,8 @@ public sealed class AudioPipeline : IAudioPipeline
             _logger.LogDebug("Applied output delay change to sync timing (buffer preserved)");
         }
 
-        (_drainingBuffer as TimedAudioBuffer)?.ResetSyncTracking();
+        // The buffer still playing out an earlier format takes the same shift, for the same reason.
+        (_drainingBuffer as TimedAudioBuffer)?.ApplyOutputDelayChange();
     }
 
     /// <inheritdoc/>
