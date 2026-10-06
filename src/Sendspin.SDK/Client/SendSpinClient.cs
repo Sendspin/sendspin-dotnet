@@ -171,14 +171,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // mutated, so a reader that has taken the reference sees a complete configuration.
     private VisualizerRoleSupport? _visualizerRoleSupport;
 
-    // Bounds for any value written to the clock synchronizer's output delay. The GroupSync offset
-    // path allows negatives (schedule later), so this is wider than the set_output_delay spec range.
-    private const double MinOutputDelayMs = -5000.0;
+    // Bounds for a persisted output delay loaded from the store. The applied value is 0-5000 per
+    // the spec's output_delay_ms (the clock synchronizer's setter is the single clamp site), so a
+    // stored value outside that range is bounded here before it is logged and re-applied.
+    private const double MinOutputDelayMs = 0.0;
     private const double MaxOutputDelayMs = 5000.0;
-
-    // Last scheduler-side value ToWireOutputDelayMs warned about, so a delay that does not
-    // survive the projection is reported once rather than on every client/state.
-    private double? _lastWarnedOutputDelayMs;
 
     // Last line-sense signal the app reported, or null if it never has. Survives reconnects on
     // purpose: it describes the device's input, not the session (#114).
@@ -208,6 +205,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // field costs a duplicate warning and nothing else, so it needs no synchronization.
     private int _warnedUndefinedPlayerAudioTypes;
 
+    // True once this unavailable period has logged a dropped display frame, so the drop (spec
+    // #266/#271) is reported once rather than at frame rate. Re-armed when the client becomes
+    // available again and on each new connection. A lost race costs a duplicate debug line and
+    // nothing else.
+    private bool _loggedDisplayDropWhileUnavailable;
+
     // Tail of the stream-lifecycle chain: the task the next lifecycle handler waits for. See
     // DispatchStreamLifecycle. The lock covers the read-and-replace only.
     private readonly object _streamLifecycleLock = new();
@@ -218,6 +221,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
     /// </summary>
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
+
+    // Whether the "discarding audio while unavailable" line has already been logged for the
+    // current unavailable period. Set on the first dropped chunk and cleared when availability
+    // returns to true (in PublishAvailabilityAsync), so a false->true->false sequence logs once
+    // per period even when no audio arrives while available. Written from the receive loop and the
+    // availability publisher; a stale read only ever costs a duplicated or skipped debug line, so
+    // it needs no lock.
+    private bool _audioDroppedWhileUnavailable;
 
     /// <summary>
     /// Serializes the two places a chunk is handed to the pipeline: the receive loop's direct
@@ -529,6 +540,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The runtime reconfiguration path validates spectrum-vs-spectrum-config already; the
         // initial configuration needs the same guard before the first client/state is built.
         _capabilities.ValidateVisualizerRoleSupport();
+
+        // A player must advertise at least one supported_format (spec #257); check before the
+        // first client/hello, where an empty list would otherwise go out.
+        _capabilities.ValidateAudioFormats();
 
         // A custom (_-prefixed) role must carry an explicit @v version (spec template.md).
         _capabilities.ValidateCustomRoleVersions();
@@ -1637,6 +1652,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 nameof(spectrum));
         }
 
+        // rate_max is a positive integer in every visualizer state object, whatever the types —
+        // an empty or event-only list included (roles/visualizer/v1.md, spec #257).
+        if (rateMax <= 0)
+        {
+            throw new ArgumentException(
+                "A visualizer configuration must set a positive rate_max, whatever types it requests.",
+                nameof(rateMax));
+        }
+
         lock (_roleConfigLock)
         {
             // Buffer capacity is a constant of the device advertised once in client/hello, so it
@@ -1681,7 +1705,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (outputDelayMs is { } requested && requested != _clockSynchronizer.OutputDelayMs)
         {
             _clockSynchronizer.OutputDelayMs = requested;
-            TrySaveOutputDelay(requested);
+
+            // Persist what the setter actually applied (clamped to 0-5000), not the raw request,
+            // so a reload restores the same value rather than re-clamping a stored out-of-range one.
+            TrySaveOutputDelay(_clockSynchronizer.OutputDelayMs);
         }
 
         // Persist the caller's values: SendInitialClientStateAsync reads _playerState, so
@@ -1909,6 +1936,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // drift between a flag and the thing it describes that this publisher exists to stop.
         var current = CurrentAvailability;
 
+        // Clear the audio-drop log latch when the client is available again, so the next
+        // unavailable period logs its first dropped chunk even if none arrived while available.
+        if (current)
+        {
+            _audioDroppedWhileUnavailable = false;
+        }
+
+        // Re-arm the display-drop log when the client is available again, so the next unavailable
+        // period logs its first dropped frame even if none arrived while available.
+        if (current)
+        {
+            _loggedDisplayDropWhileUnavailable = false;
+        }
+
         // An availability input flipped while the initial client/state is still deferred (e.g. a
         // pipeline error or external-source enter inside the converging window). Send the
         // connection's initial message instead — it reads CurrentAvailability and every role's
@@ -2073,42 +2114,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Projects a scheduler-side output delay onto the wire type: an integer millisecond value
-    /// in 0-5000. Every client/state goes through here, so the internal range stays wider than
-    /// the wire's without the difference leaking onto it.
+    /// Projects the scheduler-side output delay onto the wire type: the spec's
+    /// <c>output_delay_ms</c> is an integer and the applied value a double, so this rounds to the
+    /// nearest millisecond.
     /// </summary>
     /// <remarks>
-    /// The scheduler's value is a double in <see cref="MinOutputDelayMs"/>..<see cref="MaxOutputDelayMs"/> —
-    /// fractional from calibration, negative to schedule later. The spec's <c>output_delay_ms</c>
-    /// is an integer 0-5000 and states negatives are not supported; a conformant server rejects
-    /// one outright rather than tolerating it. Clamping is therefore not optional, and a clamp
-    /// that moved the value is worth saying out loud: the server is being told a delay the
-    /// client is not actually applying.
+    /// The applied value is already in 0-5000 — <see cref="IClockSynchronizer.OutputDelayMs"/>'s
+    /// setter is the single clamp site — so this only rounds a fractional delay to the integer the
+    /// wire carries, and the reported value can no longer differ from the applied one by more than
+    /// that rounding.
     /// </remarks>
-    private int ToWireOutputDelayMs(double outputDelayMs)
-    {
-        // A public settable double can be NaN or infinity; Math.Clamp propagates NaN and the
-        // cast would then produce a garbage int rather than throwing.
-        double bounded = double.IsFinite(outputDelayMs)
-            ? Math.Clamp(outputDelayMs, 0.0, MaxOutputDelayMs)
-            : 0.0;
-
-        int wire = (int)Math.Round(bounded, MidpointRounding.AwayFromZero);
-
-        // Deduplicated on the value: a volume slider can drive many state sends, and a
-        // misconfigured delay would otherwise warn on every one of them.
-        if (wire != outputDelayMs && _lastWarnedOutputDelayMs != outputDelayMs)
-        {
-            _lastWarnedOutputDelayMs = outputDelayMs;
-            _logger.LogWarning(
-                "output_delay_ms {Configured}ms is reported to the server as {Reported}ms: the wire "
-                + "value is an integer 0-5000 and negatives are not supported. Audio is still "
-                + "scheduled using {Configured}ms, so the server's group calibration will differ.",
-                outputDelayMs, wire, outputDelayMs);
-        }
-
-        return wire;
-    }
+    private static int ToWireOutputDelayMs(double outputDelayMs)
+        => (int)Math.Round(outputDelayMs, MidpointRounding.AwayFromZero);
 
     /// <inheritdoc/>
     public void ClearAudioBuffer()
@@ -3817,6 +3834,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _initialClientStateSent = false;
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
+        _loggedDisplayDropWhileUnavailable = false;
 
         // Role-state readiness is per connection too (spec PR #204): the new server has received
         // nothing yet, so every role's binary channel starts closed until this connection sends
@@ -4730,8 +4748,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Mute.Value);
         }
 
-        // Apply set_output_delay only when advertised as supported and a value is present.
-        // Per spec the value is 0-5000 ms (negatives are not supported), so we clamp to that range.
+        // Apply set_output_delay only when advertised as supported and a value is present. Per spec
+        // the value is 0-5000 ms (negatives are not supported); the clock synchronizer's setter is
+        // the single clamp site, so the requested value is handed to it and the applied result read
+        // back for persistence and the log.
         // Spec 168a677 (spec PR #164) renamed the command from 'set_static_delay' and the field
         // from 'static_delay_ms' with no alias; the 10.x line accepts only the new names.
         var requestedDelayMs = player.OutputDelayMs;
@@ -4739,18 +4759,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && _capabilities.SupportsSetOutputDelay
             && requestedDelayMs.HasValue)
         {
-            var clamped = Math.Clamp(requestedDelayMs.Value, 0, 5000);
-            if (clamped != requestedDelayMs.Value)
-            {
-                _logger.LogWarning("server/command [{Player}]: output_delay_ms clamped from {Requested}ms to {Clamped}ms",
-                    _capabilities.ClientName, requestedDelayMs.Value, clamped);
-            }
-
-            _clockSynchronizer.OutputDelayMs = clamped;
-            TrySaveOutputDelay(clamped);
+            _clockSynchronizer.OutputDelayMs = requestedDelayMs.Value;
+            var applied = _clockSynchronizer.OutputDelayMs;
+            TrySaveOutputDelay(applied);
             changed = true;
             _logger.LogInformation("server/command [{Player}]: Applied output delay {Delay}ms",
-                _capabilities.ClientName, clamped);
+                _capabilities.ClientName, applied);
         }
 
         if (changed)
@@ -4799,8 +4813,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// Best-effort: a throwing or out-of-range store must not abort the handshake (the initial
     /// client/state and time-sync loop run after this). On failure we log and continue without the
-    /// persisted delay. The loaded value is clamped to the same range as the GroupSync offset path,
-    /// since that is the broadest legitimate source of a persisted delay (negatives allowed).
+    /// persisted delay. The loaded value is bounded to the spec's 0-5000 range before it is logged;
+    /// the synchronizer's setter clamps to the same range, so the two agree.
     /// </remarks>
     private void LoadPersistedOutputDelay()
     {
@@ -5179,8 +5193,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             StreamEndReceived?.Invoke(this, payload);
 
             // Media held for a display time that belongs to the stream just ended must not
-            // surface after it.
-            FlushDisplayRoles(payload.Roles);
+            // surface after it, and the artwork on display is cleared: stream/end is playback
+            // termination (spec #266), unlike the stream/clear seek below.
+            FlushDisplayRoles(payload.Roles, endingStream: true);
 
             if (!ReachesPlayerRole(payload.Roles))
             {
@@ -5236,8 +5251,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         StreamClearReceived?.Invoke(this, payload);
 
         // "Clients should clear all buffered visualization data and continue with data received
-        // after this message" — the same boundary applies to artwork still held for display.
-        FlushDisplayRoles(payload.Roles);
+        // after this message" — the same boundary applies to artwork still held for display. A
+        // seek keeps the image already on screen, so the flush drops only what is pending.
+        FlushDisplayRoles(payload.Roles, endingStream: false);
 
         if (ReachesPlayerRole(payload.Roles) && _audioPipeline is { } pipeline)
         {
@@ -5283,8 +5299,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// A present-but-empty array names no role and so ends nothing, as everywhere else.
     /// Dropping the artwork still held is what spec #135 (pending merge) means by "on
     /// <c>stream/end</c>, clearing buffers includes discarding pending images".
+    /// <para>
+    /// <paramref name="endingStream"/> separates the two messages for the artwork already on
+    /// display: a <c>stream/end</c> is playback termination and additionally clears it (spec #266),
+    /// while a <c>stream/clear</c> is a seek or track jump that keeps it and only drops the pending
+    /// image.
+    /// </para>
     /// </remarks>
-    private void FlushDisplayRoles(List<string>? roles)
+    private void FlushDisplayRoles(List<string>? roles, bool endingStream)
     {
         if (roles is null)
         {
@@ -5292,7 +5314,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // hold no stream, and spec #135 (pending merge) ties a pending metadata or color
             // update to nothing a stream teardown says.
             _displayScheduler.FlushVisualizer();
-            _displayScheduler.FlushArtwork();
+            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
             return;
         }
 
@@ -5303,7 +5325,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (roles.Contains("artwork"))
         {
-            _displayScheduler.FlushArtwork();
+            _displayScheduler.FlushArtwork(raiseCleared: endingStream);
         }
     }
 
@@ -5348,9 +5370,38 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // Spec #266/#271 (SHOULD): while this client reports available: false the server should not
+        // stream it display data, so an artwork or visualizer frame that arrives anyway is dropped
+        // before it is scheduled — its timings belong to a state this client is not in. The
+        // connection stays open, and the player-audio arm keeps its own handling.
+        if (category is BinaryMessageCategory.Artwork or BinaryMessageCategory.Visualizer)
+        {
+            if (!CurrentAvailability)
+            {
+                DropDisplayBinaryWhileUnavailable();
+                return;
+            }
+        }
+
         switch (category)
         {
             case BinaryMessageCategory.PlayerAudio:
+                // Spec #270: while this client reports available: false its pipeline is not
+                // consuming, so discard inbound audio rather than decode it — the connection stays
+                // open (the spec says discard, MUST NOT close). Logged once per unavailable period,
+                // not per chunk, since a live stream would otherwise flood the log.
+                if (!CurrentAvailability)
+                {
+                    if (!_audioDroppedWhileUnavailable)
+                    {
+                        _audioDroppedWhileUnavailable = true;
+                        _logger.LogDebug(
+                            "Discarding player audio while unavailable; chunks are dropped until this client reports available again");
+                    }
+
+                    break;
+                }
+
                 if (type != BinaryMessageTypes.PlayerAudio0)
                 {
                     // player@v1 defines one audio slot; 5-7 are allocated to the role but carry no
@@ -5528,6 +5579,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             "Dropping binary type {Type}: player@v1 defines only audio type {DefinedType}",
             type,
             BinaryMessageTypes.PlayerAudio0);
+    }
+
+    /// <summary>
+    /// Logs the first artwork/visualizer frame dropped in each unavailable period, so a server
+    /// that keeps streaming display data to an unavailable client says so once rather than at
+    /// frame rate. Re-armed in <see cref="PublishAvailabilityAsync"/> when the client becomes
+    /// available again, and on each new connection.
+    /// </summary>
+    private void DropDisplayBinaryWhileUnavailable()
+    {
+        if (_loggedDisplayDropWhileUnavailable)
+        {
+            return;
+        }
+
+        _loggedDisplayDropWhileUnavailable = true;
+        _logger.LogDebug(
+            "Dropping artwork/visualizer binary data while unavailable (available: false); the "
+            + "server should not stream display data to an unavailable client");
     }
 
     /// <summary>

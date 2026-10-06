@@ -16,7 +16,7 @@ public sealed class ArtworkReceivedEventArgs : EventArgs
     public long Timestamp { get; }
 
     /// <summary>
-    /// Encoded image bytes (JPEG/PNG/BMP).
+    /// Encoded image bytes (JPEG/PNG).
     /// </summary>
     public byte[] ImageData { get; }
 
@@ -32,8 +32,9 @@ public sealed class ArtworkReceivedEventArgs : EventArgs
 }
 
 /// <summary>
-/// A single artwork channel was cleared (an empty binary artwork message: type byte + timestamp,
-/// no image data).
+/// A single artwork channel was cleared: either by an empty binary artwork message (type byte +
+/// timestamp, no image data), or by a <c>stream/end</c> that ends the artwork role while the
+/// channel still shows an image.
 /// </summary>
 public sealed class ArtworkClearedEventArgs : EventArgs
 {
@@ -43,7 +44,9 @@ public sealed class ArtworkClearedEventArgs : EventArgs
     public int Channel { get; }
 
     /// <summary>
-    /// Server clock timestamp in microseconds carried by the clear message.
+    /// Server clock timestamp in microseconds carried by the clear message. A clear raised for a
+    /// <c>stream/end</c> has no message of its own, and carries the timestamp of the image it
+    /// clears instead.
     /// </summary>
     public long Timestamp { get; }
 

@@ -207,7 +207,14 @@ public class SendspinClientServiceArtworkTests
         const long timestamp = 0x0102030405060708;
 
         var (client, connection, _) = TestClient.Create(configure: options =>
-            options with { PrecisionTimer = new FakePrecisionTimer { CurrentTime = timestamp } });
+            options with
+            {
+                PrecisionTimer = new FakePrecisionTimer { CurrentTime = timestamp },
+
+                // Display binary is dropped while the client is unavailable (spec #266/#271); a
+                // converged clock keeps this default (player) client available so the plumbing runs.
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
+            });
         using var _c = client;
 
         ArtworkReceivedEventArgs? received = null;
@@ -250,7 +257,10 @@ public class SendspinClientServiceArtworkTests
     [Fact]
     public void ZeroSizeAnnounce_RaisesClearedWithChannel_AndLeavesNoTransferInFlight()
     {
-        var (client, connection, _) = TestClient.Create();
+        // A converged clock keeps this default (player) client available; display binary is
+        // dropped while unavailable (spec #266/#271).
+        var (client, connection, _) = TestClient.Create(configure: options =>
+            options with { ClockSynchronizer = new ConvergedClockSynchronizer() });
         using var _c = client;
 
         ArtworkClearedEventArgs? cleared = null;

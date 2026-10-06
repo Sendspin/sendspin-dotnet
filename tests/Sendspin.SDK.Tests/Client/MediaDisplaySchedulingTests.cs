@@ -1,5 +1,8 @@
 using System.Buffers.Binary;
+using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Synchronization;
@@ -55,10 +58,11 @@ public class MediaDisplaySchedulingTests
             long now = Now,
             int bufferCapacity = 65_536,
             IClockSynchronizer? clockSynchronizer = null,
-            FakeAudioPipeline? audioPipeline = null)
+            FakeAudioPipeline? audioPipeline = null,
+            ILogger<SendspinClientService>? logger = null)
     {
         var timer = new FakePrecisionTimer { CurrentTime = now };
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(logger: logger, configure: options =>
             options with
             {
                 PrecisionTimer = timer,
@@ -277,6 +281,32 @@ public class MediaDisplaySchedulingTests
         await WaitUntilAsync(() => frames.Count == 2, "the two frames within capacity");
 
         Assert.Equal(new[] { 200, 300 }, frames.Select(f => f.Loudness!.Value).ToArray());
+    }
+
+    [Fact]
+    public void VisualizerFrame_ArrivingWhileUnavailable_IsDroppedWithoutClosing_ThenFlowsWhenAvailable()
+    {
+        var pipe = new FakeAudioPipeline();
+        var (client, connection, _) = SchedulingClient(audioPipeline: pipe);
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+
+        // A pipeline error makes the client report available: false. The spec says the server
+        // should not stream display data then, so a frame that arrives anyway is dropped before it
+        // is scheduled — and the connection is left open (spec #266/#271).
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 100));
+        Assert.Empty(frames);
+        Assert.Equal(ConnectionState.Connected, connection.State);
+
+        // Recovery to Playing restores availability, and frames flow again.
+        pipe.SetState(AudioPipelineState.Playing);
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 200));
+
+        var only = Assert.Single(frames);
+        Assert.Equal(200, only.Loudness);
     }
 
     [Fact]
@@ -925,6 +955,118 @@ public class MediaDisplaySchedulingTests
 
         await DrainPastAsync(client, connection, timer, Now + 1_000);
         Assert.Empty(received);
+    }
+
+    [Fact]
+    public void DisplayDropWhileUnavailable_IsLoggedOncePerUnavailablePeriod()
+    {
+        var pipe = new FakeAudioPipeline();
+        var logger = new CapturingLogger<SendspinClientService>();
+        var (client, connection, _) = SchedulingClient(audioPipeline: pipe, logger: logger);
+        using var _c = client;
+
+        // First unavailable period: two drops, one notice.
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 100));
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 200));
+
+        // Available again with no display frame in the window, then unavailable again. The latch
+        // re-arms on the availability transition, not on a frame, so the second period logs too.
+        pipe.SetState(AudioPipelineState.Playing);
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 300));
+
+        Assert.Equal(
+            2,
+            logger.MessagesAt(LogLevel.Debug)
+                .Count(m => m.Contains("Dropping artwork/visualizer binary data while unavailable", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task StreamEnd_ArrivingWhileDueArtworkIsBeingDispatched_DiscardsThatArtwork()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        // A dispatch pass raises its visualizer frames before its artwork, so ending the artwork
+        // role from the frame's handler lands the stream/end exactly where the race is: after the
+        // loop has taken the due image out of its slot, before it has raised it.
+        client.VisualizationReceived += (_, f) =>
+        {
+            connection.RaiseTextMessageReceived(
+                """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+            frames.Add(f);
+        };
+
+        // Both due at the same future moment, so one pass takes them together.
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        timer.CurrentTime = Now + 2_000;
+        await WaitUntilAsync(() => frames.Count == 1, "the frame that ends the artwork role");
+
+        // The image the loop was holding must not surface after the stream/end that discarded it.
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(received);
+    }
+
+    [Fact]
+    public async Task StreamEnd_NamingArtwork_ClearsEveryChannelStillShowingAnImage()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        var cleared = new List<ArtworkClearedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+        client.ArtworkCleared += (_, e) => cleared.Add(e);
+
+        // Two channels showing an image now (past-stamped, so raised on arrival).
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now - 1, new byte[] { 2 }, BinaryMessageTypes.Artwork1));
+        Assert.Equal(2, received.Count);
+
+        // stream/end is playback termination, so every channel still showing an image is cleared
+        // (spec #266). The flush runs before the handler's first await, so the cleared events have
+        // been raised by the time this returns.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+
+        Assert.Equal(new[] { 0, 1 }, cleared.Select(c => c.Channel).OrderBy(c => c).ToArray());
+
+        // Nothing pending is left to surface afterwards.
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Equal(2, received.Count);
+    }
+
+    [Fact]
+    public void StreamClear_NamingArtwork_KeepsTheImageOnDisplay()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var cleared = new List<ArtworkClearedEventArgs>();
+        client.ArtworkCleared += (_, e) => cleared.Add(e);
+
+        // An image on display now.
+        connection.RaiseBinaryMessageReceived(
+            ArtworkBinary(Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+
+        // A seek clears buffered data but keeps playing the same track, so the cover already shown
+        // must not be blanked — unlike a stream/end, it does not clear the display.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+        Assert.DoesNotContain(cleared, c => c.Channel == 0);
+
+        // The image is still tracked as displayed, so a later stream/end does clear it.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":2,"roles":["artwork"]}}""");
+        Assert.Contains(cleared, c => c.Channel == 0);
     }
 
     [Fact]
