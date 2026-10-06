@@ -3361,6 +3361,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The round counts toward the hold-back from here, where its code is emitted, so a
         // round abandoned afterwards still counts.
         RecordPairingCodeFailure(state.Method);
+        state.RoundBegun = true;
 
         // Present the pairing code through the app's out-channel, again in each round. Started
         // here (this method runs on the connection's synchronous receive dispatch, which cannot
@@ -3404,11 +3405,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // reached Encoding.ASCII.GetBytes(null) and threw ArgumentNullException, which the catch
         // filter does not name — so it escaped to the receive loop as an unexplained lost
         // connection rather than a deliberate one (#106).
-        if (state.Dynamic && state.PairingCode is null)
+        //
+        // The same holds in every later round, where the code is already derived: each CPace
+        // run is one guess at the pairing code, and server/pair-init is where the round is
+        // counted toward the hold-back. A server/pair-auth accepted without one would be a
+        // guess that is never counted.
+        if (state.Dynamic && !state.RoundBegun)
         {
             throw new System.Text.Json.JsonException(
-                "server/pair-auth arrived before server/pair-init; no dynamic pairing code has been derived");
+                "server/pair-auth arrived without the server/pair-init that begins its round");
         }
+
+        state.RoundBegun = false;
 
         // Static pairing code: the pairing code is device-printed and known from the start.
         string pin = state.Dynamic ? state.PairingCode! : (_effectiveStaticPairingCode ?? string.Empty);
@@ -3588,6 +3596,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // The round within the attempt, 1 for the first; advanced by each client/pair-retry.
         public uint Round = 1;
+
+        // Set by the server/pair-init that begins a dynamic round and spent by that round's
+        // server/pair-auth, so each counted round admits exactly one CPace run.
+        public bool RoundBegun;
 
         // Set for a dynamic attempt when server/pair-init arrives: the app's pairing code
         // presentation, awaited before client/pair-auth is sent, and the cancellation

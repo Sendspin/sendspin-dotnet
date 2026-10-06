@@ -44,6 +44,44 @@ public class PairingRoundTests
     }
 
     [Fact]
+    public async Task ServerPairAuth_AfterARetry_WithoutANewServerPairInit_IsAProtocolError()
+    {
+        // Each CPace run is one guess at the pairing code, and the round is counted toward the
+        // hold-back at server/pair-init. A peer that skipped it after a retry would guess for
+        // the rest of the attempt without the counter ever moving.
+        var lockouts = new InMemoryPairingCodeLockoutStore();
+        await using var h = await PairingHarness.StartAsync(lockouts: lockouts);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
+        var init = await h.NextMessageAsync<ClientPairInitMessage>();
+        h.SendServerPairInit();
+        string code = await h.WaitForNextPresentedPairingCodeAsync();
+        string wrong = code == "000000" ? "000001" : "000000";
+        await h.RunServerPakeAsync(wrong, init.Payload.PairingIndex, round: 1);
+        await h.NextMessageAsync<ClientPairRetryMessage>();
+
+        h.SendServerPairAuth();
+
+        Assert.Equal("unauthorized", h.LastDisconnectReason);
+        Assert.Single(h.SentOfType<ClientPairAuthMessage>());
+        Assert.Equal(1, lockouts.GetFailures("dynamic_pairing_code"));
+    }
+
+    [Fact]
+    public async Task SecondServerPairAuth_InOneRound_IsAProtocolError()
+    {
+        await using var h = await PairingHarness.StartAsync();
+        h.SendPairingActivate(method: "dynamic_pairing_code");
+        await h.CompleteDynamicPairingCodeToPresentationAsync();
+        h.SendServerPairAuth();
+        await h.NextMessageAsync<ClientPairAuthMessage>();
+
+        h.SendServerPairAuth();
+
+        Assert.Equal("unauthorized", h.LastDisconnectReason);
+        Assert.Single(h.SentOfType<ClientPairAuthMessage>());
+    }
+
+    [Fact]
     public async Task FailedServerKc_WhenHeldBack_AbortsRatherThanRetries()
     {
         // "MUST abort instead at the round limit": this round is the one that reaches it.

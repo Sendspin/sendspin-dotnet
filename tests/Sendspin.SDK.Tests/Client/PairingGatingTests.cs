@@ -574,6 +574,15 @@ internal sealed class PairingHarness : IAsyncDisposable
             ? $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{B64Url(RandomNumberGenerator.GetBytes(32))}}}"}}"""
             : """{"type":"server/pair-init","payload":{}}""");
 
+    /// <summary>Feeds a server/pair-auth carrying a well-formed share for an arbitrary code.</summary>
+    public void SendServerPairAuth()
+    {
+        var server = CPace.Start(
+            CPaceRole.Initiator, Encoding.ASCII.GetBytes("000000"), new byte[32], ad: PairingCodes.AdServer);
+        _connection.RaiseTextMessageReceived(
+            $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64Url(server.PublicShare)}}}"}}""");
+    }
+
     /// <summary>
     /// Runs the server's half of one CPace round with <paramref name="code"/> as the code the
     /// operator entered, up to and including server/pair-confirm. What the client answers --
