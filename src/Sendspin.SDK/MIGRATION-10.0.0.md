@@ -6,7 +6,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 **Why this matters**: before 10.0.0 the protocol was plaintext on the local network. Anyone on the same LAN could read metadata and audio, impersonate a server, or issue commands to a player. Encryption closes that, but it cannot be added transparently — both peers must speak it, so this is a hard break with no downgrade path.
 
-**Server requirement**: a 10.x client requires a server on the **10.0.0 line** of `aiosendspin`. There is one floor and it gates connecting as much as pairing — every encrypted `client/hello` carries the object-keyed `supported_pair_methods` from spec PR #179 (a map keyed by method name, not the older list of descriptors), so a server that does not accept that shape rejects the hello outright, before any playback path opens. There is no negotiation and no fallback. The 10.0.0 line is unpublished at the time of writing, so the interop workflow pins the draft commit it targets (see `.github/workflows/interop.yml`); the latest published release, 9.1.1, rejects the hello. **The 9.x line remains maintained** for deployments that need to talk to older, plaintext servers.
+**Server requirement**: a 10.x client requires **`aiosendspin` 10.0.0 or later** — the release that implements spec `1.0.0-rc1`, and the one Music Assistant ships. There is one floor and it gates connecting as much as pairing — every encrypted `client/hello` carries the object-keyed `supported_pair_methods` from spec PR #179 (a map keyed by method name, not the older list of descriptors), so a server that does not accept that shape rejects the hello outright, before any playback path opens. There is no negotiation and no fallback. The interop workflow pins `aiosendspin[server]==10.0.0` (see `.github/workflows/interop.yml`), and [`docs/SPEC-VERSION.md`](../../docs/SPEC-VERSION.md) records the spec pin, what that workflow checks, and where the SDK is known to differ from the spec. **The 9.x line remains maintained** for deployments that need to talk to older, plaintext servers; `aiosendspin` 10.0.0 still serves a 9.3.x client, on its legacy path.
 
 ---
 
@@ -14,7 +14,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 
 | Area | Change | Impact |
 |------|--------|--------|
-| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be on the `aiosendspin` 10.0.0 line (object-keyed pair methods) |
+| Transport | Plaintext removed; Noise `KKpsk2` always | **High** — server must be `aiosendspin` 10.0.0 or later (spec `1.0.0-rc1`) |
 | Client identity | New required persistent Curve25519 identity | **High** — silent data loss if unpersisted |
 | Construction | `SendspinClientOptions` + `CreateForDial(...)` | **High** — every call site |
 | Pairing | New: Pairing PSK, dynamic pairing code, static pairing code (at most one code method) | Medium — new UX surface |
@@ -37,8 +37,17 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | `client/hello` | `supported_commands` removed from `player@v1_support`; the real set is reported in the `client/state` player object instead (spec PR #177), now `volume`, `mute` and, when enabled, `set_output_delay` | **Source-breaking** — `PlayerSupport.SupportedCommands` is removed: a compiler error where it was set; drop it, since the advertised set now comes from `client/state`. A server derives controller group volume/mute from the state list |
 | Source role | On the wire, `client_stream/start` / `client_stream/end` are `client-stream/start` / `client-stream/end` (spec PR #163) | Low — wire-only; a server on the source wire must adopt the hyphen |
 | Player audio | The player audio chunk header gains a 4-byte `send_ahead` (uint32 BE) after the timestamp, audio from byte 13; `AudioChunk.SendAhead` exposes it (spec PR #167). It carries no scheduling meaning | Low — wire-only; a server must emit the wider header |
-| Connection | Fragmentation is binary ID `1` with a flags byte (`[1][flags][orig_type][data]` first, `[1][flags][data]` after); IDs 2 and 3 are reserved and no longer sent or accepted (spec PR #172) | Low — wire-only; encrypted transport internals |
+| Connection | Fragmentation is binary ID `1` with a flags byte (`[1][flags][orig_type][data]` first, `[1][flags][data]` after); IDs 2 and 3 are reserved: never sent, and silently ignored when received, whole or as a fragmented message's `orig_type` (spec PRs #172, #289) | Low — wire-only; encrypted transport internals |
+| Connection | Noise message 1 must carry `psk_category` (`lt`, `pr` or `sn`), and a `psk_id` matches only a record of that category (spec PR #284) | Low — wire-only; a server that omits it no longer completes a handshake. `aiosendspin` 10.0.0 sends it |
 | Roles | A custom (`_`-prefixed) role must carry an explicit `@v…` version, or `ClientCapabilities` rejects it at construction (spec PR #243) | Low — compiler/argument error only if you advertise a versionless custom role |
+| Construction | `ClientCapabilities` values the spec does not allow on the wire throw `ArgumentException` at construction: a player with no `AudioFormats`, or none that is `flac` or `pcm`; a visualizer `BufferCapacity` or `RateMax` that is not positive, when a visualizer role is advertised; an artwork channel with an unknown `Source`/`Format` or a missing size; a `MacAddress` that is not lowercase colon-separated (spec PRs #238, #257) | Medium — nothing at compile time; a configuration that used to construct and then fail against the server now throws. See §18 |
+| Controller | `client/command` is sent only while `controller@v1` is active and the command is in the group's `supported_commands`; otherwise it is dropped with a warning (spec PRs #251, #268) | Medium — behavioural; `SetVolumeAsync` and friends send nothing until the server has offered the command. See §19 |
+| Artwork | Artwork binary is an announce/part/cancel transfer. `BinaryMessageParser.ParseArtworkChunk` is removed in favour of `TryParseArtwork`; `ArtworkChunk` is now a complete reassembled image; the pre-rc1 `[type][timestamp][image]` framing disconnects (spec PRs #188, #266) | Low for apps — `ArtworkReceived` / `ArtworkCleared` are unchanged; compiler error only if you parse artwork binary yourself. See §20 |
+| Artwork | A `stream/end` that reaches the artwork role, or the role's removal, raises `ArtworkCleared` for every channel still showing an image (spec PR #266) | Low — behavioural |
+| Activation | The unpaired rows of the `server/activate` table follow rc1: a Pairing PSK or Sentinel session admits `[]`, `['pairing']` and, with unpaired access, `['playback']` and `['playback','pairing']`. Playback keeps running under `['playback','pairing']` (spec PRs #246, #272) | Low — behavioural; activations that closed `unauthorized` are now admitted. See §21 |
+| Activation | `active_roles` persist across an in-band re-handshake; a removed `player`, `artwork` or `visualizer` role is stopped without a `stream/end`; omitted `active_roles` on a connection that is not playback-capable are treated as empty (spec PRs #275, #287, #289) | Low — behavioural. See §21 |
+| Availability | While the client is unavailable (`available: false`), inbound player audio, artwork and visualizer data are discarded and the connection stays open (spec PRs #266, #270, #271) | Low — behavioural. See §21 |
+| Source role | `client/state` carries the `source` object whenever the source role is active, even when it is empty; a `start` received while the client is unavailable is ignored; a `start` whose codec the server did not list is refused (spec PRs #238, #273) | Low — behavioural. See §5 |
 | Clock sync | `IClockSynchronizer` gains `ServerToClientTimeUncompensated` | Low — compiler error, one-line fix, and only for a custom synchronizer |
 | Clock sync | Filter constants, burst cadence and timestamping now match the reference implementation | Low — behavioural, no code change; see §11 |
 | Connection | `ISendspinConnection` gains `SendTimeMessageAsync`; `TextMessageReceived` carries `TextMessageReceivedEventArgs` | Low — compiler error, only for a custom connection or a raw event subscriber |
@@ -57,6 +66,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
 | Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |
 | Audio pipeline | `IAudioPipeline.StartAsync` returns `Task<AudioPipelineStartOutcome>` instead of `Task` | Low — compiler error, and only for a custom pipeline; see §14 |
+| Audio pipeline | An in-place `stream/start` that changes sample rate or channel count keeps the buffered audio: `AudioPipeline` plays it out, then re-opens the output for the new format, and reports `DecoderReplaced` rather than `Restarted` (spec PR #283) | Low — behavioural; `OutputFormat` lags `CurrentFormat` while the old audio drains. See §14 |
 | Connection mode | `ConnectionMode.Auto` removed; `AdvertiseOnly` is now the zero value | Medium — compiler error where it is named, but a **persisted** mode is the real risk: a stored `"Auto"` no longer parses and stored ordinals shift; see §16 |
 
 ---
@@ -217,6 +227,11 @@ Clients can now act as an audio **source** (line-in, microphone) rather than onl
 
 The spec requires a source to run only on a paired connection, and the SDK enforces that at the point the capture device opens: it refuses to stream unless the session is at trust `user` with the source role active. Streaming is always server-initiated; a source never streams unsolicited.
 
+Two more conditions gate a `start`, both from the spec:
+
+- **The client must be available.** A `start` received while the client is unavailable — held by an external source, after a pipeline error, or before clock sync is established — is ignored, and becoming available again does not resume it: the server has to send a new `start`.
+- **The codec must be one the server listed.** `server/hello` carries the server's `source@v1_support` (`ServerHelloPayload.SourceV1Support`) with the codecs it accepts. A `start` whose encoder codec is not in that list is refused before `client-stream/start` is sent, and logged; the SDK does not substitute another codec. Set `SourceRoleSupport.Codec` to a listed one. When the server sends no list, the codec is not checked.
+
 ---
 
 ## 6. Visualizer buffer capacity is announced, not renegotiated
@@ -233,7 +248,9 @@ Capabilities = new ClientCapabilities
 }
 ```
 
-To reconfigure at runtime, call `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`; it updates that client's own visualizer configuration (the `ClientCapabilities` you supplied is left untouched) and resends the full `client/state`. See §17.
+`BufferCapacity` and `RateMax` must both be **positive**, whatever `Types` lists — both default to 0, so a `VisualizerRoleSupport` that sets neither now throws `ArgumentException` at construction instead of being rejected by the server (§18). The check applies only when a `visualizer@` role is in `Roles`; a support object left in place while the role is switched off is not validated.
+
+To reconfigure at runtime, call `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`; it updates that client's own visualizer configuration (the `ClientCapabilities` you supplied is left untouched) and resends the full `client/state`. It applies the same rule: a `rateMax` that is not positive throws. See §17.
 
 ---
 
@@ -330,7 +347,7 @@ Both exist because `output_delay_ms` belongs to the player role alone: it compen
 A `player` object used to go out on every `client/state`, and a `source` object never did.
 
 - **`player` is now sent only when the server activated the player role.** A state object for an inactive role is a client deviation the reference server rejects outright under `allow_noncompliant_clients=False`, so a source-only or artwork-only client was previously non-conformant on its very first message.
-- **`source` is now built.** If your app calls `SetSourceSignalAsync` before the initial `client/state` goes out — a line-sense client sensing signal at boot — the signal is remembered and carried by that message instead of being discarded. A client that reports only *transitions* previously left the server never knowing there was signal until it changed. The remembered signal also survives reconnects, since it describes the input, not the session.
+- **`source` is now built, and sent whenever the source role is active.** An activation requires an update that includes the role's object, and the server will not send a source `start` until it has one — so the object goes out even when it is empty (`"source": {}`), which is what a source without line sense, or one with no signal reported yet, sends. `signal` is still omitted rather than invented. If your app calls `SetSourceSignalAsync` before the initial `client/state` goes out — a line-sense client sensing signal at boot — the signal is remembered and carried by that message instead of being discarded. A client that reports only *transitions* previously left the server never knowing there was signal until it changed. The remembered signal also survives reconnects, since it describes the input, not the session.
 
 `ClientStateMessage` now has a single `Create(...)` factory taking the role payloads rather than loose player fields, because which objects belong depends on `active_roles`, which the message type cannot see:
 
@@ -688,6 +705,37 @@ error until it does:
 - Replaced the decoder and kept the buffered audio and timeline → `DecoderReplaced`
 - Re-announced the format already running and rebuilt nothing → `FormatReannounced`
 
+### A rate or channel change keeps the buffered audio
+
+The spec requires a player to keep buffered chunks across an in-place `stream/start` and decode
+each chunk in the format that was in effect when it was received. `AudioPipeline` used to send a
+sample-rate or channel-count change through a full restart, which cleared the buffer. It now
+leaves the running buffer and its player playing what they hold, replaces the decoder, and
+decodes everything after the `stream/start` into a second buffer for the new format. Once the
+first buffer has run dry — plus the output device's own latency, so the tail is heard — it
+closes the old output and opens one for the new format. The device close and re-open is the
+only gap.
+
+`StartAsync` returns `DecoderReplaced` for this case, where it used to return `Restarted`. There
+is no API change, and nothing to do unless you read the pipeline's state around a format change:
+
+- **While the old audio drains, `CurrentFormat` is the new format and `OutputFormat` is still
+  the old player's.** `BufferStats` describes the new buffer, not the one being played, so
+  buffered depth and sync error read as those of audio that has not started yet.
+- **A change that arrives while still Buffering starts the old audio playing at once**, since no
+  more is coming for it.
+- **`stream/clear` clears both buffers**; a stop, a dispose or a restart cancels the pending
+  switch.
+- **Two cases still restart.** A rate or channel change with nothing buffered has nothing to
+  keep. A second such change arriving before the first has switched does discard what is
+  buffered.
+- **The wait is bounded.** If the output stops reading for more than a second past the old
+  audio's duration, the switch goes ahead and what was left of that audio is dropped.
+
+A custom `IAudioPipeline` that restarts on a rate or channel change should keep returning
+`Restarted`: the outcome reports what the pipeline did, and the client drops its queued chunks
+either way.
+
 ---
 
 ## 15. Stream-lifecycle messages reach the pipeline one at a time
@@ -771,7 +819,7 @@ A format preference is one whole `supported_formats` entry or nothing — the sp
 | `ClientCapabilities.ArtworkChannels` (`List<ArtworkChannelSpec>`) | `List<ArtworkChannelState>` |
 | `ClientHelloMessage.Create(…, artworkSupport, …)` | parameter removed |
 
-The list is positional from channel 0, holds 1–4 entries, and any channel you do not cover is reported as `source: "none"`.
+The list is positional from channel 0, holds 1–4 entries, and any channel you do not cover is reported as `source: "none"`. Each entry is validated — at construction and again in `SetArtworkChannelAsync` — against the values the spec allows (§18). How the images themselves arrive changed too; see §20.
 
 ### Visualizer
 
@@ -790,9 +838,194 @@ Neither is a compiler error, and a conformant server never trips the gate.
 
 ---
 
-## 18. Checklist
+## 18. Capabilities are validated at construction
 
-- [ ] Server is on the `aiosendspin` 10.0.0 line — the draft commit pinned in `.github/workflows/interop.yml` until it ships — for both connecting and pairing, or stay on the 9.x line
+Several `ClientCapabilities` values used to construct happily and then fail against the server —
+a rejected `client/hello`, or a connection closed over the first `client/state`. They now throw
+`ArgumentException` when the client is constructed (`SendspinClientService`, including
+`CreateForDial`, and `SendspinHostService`), with a message naming the property. Nothing here is
+a compiler error.
+
+| Configuration | Rule |
+|---|---|
+| Player role with an empty `AudioFormats` | `supported_formats` must list at least one entry (spec PR #257) |
+| Player role with no `flac` or `pcm` entry in `AudioFormats` | A player must list at least one of the two codecs every server supports |
+| `visualizer@v1` with `VisualizerRoleSupport.BufferCapacity` ≤ 0 | A zero budget admits no message, and the server rejects the hello. The property defaults to 0, so it must be set |
+| `visualizer@v1` with `VisualizerRoleSupport.RateMax` ≤ 0 | `rate_max` is a positive integer whatever types are requested — event-only (`beat`, `peak`) included. Also defaults to 0 |
+| Artwork role with a channel whose `Source` is not `album`, `artist` or `none` | The spec's vocabulary |
+| Artwork role with an active channel whose `Format` is not `jpeg` or `png`, or whose `Width` / `Height` is missing or not positive | Required unless `Source` is `none`. Every entry is checked, including any past the first four, which never reach the wire |
+| `MacAddress` not six lowercase colon-separated hex octets | `aa:bb:cc:dd:ee:ff`; uppercase, dashes and bare hex are rejected. `null` still omits the field |
+
+The player and artwork rows apply only when that role is in `Roles`, matched by family, so a
+source-only client that clears `AudioFormats` has nothing to violate.
+
+```csharp
+// ❌ Throws at construction: BufferCapacity and RateMax are both still 0.
+VisualizerRoleSupport = new VisualizerRoleSupport { Types = new() { VisualizerTypes.Beat } }
+
+// ✅
+VisualizerRoleSupport = new VisualizerRoleSupport
+{
+    BufferCapacity = 65536, RateMax = 30, Types = new() { VisualizerTypes.Beat },
+}
+```
+
+The runtime setters apply the same rules: `SetArtworkChannelAsync` throws `ArgumentException`
+for a channel value that would fail at construction, and `SetVisualizerConfigurationAsync` for a
+`rateMax` that is not positive. `SourceStreamPipeline`'s constructor gains an optional trailing
+`listedCodecs` parameter; existing call sites compile unchanged.
+
+---
+
+## 19. Controller commands are gated on the role and `supported_commands`
+
+A `client/command` is now sent only while the `controller@v1` role is active **and** the command
+appears in the group's latest `supported_commands`. Otherwise the SDK logs a warning naming the
+command and the reason, and drops it. A server ignores such a command anyway, so a drop is truer
+to the wire than a throw.
+
+The gate covers all five senders: `SendCommandAsync`, `SetVolumeAsync`, `SetMuteAsync`,
+`SeekAsync` and `SeekRelativeAsync`. No signature changed.
+
+Two things follow that are easy to trip over:
+
+- **Nothing is permitted until the server says so.** `supported_commands` arrives in the
+  controller object of `server/state`. Until one has arrived the list is treated as empty, so a
+  command issued straight after `ConnectAsync` returns is dropped.
+- **The gate comes before the transport.** The typed senders used to send unconditionally and
+  rely on the transport to reject a send with no live socket. With no active controller role the
+  call now returns having sent nothing, rather than throwing.
+
+Read `GroupState.SupportedCommands` — from `GroupStateChanged` — and enable a control only for a
+command it lists:
+
+```csharp
+client.GroupStateChanged += (_, group) =>
+{
+    volumeSlider.IsEnabled = group.SupportedCommands?.Contains("volume") == true;
+    playButton.IsEnabled   = group.SupportedCommands?.Contains("play") == true;
+};
+```
+
+---
+
+## 20. Artwork arrives as an announce/part/cancel transfer
+
+rc1 replaced the single `[type][timestamp][image]` artwork message with a transfer: an
+**announce** (`[type][flags][timestamp][total_size]`), then **parts** (`[type][flags][data]`)
+until `total_size` bytes have arrived, with a **cancel** (`[type][flags]`) that discards a
+channel's pending image. An announce with `total_size` 0 completes immediately and clears the
+channel. At most one transfer is in flight across all channels.
+
+**Applications are unaffected.** `ArtworkReceived` still delivers one complete image per event,
+with the announce's timestamp, and `ArtworkCleared` still reports a cleared channel. The SDK
+reassembles the parts itself.
+
+What did change:
+
+- **`BinaryMessageParser.ParseArtworkChunk` is removed.** Use
+  `BinaryMessageParser.TryParseArtwork(data, out ArtworkMessage message, out ReadOnlySpan<byte> partData)`,
+  which reads one announce, part or cancel and returns false for exactly the messages the spec
+  lists as malformed. Only relevant if you parse artwork binary yourself.
+- **`ArtworkChunk` now means a complete, reassembled image**, not one binary message. Its
+  `Timestamp` is the transfer's announce timestamp, and an empty `ImageData` is a clear.
+- **A server still sending the pre-rc1 framing is disconnected**, not displayed. Malformed
+  artwork messages and malformed sequences — an announce while a transfer is in flight, a part
+  with none in flight or on another channel, a part running past `total_size` — are protocol
+  errors the spec requires the client to close over. `aiosendspin` 10.0.0 sends the rc1 framing.
+- **An image over 16 MiB is not delivered.** The declared size comes from the server and the
+  spec sets no limit, so a larger transfer is followed to its end with none of it held, and no
+  `ArtworkReceived` is raised for it. The connection stays open.
+- **`ArtworkCleared` has a second trigger.** Besides a zero-size announce, it is raised once per
+  channel still showing an image when a `stream/end` reaches the artwork role, or when the role
+  is removed from `active_roles`: both are playback termination. No clear message exists for
+  that case, so `Timestamp` is then the timestamp of the image being cleared. A `stream/clear`
+  (a seek or track jump) keeps the image on display and drops only what was pending.
+
+---
+
+## 21. Activation follows the rc1 table, and roles outlive a re-handshake
+
+### Unpaired sessions admit more activity sets
+
+The client's `server/activate` admissibility table now matches the spec row for row. The
+Pairing PSK and Sentinel PSK rows are the same row:
+
+| PSK matched | Allowed activity sets |
+|---|---|
+| long-term PSK | `[]` or `['playback']` |
+| Pairing PSK | `[]`, `['pairing']`, `['playback']`¹, `['playback', 'pairing']`¹ |
+| Sentinel PSK | `[]`, `['pairing']`, `['playback']`¹, `['playback', 'pairing']`¹ |
+
+¹ Only with `ClientCapabilities.UnpairedAccessEnabled`.
+
+- A Pairing PSK session now admits `[]`, and with unpaired access `['playback']` and
+  `['playback', 'pairing']`. A Sentinel session with unpaired access now admits
+  `['playback', 'pairing']`. All of these used to close `unauthorized`.
+- `pairing_required` applies to any unpaired session, not the Sentinel one alone: a Pairing PSK
+  session with unpaired access off that is offered playback (or roles) closes with
+  `pairing_required` where it used to say `unauthorized`.
+
+The long-term row is unchanged, so a `pairing` activity on an already-paired session is still
+refused (§3).
+
+### Playback keeps running during pairing
+
+Pairing can run alongside playback. Under `['playback', 'pairing']` — which `aiosendspin` 10.0.0
+sends when it adds pairing to an unpaired session that is already playing — the client no longer
+goes quiet: the time-sync loop, `client/state`, `client/command` and source audio keep flowing
+for the whole attempt. Under `['pairing']` alone nothing changes, and the wire is held for the
+pairing exchange as before.
+
+If the pairing code is shown or spoken on the same output a role is using, suspending that
+output for the attempt is up to your app; the SDK keeps delivering audio and artwork.
+
+### Roles persist across a re-handshake
+
+After an in-band re-handshake — the one that follows a successful pairing, for example — a
+`server/activate` that omits `active_roles` now **keeps the previous roles**. It used to leave
+the client with none. A role that activate does leave out has its `server/state` object and any
+pending scheduled update discarded, with `GroupStateChanged` (and `ColorChanged` for the palette)
+raised, as on any other activation.
+
+Persisted roles are treated as **empty** when the activation leaves the connection not
+playback-capable — re-handshaking down to a pairing-only session, say. That applies to every
+activate that omits `active_roles`, not only the one after a re-handshake, and it clears those
+roles' state. A `source@v1` carried over onto a session that is not long-term closes
+`unauthorized`, exactly as an explicit one does.
+
+### A removed stream role stops without a `stream/end`
+
+Removing `player`, `artwork` or `visualizer` from `active_roles` now stops that role's output
+and clears its buffers whether or not a `stream/end` came first. For `player` that means the
+audio pipeline is stopped and the group's playback state goes to idle; for the display roles,
+pending frames and images are dropped and `ArtworkCleared` is raised (§20). `StreamEndReceived`
+is **not** raised, since no `stream/end` arrived — if you clear your own surface from that event
+alone, also watch the role leave.
+
+### Data is discarded while unavailable
+
+While the client is unavailable (`available: false`) — clock sync not yet established, held by
+an external source, or after a pipeline error — inbound artwork and visualizer data are
+discarded rather than scheduled. Player audio is discarded while clock sync is not established
+or an external source holds the output, but not when the only reason is the pipeline's own
+reported error: a failed playback start is retried when audio arrives, so audio is what returns
+the client to available. The connection stays open, and one debug line is logged per
+unavailable period. A conformant server does not stream to an unavailable
+client, so this only matters in the window around a change of availability.
+
+Artwork is discarded more carefully than the other two, because an image is a transfer of
+several messages. The SDK still follows the transfer — announces and cancels are processed and
+each part's bytes are counted toward `total_size` — and only the image is withheld, so the next
+transfer is in sequence when the client returns. An image that began while the client was
+unavailable is not raised even if the client becomes available before its last part, and a
+zero-size announce still clears the channel, since it carries no data to discard.
+
+---
+
+## 22. Checklist
+
+- [ ] Server is `aiosendspin` 10.0.0 or later — the release Music Assistant ships — for both connecting and pairing, or stay on the 9.x line
 - [ ] `Identity` comes from a **store**, not `Generate()` — verify by restarting the app twice and confirming the pairing survives
 - [ ] The same identity and pairing store are shared across dial and listen modes
 - [ ] `PairingRecordStore` is configured and writes somewhere durable
@@ -819,6 +1052,16 @@ Neither is a compiler error, and a conformant server never trips the gate.
       `Width` / `Height`, and `ClientCapabilities.VisualizerSupport` to `VisualizerRoleSupport`
 - [ ] Nothing builds a partial `client/state` by hand — merging is gone, so every role object must
       be complete
+- [ ] The client still constructs: a player lists `flac` or `pcm`, a visualizer sets a positive
+      `BufferCapacity` and `RateMax`, every active artwork channel has a `jpeg`/`png` format and a
+      positive size, and `MacAddress` is lowercase colon-separated (§18)
+- [ ] Controller UI is enabled from `GroupState.SupportedCommands` — a command the group does not
+      list is dropped, not sent (§19)
+- [ ] Nothing calls `BinaryMessageParser.ParseArtworkChunk` — use `TryParseArtwork`, or just the
+      `ArtworkReceived` / `ArtworkCleared` events (§20)
+- [ ] A surface that clears on `StreamEndReceived` also handles a stream role being removed with
+      no `stream/end` (§21)
+- [ ] A source's codec is one the server lists in `server/hello`, or its `start` is refused (§5)
 
 ---
 

@@ -11,7 +11,7 @@ A cross-platform .NET SDK for the Sendspin synchronized multi-room audio protoco
 - **Sync Correction Built In**: `TimedAudioBuffer.Read()` applies the spec's full correction strategy — a conformant player writes no correction code
 - **Platform Flexibility**: `ReadRaw()` hands the error out instead, for platforms with their own rate-control mechanism (hardware rate adjust, playback rate, an existing resampler)
 - **Fast Startup**: Audio plays within ~300ms of connection
-- **Protocol Support**: Full Sendspin WebSocket protocol implementation
+- **Protocol Support**: Sendspin spec `1.0.0-rc1` over an end-to-end encrypted WebSocket — player, controller, metadata, artwork, color, visualizer and source roles
 - **Server Discovery**: mDNS-based automatic server discovery
 - **Audio Decoding**: Built-in PCM, FLAC, and Opus codec support
 - **Cross-Platform**: Works on Windows, Linux, and macOS (.NET 8.0 / .NET 10.0)
@@ -23,6 +23,31 @@ A cross-platform .NET SDK for the Sendspin synchronized multi-room audio protoco
 ```bash
 dotnet add package Sendspin.SDK
 ```
+
+## Compatibility
+
+From 10.0.0 the transport is encrypted end to end: every connection runs a Noise `KKpsk2`
+handshake, a client has a persistent Curve25519 identity, and a server is authenticated by a
+pre-shared key established through pairing. There is **no downgrade negotiation** — pick the
+line that matches your server.
+
+| SDK | Transport | Requires | Status |
+|---|---|---|---|
+| **10.x** | Encrypted (Noise `KKpsk2`) | `aiosendspin` 10.0.0 or later | Current |
+| **9.x** | Plaintext | Any `aiosendspin`, 10.0.0 included | Maintained for pre-encryption servers |
+
+10.0.0 implements [`Sendspin/spec`](https://github.com/Sendspin/spec) at tag `1.0.0-rc1`.
+`aiosendspin` 10.0.0 is the reference server's release of that spec and the one Music Assistant
+ships; it is the floor for connecting as much as for pairing. The spec pin, what is checked
+against the server, and the known deviations are recorded in
+[SPEC-VERSION.md](https://github.com/Sendspin/sendspin-dotnet/blob/main/docs/SPEC-VERSION.md).
+Upgrading from 9.x is a breaking change at nearly every call site; see
+[MIGRATION-10.0.0.md](https://github.com/Sendspin/sendspin-dotnet/blob/main/src/Sendspin.SDK/MIGRATION-10.0.0.md).
+
+An unpaired connection is encrypted but authenticates nothing. Pair before trusting a server,
+and leave `ClientCapabilities.UnpairedAccessEnabled` off unless you need it: an unpaired
+session is protected against passive observers, not against an active man-in-the-middle on
+the local network.
 
 ## Quick Start
 
@@ -72,7 +97,9 @@ client.GroupStateChanged += (sender, group) =>
 // failures" below.
 await client.ConnectAsync(new Uri("ws://192.168.1.100:8927/sendspin"));
 
-// Send commands
+// Send commands. A command goes out only while the controller role is active and the group
+// lists it in GroupState.SupportedCommands (from server/state); otherwise it is dropped with
+// a warning, so issue commands once GroupStateChanged has reported them.
 await client.SendCommandAsync("play");
 await client.SetVolumeAsync(75);
 ```
@@ -186,8 +213,8 @@ try
 }
 catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.LegacyServer)
 {
-    // The server predates the encrypted protocol. Upgrade it to the aiosendspin 10.0.0
-    // line, or pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
+    // The server predates the encrypted protocol. Upgrade it to aiosendspin 10.0.0 or
+    // later, or pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
 }
 catch (SendspinHandshakeException ex)   // ServerError, PairingStateDiverged, or HandshakeRejected
 {
@@ -561,7 +588,9 @@ var capabilities = new ClientCapabilities
 };
 ```
 
-All fields are optional and omitted from the protocol if null.
+All fields are optional and omitted from the protocol if null. `MacAddress` must be in exactly
+that form — uppercase, dashes or bare hex throw `ArgumentException` when the client is
+constructed.
 
 ## Player Timing & Output Delay
 
@@ -734,7 +763,7 @@ continue to work (the seed wins over the store when both are supplied).
 
 ## Artwork
 
-Artwork clients support **1–4 independent channels** (e.g. album art on one display, artist photos on another). Each channel has its own source, format, and maximum size. Configure them in capabilities:
+Artwork clients support **1–4 independent channels** (e.g. album art on one display, artist photos on another). Each channel has its own source, format, and maximum size. Configure them in capabilities — the source is `album`, `artist` or `none`, and an active channel needs a `jpeg` or `png` format and a positive width and height, or construction throws `ArgumentException`:
 
 ```csharp
 var capabilities = new ClientCapabilities
@@ -762,7 +791,9 @@ client.ArtworkReceived += (_, e) =>
 client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // an empty image (zero-size announce) = clear that channel
 ```
 
-`ArtworkCleared` is also raised, once per channel still showing an image, when a `stream/end` ends the artwork role. No clear message exists for that case, so `e.Timestamp` is then the timestamp of the image being cleared rather than a moment to clear at.
+On the wire an image is a transfer — an announce carrying the timestamp and total size, then parts, with a cancel that discards a pending image — and the SDK reassembles it, so `ArtworkReceived` always delivers a complete image. An announce with a total size of zero clears the channel.
+
+`ArtworkCleared` is also raised, once per channel still showing an image, when a `stream/end` ends the artwork role or the server removes the role from `active_roles`. No clear message exists for that case, so `e.Timestamp` is then the timestamp of the image being cleared rather than a moment to clear at.
 
 Change or disable a channel at runtime without reconnecting. The SDK updates that connection's own channel configuration — `ClientCapabilities` is yours and is left untouched, so a host sharing one across connections keeps them independent — and resends the whole `client/state` (the server replies with a new `stream/start`):
 
@@ -803,8 +834,8 @@ var capabilities = new ClientCapabilities
     Roles = new() { "player@v1", "visualizer@v1" },
     VisualizerRoleSupport = new VisualizerRoleSupport
     {
-        BufferCapacity = 65536,           // client/hello: visualizer@v1_support
-        RateMax = 30,                     // client/state: max frames/sec
+        BufferCapacity = 65536,           // client/hello: visualizer@v1_support. Must be positive
+        RateMax = 30,                     // client/state: max frames/sec. Must be positive
         Types = new() { VisualizerTypes.Loudness, VisualizerTypes.Spectrum, VisualizerTypes.Beat },
         // Required when Spectrum is requested:
         Spectrum = new VisualizerSpectrum { NDispBins = 32, Scale = "log", FMin = 20, FMax = 16000 },
@@ -812,7 +843,7 @@ var capabilities = new ClientCapabilities
 };
 ```
 
-`buffer_capacity` is the only field left in the `visualizer@v1_support` object of `client/hello`; `types`, `rate_max` and `spectrum` are reported in the `visualizer` object of `client/state` (spec PR #195).
+`buffer_capacity` is the only field left in the `visualizer@v1_support` object of `client/hello`; `types`, `rate_max` and `spectrum` are reported in the `visualizer` object of `client/state` (spec PR #195). `BufferCapacity` and `RateMax` both default to 0 and must both be set to a positive value, whatever types are requested: a `VisualizerRoleSupport` that leaves either at 0 throws `ArgumentException` when the client is constructed.
 
 Each binary message carries one feature type; subscribe to `VisualizationReceived` and read the populated field:
 
@@ -828,11 +859,11 @@ client.VisualizationReceived += (_, frame) =>
 
 `Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Reconfigure at runtime with `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`, which updates that connection's own visualizer configuration (not the `ClientCapabilities` you supplied) and resends the full `client/state`.
 
-> **Note:** `visualizer@v1` follows the [aiosendspin](https://github.com/Sendspin/aiosendspin) reference implementation, which is ahead of the formal protocol spec. The wire format may still evolve. The role degrades gracefully while it matures: it is **opt-in** (off by default), frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
+> **Note:** `visualizer@v1` is **opt-in** (off by default). Frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
 
 ## Stream teardown
 
-`stream/end` ends a stream and `stream/clear` flushes its buffers (a seek or track jump). Both may target specific roles, and the SDK drives the audio pipeline only when the message reaches the `player` role — an end or clear aimed at `artwork` or `visualizer` leaves playback untouched. Role-targeted teardown is routine: dropping a stream role from `active_roles` makes the server end that role's output first.
+`stream/end` ends a stream and `stream/clear` flushes its buffers (a seek or track jump). Both may target specific roles, and the SDK drives the audio pipeline only when the message reaches the `player` role — an end or clear aimed at `artwork` or `visualizer` leaves playback untouched. Role-targeted teardown is routine: dropping a stream role from `active_roles` makes the server end that role's output first. If a role is removed with no `stream/end` at all, the SDK stops that role's output and clears its buffers anyway, without raising `StreamEndReceived`.
 
 Roles the SDK does not own are reported so the surface that owns them can react:
 
@@ -887,16 +918,24 @@ is never opened unless the connection is at trust `user` *and* the source role i
 currently in `active_roles`. The second check is what stops a `server/command
 { source: { command: "start" } }` that skips activation entirely.
 
+**Availability required.** A `start` received while the client is unavailable — before clock
+sync is established, while held by an external source, or after a pipeline error — is ignored,
+and becoming available again does not resume it; the server sends a new `start`.
+
 **Encoders.** PCM is built in (and always accepted by servers). Supply a custom
 `ISourceAudioEncoderFactory` for Opus/FLAC. The encoder is created from the capture
 device's own format by default; set `SourceRoleSupport.Codec` to encode as something else
-(e.g. a PCM capture device streaming as Opus). A device implementing both `source` and
+(e.g. a PCM capture device streaming as Opus). The codec must be one the server lists in
+`server/hello`: a `start` for an unlisted codec is refused and logged rather than swapped for
+another. A device implementing both `source` and
 `player` never plays its own captured input locally — it outputs only what the server
 distributes, staying in sync with the group.
 
 **Line sensing.** When `SourceRoleSupport.LineSense` is set, call
 `SetSourceSignalAsync(present)` to report `signal: present|absent` in `client/state`; the
-server may use it as a hint for when to start/stop.
+server may use it as a hint for when to start/stop. The `source` object is sent whenever the
+role is active — empty when there is no signal to report — because the server waits for it
+before sending `start`.
 
 ## NativeAOT Support
 
