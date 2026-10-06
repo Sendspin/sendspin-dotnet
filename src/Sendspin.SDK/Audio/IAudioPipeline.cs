@@ -122,13 +122,18 @@ public interface IAudioPipeline : IAsyncDisposable
     void Clear(long? newTargetTimestamp = null);
 
     /// <summary>
-    /// Re-anchors playback timing without discarding buffered audio.
+    /// Applies a changed <see cref="Synchronization.IClockSynchronizer.OutputDelayMs"/> to playback
+    /// that is already running, without discarding buffered audio.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Resets the sync-timing anchor so the next callback re-derives the scheduled start from the
-    /// current clock state — picking up a changed <see cref="Synchronization.IClockSynchronizer.OutputDelayMs"/> —
-    /// while keeping all buffered audio.
+    /// Moves the playback schedule by exactly the change in output delay since the timing anchor
+    /// was taken, and closes the difference in one step: a larger delay skips that much buffered
+    /// audio, a smaller one plays that much silence. Nothing else about the timing state is
+    /// touched, so playback ends up where it was against the schedule, shifted by the delay and by
+    /// nothing more. Calling it when the delay has not changed, or before playback has started,
+    /// does nothing — a start that has not happened yet derives its schedule from the current
+    /// delay anyway.
     /// </para>
     /// <para>
     /// Use this to apply a static-delay change mid-playback. Unlike <see cref="Clear"/>, it does not
@@ -136,6 +141,15 @@ public interface IAudioPipeline : IAsyncDisposable
     /// delay) instead of stalling to refill. That matters with servers that transmit far ahead of
     /// playback, where <see cref="Clear"/> leaves the buffer waiting the full transmit-ahead window
     /// (tens of seconds) for re-received, future-timestamped audio.
+    /// </para>
+    /// <para>
+    /// A delay increase larger than the audio currently buffered cannot be met from the buffer:
+    /// playback is silent until the server has sent audio that far ahead, and then resumes on
+    /// schedule.
+    /// </para>
+    /// <para>
+    /// This does not re-derive the timing anchor. An output-device change, where the device
+    /// restarts and its queue is empty again, is handled by <see cref="SwitchDeviceAsync"/>.
     /// </para>
     /// </remarks>
     void ReanchorTiming();
