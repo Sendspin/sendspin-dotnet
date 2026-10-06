@@ -278,7 +278,7 @@ public sealed class ClientPairInitPayload
     public string? CommitB { get; set; }
 }
 
-/// <summary>Server's nonce contribution in dynamic-pairing code.</summary>
+/// <summary>Begins a round in dynamic-pairing code; the first carries the server's nonce contribution.</summary>
 public sealed class ServerPairInitMessage : IMessageWithPayload<ServerPairInitPayload>
 {
     [JsonPropertyName("type")]
@@ -291,9 +291,10 @@ public sealed class ServerPairInitMessage : IMessageWithPayload<ServerPairInitPa
 /// <summary>Payload of <c>server/pair-init</c>.</summary>
 public sealed class ServerPairInitPayload
 {
-    /// <summary>32 bytes from a CSPRNG, base64url (43 chars).</summary>
+    /// <summary>32 bytes from a CSPRNG, base64url (43 chars). Present in the first round only.</summary>
     [JsonPropertyName("nonce_A")]
-    public string NonceA { get; set; } = string.Empty;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NonceA { get; set; }
 }
 
 /// <summary>Server's CPace public share.</summary>
@@ -358,6 +359,24 @@ public sealed class ClientPairConfirmMessage : IMessageWithPayload<ClientPairCon
 
     [JsonPropertyName("payload")]
     public ClientPairConfirmPayload Payload { get; set; } = new();
+}
+
+/// <summary>
+/// Asks for another round of a dynamic-pairing code attempt; sent in place of
+/// <c>client/pair-confirm</c> when <c>server_kc</c> fails to verify.
+/// </summary>
+public sealed class ClientPairRetryMessage : IMessageWithPayload<ClientPairRetryPayload>
+{
+    [JsonPropertyName("type")]
+    public string Type => MessageTypes.ClientPairRetry;
+
+    [JsonPropertyName("payload")]
+    public ClientPairRetryPayload Payload { get; set; } = new();
+}
+
+/// <summary>Payload of <c>client/pair-retry</c> (empty).</summary>
+public sealed class ClientPairRetryPayload
+{
 }
 
 /// <summary>Payload of <c>client/pair-confirm</c>.</summary>

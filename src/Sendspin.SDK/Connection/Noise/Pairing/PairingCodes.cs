@@ -124,8 +124,9 @@ internal static class PairingCodes
 }
 
 /// <summary>
-/// Persists per-method pairing code failure counters (spec: escalates to gesture-gating at 10,
-/// counters survive reboots, not partitioned by server).
+/// Persists per-method pairing code failure counters (escalates to gesture-gating at 10,
+/// counters survive reboots, not partitioned by server). For 'dynamic_pairing_code' the counter
+/// holds rounds since the last verified one, counted from the moment a round's code is emitted.
 /// </summary>
 public interface IPairingCodeLockoutStore
 {

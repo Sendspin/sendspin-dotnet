@@ -38,6 +38,7 @@ namespace Sendspin.SDK.Protocol;
 [JsonSerializable(typeof(ClientPairAuthMessage))]
 [JsonSerializable(typeof(ServerPairConfirmMessage))]
 [JsonSerializable(typeof(ClientPairConfirmMessage))]
+[JsonSerializable(typeof(ClientPairRetryMessage))]
 [JsonSerializable(typeof(ServerUnpairMessage))]
 [JsonSerializable(typeof(ServerTimeMessage))]
 [JsonSerializable(typeof(StreamStartMessage))]
