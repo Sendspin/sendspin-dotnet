@@ -259,6 +259,29 @@ public class AudioPipelineStreamStartTests
     }
 
     [Fact]
+    public async Task StartAsync_SampleRateChangeJustAfterTheBufferEmptied_LeavesTheOutputPlayingItsTail()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        harness.PullUntilEmpty(harness.Buffer, harness.Sources[0]);
+
+        // The ring is empty because its last samples went to the device, which has yet to play
+        // them: the end of any track that was not sent ahead.
+        var firstPlayer = harness.Player;
+        firstPlayer.OutputLatencyMs = 300;
+
+        var outcome = await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+
+        Assert.Equal(AudioPipelineStartOutcome.DecoderReplaced, outcome);
+        Assert.Single(harness.Players);
+        Assert.Equal(0, firstPlayer.StopCount);
+        Assert.False(firstPlayer.Disposed);
+
+        await harness.WaitForAsync(() => harness.Players.Count == 2 && firstPlayer.Disposed);
+    }
+
+    [Fact]
     public async Task StartAsync_SecondSampleRateChangeBeforeTheFirstHasSwitched_Restarts()
     {
         await using var harness = new Harness();
@@ -272,6 +295,37 @@ public class AudioPipelineStreamStartTests
         Assert.Equal(2, harness.Players.Count);
         Assert.True(harness.Players[0].Disposed);
         Assert.Equal(96_000, harness.Pipeline.CurrentFormat?.SampleRate);
+    }
+
+    [Fact]
+    public async Task StartAsync_SecondSampleRateChangeBeforeTheFirstHasSwitched_StopsTheOutputBeforeDisposingItsBuffer()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        var read = harness.ReadFirstSourceWhenStopping(harness.Player);
+
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 96_000));
+
+        Assert.True(read.Done);
+        Assert.Null(read.Thrown);
+    }
+
+    [Fact]
+    public async Task StartAsync_AfterAPlayerErrorDuringASampleRateChange_StopsTheOutputBeforeDisposingItsBuffer()
+    {
+        await using var harness = new Harness();
+        await harness.Pipeline.StartAsync(Pcm());
+        harness.Feed(ChunksToPlayback);
+        await harness.Pipeline.StartAsync(Pcm(sampleRate: 44_100));
+        var read = harness.ReadFirstSourceWhenStopping(harness.Player);
+        harness.Player.Fail();
+
+        await harness.Pipeline.StartAsync(Pcm());
+
+        Assert.True(read.Done);
+        Assert.Null(read.Thrown);
     }
 
     [Fact]
@@ -546,6 +600,21 @@ public class AudioPipelineStreamStartTests
             return heard;
         }
 
+        /// <summary>
+        /// Has the output's audio callback land once more as <paramref name="player"/> is being
+        /// stopped: until the stop returns, the device is free to ask for another block.
+        /// </summary>
+        public LastRead ReadFirstSourceWhenStopping(StubAudioPlayer player)
+        {
+            var read = new LastRead();
+            player.Stopping = () =>
+            {
+                read.Thrown = Record.Exception(() => Sources[0].Read(new float[Channels], 0, Channels));
+                read.Done = true;
+            };
+            return read;
+        }
+
         /// <summary>Waits for something the pipeline does on its own time.</summary>
         public async Task WaitForAsync(Func<bool> condition)
         {
@@ -558,6 +627,14 @@ public class AudioPipelineStreamStartTests
         }
 
         public ValueTask DisposeAsync() => Pipeline.DisposeAsync();
+    }
+
+    /// <summary>What a read made by <see cref="Harness.ReadFirstSourceWhenStopping"/> came to.</summary>
+    private sealed class LastRead
+    {
+        public bool Done { get; set; }
+
+        public Exception? Thrown { get; set; }
     }
 
     private sealed class StubTimer : IHighPrecisionTimer
@@ -614,6 +691,9 @@ public class AudioPipelineStreamStartTests
 
         public bool Disposed { get; private set; }
 
+        /// <summary>Run at the start of <see cref="Stop"/>, while the output is still live.</summary>
+        public Action? Stopping { get; set; }
+
         public Task InitializeAsync(AudioFormat format, CancellationToken cancellationToken = default)
         {
             InitializeCalls++;
@@ -642,6 +722,7 @@ public class AudioPipelineStreamStartTests
 
         public void Stop()
         {
+            Stopping?.Invoke();
             StopCount++;
             State = AudioPlayerState.Stopped;
         }
