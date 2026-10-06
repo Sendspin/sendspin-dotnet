@@ -31,7 +31,7 @@ client_args=("$SCENARIO" "$PORT")
 CLIENT_OUT="$(mktemp)"
 dotnet run --project "$HERE/InteropClient" -c Release -- "${client_args[@]}" >"$CLIENT_OUT" 2>&1 &
 CLIENT_PID=$!
-trap 'kill $CLIENT_PID 2>/dev/null || true' EXIT
+trap 'kill $CLIENT_PID 2>/dev/null || true; rm -f "$CLIENT_OUT" "${SERVER_OUT:-}"' EXIT
 
 # Wait for the host to report ready.
 for _ in $(seq 1 60); do

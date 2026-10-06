@@ -645,9 +645,14 @@ public interface IClockSynchronizer
     /// <summary>
     /// Gets or sets the output delay in milliseconds. Compensates for hardware delay beyond
     /// the audio port (external speakers, amplifiers). Per the Sendspin protocol spec, the
-    /// value is subtracted from server timestamps when scheduling playback: positive values
-    /// schedule audio earlier; negative values schedule it later.
+    /// value is subtracted from server timestamps when scheduling playback: a larger delay
+    /// schedules audio that much earlier.
     /// </summary>
+    /// <remarks>
+    /// This is the spec's <c>output_delay_ms</c>, 0 to 5000 ms; negative values are not
+    /// supported. Implementations MUST keep the value in that range by clamping on set: the
+    /// client reports and persists whatever the synchronizer holds, and does not clamp it again.
+    /// </remarks>
     double OutputDelayMs { get; set; }
 }
 

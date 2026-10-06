@@ -364,7 +364,10 @@ public sealed class ClientCapabilities
                 nameof(VisualizerRoleSupport));
         }
 
-        VisualizerRoleSupport?.Validate();
+        if (Roles.Any(r => r.StartsWith("visualizer@", StringComparison.Ordinal)))
+        {
+            VisualizerRoleSupport?.Validate();
+        }
     }
 
     /// <summary>

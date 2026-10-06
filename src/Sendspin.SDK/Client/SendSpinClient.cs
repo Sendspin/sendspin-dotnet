@@ -177,8 +177,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private VisualizerRoleSupport? _visualizerRoleSupport;
 
     // Bounds for a persisted output delay loaded from the store. The applied value is 0-5000 per
-    // the spec's output_delay_ms (the clock synchronizer's setter is the single clamp site), so a
-    // stored value outside that range is bounded here before it is logged and re-applied.
+    // the spec's output_delay_ms and the clock synchronizer's setter is the single clamp site;
+    // bounding a stored value here as well only keeps the logged value equal to the applied one.
     private const double MinOutputDelayMs = 0.0;
     private const double MaxOutputDelayMs = 5000.0;
 
@@ -228,7 +228,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
 
     // Whether the "discarding audio while unavailable" line has already been logged for the
-    // current unavailable period. Set on the first dropped chunk and cleared when availability
+    // current unavailable period (external source or unsynchronized clock; a pipeline error alone
+    // does not discard). Set on the first dropped chunk and cleared when availability
     // returns to true (in PublishAvailabilityAsync), so a false->true->false sequence logs once
     // per period even when no audio arrives while available. Written from the receive loop and the
     // availability publisher; a stale read only ever costs a duplicated or skipped debug line, so
@@ -4593,6 +4594,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Log group ID changes (helps diagnose grouping issues)
         if (previousGroupId != _currentGroup.GroupId && !string.IsNullOrEmpty(previousGroupId))
         {
+            // supported_commands belongs to the previous group; drop it until the new group's server/state.
+            _currentGroup.SupportedCommands = null;
+
             _logger.LogInformation("group/update [{Player}]: Group ID changed {OldId} -> {NewId}",
                 _capabilities.ClientName, previousGroupId, _currentGroup.GroupId);
         }
@@ -4982,8 +4986,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// Best-effort: a throwing or out-of-range store must not abort the handshake (the initial
     /// client/state and time-sync loop run after this). On failure we log and continue without the
-    /// persisted delay. The loaded value is bounded to the spec's 0-5000 range before it is logged;
-    /// the synchronizer's setter clamps to the same range, so the two agree.
+    /// persisted delay. The synchronizer's setter is what keeps the applied delay in the spec's
+    /// 0-5000 range; the bound applied here is redundant with it and only makes the debug line
+    /// report the value that was applied.
     /// </remarks>
     private void LoadPersistedOutputDelay()
     {
@@ -5592,7 +5597,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 // consuming, so discard inbound audio rather than decode it — the connection stays
                 // open (the spec says discard, MUST NOT close). Logged once per unavailable period,
                 // not per chunk, since a live stream would otherwise flood the log.
-                if (!CurrentAvailability)
+                // The pipeline's own reported error is deliberately not a reason to discard: a
+                // failed playback start is retried from ProcessAudioChunk, so audio is the only
+                // thing that returns the pipeline to Playing and clears that error.
+                if (IsExternalSource || (RequiresClockSync() && !ClockSyncEstablished))
                 {
                     if (!_audioDroppedWhileUnavailable)
                     {
@@ -5712,6 +5720,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 {
                     CloseOnArtworkProtocolError("announce while a transfer is in flight", data);
                     return;
+                }
+
+                if (message.TotalSize > ArtworkTransfer.MaxImageBytes)
+                {
+                    _logger.LogWarning(
+                        "Refusing artwork image of {Size} bytes on channel {Channel}: over the {Max} byte limit",
+                        message.TotalSize, message.Channel, ArtworkTransfer.MaxImageBytes);
                 }
 
                 _displayScheduler.FlushArtworkChannel(message.Channel);

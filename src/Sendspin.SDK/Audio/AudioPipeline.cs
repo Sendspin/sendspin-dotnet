@@ -331,25 +331,33 @@ public sealed class AudioPipeline : IAudioPipeline
         // hold, chunks from here on decode into a second buffer, and the output moves to that one
         // once the first has run dry — see CompleteFormatSwitchAsync.
         //
-        // With nothing buffered there is nothing to keep and the restart below loses nothing.
+        // An empty buffer that is playing has still handed its last samples to the output device,
+        // which has yet to play them, so it takes this path as well. With nothing buffered and
+        // nothing playing there is nothing to keep and the restart below loses nothing.
         // A second such change while the first is still draining also restarts: carrying it would
         // take a queue of parked formats.
         var formatSwitch = running is not null
             && !decoderOnlyChange
             && _drainingBuffer is null
-            && _buffer is { BufferedMilliseconds: > 0 };
+            && (State == AudioPipelineState.Playing || _buffer is { BufferedMilliseconds: > 0 });
 
         if (!decoderOnlyChange && !formatSwitch)
         {
-            // A start from Error does not go through StopCoreAsync below, and a switch left
-            // pending by the stream that failed would otherwise close this one's output.
-            DisposeDrainingBuffer();
+            // A switch left pending must not go on to close the output this start opens.
+            _formatSwitchCts?.Cancel();
 
             if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
             {
                 // The non-gated core: this already holds the lifecycle gate, and SemaphoreSlim
                 // is not reentrant.
                 await StopCoreAsync();
+            }
+            else
+            {
+                // A start from Error does not go through StopCoreAsync, and the output that
+                // failed may be mid-switch. Its player goes before the buffer it reads from.
+                await DisposePlayerAsync();
+                DisposeDrainingBuffer();
             }
 
             SetState(AudioPipelineState.Starting);
@@ -719,17 +727,20 @@ public sealed class AudioPipeline : IAudioPipeline
     /// <inheritdoc/>
     public void ReanchorTiming()
     {
-        // Soft re-anchor: reset the sync-timing anchor (so the next callback re-derives the
-        // scheduled start with the current OutputDelayMs) while preserving buffered audio.
-        // Same primitive the device-switch path uses — deliberately NOT Clear(), which would
-        // dump the buffer and stall for the server's transmit-ahead window.
+        // Shift the schedule by the change in OutputDelayMs and snap by the same amount, keeping
+        // the buffered audio and the rest of the timing state. Deliberately neither Clear(), which
+        // would dump the buffer and stall for the server's transmit-ahead window, nor the reset the
+        // device-switch path uses: a fresh anchor taken while the output device is already full
+        // captures a different baseline than the cold start did, and moves playback by the
+        // difference as well as by the delay.
         if (_buffer is TimedAudioBuffer timedBuffer)
         {
-            timedBuffer.ResetSyncTracking();
-            _logger.LogDebug("Re-anchored sync timing (buffer preserved)");
+            timedBuffer.ApplyOutputDelayChange();
+            _logger.LogDebug("Applied output delay change to sync timing (buffer preserved)");
         }
 
-        (_drainingBuffer as TimedAudioBuffer)?.ResetSyncTracking();
+        // The buffer still playing out an earlier format takes the same shift, for the same reason.
+        (_drainingBuffer as TimedAudioBuffer)?.ApplyOutputDelayChange();
     }
 
     /// <inheritdoc/>
