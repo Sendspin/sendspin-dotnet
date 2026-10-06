@@ -413,6 +413,32 @@ public class SendspinClientServiceArtworkTests
     }
 
     [Fact]
+    public async Task ImageStartedWhileAvailable_IsNotRaised_IfTheClientGoesUnavailableMidTransfer()
+    {
+        var (client, connection) = SyncedClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1));
+        await client.EnterExternalSourceAsync();
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 2));
+
+        Assert.Empty(received);
+
+        // The part that arrived while unavailable was still counted, so the transfer completed
+        // and the announce that follows is in sequence rather than a reason to close.
+        await client.ExitExternalSourceAsync();
+        connection.RaiseArtwork(BinaryMessageTypes.Artwork0, 2, new byte[] { 4 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 4 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
     public async Task UnavailableClient_StillAppliesAClear()
     {
         var (client, connection) = SyncedClient();
