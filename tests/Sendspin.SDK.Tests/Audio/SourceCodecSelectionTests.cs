@@ -40,6 +40,9 @@ public class SourceCodecSelectionTests
                 Capabilities = new ClientCapabilities { Roles = { "source@v1" }, SourceRoleSupport = sourceSupport },
                 CaptureDevice = capture,
                 SourceEncoderFactory = new StubEncoderFactory(),
+
+                // Clock already converged: a start is ignored while the client is unavailable.
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
             });
 
         // Bound to ServerId so the source trust gate (user trust) is satisfied, same as

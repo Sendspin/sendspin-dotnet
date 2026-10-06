@@ -615,12 +615,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
-    /// connection with the source role currently active. Evaluated per start attempt,
-    /// because both trust and the active-role set can change over a connection's life.
+    /// connection with the source role currently active, on a client that is available ("A
+    /// client MUST ignore <c>start</c> received while it is unavailable"). Evaluated per start
+    /// attempt, because trust, the active-role set and availability can all change over a
+    /// connection's life.
     /// </summary>
     private bool IsSourceStreamingPermitted() =>
         _session.MatchedPsk?.Category == PskCategory.LongTerm
-        && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false);
+        && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false)
+        && CurrentAvailability;
 
     /// <inheritdoc />
     /// <remarks>
@@ -902,21 +905,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// The <c>source</c> object for a client/state, or null when it does not belong: the role is
-    /// not active, line sense is not supported, or nothing has reported a signal yet.
+    /// The <c>source</c> object for a client/state, or null when source is not an active role.
     /// </summary>
     /// <remarks>
+    /// The object is sent even when it is empty: an activation requires an update that includes
+    /// it, and the server MUST NOT send a source <c>start</c> until it has received one.
     /// <c>signal</c> is the only field, and it is optional ("only if 'line_sense' is supported"),
-    /// so with no reported signal there is nothing truthful to put in the object — inventing
-    /// 'absent' would assert something the app never said.
+    /// so it is left out when line sense is not supported or nothing has reported a signal yet —
+    /// inventing 'absent' would assert something the app never said.
     /// </remarks>
     private SourceStatePayload? BuildSourceState(IReadOnlySet<string>? activeRoleFamilies)
     {
-        if (!MayReportRoleState("source", activeRoleFamilies)
-            || _capabilities.SourceRoleSupport?.LineSense != true
-            || _lastSourceSignal is not { } signal)
+        if (!MayReportRoleState("source", activeRoleFamilies))
         {
             return null;
+        }
+
+        if (_capabilities.SourceRoleSupport?.LineSense != true || _lastSourceSignal is not { } signal)
+        {
+            return new SourceStatePayload();
         }
 
         return new SourceStatePayload { Signal = signal ? "present" : "absent" };

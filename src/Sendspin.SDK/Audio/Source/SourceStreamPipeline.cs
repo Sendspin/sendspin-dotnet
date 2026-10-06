@@ -159,7 +159,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
             if (!_canStream())
             {
                 _logger.LogWarning(
-                    "Refusing to stream: source@v1 requires user trust and an active source role");
+                    "Refusing to stream: source@v1 requires user trust, an active source role and an available client");
                 return;
             }
         }
