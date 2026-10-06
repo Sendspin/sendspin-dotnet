@@ -309,6 +309,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         // a malformed message 1, an unresolvable psk_id, a psk_id bound to another server --
         // otherwise leaves a live Curve25519 private key on the heap until GC (#102).
         string pskId;
+        PskCategory pskCategory;
         byte[] probeKey = _identity.PrivateKey.ToArray();
         try
         {
@@ -322,18 +323,30 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             using var payloadDoc = JsonDocument.Parse(Encoding.UTF8.GetString(probeBuf, 0, probeLen));
             pskId = payloadDoc.RootElement.GetProperty("psk_id").GetString()
                 ?? throw new FormatException("psk_id missing");
+
+            // messaging.md § noise/handshake: a psk_category outside the three defined codes is
+            // a malformed inner payload, hence a silent failure like any other throw in here.
+            string? categoryCode = payloadDoc.RootElement.GetProperty("psk_category").GetString();
+            pskCategory = categoryCode switch
+            {
+                "lt" => PskCategory.LongTerm,
+                "pr" => PskCategory.Pairing,
+                "sn" => PskCategory.Sentinel,
+                _ => throw new FormatException($"unknown psk_category {categoryCode}"),
+            };
         }
         finally
         {
             CryptographicOperations.ZeroMemory(probeKey);
         }
 
-        var resolved = _pskResolver.Resolve(pskId);
+        var resolved = _pskResolver.Resolve(pskId, pskCategory);
         if (resolved is null)
         {
             // Sentinel Fallback (connection.md § Sentinel Fallback): a psk_id that matches
             // nothing means the server referenced a credential this client cannot use -- a lost
-            // pairing record, an interrupted pairing finalize, or a PSK for a pairing method the
+            // pairing record, an interrupted pairing finalize, a PSK held under a different
+            // category than the declared psk_category, or a PSK for a pairing method the
             // client has disabled. On the INITIAL handshake the client completes message 2 with
             // the published Sentinel PSK instead of failing; the server recognises that as an
             // authenticated credential-mismatch signal and the session proceeds as an ordinary
@@ -348,7 +361,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             if (!isInitialHandshake)
                 return Fail($"no PSK matches psk_id {pskId}");
 
-            resolved = SentinelPskResolver.Instance.Resolve(NoiseConstants.SentinelPskId)!;
+            resolved = SentinelPskResolver.Instance.Resolve(NoiseConstants.SentinelPskId, PskCategory.Sentinel)!;
         }
 
         // A misbinding, not a miss: the psk_id DID match a stored-pubkey record, but that record
@@ -457,12 +470,6 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (_reassemblyBuffer is not null)
             return Fail("non-fragment frame received while a fragmented message is in flight");
 
-        // IDs 2 and 3 were the pre-1.0 fragment types and are now reserved (spec messaging.md).
-        // A reserved ID is not a valid application binary type, so it is a silent failure like a
-        // malformed fragment rather than something surfaced to BinaryMessageParser as a message.
-        if (type is 2 or 3)
-            return Fail($"reserved binary message id {type}");
-
         return DispatchMessage(type, plainBuf.AsMemory(1, plainLen - 1));
     }
 
@@ -477,10 +484,11 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             if (plaintext.Length < 3)
                 return Fail("opening fragment missing orig_type");
             _reassemblyOrigType = plaintext.Span[2];
-            // orig_type must be a real message type: the fragment id (1) and the reserved ids
-            // (2, 3) are malformed here, the same as receiving them as a top-level frame.
-            if (_reassemblyOrigType is NoiseConstants.MessageTypeFragment or 2 or 3)
-                return Fail($"orig_type is a reserved id {_reassemblyOrigType}");
+            // An orig_type of 1 is the one malformed value (messaging.md § Fragmentation). The
+            // reserved ids 2 and 3 are merely unimplemented: they reassemble and are dropped at
+            // dispatch, so the fragment sequence is still tracked.
+            if (_reassemblyOrigType == NoiseConstants.MessageTypeFragment)
+                return Fail("orig_type is the fragment id 1");
             _reassemblyBuffer = new MemoryStream();
             data = plaintext[3..];
         }
@@ -532,6 +540,12 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
 
     private InboundFrameResult DispatchMessage(byte type, ReadOnlyMemory<byte> payload)
     {
+        // IDs 2 and 3 were the pre-1.0 fragment types and are now reserved (messaging.md). The
+        // SDK does not implement them, so they are ignored ("MUST also ignore binary messages
+        // whose ID they do not implement") rather than surfaced to BinaryMessageParser.
+        if (type is 2 or 3)
+            return InboundFrameResult.None;
+
         if (type == NoiseConstants.MessageTypeJsonBody)
         {
             string json = Encoding.UTF8.GetString(payload.Span);

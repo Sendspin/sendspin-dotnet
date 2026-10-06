@@ -407,7 +407,7 @@ public class SendspinClientServicePairingTests
         store.Upsert(new PairingRecord(psk, PskCategory.LongTerm, "srv-1"));
 
         var resolver = new RecordPskResolver(store);
-        var resolved = resolver.Resolve(NoiseConstants.DerivePskId(psk));
+        var resolved = resolver.Resolve(NoiseConstants.DerivePskId(psk), PskCategory.LongTerm);
 
         Assert.NotNull(resolved);
         Assert.Null(Assert.Single(store.List()).LastUsedUtc);

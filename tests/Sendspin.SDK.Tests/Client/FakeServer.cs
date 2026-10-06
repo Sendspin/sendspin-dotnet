@@ -23,6 +23,7 @@ internal class FakeServer : IAsyncDisposable
     private readonly ClientWebSocket _ws = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly byte[] _psk;
+    private readonly string? _pskCategory;
     private readonly IReadOnlyList<string> _activities;
     private readonly KeyPair _keys;
     private readonly TaskCompletionSource<string> _goodbye =
@@ -38,9 +39,11 @@ internal class FakeServer : IAsyncDisposable
     /// <param name="psk">Must match a PSK the host's pairing record store resolves.</param>
     /// <param name="activities">server/activate activities: ["playback"], or empty for discovery.</param>
     /// <param name="keys">Pass an existing pair so two instances share one server_id.</param>
-    internal FakeServer(byte[] psk, IReadOnlyList<string> activities, KeyPair? keys = null)
+    /// <param name="pskCategory">The psk_category code to declare; see <see cref="TestNoiseServer"/> for the default.</param>
+    internal FakeServer(byte[] psk, IReadOnlyList<string> activities, KeyPair? keys = null, string? pskCategory = null)
     {
         _psk = psk;
+        _pskCategory = pskCategory;
         _activities = activities;
         _keys = keys ?? KeyPair.Generate();
 
@@ -190,7 +193,7 @@ internal class FakeServer : IAsyncDisposable
             {
                 using var doc = JsonDocument.Parse(json);
                 string clientId = doc.RootElement.GetProperty("payload").GetProperty("client_id").GetString()!;
-                _noise = new TestNoiseServer(SendspinIdentity.DecodePeerId(clientId), _psk, _keys);
+                _noise = new TestNoiseServer(SendspinIdentity.DecodePeerId(clientId), _psk, _keys, pskCategory: _pskCategory);
 
                 // Both types derive a server id from the same key pair independently. They agree
                 // only because _keys is threaded through, and nothing else pins that: a change to
