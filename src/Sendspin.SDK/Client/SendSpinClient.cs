@@ -169,8 +169,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private VisualizerRoleSupport? _visualizerRoleSupport;
 
     // Bounds for a persisted output delay loaded from the store. The applied value is 0-5000 per
-    // the spec's output_delay_ms (the clock synchronizer's setter is the single clamp site), so a
-    // stored value outside that range is bounded here before it is logged and re-applied.
+    // the spec's output_delay_ms and the clock synchronizer's setter is the single clamp site;
+    // bounding a stored value here as well only keeps the logged value equal to the applied one.
     private const double MinOutputDelayMs = 0.0;
     private const double MaxOutputDelayMs = 5000.0;
 
@@ -4783,8 +4783,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// Best-effort: a throwing or out-of-range store must not abort the handshake (the initial
     /// client/state and time-sync loop run after this). On failure we log and continue without the
-    /// persisted delay. The loaded value is bounded to the spec's 0-5000 range before it is logged;
-    /// the synchronizer's setter clamps to the same range, so the two agree.
+    /// persisted delay. The synchronizer's setter is what keeps the applied delay in the spec's
+    /// 0-5000 range; the bound applied here is redundant with it and only makes the debug line
+    /// report the value that was applied.
     /// </remarks>
     private void LoadPersistedOutputDelay()
     {
