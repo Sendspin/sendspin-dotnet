@@ -46,8 +46,8 @@ public sealed class VisualizerRoleSupport
     /// Validates the configuration against the visualizer role's wire rules.
     /// </summary>
     /// <exception cref="ArgumentException">
-    /// <see cref="Types"/> contains <c>spectrum</c> but <see cref="Spectrum"/> is null, or it
-    /// requests a periodic type while <see cref="RateMax"/> is not positive.
+    /// <see cref="Types"/> contains <c>spectrum</c> but <see cref="Spectrum"/> is null, or
+    /// <see cref="RateMax"/> is not positive.
     /// </exception>
     internal void Validate()
     {
@@ -60,12 +60,12 @@ public sealed class VisualizerRoleSupport
                 nameof(Spectrum));
         }
 
-        if (RateMax <= 0 && VisualizerTypes.ContainsPeriodic(Types))
+        if (RateMax <= 0)
         {
             throw new ArgumentException(
-                "ClientCapabilities.VisualizerRoleSupport requests a periodic type (loudness, "
-                + "f_peak, spectrum) but sets a non-positive RateMax. rate_max is the per-second "
-                + "ceiling for periodic frames and must be positive when any is requested.",
+                "ClientCapabilities.VisualizerRoleSupport sets a non-positive RateMax. rate_max "
+                + "is a positive integer in every visualizer client/state object, whatever types "
+                + "it requests.",
                 nameof(RateMax));
         }
     }

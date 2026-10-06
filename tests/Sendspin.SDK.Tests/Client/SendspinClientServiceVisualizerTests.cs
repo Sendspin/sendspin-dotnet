@@ -235,11 +235,14 @@ public class SendspinClientServiceVisualizerTests
         }));
     }
 
-    [Fact]
-    public void PeriodicTypeWithNonPositiveRateMax_ThrowsAtConstruction()
+    [Theory]
+    [InlineData(VisualizerTypes.Loudness)]
+    [InlineData(VisualizerTypes.Beat)]
+    [InlineData]
+    public void NonPositiveRateMax_ThrowsAtConstruction(params string[] types)
     {
-        // rate_max is the per-second ceiling on periodic frames, so a periodic type (loudness) with
-        // a zero cap advertises a client/state the server could never stream. Rejected at
+        // rate_max is a positive integer in every visualizer state object, so a zero is rejected
+        // whatever the types: periodic, event-only, or none at all (spec #257). Rejected at
         // construction, where a spectrum-without-config is.
         Assert.Throws<ArgumentException>(() => TestClient.Create(configure: options => options with
         {
@@ -250,7 +253,7 @@ public class SendspinClientServiceVisualizerTests
                 {
                     BufferCapacity = 65536,
                     RateMax = 0,
-                    Types = new List<string> { VisualizerTypes.Loudness },
+                    Types = types.ToList(),
                 },
             },
         }));
@@ -392,17 +395,20 @@ public class SendspinClientServiceVisualizerTests
             types: new List<string> { VisualizerTypes.Spectrum }, rateMax: 15, spectrum: null));
     }
 
-    [Fact]
-    public async Task SetVisualizerConfigurationAsync_PeriodicTypeWithNonPositiveRateMax_Throws()
+    [Theory]
+    [InlineData(VisualizerTypes.Loudness)]
+    [InlineData(VisualizerTypes.Beat)]
+    [InlineData]
+    public async Task SetVisualizerConfigurationAsync_NonPositiveRateMax_Throws(params string[] types)
     {
-        // The runtime twin of the construction check: a periodic type reconfigured with a
-        // non-positive rate_max is rejected before it can reach the wire.
+        // The runtime twin of the construction check: a non-positive rate_max is rejected before
+        // it can reach the wire, whether the types are periodic, event-only, or empty.
         var (client, connection) = VisualizerClient();
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         await Assert.ThrowsAsync<ArgumentException>(() => client.SetVisualizerConfigurationAsync(
-            types: new List<string> { VisualizerTypes.Loudness }, rateMax: 0, spectrum: null));
+            types: types.ToList(), rateMax: 0, spectrum: null));
     }
 }

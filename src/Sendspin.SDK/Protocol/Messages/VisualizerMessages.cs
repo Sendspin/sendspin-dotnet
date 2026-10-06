@@ -21,15 +21,6 @@ public static class VisualizerTypes
 
     /// <summary>Energy-onset events with strength (binary type 20).</summary>
     public const string Peak = "peak";
-
-    /// <summary>
-    /// Whether a type is periodic — throttled by <c>rate_max</c>. Everything but the event types
-    /// <see cref="Beat"/> and <see cref="Peak"/> is periodic (roles/visualizer/v1.md).
-    /// </summary>
-    internal static bool IsPeriodic(string type) => type is Loudness or FPeak or Spectrum;
-
-    /// <summary>Whether any requested type is periodic, so <c>rate_max</c> must be positive.</summary>
-    internal static bool ContainsPeriodic(IEnumerable<string> types) => types.Any(IsPeriodic);
 }
 
 /// <summary>

@@ -1639,9 +1639,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 nameof(spectrum));
         }
 
-        // rate_max is the ceiling on periodic frames per second, so it must be positive whenever a
-        // periodic type is requested — a zero cap would leave the server unable to send any.
-        if (rateMax <= 0 && VisualizerTypes.ContainsPeriodic(types))
+        // rate_max is a positive integer in every visualizer state object, whatever the types —
+        // an empty or event-only list included (roles/visualizer/v1.md, spec #257).
+        if (rateMax <= 0)
         {
             throw new ArgumentException(
                 "A visualizer configuration that requests a periodic type (loudness, f_peak, "
