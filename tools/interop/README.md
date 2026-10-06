@@ -25,6 +25,21 @@ our host responds — the same path a real server-initiated deployment uses.
   `server/activate(pairing)` → `client/pair-finalize` → `server/pair-finalize` →
   the long-term record persists on **both** sides → the server re-handshakes to the new
   PSK, promoting the client to `user` trust.
+- **`static-pin`** — a `static_pairing_code` attempt with an 8-digit code both sides
+  already know. Proves the CPace round and PSK wrapping, and that the client gesture-gated
+  the attempt: the server side fails the run unless it saw `client/pair-pending` first.
+- **`dynamic-pin`** — a `dynamic_pairing_code` attempt. The client derives a fresh code
+  during the attempt and presents it; the harness reads it off the client's output and
+  feeds it to the server, as an operator would type it in. Proves the `digits` emission
+  format and the same CPace round with a code that was never shared up front.
+- **`source`** — pairs, then the server asks the client to stream its `source@v1` input
+  and decodes the chunks that arrive. Proves the server's start command, the client's
+  `client-stream/start`, and real audio over the wire.
+- **`player`** — pairs, waits for the client to report itself available, then pushes two
+  seconds of PCM at the `player@v1` role. Proves `stream/start`, `stream/end`, and the
+  13-byte audio chunk header: the client must decode exactly the samples the server sent
+  and see a non-zero `send_ahead`. Also fails if the server logs the client's initial
+  `client/state` as late (aiosendspin allows 5 s), and prints how long it took.
 
 ## Running locally
 
@@ -34,6 +49,10 @@ our host responds — the same path a real server-initiated deployment uses.
 pip install "aiosendspin[server]==10.0.0"
 bash tools/interop/run.sh unpaired
 bash tools/interop/run.sh pairing
+bash tools/interop/run.sh static-pin
+bash tools/interop/run.sh dynamic-pin
+bash tools/interop/run.sh source
+bash tools/interop/run.sh player
 ```
 
 Use a different Python via `PYTHON=/path/to/python bash tools/interop/run.sh …`.
@@ -48,6 +67,4 @@ Use a different Python via `PYTHON=/path/to/python bash tools/interop/run.sh …
 
 ## Not yet covered
 
-Pairing-code pairing (dynamic/static) has full unit + KAT coverage;
-adding it here is tracked in the interop follow-ups. It needs a `PinProvider`
-on the server side to feed the operator-entered pairing code.
+The artwork, visualizer and controller roles have no scenario here yet.
