@@ -787,7 +787,7 @@ client.ArtworkReceived += (_, e) =>
     displays[e.Channel].Show(e.ImageData);
 };
 
-client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // zero-size announce = clear that channel
+client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // an empty image (zero-size announce) = clear that channel
 ```
 
 On the wire an image is a transfer — an announce carrying the timestamp and total size, then parts, with a cancel that discards a pending image — and the SDK reassembles it, so `ArtworkReceived` always delivers a complete image. An announce with a total size of zero clears the channel.

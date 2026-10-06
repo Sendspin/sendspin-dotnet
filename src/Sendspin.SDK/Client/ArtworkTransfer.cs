@@ -147,7 +147,8 @@ internal sealed class ArtworkTransfer
 
     /// <summary>
     /// Ends the transfer in flight on <paramref name="channel"/>, if there is one: its partly
-    /// received image is that channel's pending image, which a cancel discards.
+    /// received image is that channel's pending image, which a cancel discards, as does a
+    /// <c>stream/start</c> that changes the channel's configuration.
     /// </summary>
     internal void Cancel(byte channel)
     {
@@ -161,7 +162,9 @@ internal sealed class ArtworkTransfer
     }
 
     /// <summary>
-    /// Forgets the transfer in flight. For the loss of the connection it was arriving on.
+    /// Forgets the transfer in flight, whichever channel it is on. For an artwork
+    /// <c>stream/end</c>, which discards every pending image, and for the loss of the connection
+    /// the transfer was arriving on.
     /// </summary>
     internal void Reset()
     {
