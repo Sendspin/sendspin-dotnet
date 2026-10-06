@@ -23,12 +23,16 @@ public enum PskCategory
 internal sealed record NoisePsk(ReadOnlyMemory<byte> Key, PskCategory Category, string? ServerId = null);
 
 /// <summary>
-/// Resolves the psk_id received in Noise handshake message 1 to a PSK candidate.
+/// Resolves the psk_id and psk_category received in Noise handshake message 1 to a PSK candidate.
 /// </summary>
 internal interface INoisePskResolver
 {
-    /// <summary>Returns the PSK whose derived psk_id matches, or null for a lookup miss.</summary>
-    NoisePsk? Resolve(string pskId);
+    /// <summary>
+    /// Returns the PSK of the declared category whose derived psk_id matches, or null for a
+    /// lookup miss. A psk_id held only under a different category is a miss (connection.md
+    /// § Pre-Shared Key).
+    /// </summary>
+    NoisePsk? Resolve(string pskId, PskCategory category);
 }
 
 /// <summary>
@@ -40,8 +44,8 @@ internal sealed class SentinelPskResolver : INoisePskResolver
     public static SentinelPskResolver Instance { get; } = new();
 
     /// <inheritdoc/>
-    public NoisePsk? Resolve(string pskId) =>
-        pskId == NoiseConstants.SentinelPskId
+    public NoisePsk? Resolve(string pskId, PskCategory category) =>
+        category == PskCategory.Sentinel && pskId == NoiseConstants.SentinelPskId
             ? new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), PskCategory.Sentinel)
             : null;
 }
