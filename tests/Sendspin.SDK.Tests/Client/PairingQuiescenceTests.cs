@@ -108,6 +108,13 @@ public class PairingQuiescenceTests
         var (client, connection) = PairableClient();
         using var _c = client;
 
+        // SetVolumeAsync is a controller command, so it must also clear the controller-role gate:
+        // activate controller@v1 alongside the player and report 'volume' as supported.
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1","controller@v1"]}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/state","payload":{"controller":{"supported_commands":["volume"]}}}""");
+
         int before = NonPairingSends(connection);
 
         await client.SetVolumeAsync(42);

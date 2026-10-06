@@ -1,5 +1,8 @@
 using System.Buffers.Binary;
+using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Synchronization;
@@ -41,14 +44,9 @@ public class MediaDisplaySchedulingTests
         return Frame(BinaryMessageTypes.VisualizerLoudness, timestamp, data);
     }
 
-    private static byte[] ArtworkBinary(long timestamp, byte[] image, byte type = BinaryMessageTypes.Artwork0)
-    {
-        var buf = new byte[9 + image.Length];
-        buf[0] = type;
-        BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1, 8), timestamp);
-        image.CopyTo(buf, 9);
-        return buf;
-    }
+    private static void SendArtwork(
+        FakeSendspinConnection connection, long timestamp, byte[] image, byte type = BinaryMessageTypes.Artwork0)
+        => connection.RaiseArtwork(type, timestamp, image);
 
     /// <summary>
     /// Client whose local clock is frozen at <paramref name="now"/> and whose clock synchronizer
@@ -60,10 +58,11 @@ public class MediaDisplaySchedulingTests
             long now = Now,
             int bufferCapacity = 65_536,
             IClockSynchronizer? clockSynchronizer = null,
-            FakeAudioPipeline? audioPipeline = null)
+            FakeAudioPipeline? audioPipeline = null,
+            ILogger<SendspinClientService>? logger = null)
     {
         var timer = new FakePrecisionTimer { CurrentTime = now };
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(logger: logger, configure: options =>
             options with
             {
                 PrecisionTimer = timer,
@@ -140,10 +139,11 @@ public class MediaDisplaySchedulingTests
         client.ArtworkCleared += OnCleared;
         try
         {
-            connection.RaiseBinaryMessageReceived(ArtworkBinary(
+            SendArtwork(
+                connection,
                 clock is null ? through + 1 : clock.ClientToServerTime(through + 1),
                 Array.Empty<byte>(),
-                (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel)));
+                (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel));
             timer.CurrentTime = through + 1;
             await marker.Task.WaitAsync(TimeSpan.FromSeconds(5));
         }
@@ -284,6 +284,32 @@ public class MediaDisplaySchedulingTests
     }
 
     [Fact]
+    public void VisualizerFrame_ArrivingWhileUnavailable_IsDroppedWithoutClosing_ThenFlowsWhenAvailable()
+    {
+        var pipe = new FakeAudioPipeline();
+        var (client, connection, _) = SchedulingClient(audioPipeline: pipe);
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+
+        // A pipeline error makes the client report available: false. The spec says the server
+        // should not stream display data then, so a frame that arrives anyway is dropped before it
+        // is scheduled — and the connection is left open (spec #266/#271).
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 100));
+        Assert.Empty(frames);
+        Assert.Equal(ConnectionState.Connected, connection.State);
+
+        // Recovery to Playing restores availability, and frames flow again.
+        pipe.SetState(AudioPipelineState.Playing);
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 200));
+
+        var only = Assert.Single(frames);
+        Assert.Equal(200, only.Loudness);
+    }
+
+    [Fact]
     public void Artwork_StampedInThePast_IsRaisedImmediately()
     {
         var (client, connection, _) = SchedulingClient();
@@ -294,7 +320,7 @@ public class MediaDisplaySchedulingTests
 
         // Unlike a visualizer frame, artwork is never dropped for lateness: a timestamp already
         // in the past means display it now, however far past it is.
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now - 60_000_000, new byte[] { 1, 2, 3 }));
+        SendArtwork(connection, Now - 60_000_000, new byte[] { 1, 2, 3 });
 
         Assert.NotNull(received);
         Assert.Equal(new byte[] { 1, 2, 3 }, received.ImageData);
@@ -311,7 +337,7 @@ public class MediaDisplaySchedulingTests
 
         // The gapless case: the next track's cover, pre-sent with the timestamp it becomes
         // current at. Displaying it on arrival would change the art mid-track.
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 5_000_000, new byte[] { 9 }));
+        SendArtwork(connection, Now + 5_000_000, new byte[] { 9 });
 
         Assert.Empty(received);
     }
@@ -332,7 +358,7 @@ public class MediaDisplaySchedulingTests
 
         long displayTime = Now + 1_000;
         long serverTimestamp = clock.ClientToServerTime(displayTime);
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(serverTimestamp, new byte[] { 9 }));
+        SendArtwork(connection, serverTimestamp, new byte[] { 9 });
 
         Assert.Empty(received);
 
@@ -358,12 +384,9 @@ public class MediaDisplaySchedulingTests
 
         // "Latest wins" is per channel: only the second image may ever be displayed on
         // channel 0, while channel 1 is untouched by it.
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 2_000, new byte[] { 2 }, BinaryMessageTypes.Artwork0));
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 3_000, new byte[] { 3 }, BinaryMessageTypes.Artwork1));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now + 2_000, new byte[] { 2 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now + 3_000, new byte[] { 3 }, BinaryMessageTypes.Artwork1);
 
         timer.CurrentTime = Now + 3_000;
         await WaitUntilAsync(() => received.Count == 2, "both channels' images");
@@ -384,8 +407,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkCleared += (_, e) => cleared.Add(e);
 
         // An empty image is a clear, and it is scheduled exactly as an image is.
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 1_000, Array.Empty<byte>(), BinaryMessageTypes.Artwork2));
+        SendArtwork(connection, Now + 1_000, Array.Empty<byte>(), BinaryMessageTypes.Artwork2);
 
         Assert.Empty(cleared);
 
@@ -422,7 +444,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkReceived += (_, e) => artwork.Add(e);
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 9 }));
+        SendArtwork(connection, Now + 1_000, new byte[] { 9 });
 
         // Had the delay been folded in, both would have looked 5 s overdue on arrival: the
         // frame dropped as stale, the artwork displayed at once.
@@ -447,7 +469,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkReceived += (_, e) => received.Add(e);
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
 
         // A seek: buffered visualization is cleared and playback continues from what follows.
         // Handled synchronously, so the flush has happened by the time this returns.
@@ -495,7 +517,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkReceived += (_, e) => artwork.Add(e);
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
 
         connection.RaiseTextMessageReceived(
             """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["player"]}}""");
@@ -523,7 +545,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkReceived += (_, e) => artwork.Add(e);
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
 
         connection.RaiseTextMessageReceived(
             """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["visualizer"]}}""");
@@ -554,7 +576,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkReceived += (_, e) => artwork.Add(e);
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
 
         connection.RaiseTextMessageReceived(
             """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["visualizer"]}}""");
@@ -583,7 +605,7 @@ public class MediaDisplaySchedulingTests
         client.ArtworkReceived += (_, e) => artwork.Add(e);
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
 
         connection.RaiseTextMessageReceived(
             """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":[]}}""");
@@ -890,6 +912,30 @@ public class MediaDisplaySchedulingTests
         Assert.Null(client.CurrentGroup.Metadata);
     }
 
+    [Fact]
+    public async Task Activate_DroppingTheVisualizer_DiscardsItsPendingFrames_WithoutAStreamEnd()
+    {
+        // Spec PR #289: a removed stream role stops its remaining output and clears its buffers
+        // on the activate itself. Artwork stays active, which is what lets the drain marker
+        // prove the loop ran past the frame's display time.
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "visualizer@v1", "artwork@v1");
+
+        var frames = new List<VisualizerFrame>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["artwork@v1"]}}
+            """);
+
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(frames);
+    }
+
     // -- Artwork rules of spec #135 not already covered above -------------------------------
 
     [Fact]
@@ -904,10 +950,8 @@ public class MediaDisplaySchedulingTests
         // The channel keeps one pending image and the newest message takes the slot, with no
         // comparison against what is held — so an image due sooner than the one it displaces
         // still wins, and the displaced one is gone rather than merely reordered.
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 5_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 1_000, new byte[] { 2 }, BinaryMessageTypes.Artwork0));
+        SendArtwork(connection, Now + 5_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now + 1_000, new byte[] { 2 }, BinaryMessageTypes.Artwork0);
 
         timer.CurrentTime = Now + 1_000;
         await WaitUntilAsync(() => received.Count == 1, "the replacement image");
@@ -926,8 +970,7 @@ public class MediaDisplaySchedulingTests
         var received = new List<ArtworkReceivedEventArgs>();
         client.ArtworkReceived += (_, e) => received.Add(e);
 
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
 
         // "On stream/end, clearing buffers includes discarding pending images": an image sent
         // ahead for a track the server has just stopped streaming must not still appear.
@@ -936,6 +979,115 @@ public class MediaDisplaySchedulingTests
 
         await DrainPastAsync(client, connection, timer, Now + 1_000);
         Assert.Empty(received);
+    }
+
+    [Fact]
+    public void DisplayDropWhileUnavailable_IsLoggedOncePerUnavailablePeriod()
+    {
+        var pipe = new FakeAudioPipeline();
+        var logger = new CapturingLogger<SendspinClientService>();
+        var (client, connection, _) = SchedulingClient(audioPipeline: pipe, logger: logger);
+        using var _c = client;
+
+        // First unavailable period: two drops, one notice.
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 100));
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 200));
+
+        // Available again with no display frame in the window, then unavailable again. The latch
+        // re-arms on the availability transition, not on a frame, so the second period logs too.
+        pipe.SetState(AudioPipelineState.Playing);
+        pipe.RaiseError();
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now - 1, 300));
+
+        Assert.Equal(
+            2,
+            logger.MessagesAt(LogLevel.Debug)
+                .Count(m => m.Contains("Dropping artwork/visualizer binary data while unavailable", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task StreamEnd_ArrivingWhileDueArtworkIsBeingDispatched_DiscardsThatArtwork()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        // A dispatch pass raises its visualizer frames before its artwork, so ending the artwork
+        // role from the frame's handler lands the stream/end exactly where the race is: after the
+        // loop has taken the due image out of its slot, before it has raised it.
+        client.VisualizationReceived += (_, f) =>
+        {
+            connection.RaiseTextMessageReceived(
+                """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+            frames.Add(f);
+        };
+
+        // Both due at the same future moment, so one pass takes them together.
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
+        timer.CurrentTime = Now + 2_000;
+        await WaitUntilAsync(() => frames.Count == 1, "the frame that ends the artwork role");
+
+        // The image the loop was holding must not surface after the stream/end that discarded it.
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(received);
+    }
+
+    [Fact]
+    public async Task StreamEnd_NamingArtwork_ClearsEveryChannelStillShowingAnImage()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        var cleared = new List<ArtworkClearedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+        client.ArtworkCleared += (_, e) => cleared.Add(e);
+
+        // Two channels showing an image now (past-stamped, so raised on arrival).
+        SendArtwork(connection, Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now - 1, new byte[] { 2 }, BinaryMessageTypes.Artwork1);
+        Assert.Equal(2, received.Count);
+
+        // stream/end is playback termination, so every channel still showing an image is cleared
+        // (spec #266). The flush runs before the handler's first await, so the cleared events have
+        // been raised by the time this returns.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+
+        Assert.Equal(new[] { 0, 1 }, cleared.Select(c => c.Channel).OrderBy(c => c).ToArray());
+
+        // Nothing pending is left to surface afterwards.
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Equal(2, received.Count);
+    }
+
+    [Fact]
+    public void StreamClear_NamingArtwork_KeepsTheImageOnDisplay()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var cleared = new List<ArtworkClearedEventArgs>();
+        client.ArtworkCleared += (_, e) => cleared.Add(e);
+
+        // An image on display now.
+        SendArtwork(connection, Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+
+        // A seek clears buffered data but keeps playing the same track, so the cover already shown
+        // must not be blanked — unlike a stream/end, it does not clear the display.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+        Assert.DoesNotContain(cleared, c => c.Channel == 0);
+
+        // The image is still tracked as displayed, so a later stream/end does clear it.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":2,"roles":["artwork"]}}""");
+        Assert.Contains(cleared, c => c.Channel == 0);
     }
 
     [Fact]
@@ -951,10 +1103,8 @@ public class MediaDisplaySchedulingTests
             """{"source":"album","format":"jpeg","width":512,"height":512}""",
             """{"source":"artist","format":"jpeg","width":256,"height":256}"""));
 
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0));
-        connection.RaiseBinaryMessageReceived(
-            ArtworkBinary(Now + 1_000, new byte[] { 2 }, BinaryMessageTypes.Artwork1));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now + 1_000, new byte[] { 2 }, BinaryMessageTypes.Artwork1);
 
         // Channel 0 is reconfigured, so the image held for it was encoded for a size that no
         // longer applies and the server will re-send it if it still does. Channel 1 is
@@ -968,6 +1118,106 @@ public class MediaDisplaySchedulingTests
         var only = Assert.Single(received);
         Assert.Equal(1, only.Channel);
         Assert.Equal(new byte[] { 2 }, only.ImageData);
+    }
+
+    [Fact]
+    public void StreamEnd_NamingArtwork_EndsTheTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 4));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2));
+
+        // A pending image runs from its announce, so the one still arriving is among those a
+        // stream/end discards. Were its transfer left in flight, the next stream's first
+        // announce would be a protocol error — and the image, once complete, would go on
+        // display after the application had been told to clear.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+        SendArtwork(connection, Now - 1, new byte[] { 7, 8 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 7, 8 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void StreamClear_NamingArtwork_LeavesTheTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1));
+
+        // Artwork is not in stream/clear's role vocabulary, so the server goes on sending the
+        // image's parts: forgetting the transfer here would make the next part a protocol error.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/clear","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 2));
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 1, 2 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void StreamStart_ChangingAChannelsConfiguration_EndsThatChannelsTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":512,"height":512}"""));
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 4));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1, 2));
+
+        // The partly received image was encoded for the old size; the server re-sends it for
+        // the new one, and that announce must find nothing in flight.
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":128,"height":128}"""));
+        SendArtwork(connection, Now - 1, new byte[] { 7, 8 });
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 7, 8 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
+    }
+
+    [Fact]
+    public void StreamStart_ChangingAnotherChannelsConfiguration_LeavesTheTransferInFlight()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":512,"height":512}""",
+            """{"source":"artist","format":"jpeg","width":256,"height":256}"""));
+
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Announce(BinaryMessageTypes.Artwork0, Now - 1, 2));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 1));
+
+        connection.RaiseTextMessageReceived(ArtworkStreamStart(
+            """{"source":"album","format":"jpeg","width":512,"height":512}""",
+            """{"source":"artist","format":"jpeg","width":64,"height":64}"""));
+        connection.RaiseBinaryMessageReceived(ArtworkWire.Part(BinaryMessageTypes.Artwork0, 2));
+
+        var only = Assert.Single(received);
+        Assert.Equal(new byte[] { 1, 2 }, only.ImageData);
+        Assert.Null(connection.LastDisconnectReason);
     }
 
     /// <summary>
@@ -1055,7 +1305,7 @@ public class MediaDisplaySchedulingTests
 
         long displayTime = Now + 1_000;
         long serverTimestamp = displayTime + UptimeOffsetMicroseconds;
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(serverTimestamp, new byte[] { 9 }));
+        SendArtwork(connection, serverTimestamp, new byte[] { 9 });
 
         Assert.Empty(received);
 
@@ -1141,8 +1391,9 @@ public class MediaDisplaySchedulingTests
             MetadataState($$"""{"timestamp":{{Now + 1_000}},"title":"Second"}"""));
         connection.RaiseTextMessageReceived(
             ColorState($$"""{"timestamp":{{Now + 1_000}},"primary":[2,2,2]}"""));
-        connection.RaiseBinaryMessageReceived(ArtworkBinary(
-            Now + 1_000, Array.Empty<byte>(), (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel)));
+        SendArtwork(
+            connection,
+            Now + 1_000, Array.Empty<byte>(), (byte)(BinaryMessageTypes.Artwork0 + MarkerChannel));
 
         var passComplete = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         client.ArtworkCleared += (_, e) =>

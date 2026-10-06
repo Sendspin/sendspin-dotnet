@@ -3,10 +3,10 @@ using Sendspin.SDK.Client;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// The pairing window is device-level, not connection-level: the spec closes it on "drop of
-/// the connection carrying its attempt" and calls it a state in which the client has decided
-/// to accept ONE attempt. A host running several servers therefore shares one window, and
-/// exactly one connection may consume any given opening.
+/// The pairing window is device-level, not connection-level: the spec calls it a state in
+/// which the client has decided to accept pairing attempts, and admits them "only on the
+/// connection that carries its first". A host running several servers therefore shares one
+/// window, and exactly one connection is admitted by any given opening.
 /// </summary>
 public class PairingWindowTests
 {
@@ -29,21 +29,117 @@ public class PairingWindowTests
     }
 
     [Fact]
-    public void TryConsume_SucceedsOnceThenCloses()
+    public void TryAdmit_LeavesTheWindowOpen_AndAdmitsTheSameConnectionAgain()
     {
-        // "The window admits exactly one attempt."
+        // An attempt that ends timed out or cancelled "does not itself close the window".
+        var window = new PairingWindow();
+        var connection = new object();
+        window.Open();
+
+        Assert.True(window.TryAdmit(connection));
+        Assert.True(window.TryAdmit(connection));
+        Assert.True(window.IsOpen);
+    }
+
+    [Fact]
+    public void TryAdmit_OnAnotherConnection_Fails()
+    {
+        // "The window admits attempts only on the connection that carries its first."
         var window = new PairingWindow();
         window.Open();
 
-        Assert.True(window.TryConsume());
-        Assert.False(window.TryConsume());
+        Assert.True(window.TryAdmit(new object()));
+        Assert.False(window.TryAdmit(new object()));
+    }
+
+    [Fact]
+    public void TryAdmit_OnAClosedWindow_Fails()
+    {
+        Assert.False(new PairingWindow().TryAdmit(new object()));
+    }
+
+    [Fact]
+    public void RecordFailedAttempt_ClosesTheWindowOnTheFifth()
+    {
+        var window = new PairingWindow();
+        var connection = new object();
+        window.Open();
+        window.TryAdmit(connection);
+
+        for (int i = 0; i < 4; i++)
+        {
+            window.RecordFailedAttempt(connection);
+        }
+
+        Assert.True(window.IsOpen);
+
+        window.RecordFailedAttempt(connection);
+
         Assert.False(window.IsOpen);
     }
 
     [Fact]
-    public void TryConsume_OnAClosedWindow_Fails()
+    public void RecordFailedAttempt_OnAnotherConnection_DoesNotCount()
     {
-        Assert.False(new PairingWindow().TryConsume());
+        // An ungated attempt failing elsewhere is not one of this window's attempts.
+        var window = new PairingWindow();
+        window.Open();
+        window.TryAdmit(new object());
+
+        var other = new object();
+        for (int i = 0; i < 5; i++)
+        {
+            window.RecordFailedAttempt(other);
+        }
+
+        Assert.True(window.IsOpen);
+    }
+
+    [Fact]
+    public void CloseFor_TheAdmittedConnection_ClosesTheWindow()
+    {
+        var window = new PairingWindow();
+        var connection = new object();
+        window.Open();
+        window.TryAdmit(connection);
+
+        window.CloseFor(connection);
+
+        Assert.False(window.IsOpen);
+    }
+
+    [Fact]
+    public void CloseFor_AnotherConnection_LeavesTheWindowOpen()
+    {
+        // Only the drop of the connection carrying the attempts closes the window; any other
+        // connection going away must not spend the operator's gesture.
+        var window = new PairingWindow();
+        window.Open();
+        window.TryAdmit(new object());
+
+        window.CloseFor(new object());
+
+        Assert.True(window.IsOpen);
+    }
+
+    [Fact]
+    public void Reopening_AdmitsADifferentConnection_WithAFreshFailureCount()
+    {
+        var window = new PairingWindow();
+        var first = new object();
+        window.Open();
+        window.TryAdmit(first);
+        for (int i = 0; i < 4; i++)
+        {
+            window.RecordFailedAttempt(first);
+        }
+
+        window.Open();
+        var second = new object();
+
+        Assert.True(window.TryAdmit(second));
+        window.RecordFailedAttempt(second);
+        Assert.True(window.IsOpen);
     }
 
     [Fact]
@@ -56,7 +152,7 @@ public class PairingWindowTests
         clock.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
 
         Assert.False(window.IsOpen);
-        Assert.False(window.TryConsume());
+        Assert.False(window.TryAdmit(new object()));
     }
 
     [Fact]
@@ -69,7 +165,7 @@ public class PairingWindowTests
         clock.Advance(TimeSpan.FromMinutes(4) + TimeSpan.FromSeconds(59));
 
         Assert.True(window.IsOpen);
-        Assert.True(window.TryConsume());
+        Assert.True(window.TryAdmit(new object()));
     }
 
     [Fact]
@@ -84,7 +180,7 @@ public class PairingWindowTests
         clock.Advance(TimeSpan.FromMinutes(5));
 
         Assert.True(window.IsOpen);
-        Assert.True(window.TryConsume());
+        Assert.True(window.TryAdmit(new object()));
     }
 
     [Fact]
@@ -102,7 +198,7 @@ public class PairingWindowTests
     }
 
     [Fact]
-    public void ConcurrentConsumers_ProduceExactlyOneWinner()
+    public void ConcurrentConnections_ProduceExactlyOneWinner()
     {
         // The multi-server case: two connections race for one opening.
         var window = new PairingWindow();
@@ -111,7 +207,7 @@ public class PairingWindowTests
         int winners = 0;
         Parallel.For(0, 64, _ =>
         {
-            if (window.TryConsume())
+            if (window.TryAdmit(new object()))
             {
                 Interlocked.Increment(ref winners);
             }

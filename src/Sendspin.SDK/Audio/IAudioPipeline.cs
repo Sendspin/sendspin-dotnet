@@ -244,9 +244,11 @@ public enum AudioPipelineStartOutcome
     Restarted = 0,
 
     /// <summary>
-    /// Only the decoder was rebuilt: audio decoded before the change, the timeline and the output
-    /// device were all kept. Audio still encoded for the previous stream cannot be fed to the new
-    /// decoder, so a caller holding any must drop it, as for <see cref="Restarted"/>.
+    /// The decoder was rebuilt, and audio decoded before the change and the timeline were kept.
+    /// The output device is kept too unless the sample rate or channel count changed, in which
+    /// case it is re-opened once that audio has played. Audio still encoded for the previous
+    /// stream cannot be fed to the new decoder, so a caller holding any must drop it, as for
+    /// <see cref="Restarted"/>.
     /// </summary>
     DecoderReplaced = 1,
 

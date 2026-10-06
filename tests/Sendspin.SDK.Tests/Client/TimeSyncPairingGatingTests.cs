@@ -22,6 +22,12 @@ public class TimeSyncPairingGatingTests
     private const string PairingActivate =
         """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""";
 
+    private const string PlaybackAndPairingActivate =
+        """{"type":"server/activate","payload":{"activities":["playback","pairing"],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""";
+
+    private const string PairingOnlyActivateKeepingRoles =
+        """{"type":"server/activate","payload":{"activities":["pairing"],"pairing":{"method":"dynamic_pairing_code","format":"digits"}}}""";
+
     private const string PlaybackActivate =
         """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""";
 
@@ -247,6 +253,44 @@ public class TimeSyncPairingGatingTests
         await Task.Delay(200);
         var initial = Assert.Single(ClientStates(connection));
         Assert.Equal(true, initial.Payload.Available);
+    }
+
+    [Fact]
+    public async Task PlaybackAndPairingActivate_KeepsClientTimeAndClientStateFlowing_AndAPairingOnlyActivateStopsThem()
+    {
+        // Spec 1.0.0-rc1, pairing.md: "Pairing can run alongside playback. A server/activate
+        // that adds 'pairing' to activities does not by itself affect active_roles, streams, or
+        // group membership." So the wire is held for the pairing exchange alone only when
+        // 'playback' is absent from the activity set, not whenever 'pairing' is present.
+        var (client, connection, _) = CreatePairingCodePairableClient(PskCategory.Sentinel, unpairedAccess: true);
+        using var _c = client;
+        connection.RespondToTimeSync = true;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+
+        // Pairing joins a session that is already playing: the attempt starts...
+        connection.RaiseTextMessageReceived(PlaybackAndPairingActivate);
+        Assert.Contains(connection.SnapshotSentMessages(), m => m is ClientPairInitMessage);
+
+        // ...and playback's own traffic carries on beside it.
+        int probes = Probes(connection).Count;
+        int states = ClientStates(connection).Count;
+        await client.SendPlayerStateAsync(volume: 42, muted: false);
+        Assert.Equal(states + 1, ClientStates(connection).Count);
+        await WaitForAsync(() => Probes(connection).Count > probes, TimeSpan.FromSeconds(5));
+
+        // Dropping 'playback' leaves a pairing-only activation, which does hold the wire. The
+        // roles are left standing (active_roles omitted), so the silence below is the gate's
+        // doing rather than a deactivated player having nothing to report.
+        connection.RaiseTextMessageReceived(PairingOnlyActivateKeepingRoles);
+        await Task.Delay(200);
+        probes = Probes(connection).Count;
+        states = ClientStates(connection).Count;
+        await client.SendPlayerStateAsync(volume: 43, muted: false);
+        await Task.Delay(700);
+        Assert.Equal(probes, Probes(connection).Count);
+        Assert.Equal(states, ClientStates(connection).Count);
     }
 
     private static async Task WaitForAsync(Func<bool> condition, TimeSpan timeout)

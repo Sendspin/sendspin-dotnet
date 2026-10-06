@@ -154,7 +154,7 @@ public class SendspinHostServiceArbitrationTests
         // own server reconnecting, which drops the previous socket as stale.
         await using var host = await StartHostAsync();
         var keys = KeyPair.Generate();
-        await using var pairing = new FakeServer(PairingPsk, ["pairing"], keys);
+        await using var pairing = new FakeServer(PairingPsk, ["pairing"], keys, pskCategory: "pr");
         await pairing.ConnectAsync(host.ListeningPort);
         await WaitForServerConnectedAsync(host, pairing.ServerId);
 
@@ -178,7 +178,7 @@ public class SendspinHostServiceArbitrationTests
         await existing.ConnectAsync(host.ListeningPort);
         await WaitForServerConnectedAsync(host, existing.ServerId);
 
-        await using var incoming = new FakeServer(PairingPsk, ["pairing"]);
+        await using var incoming = new FakeServer(PairingPsk, ["pairing"], pskCategory: "pr");
         await incoming.ConnectAsync(host.ListeningPort);
 
         Assert.True(await incoming.WaitForPairAbortAsync("concurrent_attempt", Timeout));

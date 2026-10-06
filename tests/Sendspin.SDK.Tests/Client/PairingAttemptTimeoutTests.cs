@@ -6,8 +6,7 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// The client bounds each pairing attempt from its first message (pairing.md:26) and aborts
-/// with attempt_timeout on expiry. Nothing implemented this before; the pairing window also
-/// closes on attempt-timeout expiry, so without it that close condition could never fire.
+/// with attempt_timeout on expiry. A timed-out attempt "does not itself close the window".
 /// </summary>
 public class PairingAttemptTimeoutTests
 {
@@ -27,6 +26,28 @@ public class PairingAttemptTimeoutTests
         // Server never replies. The attempt must not hang forever.
         var abort = await h.NextMessageAsync<PairAbortMessage>(TimeSpan.FromSeconds(5));
         Assert.Equal("attempt_timeout", abort.Payload.Reason);
+    }
+
+    [Fact]
+    public async Task TimedOutAttempt_LeavesTheWindowOpen_AndItAdmitsTheNextAttempt()
+    {
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(
+            staticPairingCode: "12345678", window: window, attemptTimeout: Short);
+
+        h.SendPairingActivate(method: "static_pairing_code");
+        await h.NextMessageAsync<ClientPairInitMessage>();
+        var abort = await h.NextMessageAsync<PairAbortMessage>(TimeSpan.FromSeconds(5));
+        Assert.Equal("attempt_timeout", abort.Payload.Reason);
+
+        Assert.True(window.IsOpen);
+
+        // No new gesture: the same opening admits the attempt that follows.
+        h.SendPairingActivate(method: "static_pairing_code");
+        var init = await h.NextMessageAsync<ClientPairInitMessage>();
+        Assert.Equal(2, init.Payload.PairingIndex);
+        Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
     }
 
     [Fact]

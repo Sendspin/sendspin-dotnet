@@ -27,6 +27,7 @@ internal sealed class TestNoiseServer
     private readonly ReadOnlyMemory<byte> _clientPublicKey;
     private readonly byte[] _psk;
     private readonly string _advertisedPskId;
+    private readonly string _pskCategory;
     private readonly string _protocolName;
     private HandshakeState? _state;
     private Transport? _transport;
@@ -42,17 +43,24 @@ internal sealed class TestNoiseServer
     /// one fails, so a server exercising that path names a credential the client cannot match
     /// while running its own state on the Sentinel — exactly this pair of arguments.
     /// </param>
+    /// <param name="pskCategory">
+    /// The psk_category code (lt|pr|sn) to declare in Noise message 1. This server holds only
+    /// raw PSK bytes and cannot know where they came from, so it defaults to "sn" when it names
+    /// the Sentinel's psk_id and to "lt", the ordinary paired case, otherwise.
+    /// </param>
     internal TestNoiseServer(
         ReadOnlyMemory<byte> clientPublicKey,
         byte[] psk,
         KeyPair? keys = null,
         NoiseCipherSuite suite = NoiseCipherSuite.ChaChaPoly,
-        string? advertisedPskId = null)
+        string? advertisedPskId = null,
+        string? pskCategory = null)
     {
         _keys = keys ?? KeyPair.Generate();
         _clientPublicKey = clientPublicKey;
         _psk = psk;
         _advertisedPskId = advertisedPskId ?? NoiseConstants.DerivePskId(psk);
+        _pskCategory = pskCategory ?? (_advertisedPskId == NoiseConstants.SentinelPskId ? "sn" : "lt");
         _protocolName = suite.ToProtocolName();
         ServerId = TestBase64Url.EncodeToString(_keys.PublicKey);
     }
@@ -77,14 +85,12 @@ internal sealed class TestNoiseServer
             rs: _clientPublicKey.ToArray(),
             psks: [_psk]);
 
-        // psk_category (lt|pr|sn) is where the PSK came from; this server holds only raw PSK
-        // bytes and cannot know it, so "lt" stands in for the ordinary paired case. x-unknown
-        // is a deliberately unrecognised member: it pins NoiseWireFraming's tolerance of extra
+        // x-unknown is a deliberately unrecognised member: it pins NoiseWireFraming's tolerance of extra
         // message-1 members (#279) so a strict reader fails the suite here, not every handshake.
         string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = _advertisedPskId,
-            ["psk_category"] = "lt",
+            ["psk_category"] = _pskCategory,
             ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
@@ -129,7 +135,7 @@ internal sealed class TestNoiseServer
         string msg1Payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = _advertisedPskId,
-            ["psk_category"] = "lt", // alternate initial handshake; see Respond
+            ["psk_category"] = _pskCategory,
             ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];
@@ -143,7 +149,7 @@ internal sealed class TestNoiseServer
     }
 
     /// <summary>Initiates an in-band re-handshake to a new PSK; returns the encrypted msg1 frame.</summary>
-    internal byte[] StartRehandshake(byte[] newPsk)
+    internal byte[] StartRehandshake(byte[] newPsk, string pskCategory = "lt")
     {
         var protocol = NoiseProtocol.Parse(_protocolName.AsSpan());
         _state = protocol.Create(
@@ -154,7 +160,7 @@ internal sealed class TestNoiseServer
         string payload = JsonSerializer.Serialize(new Dictionary<string, string>
         {
             ["psk_id"] = NoiseConstants.DerivePskId(newPsk),
-            ["psk_category"] = "lt", // re-handshake message 1; see Respond
+            ["psk_category"] = pskCategory,
             ["x-unknown"] = "1",
         });
         var buf = new byte[NoiseProtocol.MaxMessageLength];

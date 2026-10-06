@@ -46,6 +46,18 @@ jobs:
       - name: Static pairing code round-trip (gesture-gated attempt, CPace, wrapped PSK)
         run: bash tools/interop/run.sh static-pin
 
+      # The code does not exist until the attempt is under way: the client derives it and
+      # shows it, and the harness relays it to the server as an operator would type it in.
+      - name: Dynamic pairing code round-trip (client-emitted code, CPace, wrapped PSK)
+        run: bash tools/interop/run.sh dynamic-pin
+
+      # The only live cover for the player role's stream/start and stream/end, and for the
+      # 13-byte audio chunk header: every sample the server sends has to come out of the
+      # client's decoder. Also fails if the server logs the client's initial client/state
+      # as late, which it does after 5 s.
+      - name: Player audio (stream/start, audio chunks with send_ahead, stream/end)
+        run: bash tools/interop/run.sh player
+
       # Slower than the others by design: the client withholds its initial client/state
       # until clock sync converges, which takes ~30s of burst sampling, and the server
       # discards source chunks until that state arrives.

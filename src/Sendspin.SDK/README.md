@@ -621,12 +621,12 @@ A server changes it with the `set_output_delay` command, which the SDK advertise
 client advertises the commands it accepts). Set `ClientCapabilities.SupportsSetOutputDelay = false`
 to decline it.
 
-> `IClockSynchronizer.OutputDelayMs` is a `double` over −5000…5000: fractional values come from
-> calibration, and negative values schedule audio *later*. The spec's wire field is an integer
-> 0–5000 and states negatives are unsupported, so what the client **reports** is rounded and
-> clamped into that range while playback keeps using the value you set. The SDK logs a warning
-> naming both numbers when they diverge — at that point the server's group calibration is working
-> from a different delay than your playback is.
+> `IClockSynchronizer.OutputDelayMs` is a `double` over 0…5000, the range of the spec's
+> `output_delay_ms`; negatives are unsupported. Its setter is the single clamp site: a value
+> outside the range is clamped (a non-finite one becomes 0), and playback, the persisted value and
+> the reported one all use the result. Fractional values come from calibration and are kept for
+> playback; the wire field is an integer, so what the client **reports** is rounded to the nearest
+> millisecond. A custom `IClockSynchronizer` must clamp on set the same way.
 
 ```csharp
 public sealed class FileOutputDelayStore : IOutputDelayStore
@@ -755,12 +755,14 @@ Images arrive per channel, with the display timestamp and channel number:
 ```csharp
 client.ArtworkReceived += (_, e) =>
 {
-    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png/bmp bytes)
+    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png bytes)
     displays[e.Channel].Show(e.ImageData);
 };
 
-client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // empty binary message = clear that channel
+client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // an empty image (zero-size announce) = clear that channel
 ```
+
+`ArtworkCleared` is also raised, once per channel still showing an image, when a `stream/end` ends the artwork role. No clear message exists for that case, so `e.Timestamp` is then the timestamp of the image being cleared rather than a moment to clear at.
 
 Change or disable a channel at runtime without reconnecting. The SDK updates that connection's own channel configuration — `ClientCapabilities` is yours and is left untouched, so a host sharing one across connections keeps them independent — and resends the whole `client/state` (the server replies with a new `stream/start`):
 

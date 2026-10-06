@@ -85,6 +85,12 @@ public sealed class AudioPipeline : IAudioPipeline
     // The decoded ring the last stream used, kept for the next one. See TakeOrCreateBuffer.
     private ITimedAudioBuffer? _retainedBuffer;
 
+    // Set while a sample-rate or channel-count change is being applied in place: the previous
+    // format's buffer, still being played out by _player, and what cancels the task waiting for
+    // it to run dry. See CompleteFormatSwitchAsync.
+    private ITimedAudioBuffer? _drainingBuffer;
+    private CancellationTokenSource? _formatSwitchCts;
+
     // Set by ClearCore when a seek invalidates the decoder's inter-frame state, taken by
     // ProcessAudioChunk before the next decode. See both for why it is a request rather than
     // a call.
@@ -101,6 +107,11 @@ public sealed class AudioPipeline : IAudioPipeline
     private long _lastSyncLogTime;
     private bool _usingAudioClock;
     private bool? _lastAudioClockAvailable; // For tracking timing source transitions
+
+    // How often a pending format switch looks at the buffer it is waiting on, and how long past
+    // that buffer's own duration it goes on waiting for an output that has stopped reading it.
+    private const int FormatSwitchPollMilliseconds = 10;
+    private const int FormatSwitchDrainMarginMilliseconds = 1000;
 
     // How often to log sync status during playback (microseconds)
     private const long SyncLogIntervalMicroseconds = 5_000_000; // 5 seconds
@@ -308,24 +319,45 @@ public sealed class AudioPipeline : IAudioPipeline
         // is rebuilt and the audio already decoded ahead of it keeps playing — the .NET shape of
         // the C++ client injecting a new codec-header chunk into its running pipeline.
         //
-        // A sample-rate or channel-count change deliberately falls through to the restart below,
-        // which does clear the buffer: the deviation the spec allows ("does not clear buffers
-        // unless its implementation requires it, and may document its specific behavior"). This
-        // pipeline decodes on arrival, so what is buffered is float PCM, and TimedAudioBuffer's
-        // ring, timestamps and schedule are all fixed to one rate and channel count at
-        // construction — carrying that audio across such a change would mean resampling it into a
-        // second buffer while the output device is re-initialized for the new format.
         var decoderOnlyChange = running is not null
             && running.SampleRate == format.SampleRate
             && running.Channels == format.Channels;
 
-        if (!decoderOnlyChange)
+        // A sample-rate or channel-count change keeps the buffered audio too (spec: "Clients MUST
+        // keep buffered chunks and decode each chunk in the format that was in effect when it was
+        // received"), but cannot keep the buffer: this pipeline decodes on arrival, so what is
+        // buffered is float PCM in a ring fixed to one rate and channel count, feeding an output
+        // device opened for the same. So the buffer and its player are left playing what they
+        // hold, chunks from here on decode into a second buffer, and the output moves to that one
+        // once the first has run dry — see CompleteFormatSwitchAsync.
+        //
+        // An empty buffer that is playing has still handed its last samples to the output device,
+        // which has yet to play them, so it takes this path as well. With nothing buffered and
+        // nothing playing there is nothing to keep and the restart below loses nothing.
+        // A second such change while the first is still draining also restarts: carrying it would
+        // take a queue of parked formats.
+        var formatSwitch = running is not null
+            && !decoderOnlyChange
+            && _drainingBuffer is null
+            && (State == AudioPipelineState.Playing || _buffer is { BufferedMilliseconds: > 0 });
+
+        if (!decoderOnlyChange && !formatSwitch)
         {
+            // A switch left pending must not go on to close the output this start opens.
+            _formatSwitchCts?.Cancel();
+
             if (State != AudioPipelineState.Idle && State != AudioPipelineState.Error)
             {
                 // The non-gated core: this already holds the lifecycle gate, and SemaphoreSlim
                 // is not reentrant.
                 await StopCoreAsync();
+            }
+            else
+            {
+                // A start from Error does not go through StopCoreAsync, and the output that
+                // failed may be mid-switch. Its player goes before the buffer it reads from.
+                await DisposePlayerAsync();
+                DisposeDrainingBuffer();
             }
 
             SetState(AudioPipelineState.Starting);
@@ -355,7 +387,7 @@ public sealed class AudioPipeline : IAudioPipeline
             // On a decoder-only update the running decoder is replaced, and only once its
             // replacement exists: a factory failure then leaves it in place for the catch below
             // to dispose, instead of leaving the pipeline decoderless.
-            var replacedDecoder = decoderOnlyChange ? _decoder : null;
+            var replacedDecoder = decoderOnlyChange || formatSwitch ? _decoder : null;
             _decoder = _decoderFactory.Create(format);
             replacedDecoder?.Dispose();
             _decodeBuffer = new float[_decoder.MaxSamplesPerFrame];
@@ -373,6 +405,16 @@ public sealed class AudioPipeline : IAudioPipeline
                 return AudioPipelineStartOutcome.DecoderReplaced;
             }
 
+            // No more audio is coming for the buffer being left behind, so it will never reach
+            // the readiness gate by itself: what it holds starts playing now, on its timestamps.
+            if (formatSwitch && State == AudioPipelineState.Buffering)
+            {
+                StartPlayback();
+            }
+
+            // Replaced only once its successor exists, like the decoder above: a factory failure
+            // leaves it in place for the catch below to retain intact.
+            var replacedBuffer = _buffer;
             _buffer = TakeOrCreateBuffer(format);
 
             if (_buffer is TimedAudioBuffer timedBuffer)
@@ -387,62 +429,25 @@ public sealed class AudioPipeline : IAudioPipeline
                 _buffer.MinBufferMilliseconds = _minBufferMs.Value;
             }
 
-            _player = _playerFactory();
-            await _player.InitializeAsync(format, cancellationToken);
-
-            _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
-            PublishOutputLatency();
-
-            // Used by push-model backends to compensate sync error for the calibrated startup latency.
-            _buffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
-            if (_player.CalibratedStartupLatencyMs > 0)
+            if (formatSwitch)
             {
+                // A re-anchor clears the pipeline's buffer, which from here on is the new one.
+                if (replacedBuffer is TimedAudioBuffer draining)
+                {
+                    draining.ReanchorRequired -= OnReanchorRequired;
+                }
+
+                _drainingBuffer = replacedBuffer;
+                _formatSwitchCts = new CancellationTokenSource();
+                _ = CompleteFormatSwitchAsync(_formatSwitchCts.Token);
+
                 _logger.LogInformation(
-                    "[Playback] Startup latency: {CalibratedMs}ms (output latency: {OutputMs}ms)",
-                    _player.CalibratedStartupLatencyMs,
-                    _player.OutputLatencyMs);
-            }
-            else
-            {
-                _logger.LogDebug(
-                    "[Playback] Output latency: {OutputMs}ms, No startup latency compensation",
-                    _player.OutputLatencyMs);
+                    "[Playback] In-place stream/start: {Format} takes over the output once the audio buffered before it has played",
+                    format);
+                return AudioPipelineStartOutcome.DecoderReplaced;
             }
 
-            _usingAudioClock = _player.GetAudioClockMicroseconds().HasValue;
-            _lastAudioClockAvailable = _usingAudioClock;
-            if (_usingAudioClock)
-            {
-                _buffer.TimingSourceName = "audio-clock";
-                _logger.LogInformation("[Timing] Using audio hardware clock for sync timing (VM-immune)");
-            }
-            else if (_precisionTimer is MonotonicTimer)
-            {
-                _buffer.TimingSourceName = "monotonic";
-                _logger.LogInformation("[Timing] Using MonotonicTimer for sync timing (audio clock not available)");
-            }
-            else
-            {
-                _buffer.TimingSourceName = "wall-clock";
-                _logger.LogInformation("[Timing] Using wall clock for sync timing (audio clock not available)");
-            }
-
-            _sampleSource = _sourceFactory(_buffer, GetCurrentLocalTimeMicroseconds);
-            _player.SetSampleSource(_sampleSource);
-
-            // Re-read output latency now that SetSampleSource has initialized the output: some backends
-            // (e.g. WASAPI) can only measure their real device latency once the audio client is started,
-            // and report an estimate beforehand. The buffer subtracts this from the scheduled start so
-            // playback is pre-rolled by the output latency and reaches the speaker on the server's clock.
-            _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
-            _logger.LogDebug("[Playback] Output latency after attach: {OutputMs}ms", _player.OutputLatencyMs);
-            PublishOutputLatency();
-
-            _player.Volume = PerceivedVolumeToAmplitude(_volume);
-            _player.IsMuted = _muted;
-
-            _player.StateChanged += OnPlayerStateChanged;
-            _player.ErrorOccurred += OnPlayerError;
+            await AttachPlayerAsync(_buffer, format, cancellationToken);
 
             SetState(AudioPipelineState.Buffering);
             _logger.LogInformation("[Playback] Audio pipeline started: {Format}", format);
@@ -456,6 +461,154 @@ public sealed class AudioPipeline : IAudioPipeline
             ErrorOccurred?.Invoke(this, new AudioPipelineError("Failed to start pipeline", ex));
             throw;
         }
+    }
+
+    /// <summary>
+    /// Opens an output for <paramref name="format"/> and attaches <paramref name="buffer"/> to it.
+    /// Must be called with the lifecycle gate held.
+    /// </summary>
+    private async Task AttachPlayerAsync(
+        ITimedAudioBuffer buffer, AudioFormat format, CancellationToken cancellationToken)
+    {
+        _player = _playerFactory();
+        await _player.InitializeAsync(format, cancellationToken);
+
+        buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+        PublishOutputLatency();
+
+        // Used by push-model backends to compensate sync error for the calibrated startup latency.
+        buffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
+        if (_player.CalibratedStartupLatencyMs > 0)
+        {
+            _logger.LogInformation(
+                "[Playback] Startup latency: {CalibratedMs}ms (output latency: {OutputMs}ms)",
+                _player.CalibratedStartupLatencyMs,
+                _player.OutputLatencyMs);
+        }
+        else
+        {
+            _logger.LogDebug(
+                "[Playback] Output latency: {OutputMs}ms, No startup latency compensation",
+                _player.OutputLatencyMs);
+        }
+
+        _usingAudioClock = _player.GetAudioClockMicroseconds().HasValue;
+        _lastAudioClockAvailable = _usingAudioClock;
+        if (_usingAudioClock)
+        {
+            buffer.TimingSourceName = "audio-clock";
+            _logger.LogInformation("[Timing] Using audio hardware clock for sync timing (VM-immune)");
+        }
+        else if (_precisionTimer is MonotonicTimer)
+        {
+            buffer.TimingSourceName = "monotonic";
+            _logger.LogInformation("[Timing] Using MonotonicTimer for sync timing (audio clock not available)");
+        }
+        else
+        {
+            buffer.TimingSourceName = "wall-clock";
+            _logger.LogInformation("[Timing] Using wall clock for sync timing (audio clock not available)");
+        }
+
+        _sampleSource = _sourceFactory(buffer, GetCurrentLocalTimeMicroseconds);
+        _player.SetSampleSource(_sampleSource);
+
+        // Re-read output latency now that SetSampleSource has initialized the output: some backends
+        // (e.g. WASAPI) can only measure their real device latency once the audio client is started,
+        // and report an estimate beforehand. The buffer subtracts this from the scheduled start so
+        // playback is pre-rolled by the output latency and reaches the speaker on the server's clock.
+        buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+        _logger.LogDebug("[Playback] Output latency after attach: {OutputMs}ms", _player.OutputLatencyMs);
+        PublishOutputLatency();
+
+        _player.Volume = PerceivedVolumeToAmplitude(_volume);
+        _player.IsMuted = _muted;
+
+        _player.StateChanged += OnPlayerStateChanged;
+        _player.ErrorOccurred += OnPlayerError;
+    }
+
+    /// <summary>
+    /// Finishes a sample-rate or channel-count change: waits for the previous format's audio to
+    /// play out, then moves the output to the format now being received.
+    /// </summary>
+    /// <remarks>
+    /// The output device is closed and re-opened for the new format, and that takes however long
+    /// the backend takes. Nothing is added to cover it: the new buffer schedules from its chunks'
+    /// timestamps, so it waits when its first chunk is not yet due and skips whatever became stale
+    /// while the device was opening, and playback is back on the server's timeline either way.
+    /// </remarks>
+    private async Task CompleteFormatSwitchAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // An output that has stopped reading never empties the buffer, while the new one
+            // fills and overflows behind it, so the wait ends once this audio is overdue.
+            var deadline = Environment.TickCount64
+                + (long)(_drainingBuffer?.BufferedMilliseconds ?? 0)
+                + FormatSwitchDrainMarginMilliseconds;
+
+            while (_drainingBuffer is { BufferedMilliseconds: > 0 } && Environment.TickCount64 < deadline)
+            {
+                await Task.Delay(FormatSwitchPollMilliseconds, cancellationToken);
+            }
+
+            // The ring is empty, but the last of it is still in the output device's own buffer.
+            await Task.Delay(Math.Max(0, DetectedOutputLatencyMs), cancellationToken);
+
+            await _lifecycleGate.WaitAsync(cancellationToken);
+            try
+            {
+                // Whatever cancelled this did so holding the gate, and has already torn down
+                // what this was about to switch.
+                if (cancellationToken.IsCancellationRequested || _buffer is null || _currentFormat is null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await DisposePlayerAsync();
+                    await AttachPlayerAsync(_buffer, _currentFormat, CancellationToken.None);
+
+                    // An in-place update does not re-apply the startup lead. After a stream/clear
+                    // the pipeline is Buffering, and ProcessAudioChunk has been leaving the start
+                    // to this while the output was being replaced.
+                    if (State == AudioPipelineState.Playing || _buffer.IsReadyForPlayback)
+                    {
+                        StartPlayback();
+                    }
+
+                    DisposeDrainingBuffer();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to switch the output to the new stream format");
+                    await CleanupAsync();
+                    SetState(AudioPipelineState.Error);
+                    ErrorOccurred?.Invoke(this, new AudioPipelineError("Failed to switch stream format", ex));
+                }
+            }
+            finally
+            {
+                _lifecycleGate.Release();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopped, restarted or disposed while waiting: the teardown that cancelled this
+            // has dealt with both buffers.
+        }
+    }
+
+    private void DisposeDrainingBuffer()
+    {
+        _formatSwitchCts?.Cancel();
+        _formatSwitchCts?.Dispose();
+        _formatSwitchCts = null;
+
+        _drainingBuffer?.Dispose();
+        _drainingBuffer = null;
     }
 
     /// <inheritdoc/>
@@ -494,6 +647,7 @@ public sealed class AudioPipeline : IAudioPipeline
     public void NotifyReconnect()
     {
         _buffer?.NotifyReconnect();
+        _drainingBuffer?.NotifyReconnect();
         _player?.NotifyReconnect();
 
         // A source that corrects (SyncCorrectedSampleSource, or anything else keeping state of
@@ -522,6 +676,10 @@ public sealed class AudioPipeline : IAudioPipeline
         try
         {
             _buffer?.Clear();
+
+            // Audio from before an in-place format change is cleared with the rest; the pending
+            // switch then finds nothing left to wait for.
+            _drainingBuffer?.Clear();
 
             // Everything upstream of the output has just been reset, so anything the source is
             // still holding belongs to the discarded stream: a primed resampler splices pre-seek
@@ -580,6 +738,8 @@ public sealed class AudioPipeline : IAudioPipeline
             timedBuffer.ApplyOutputDelayChange();
             _logger.LogDebug("Applied output delay change to sync timing (buffer preserved)");
         }
+
+        (_drainingBuffer as TimedAudioBuffer)?.ResetSyncTracking();
     }
 
     /// <inheritdoc/>
@@ -620,7 +780,9 @@ public sealed class AudioPipeline : IAudioPipeline
 
                 // Start playback when buffer is ready AND (optionally) clock is synced
                 // JS client approach: wait for clock sync convergence to ensure accurate timing
-                if (State == AudioPipelineState.Buffering && _buffer.IsReadyForPlayback)
+                // Not while a format switch is pending: the player in place is the one being
+                // closed, and CompleteFormatSwitchAsync starts its replacement.
+                if (State == AudioPipelineState.Buffering && _drainingBuffer is null && _buffer.IsReadyForPlayback)
                 {
                     if (ShouldWaitForClockSync())
                     {
@@ -719,10 +881,12 @@ public sealed class AudioPipeline : IAudioPipeline
 
             // Update the buffer's latency values for the new device
             // The new device may have different latency characteristics
-            if (_buffer != null)
+            // During a format switch that is the buffer still draining, not the one filling.
+            var playingBuffer = _drainingBuffer ?? _buffer;
+            if (playingBuffer != null)
             {
-                _buffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
-                _buffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
+                playingBuffer.OutputLatencyMicroseconds = _player.OutputLatencyMs * 1000L;
+                playingBuffer.CalibratedStartupLatencyMicroseconds = _player.CalibratedStartupLatencyMs * 1000L;
                 PublishOutputLatency();
                 _logger.LogDebug(
                     "Updated latencies after device switch: output={LatencyMs}ms, calibrated={CalibratedMs}ms",
@@ -731,7 +895,7 @@ public sealed class AudioPipeline : IAudioPipeline
 
                 // Trigger a soft re-anchor to reset sync error tracking
                 // This prevents the timing discontinuity from causing false sync corrections
-                if (_buffer is TimedAudioBuffer timedBuffer)
+                if (playingBuffer is TimedAudioBuffer timedBuffer)
                 {
                     timedBuffer.ResetSyncTracking();
                     _logger.LogDebug("Reset sync tracking after device switch");
@@ -1016,15 +1180,8 @@ public sealed class AudioPipeline : IAudioPipeline
 
     private async Task CleanupAsync()
     {
-        // Unsubscribe from events
-        if (_player != null)
-        {
-            _player.StateChanged -= OnPlayerStateChanged;
-            _player.ErrorOccurred -= OnPlayerError;
-            _player.Stop();
-            await _player.DisposeAsync();
-            _player = null;
-        }
+        await DisposePlayerAsync();
+        DisposeDrainingBuffer();
 
         // Unsubscribe from buffer events
         if (_buffer is TimedAudioBuffer timedBuffer)
@@ -1043,6 +1200,19 @@ public sealed class AudioPipeline : IAudioPipeline
         _sampleSource = null;
         _decodeBuffer = Array.Empty<float>();
         _currentFormat = null;
+    }
+
+    private async Task DisposePlayerAsync()
+    {
+        // Unsubscribe from events
+        if (_player != null)
+        {
+            _player.StateChanged -= OnPlayerStateChanged;
+            _player.ErrorOccurred -= OnPlayerError;
+            _player.Stop();
+            await _player.DisposeAsync();
+            _player = null;
+        }
     }
 
     /// <summary>

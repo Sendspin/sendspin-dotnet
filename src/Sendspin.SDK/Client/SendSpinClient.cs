@@ -25,13 +25,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     // Holds visualizer frames and artwork until their display timestamps (#198, #199).
     private readonly MediaDisplayScheduler _displayScheduler;
+
+    // Reassembles the artwork image transfer in flight; a complete image goes to the scheduler.
+    private readonly ArtworkTransfer _artworkTransfer = new();
     private readonly IAudioPipeline? _audioPipeline;
     private readonly IOutputDelayStore? _outputDelayStore;
     private readonly INoiseSessionInfo _session;
     private bool _activateReceived;
 
-    // True from a pairing server/activate until the first non-pairing one. Gates every send
-    // (see SendAsync): the pairing exchange holds the wire alone (#118). Cleared with the rest
+    // True while the activation in effect declares 'pairing' without 'playback'. Gates every
+    // send (see SendAsync): the pairing exchange then holds the wire alone (#118); alongside
+    // playback it does not (pairing.md, "Entering and leaving pairing"). Cleared with the rest
     // of the per-connection state at handshake, so a reconnect never starts inside the window.
     private bool _pairingActivationActive;
     private readonly SourceStreamPipeline? _sourcePipeline;
@@ -88,6 +92,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private PairingCodeState? _pairingCodeState;
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
+
+    // The active roles an in-band re-handshake set aside, for the server/activate that follows
+    // it to persist or remove. Null outside that window.
+    private List<string>? _activeRolesBeforeRekey;
 
     // format from the current pairing activation, validated on receipt. Null when the
     // activation is not dynamic_pairing_code.
@@ -168,14 +176,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // mutated, so a reader that has taken the reference sees a complete configuration.
     private VisualizerRoleSupport? _visualizerRoleSupport;
 
-    // Bounds for any value written to the clock synchronizer's output delay. The GroupSync offset
-    // path allows negatives (schedule later), so this is wider than the set_output_delay spec range.
-    private const double MinOutputDelayMs = -5000.0;
+    // Bounds for a persisted output delay loaded from the store. The applied value is 0-5000 per
+    // the spec's output_delay_ms and the clock synchronizer's setter is the single clamp site;
+    // bounding a stored value here as well only keeps the logged value equal to the applied one.
+    private const double MinOutputDelayMs = 0.0;
     private const double MaxOutputDelayMs = 5000.0;
-
-    // Last scheduler-side value ToWireOutputDelayMs warned about, so a delay that does not
-    // survive the projection is reported once rather than on every client/state.
-    private double? _lastWarnedOutputDelayMs;
 
     // Last line-sense signal the app reported, or null if it never has. Survives reconnects on
     // purpose: it describes the device's input, not the session (#114).
@@ -205,6 +210,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // field costs a duplicate warning and nothing else, so it needs no synchronization.
     private int _warnedUndefinedPlayerAudioTypes;
 
+    // True once this unavailable period has logged a dropped display frame, so the drop (spec
+    // #266/#271) is reported once rather than at frame rate. Re-armed when the client becomes
+    // available again and on each new connection. A lost race costs a duplicate debug line and
+    // nothing else.
+    private bool _loggedDisplayDropWhileUnavailable;
+
     // Tail of the stream-lifecycle chain: the task the next lifecycle handler waits for. See
     // DispatchStreamLifecycle. The lock covers the read-and-replace only.
     private readonly object _streamLifecycleLock = new();
@@ -215,6 +226,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
     /// </summary>
     private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
+
+    // Whether the "discarding audio while unavailable" line has already been logged for the
+    // current unavailable period (external source or unsynchronized clock; a pipeline error alone
+    // does not discard). Set on the first dropped chunk and cleared when availability
+    // returns to true (in PublishAvailabilityAsync), so a false->true->false sequence logs once
+    // per period even when no audio arrives while available. Written from the receive loop and the
+    // availability publisher; a stale read only ever costs a duplicated or skipped debug line, so
+    // it needs no lock.
+    private bool _audioDroppedWhileUnavailable;
 
     /// <summary>
     /// Serializes the two places a chunk is handed to the pipeline: the receive loop's direct
@@ -506,7 +526,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger,
                 IsSourceStreamingPermitted,
                 _sourceEncoderFactory,
-                _capabilities.SourceRoleSupport?.Codec);
+                _capabilities.SourceRoleSupport?.Codec,
+                () => LastServerHello?.SourceV1Support?.SupportedCodecs);
         }
         _audioPipeline = options.AudioPipeline;
         _outputDelayStore = options.OutputDelayStore;
@@ -527,8 +548,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // initial configuration needs the same guard before the first client/state is built.
         _capabilities.ValidateVisualizerRoleSupport();
 
+        // A player must advertise at least one supported_format (spec #257); check before the
+        // first client/hello, where an empty list would otherwise go out.
+        _capabilities.ValidateAudioFormats();
+
         // A custom (_-prefixed) role must carry an explicit @v version (spec template.md).
         _capabilities.ValidateCustomRoleVersions();
+
+        // Values a server rejects the hello or the first client/state over, or that the spec
+        // gives a fixed form: a player lists flac or pcm, artwork channels stay inside the
+        // role's vocabulary, and mac_address is lowercase colon-separated.
+        _capabilities.ValidatePlayerCodecs();
+        _capabilities.ValidateArtworkChannels();
+        _capabilities.ValidateMacAddress();
 
         // Implemented methods start enabled unless the app says otherwise. ANDing each with
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
@@ -615,12 +647,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
-    /// connection with the source role currently active. Evaluated per start attempt,
-    /// because both trust and the active-role set can change over a connection's life.
+    /// connection with the source role currently active, on a client that is available ("A
+    /// client MUST ignore <c>start</c> received while it is unavailable"). Evaluated per start
+    /// attempt, because trust, the active-role set and availability can all change over a
+    /// connection's life.
     /// </summary>
     private bool IsSourceStreamingPermitted() =>
         _session.MatchedPsk?.Category == PskCategory.LongTerm
-        && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false);
+        && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false)
+        && CurrentAvailability;
 
     /// <inheritdoc />
     /// <remarks>
@@ -805,6 +840,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         is ClientPairInitMessage
         or ClientPairAuthMessage
         or ClientPairConfirmMessage
+        or ClientPairRetryMessage
         or ClientPairFinalizeMessage
         or ClientPairPendingMessage
         or PairAbortMessage
@@ -902,21 +938,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// The <c>source</c> object for a client/state, or null when it does not belong: the role is
-    /// not active, line sense is not supported, or nothing has reported a signal yet.
+    /// The <c>source</c> object for a client/state, or null when source is not an active role.
     /// </summary>
     /// <remarks>
+    /// The object is sent even when it is empty: an activation requires an update that includes
+    /// it, and the server MUST NOT send a source <c>start</c> until it has received one.
     /// <c>signal</c> is the only field, and it is optional ("only if 'line_sense' is supported"),
-    /// so with no reported signal there is nothing truthful to put in the object — inventing
-    /// 'absent' would assert something the app never said.
+    /// so it is left out when line sense is not supported or nothing has reported a signal yet —
+    /// inventing 'absent' would assert something the app never said.
     /// </remarks>
     private SourceStatePayload? BuildSourceState(IReadOnlySet<string>? activeRoleFamilies)
     {
-        if (!MayReportRoleState("source", activeRoleFamilies)
-            || _capabilities.SourceRoleSupport?.LineSense != true
-            || _lastSourceSignal is not { } signal)
+        if (!MayReportRoleState("source", activeRoleFamilies))
         {
             return null;
+        }
+
+        if (_capabilities.SourceRoleSupport?.LineSense != true || _lastSourceSignal is not { } signal)
+        {
+            return new SourceStatePayload();
         }
 
         return new SourceStatePayload { Signal = signal ? "present" : "absent" };
@@ -1415,8 +1455,40 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _currentGroup = null;
     }
 
+    /// <summary>
+    /// Whether a controller <c>client/command</c> named <paramref name="command"/> may be put on
+    /// the wire: the <c>controller@v1</c> role must be active and the command must appear in the
+    /// group's latest <c>supported_commands</c>. Until a <c>server/state</c> controller object has
+    /// populated that list it is treated as empty — nothing is permitted until the server says so.
+    /// Drops with a warning naming the command and the reason rather than throwing, the same way
+    /// the seek path drops a seek without its argument: a server ignores such a command anyway.
+    /// </summary>
+    private bool MaySendControllerCommand(string command)
+    {
+        if (!IsRoleActive("controller"))
+        {
+            _logger.LogWarning("Dropping controller command '{Command}': controller@v1 is not active", command);
+            return false;
+        }
+
+        var supported = _currentGroup?.SupportedCommands;
+        if (supported is null || !supported.Contains(command))
+        {
+            _logger.LogWarning(
+                "Dropping controller command '{Command}': not in the group's supported_commands", command);
+            return false;
+        }
+
+        return true;
+    }
+
     public async Task SendCommandAsync(string command, Dictionary<string, object>? parameters = null)
     {
+        if (!MaySendControllerCommand(command))
+        {
+            return;
+        }
+
         // Extract the typed controller parameters from the loosely-typed dictionary
         int? volume = null;
         bool? mute = null;
@@ -1488,6 +1560,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     public async Task SetVolumeAsync(int volume)
     {
+        if (!MaySendControllerCommand(Commands.Volume))
+        {
+            return;
+        }
+
         var clampedVolume = Math.Clamp(volume, 0, 100);
         var message = ClientCommandMessage.Create(Commands.Volume, volume: clampedVolume);
 
@@ -1498,6 +1575,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task SetMuteAsync(bool muted)
     {
+        if (!MaySendControllerCommand(Commands.Mute))
+        {
+            return;
+        }
+
         var message = ClientCommandMessage.Create(Commands.Mute, mute: muted);
 
         _logger.LogDebug("Setting mute to {Muted}", muted);
@@ -1507,6 +1589,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task SeekAsync(int positionMs)
     {
+        if (!MaySendControllerCommand(Commands.Seek))
+        {
+            return;
+        }
+
         var message = ClientCommandMessage.Create(Commands.Seek, positionMs: positionMs);
 
         _logger.LogDebug("Seeking to {PositionMs} ms", positionMs);
@@ -1516,6 +1603,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <inheritdoc/>
     public async Task SeekRelativeAsync(int offsetMs)
     {
+        if (!MaySendControllerCommand(Commands.SeekRelative))
+        {
+            return;
+        }
+
         var message = ClientCommandMessage.Create(Commands.SeekRelative, offsetMs: offsetMs);
 
         _logger.LogDebug("Seeking by {OffsetMs} ms", offsetMs);
@@ -1609,6 +1701,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 Width = width ?? existing.Width ?? defaults.Width,
                 Height = height ?? existing.Height ?? defaults.Height,
             };
+            configured.Validate();
             _artworkChannels[channel] = configured;
         }
 
@@ -1632,6 +1725,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 "A visualizer configuration that requests 'spectrum' must also carry a spectrum object; "
                 + "the server closes the connection over one that does not.",
                 nameof(spectrum));
+        }
+
+        // rate_max is a positive integer in every visualizer state object, whatever the types —
+        // an empty or event-only list included (roles/visualizer/v1.md, spec #257).
+        if (rateMax <= 0)
+        {
+            throw new ArgumentException(
+                "A visualizer configuration must set a positive rate_max, whatever types it requests.",
+                nameof(rateMax));
         }
 
         lock (_roleConfigLock)
@@ -1678,7 +1780,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (outputDelayMs is { } requested && requested != _clockSynchronizer.OutputDelayMs)
         {
             _clockSynchronizer.OutputDelayMs = requested;
-            TrySaveOutputDelay(requested);
+
+            // Persist what the setter actually applied (clamped to 0-5000), not the raw request,
+            // so a reload restores the same value rather than re-clamping a stored out-of-range one.
+            TrySaveOutputDelay(_clockSynchronizer.OutputDelayMs);
         }
 
         // Persist the caller's values: SendInitialClientStateAsync reads _playerState, so
@@ -1906,6 +2011,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // drift between a flag and the thing it describes that this publisher exists to stop.
         var current = CurrentAvailability;
 
+        // Clear the audio-drop log latch when the client is available again, so the next
+        // unavailable period logs its first dropped chunk even if none arrived while available.
+        if (current)
+        {
+            _audioDroppedWhileUnavailable = false;
+        }
+
+        // Re-arm the display-drop log when the client is available again, so the next unavailable
+        // period logs its first dropped frame even if none arrived while available.
+        if (current)
+        {
+            _loggedDisplayDropWhileUnavailable = false;
+        }
+
         // An availability input flipped while the initial client/state is still deferred (e.g. a
         // pipeline error or external-source enter inside the converging window). Send the
         // connection's initial message instead — it reads CurrentAvailability and every role's
@@ -2070,42 +2189,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Projects a scheduler-side output delay onto the wire type: an integer millisecond value
-    /// in 0-5000. Every client/state goes through here, so the internal range stays wider than
-    /// the wire's without the difference leaking onto it.
+    /// Projects the scheduler-side output delay onto the wire type: the spec's
+    /// <c>output_delay_ms</c> is an integer and the applied value a double, so this rounds to the
+    /// nearest millisecond.
     /// </summary>
     /// <remarks>
-    /// The scheduler's value is a double in <see cref="MinOutputDelayMs"/>..<see cref="MaxOutputDelayMs"/> —
-    /// fractional from calibration, negative to schedule later. The spec's <c>output_delay_ms</c>
-    /// is an integer 0-5000 and states negatives are not supported; a conformant server rejects
-    /// one outright rather than tolerating it. Clamping is therefore not optional, and a clamp
-    /// that moved the value is worth saying out loud: the server is being told a delay the
-    /// client is not actually applying.
+    /// The applied value is already in 0-5000 — <see cref="IClockSynchronizer.OutputDelayMs"/>'s
+    /// setter is the single clamp site — so this only rounds a fractional delay to the integer the
+    /// wire carries, and the reported value can no longer differ from the applied one by more than
+    /// that rounding.
     /// </remarks>
-    private int ToWireOutputDelayMs(double outputDelayMs)
-    {
-        // A public settable double can be NaN or infinity; Math.Clamp propagates NaN and the
-        // cast would then produce a garbage int rather than throwing.
-        double bounded = double.IsFinite(outputDelayMs)
-            ? Math.Clamp(outputDelayMs, 0.0, MaxOutputDelayMs)
-            : 0.0;
-
-        int wire = (int)Math.Round(bounded, MidpointRounding.AwayFromZero);
-
-        // Deduplicated on the value: a volume slider can drive many state sends, and a
-        // misconfigured delay would otherwise warn on every one of them.
-        if (wire != outputDelayMs && _lastWarnedOutputDelayMs != outputDelayMs)
-        {
-            _lastWarnedOutputDelayMs = outputDelayMs;
-            _logger.LogWarning(
-                "output_delay_ms {Configured}ms is reported to the server as {Reported}ms: the wire "
-                + "value is an integer 0-5000 and negatives are not supported. Audio is still "
-                + "scheduled using {Configured}ms, so the server's group calibration will differ.",
-                outputDelayMs, wire, outputDelayMs);
-        }
-
-        return wire;
-    }
+    private static int ToWireOutputDelayMs(double outputDelayMs)
+        => (int)Math.Round(outputDelayMs, MidpointRounding.AwayFromZero);
 
     /// <inheritdoc/>
     public void ClearAudioBuffer()
@@ -2182,6 +2277,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // hash reset with it), so release a presenter still showing the pairing code.
             ClearPairingCodeState();
 
+            // The window closes on "drop of that connection" — the one carrying its attempts.
+            _pairingWindow?.CloseFor(this);
+
             // Streaming state is per-connection (spec): a start from the old connection
             // must not survive into the next one, so tear capture down now, without a
             // client-stream/end — the stream it would end died with the connection.
@@ -2193,6 +2291,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // metadata and color updates too — the first server/state of the next connection
             // has to carry each role's full state anyway.
             _displayScheduler.Flush();
+
+            // A transfer the old connection left partly received will never get its remaining
+            // parts, and would make the next connection's first announce a protocol error.
+            _artworkTransfer.Reset();
         }
 
         // Clean up client state on full disconnection
@@ -2318,8 +2420,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // server/hello to reset that mirror on its own, so without this a source@v1 grant
         // from a retired session would carry forward indefinitely, rather than just until the
         // next reconnect.
+        //
+        // The roles are set aside rather than dropped: the activate that follows a
+        // re-handshake "is a subsequent one on the same connection", so it persists them when
+        // it omits active_roles and removes the ones it leaves out (spec PR #287). Nothing is
+        // granted from them until that activate has been admitted under the new PSK.
         if (LastServerHello is not null)
         {
+            _activeRolesBeforeRekey = LastServerHello.ActiveRoles;
             LastServerHello.ActiveRoles = [];
         }
 
@@ -2502,6 +2610,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         LastServerHello = payload;
         ServerName = payload.Name;
 
+        // A server/hello opens a new connection, and no role persists into one.
+        _activeRolesBeforeRekey = null;
+
         // Connection-scoped since spec #178 moved the hint here from the pairing activation.
         // Copied so a later hello cannot mutate a list already handed to a presenter.
         _serverLanguages = payload.Languages is { Count: > 0 } languages ? [.. languages] : null;
@@ -2597,11 +2708,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // active_roles persists across activates that omit it. That includes the first one
+        // after a re-handshake, whose roles DetectSessionRekey set aside (spec PR #287: "The
+        // activation rules, including those for omitted active_roles, apply under the newly
+        // matched PSK") — and one of those rules is that persisted roles are treated as empty
+        // once the connection is no longer playback-capable.
+        var previousActiveRoles = _activeRolesBeforeRekey ?? LastServerHello?.ActiveRoles ?? [];
+        bool playbackCapable = _session.MatchedPsk is { } matchedPsk
+            && IsAdmissible(matchedPsk.Category, payload.ActivitiesList, hasRoles: true, _unpairedAccessEnabled);
+        var activeRoles = payload.ActiveRoles ?? (playbackCapable ? previousActiveRoles : []);
+
         // Source role is trust-gated: it streams potentially sensitive captured audio,
         // so it MUST only run on a paired ('user'-trust) connection. If a server
         // activates source@v1 without user trust, refuse and close (spec).
-        if (payload.ActiveRoles is not null
-            && payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
+        if (activeRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
             && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
             _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
@@ -2616,18 +2736,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // defensible meaning for a value other code grants permission from.
         LastServerActivate = payload;
 
-        // Mirror roles where legacy consumers look. active_roles persists across
-        // activates that omit it, so only overwrite when present.
+        // Mirror roles where legacy consumers look.
         bool activeRolesChanged = false;
-        if (payload.ActiveRoles is not null && LastServerHello is not null)
+        if (LastServerHello is not null)
         {
-            var previousActiveRoleFamilies = ToRoleFamilies(LastServerHello.ActiveRoles);
-            var currentActiveRoleFamilies = ToRoleFamilies(payload.ActiveRoles);
+            _activeRolesBeforeRekey = null;
+
+            var previousActiveRoleFamilies = ToRoleFamilies(previousActiveRoles);
+            var currentActiveRoleFamilies = ToRoleFamilies(activeRoles);
 
             // When the source role is dropped from active_roles, stop streaming (spec:
             // the client ends its input stream on deactivation).
-            bool wasSourceActive = LastServerHello.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
-            bool isSourceActive = payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
+            bool wasSourceActive = previousActiveRoleFamilies.Contains("source");
+            bool isSourceActive = currentActiveRoleFamilies.Contains("source");
             if (wasSourceActive && !isSourceActive && _sourcePipeline is not null)
             {
                 _sourcePipeline.StopStreamingAsync().SafeFireAndForget(_logger);
@@ -2640,20 +2761,36 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // handshake and pairing decisions have run.
             activeRolesChanged = !previousActiveRoleFamilies.SetEquals(currentActiveRoleFamilies);
 
-            LastServerHello.ActiveRoles = [.. payload.ActiveRoles];
+            LastServerHello.ActiveRoles = [.. activeRoles];
 
             if (activeRolesChanged)
             {
                 RemoveRoleStateClaimsForInactiveFamilies(currentActiveRoleFamilies);
                 DiscardDeactivatedRoleState(previousActiveRoleFamilies, currentActiveRoleFamilies);
+
+                // A removed stream role stops its remaining output and clears its buffers
+                // whether or not a stream/end came first (spec PR #289). On the lifecycle
+                // chain, so it cannot overtake a stream/start still starting the pipeline.
+                var removedStreamRoles = previousActiveRoleFamilies
+                    .Except(currentActiveRoleFamilies)
+                    .Where(family => family is "player" or "artwork" or "visualizer")
+                    .ToList();
+                if (removedStreamRoles.Count > 0)
+                {
+                    DispatchStreamLifecycle(() => StopStreamRolesAsync(removedStreamRoles));
+                }
             }
         }
 
         _logger.LogInformation("Server activate: activities [{Activities}], roles [{Roles}]",
             string.Join(", ", payload.ActivitiesList),
-            string.Join(", ", payload.ActiveRoles ?? LastServerHello?.ActiveRoles ?? []));
+            string.Join(", ", activeRoles));
 
+        // Pairing can run alongside playback (pairing.md, "Entering and leaving pairing"): the
+        // attempt starts on any activation declaring 'pairing', but the wire is held for the
+        // pairing exchange alone only when the activation does not also declare 'playback'.
         bool pairing = payload.ActivitiesList.Contains(Activities.Pairing);
+        bool pairingOnly = pairing && !payload.ActivitiesList.Contains(Activities.Playback);
         if (pairing)
         {
             HandlePairingActivate(payload);
@@ -2670,7 +2807,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // The initial activate completes the encrypted handshake; only now may the
             // client start sending (client/time, client/state).
-            if (!FinishHandshake(pairing))
+            if (!FinishHandshake(pairingOnly))
             {
                 // The connection was closed from inside its own promotion to Connected, so the
                 // rest of this activate — the hello notification, the time-sync loop, the
@@ -2686,8 +2823,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
         }
 
-        // The time-sync loop runs only outside a pairing activation. A pairing activate
-        // grants no roles, so there is nothing to synchronize a clock for — and the
+        // The time-sync loop runs only outside a pairing-only activation. Such an activate
+        // declares no playback, so there is nothing to synchronize a clock for — and the
         // reference server stops reading the socket while the operator enters the pairing code,
         // then treats the first buffered frame as the next pairing message, so a probe
         // sent during that window aborts the attempt as a protocol error. Stopping here
@@ -2700,10 +2837,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // resumes without re-converging.
         // Set before StopTimeSyncLoop so a probe racing the stop is dropped at the send choke
         // point rather than reaching a server that is about to treat it as a protocol error.
-        bool leavingPairing = _pairingActivationActive && !pairing;
-        _pairingActivationActive = pairing;
+        bool leavingPairing = _pairingActivationActive && !pairingOnly;
+        _pairingActivationActive = pairingOnly;
 
-        if (pairing)
+        if (pairingOnly)
         {
             StopTimeSyncLoop();
         }
@@ -2783,9 +2920,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return true;
         }
 
-        // Spec rule ordering: prefer 'pairing_required' when enabling unpaired access
-        // would make the activation admissible on a Sentinel-keyed session.
-        if (psk.Category == PskCategory.Sentinel
+        // Spec rule ordering: prefer 'pairing_required' when the session is unpaired and
+        // enabling unpaired access would make the activation admissible.
+        if (psk.Category != PskCategory.LongTerm
             && !_unpairedAccessEnabled
             && IsAdmissible(psk.Category, activities, hasRoles, unpairedAccessEnabled: true))
         {
@@ -2801,15 +2938,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         bool AllowedSet(IReadOnlyCollection<string> set) => category switch
         {
-            PskCategory.Pairing => set.Count == 1 && set.Contains(Activities.Pairing),
-
             // A paired session never carries a pairing activity: pairing runs on the Pairing
             // PSK (or, unpaired, on the Sentinel PSK), so a server declaring it on a long-term
             // session is asking this client to re-pair over a credential it already holds.
             PskCategory.LongTerm => set.All(a => a is Activities.Playback),
-            PskCategory.Sentinel => set.Count == 0
-                || (set.Count == 1 && set.Contains(Activities.Pairing))
-                || (set.Count == 1 && set.Contains(Activities.Playback) && unpairedAccessEnabled),
+
+            // The two unpaired rows are the same row: pairing always, playback only with
+            // unpaired access enabled.
+            PskCategory.Pairing or PskCategory.Sentinel => set.All(
+                a => a is Activities.Pairing || (a is Activities.Playback && unpairedAccessEnabled)),
             _ => false,
         };
 
@@ -3144,17 +3281,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         bool deferred = false;
         if (gated)
         {
-            // Claiming the opening and marking this connection pending must be one step. Split,
+            // Asking for admission and marking this connection pending must be one step. Split,
             // a window opened in the gap raised StateChanged while _pendingGatedMethod was still
             // null, so OnPairingWindowStateChanged found nothing pending and returned — and this
             // connection then waited for an opening that had already been and gone (#148).
             //
-            // Locking across TryConsume is safe in this order: PairingWindow releases its own
+            // Locking across TryAdmit is safe in this order: PairingWindow releases its own
             // gate before raising StateChanged (see Open/Close), so the reverse nesting —
             // window gate held while a handler takes _attemptLock — does not exist.
             lock (_attemptLock)
             {
-                if (_pairingWindow?.TryConsume() != true)
+                if (_pairingWindow?.TryAdmit(this) != true)
                 {
                     // Signals the wait without starting the attempt, so no timeout is armed.
                     _pendingGatedMethod = method;
@@ -3188,7 +3325,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// A window opened while this connection was waiting on a gesture. Exactly one waiting
-    /// connection can claim any opening; the losers stay pending and send nothing.
+    /// connection is admitted by any opening; the losers stay pending and send nothing.
     /// </summary>
     private void OnPairingWindowStateChanged(object? sender, EventArgs e)
     {
@@ -3203,8 +3340,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             string method;
 
             // The claim — "is this connection still pending, and can it take the opening?" — has
-            // to be atomic, or two raises on different threads both consume for the same
-            // connection. TryConsume takes the window's own lock, which is safe here: the window
+            // to be atomic, or two raises on different threads both start an attempt for the
+            // same connection. TryAdmit takes the window's own lock, which is safe here: the window
             // raises this event after releasing that lock, so the two are never taken in the
             // other order.
             lock (_attemptLock)
@@ -3214,7 +3351,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     return;
                 }
 
-                if (_pairingWindow?.TryConsume() != true)
+                if (_pairingWindow?.TryAdmit(this) != true)
                 {
                     return;
                 }
@@ -3227,9 +3364,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         catch (Exception ex)
         {
-            // The opening may already have been consumed by the time this throws, in which case
-            // the operator's gesture is spent and the attempt did not start. Nothing here can
-            // recover that; the point is that it stops being silent.
+            // The opening may already be bound to this connection by the time this throws, in
+            // which case the attempt did not start. Nothing here can recover that; the point is
+            // that it stops being silent.
             _logger.LogError(
                 ex,
                 "Pairing window state-changed handler failed; a gated attempt may not have resumed");
@@ -3237,15 +3374,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Drops a gated attempt still waiting on a gesture, without consuming the window.
+    /// Drops a gated attempt still waiting on a gesture, without claiming the window.
     /// </summary>
     /// <remarks>
     /// A pending attempt belongs to the activation that deferred it. An activation that does
     /// not declare the pairing activity ends that one, so the wait ends with it: left standing,
     /// the next opening would make this connection send client/pair-init outside any pairing
-    /// activation — and consume the shared window while doing it, so the gesture the operator
-    /// made for whichever connection is still legitimately pending would silently do nothing
-    /// for them. Not consuming the window is the other half: the opening stays available.
+    /// activation — and bind the shared window to itself while doing it, so the gesture the
+    /// operator made for whichever connection is still legitimately pending would silently do
+    /// nothing for them. Not claiming the window is the other half: the opening stays available.
     /// The superseded-by-a-newer-pairing-activation case is <see cref="HandlePairingActivate"/>'s
     /// own ClearPairingCodeState.
     /// </remarks>
@@ -3268,7 +3405,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Begins a pairing code attempt by sending client/pair-init. For dynamic pairing code it includes
     /// commit_B over a fresh nonce_B. Any gesture gating has already been satisfied by
-    /// <see cref="BeginOrDeferPairingCodeAttempt"/>, which consumed the pairing window.
+    /// <see cref="BeginOrDeferPairingCodeAttempt"/>, which had the pairing window admit it.
     /// </summary>
     private void StartPairingCodeAttempt(bool dynamic)
     {
@@ -3326,7 +3463,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
                 _logger.LogWarning("Pairing attempt timed out; aborting");
                 AbortPairingCode(PairAbortReasons.AttemptTimeout);
-                _pairingWindow?.Close();
             },
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
@@ -3339,18 +3475,35 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (msg is null || _pairingCodeState is not { Dynamic: true } state)
             return;
 
-        state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
-        var h = _session.HandshakeHash!.Value.ToArray();
-        string pin = PairingCodes.DerivePairingCode(
-            h, state.NonceA, state.NonceB!, PairingCodes.DynamicPairingCodeLength);
-        state.PairingCode = pin;
+        // nonce_A is "present in the first round only": that round derives the pairing code,
+        // and the binding values, and so the code, are unchanged across the rounds after it.
+        if (state.PairingCode is null)
+        {
+            if (msg.Payload.NonceA is null)
+            {
+                throw new System.Text.Json.JsonException(
+                    "the first round's server/pair-init is missing nonce_A");
+            }
 
-        // Present the pairing code through the app's out-channel. Started here (this method runs on
-        // the connection's synchronous receive dispatch, which cannot await); its completion
-        // gates client/pair-auth in SendPairAuthAfterPairingCodePresentedAsync, and its token is
-        // cancelled by ClearPairingCodeState when the attempt or the connection is torn down.
-        state.PresentPairingCodeCts = new CancellationTokenSource();
-        state.PairingCodePresented = InvokePairingCodePresenterAsync(pin, state.PresentPairingCodeCts.Token);
+            state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
+            var h = _session.HandshakeHash!.Value.ToArray();
+            state.PairingCode = PairingCodes.DerivePairingCode(
+                h, state.NonceA, state.NonceB!, PairingCodes.DynamicPairingCodeLength);
+        }
+
+        // The round counts toward the hold-back from here, where its code is emitted, so a
+        // round abandoned afterwards still counts.
+        RecordPairingCodeFailure(state.Method);
+        state.RoundBegun = true;
+
+        // Present the pairing code through the app's out-channel, again in each round. Started
+        // here (this method runs on the connection's synchronous receive dispatch, which cannot
+        // await); its completion gates client/pair-auth in
+        // SendPairAuthAfterPairingCodePresentedAsync, and its token is cancelled by
+        // ClearPairingCodeState when the attempt or the connection is torn down.
+        state.PresentPairingCodeCts ??= new CancellationTokenSource();
+        state.PairingCodePresented = InvokePairingCodePresenterAsync(
+            state.PairingCode, state.PresentPairingCodeCts.Token);
         // The PAKE begins when server/pair-auth arrives (server has the pairing code by then).
     }
 
@@ -3385,19 +3538,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // reached Encoding.ASCII.GetBytes(null) and threw ArgumentNullException, which the catch
         // filter does not name — so it escaped to the receive loop as an unexplained lost
         // connection rather than a deliberate one (#106).
-        if (state.Dynamic && state.PairingCode is null)
+        //
+        // The same holds in every later round, where the code is already derived: each CPace
+        // run is one guess at the pairing code, and server/pair-init is where the round is
+        // counted toward the hold-back. A server/pair-auth accepted without one would be a
+        // guess that is never counted.
+        if (state.Dynamic && !state.RoundBegun)
         {
             throw new System.Text.Json.JsonException(
-                "server/pair-auth arrived before server/pair-init; no dynamic pairing code has been derived");
+                "server/pair-auth arrived without the server/pair-init that begins its round");
         }
+
+        state.RoundBegun = false;
 
         // Static pairing code: the pairing code is device-printed and known from the start.
         string pin = state.Dynamic ? state.PairingCode! : (_effectiveStaticPairingCode ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
 
-        // Round 1: the static flow is always round 1, and the dynamic flow has no
-        // client/pair-retry yet (separate task), so every attempt is a single round.
-        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter, 1);
+        // Each round is a separate CPace run under its own sid. The static flow is always
+        // round 1; the dynamic flow advances the round with each client/pair-retry.
+        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter, state.Round);
 
         var cpace = CPace.Start(
             CPaceRole.Responder,
@@ -3474,7 +3634,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (!cpace.Verify(Base64UrlText.Decode(msg.Payload.ServerKc)))
         {
-            RecordPairingCodeFailure(state.Method);
+            if (state.Dynamic && !IsMethodEscalated(state.Method))
+            {
+                // "The client SHOULD retry": another round against the same pairing code. The
+                // attempt, its code and its running timeout stay in place; the server begins
+                // the next round with a new server/pair-init.
+                cpace.Dispose();
+                state.CPace = null;
+                state.Round++;
+                SendAsync(new ClientPairRetryMessage()).SafeFireAndForget(_logger);
+                return;
+            }
+
+            // A dynamic round was already counted when its code was emitted.
+            if (!state.Dynamic)
+            {
+                RecordPairingCodeFailure(state.Method);
+            }
+
+            _pairingWindow?.RecordFailedAttempt(this);
             AbortPairingCode(PairAbortReasons.PairingCodeMismatch);
             return;
         }
@@ -3520,10 +3698,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Whether the method's failure counter has reached the spec's escalation threshold. An
-    /// escalated method stays offered and still runs; every attempt is gesture-gated until a
-    /// successful server_kc verification resets the counter.
+    /// Whether the method's failure counter has reached the escalation threshold. An escalated
+    /// method stays offered and still runs; every attempt is gesture-gated, and a failed round
+    /// aborts rather than retries, until a successful server_kc verification resets the counter.
     /// </summary>
+    /// <remarks>
+    /// The counter holds failed server_kc verifications for static_pairing_code and rounds since
+    /// the last verified server_kc for dynamic_pairing_code. The spec's round limit is 20 and
+    /// lets a client hold attempts back earlier; this one does so at 10.
+    /// </remarks>
     private bool IsMethodEscalated(string method)
         => (_pairingCodeLockoutStore?.GetFailures(method) ?? 0) >= 10;
 
@@ -3543,6 +3726,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         public string? PairingCode;
         public byte[]? Sid;
         public CPace? CPace;
+
+        // The round within the attempt, 1 for the first; advanced by each client/pair-retry.
+        public uint Round = 1;
+
+        // Set by the server/pair-init that begins a dynamic round and spent by that round's
+        // server/pair-auth, so each counted round admits exactly one CPace run.
+        public bool RoundBegun;
 
         // Set for a dynamic attempt when server/pair-init arrives: the app's pairing code
         // presentation, awaited before client/pair-auth is sent, and the cancellation
@@ -3652,6 +3842,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         _logger.LogInformation("Pairing complete: long-term record persisted for {ServerId}", ServerId);
+        _pairingWindow?.CloseFor(this);
         PairingCompleted?.Invoke(this, ServerId);
     }
 
@@ -3747,9 +3938,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// which is the point the encrypted handshake completes and the client may start sending.
     /// </summary>
     /// <param name="pairing">Whether the activate completing the handshake declares the
-    /// pairing activity. A pairing activation admits nothing but pairing messages onto the
-    /// wire, so the initial client/state is then withheld — even for roles that need no
-    /// clock sync — until the first non-pairing activate (see
+    /// pairing activity without playback. Such an activation admits nothing but pairing
+    /// messages onto the wire, so the initial client/state is then withheld — even for roles
+    /// that need no clock sync — until the first activate that is not pairing-only (see
     /// <see cref="_initialClientStateHeldForPairing"/>).</param>
     /// <returns>
     /// True when the connection survived its own promotion to Connected, so the rest of the
@@ -3810,6 +4001,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _initialClientStateSent = false;
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
+        _loggedDisplayDropWhileUnavailable = false;
 
         // Role-state readiness is per connection too (spec PR #204): the new server has received
         // nothing yet, so every role's binary channel starts closed until this connection sends
@@ -4402,6 +4594,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Log group ID changes (helps diagnose grouping issues)
         if (previousGroupId != _currentGroup.GroupId && !string.IsNullOrEmpty(previousGroupId))
         {
+            // supported_commands belongs to the previous group; drop it until the new group's server/state.
+            _currentGroup.SupportedCommands = null;
+
             _logger.LogInformation("group/update [{Player}]: Group ID changed {OldId} -> {NewId}",
                 _capabilities.ClientName, previousGroupId, _currentGroup.GroupId);
         }
@@ -4480,13 +4675,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     _currentGroup.Repeat = controller.Repeat;
                 if (controller.Shuffle.HasValue)
                     _currentGroup.Shuffle = controller.Shuffle.Value;
-                if (controller.SupportedCommands is not null)
-                    _currentGroup.SupportedCommands = controller.SupportedCommands;
 
-                // Full state per spec #175: an absent seek_max_ms is unset, not the last bound
-                // kept. Absence and an explicit null both read as unset here. The always-reported
-                // siblings above stay keep-on-absent — a conformant server never omits them, and
-                // Volume/Muted are non-nullable with no "unset" to clear to.
+                // Full state per spec #175: supported_commands and seek_max_ms are unset when the
+                // controller object omits them, not kept from the last one. This matters for the
+                // client/command gate (MaySendControllerCommand), which authorises a command only
+                // while it is in the current supported_commands — a stale list would let it send a
+                // command the latest state no longer advertises. Absence and an explicit null both
+                // read as unset. The always-reported siblings above stay keep-on-absent: a
+                // conformant server never omits them, and Volume/Muted are non-nullable with no
+                // "unset" to clear to.
+                _currentGroup.SupportedCommands = controller.SupportedCommands;
                 _currentGroup.SeekMaxMs = controller.SeekMaxMs.GetValueOrDefault();
             }
         }
@@ -4723,8 +4921,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Mute.Value);
         }
 
-        // Apply set_output_delay only when advertised as supported and a value is present.
-        // Per spec the value is 0-5000 ms (negatives are not supported), so we clamp to that range.
+        // Apply set_output_delay only when advertised as supported and a value is present. Per spec
+        // the value is 0-5000 ms (negatives are not supported); the clock synchronizer's setter is
+        // the single clamp site, so the requested value is handed to it and the applied result read
+        // back for persistence and the log.
         // Spec 168a677 (spec PR #164) renamed the command from 'set_static_delay' and the field
         // from 'static_delay_ms' with no alias; the 10.x line accepts only the new names.
         var requestedDelayMs = player.OutputDelayMs;
@@ -4732,18 +4932,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && _capabilities.SupportsSetOutputDelay
             && requestedDelayMs.HasValue)
         {
-            var clamped = Math.Clamp(requestedDelayMs.Value, 0, 5000);
-            if (clamped != requestedDelayMs.Value)
-            {
-                _logger.LogWarning("server/command [{Player}]: output_delay_ms clamped from {Requested}ms to {Clamped}ms",
-                    _capabilities.ClientName, requestedDelayMs.Value, clamped);
-            }
-
-            _clockSynchronizer.OutputDelayMs = clamped;
-            TrySaveOutputDelay(clamped);
+            _clockSynchronizer.OutputDelayMs = requestedDelayMs.Value;
+            var applied = _clockSynchronizer.OutputDelayMs;
+            TrySaveOutputDelay(applied);
             changed = true;
             _logger.LogInformation("server/command [{Player}]: Applied output delay {Delay}ms",
-                _capabilities.ClientName, clamped);
+                _capabilities.ClientName, applied);
         }
 
         if (changed)
@@ -4792,8 +4986,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// Best-effort: a throwing or out-of-range store must not abort the handshake (the initial
     /// client/state and time-sync loop run after this). On failure we log and continue without the
-    /// persisted delay. The loaded value is clamped to the same range as the GroupSync offset path,
-    /// since that is the broadest legitimate source of a persisted delay (negatives allowed).
+    /// persisted delay. The synchronizer's setter is what keeps the applied delay in the spec's
+    /// 0-5000 range; the bound applied here is redundant with it and only makes the debug line
+    /// report the value that was applied.
     /// </remarks>
     private void LoadPersistedOutputDelay()
     {
@@ -4990,7 +5185,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Smart sync burst: only trigger if clock isn't already synced
         // If we've been connected for a while, the continuous sync loop has already converged
-        if (LastServerActivate?.ActivitiesList.Contains(Activities.Pairing) == true)
+        if (_pairingActivationActive)
         {
             // Same rule as the time-sync loop's gate in HandleServerActivate: no
             // client/time may leave the client while a pairing activation is in effect —
@@ -5126,6 +5321,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             if (!SameArtworkChannelConfiguration(wasConfigured, isConfigured))
             {
+                // The channel's pending image is the transfer in flight until it completes,
+                // and the one the scheduler holds after.
+                _artworkTransfer.Cancel((byte)channel);
                 _displayScheduler.FlushArtworkChannel(channel);
             }
         }
@@ -5171,31 +5369,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             StreamEndReceived?.Invoke(this, payload);
 
-            // Media held for a display time that belongs to the stream just ended must not
-            // surface after it.
-            FlushDisplayRoles(payload.Roles);
-
-            if (!ReachesPlayerRole(payload.Roles))
-            {
-                return;
-            }
-
-            while (_earlyChunkQueue.TryDequeue(out _))
-            {
-            }
-
-            if (_audioPipeline != null)
-            {
-                // A pipeline-stop failure is a local fault, not peer input; it propagates
-                // to the fire-and-forget boundary so a real bug surfaces (#88 item 2).
-                await _audioPipeline.StopAsync();
-            }
-
-            if (_currentGroup != null)
-            {
-                _currentGroup.PlaybackState = PlaybackState.Idle;
-                GroupStateChanged?.Invoke(this, _currentGroup);
-            }
+            await StopStreamRolesAsync(payload.Roles);
         }
         catch (System.Text.Json.JsonException ex)
         {
@@ -5205,6 +5379,40 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // sees its failures — the close must happen here.
             _logger.LogError(ex, "Malformed stream/end from authenticated peer; closing connection");
             await DisconnectAsync("unauthorized");
+        }
+    }
+
+    /// <summary>
+    /// Stops the output and clears the buffers of the stream roles a <c>stream/end</c> names —
+    /// every one when it names none — or that a <c>server/activate</c> removed.
+    /// </summary>
+    private async Task StopStreamRolesAsync(List<string>? roles)
+    {
+        // Media held for a display time that belongs to the stream just ended must not
+        // surface after it, and the artwork on display is cleared: both a stream/end and a
+        // role's removal are playback termination (spec #266), unlike a stream/clear seek.
+        FlushDisplayRoles(roles, endingStream: true);
+
+        if (!ReachesPlayerRole(roles))
+        {
+            return;
+        }
+
+        while (_earlyChunkQueue.TryDequeue(out _))
+        {
+        }
+
+        if (_audioPipeline != null)
+        {
+            // A pipeline-stop failure is a local fault, not peer input; it propagates
+            // to the fire-and-forget boundary so a real bug surfaces (#88 item 2).
+            await _audioPipeline.StopAsync();
+        }
+
+        if (_currentGroup != null)
+        {
+            _currentGroup.PlaybackState = PlaybackState.Idle;
+            GroupStateChanged?.Invoke(this, _currentGroup);
         }
     }
 
@@ -5229,8 +5437,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         StreamClearReceived?.Invoke(this, payload);
 
         // "Clients should clear all buffered visualization data and continue with data received
-        // after this message" — the same boundary applies to artwork still held for display.
-        FlushDisplayRoles(payload.Roles);
+        // after this message" — the same boundary applies to artwork still held for display. A
+        // seek keeps the image already on screen, so the flush drops only what is pending.
+        FlushDisplayRoles(payload.Roles, endingStream: false);
 
         if (ReachesPlayerRole(payload.Roles) && _audioPipeline is { } pipeline)
         {
@@ -5276,8 +5485,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// A present-but-empty array names no role and so ends nothing, as everywhere else.
     /// Dropping the artwork still held is what spec #135 (pending merge) means by "on
     /// <c>stream/end</c>, clearing buffers includes discarding pending images".
+    /// <para>
+    /// <paramref name="endingStream"/> separates the two messages for the artwork already on
+    /// display: a <c>stream/end</c> is playback termination and additionally clears it (spec #266),
+    /// while a <c>stream/clear</c> is a seek or track jump that keeps it and only drops the pending
+    /// image.
+    /// </para>
     /// </remarks>
-    private void FlushDisplayRoles(List<string>? roles)
+    private void FlushDisplayRoles(List<string>? roles, bool endingStream)
     {
         if (roles is null)
         {
@@ -5285,7 +5500,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // hold no stream, and spec #135 (pending merge) ties a pending metadata or color
             // update to nothing a stream teardown says.
             _displayScheduler.FlushVisualizer();
-            _displayScheduler.FlushArtwork();
+            FlushArtwork(endingStream);
             return;
         }
 
@@ -5296,12 +5511,43 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (roles.Contains("artwork"))
         {
-            _displayScheduler.FlushArtwork();
+            FlushArtwork(endingStream);
         }
+    }
+
+    /// <summary>
+    /// Discards the pending artwork a <c>stream/end</c> or <c>stream/clear</c> reaches, and for a
+    /// <c>stream/end</c> also clears what is on display and ends the transfer in flight.
+    /// </summary>
+    /// <remarks>
+    /// "On <c>stream/end</c> for the artwork role, clients MUST clear the current image and
+    /// discard any pending image" — and a channel's pending image runs from its announce, so one
+    /// still arriving is discarded with the rest; left alone it would complete and go on display
+    /// after the application was told to clear. A <c>stream/clear</c> leaves the transfer be:
+    /// artwork is not in that message's role vocabulary, so the server goes on sending the
+    /// image's parts, and forgetting the transfer would turn each into a protocol error.
+    /// </remarks>
+    private void FlushArtwork(bool endingStream)
+    {
+        if (endingStream)
+        {
+            _artworkTransfer.Reset();
+        }
+
+        _displayScheduler.FlushArtwork(raiseCleared: endingStream);
     }
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
     {
+        // Artwork is routed on its type byte alone: it does not share the timestamped header
+        // TryParse reads — a cancel is two bytes — and a length that header would reject is,
+        // for artwork, a protocol error to close over rather than a frame to drop.
+        if (data.Length > 0 && BinaryMessageTypes.IsArtwork(data.Span[0]))
+        {
+            DispatchBinaryMessage(BinaryMessageCategory.Artwork, data.Span[0], 0, default, data);
+            return;
+        }
+
         if (!BinaryMessageParser.TryParse(data.Span, out var type, out var timestamp, out var payload))
         {
             _logger.LogWarning("Failed to parse binary message");
@@ -5311,11 +5557,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var category = BinaryMessageParser.GetCategory(type);
 
         // No catch here, deliberately: every binary parser is Try-style (a malformed frame
-        // parses to null and is dropped above or inside DispatchBinaryMessage), so nothing
-        // a hostile payload produces can throw. Anything that does throw — a buggy event
-        // subscriber or pipeline — is a bug in our own handling and must propagate so the
-        // receive loop surfaces it as a lost connection, not be collapsed into a log line
-        // (#88 item 2).
+        // parses to null and is dropped above or inside DispatchBinaryMessage, or for artwork
+        // closes the connection there), so nothing a hostile payload produces can throw.
+        // Anything that does throw — a buggy event subscriber or pipeline — is a bug in our own
+        // handling and must propagate so the receive loop surfaces it as a lost connection, not
+        // be collapsed into a log line (#88 item 2).
         DispatchBinaryMessage(category, type, timestamp, payload, data);
     }
 
@@ -5332,9 +5578,40 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // Spec #266/#271 (SHOULD): while this client reports available: false the server should not
+        // stream it display data, so a visualizer frame that arrives anyway is dropped before it
+        // is scheduled — its timings belong to a state this client is not in. The connection
+        // stays open, and the player-audio arm keeps its own handling. So does the artwork arm:
+        // an image is a transfer of several messages, which has to be followed even while its
+        // data is being discarded (see HandleArtworkMessage).
+        if (category is BinaryMessageCategory.Visualizer && !CurrentAvailability)
+        {
+            DropDisplayBinaryWhileUnavailable();
+            return;
+        }
+
         switch (category)
         {
             case BinaryMessageCategory.PlayerAudio:
+                // Spec #270: while this client reports available: false its pipeline is not
+                // consuming, so discard inbound audio rather than decode it — the connection stays
+                // open (the spec says discard, MUST NOT close). Logged once per unavailable period,
+                // not per chunk, since a live stream would otherwise flood the log.
+                // The pipeline's own reported error is deliberately not a reason to discard: a
+                // failed playback start is retried from ProcessAudioChunk, so audio is the only
+                // thing that returns the pipeline to Playing and clears that error.
+                if (IsExternalSource || (RequiresClockSync() && !ClockSyncEstablished))
+                {
+                    if (!_audioDroppedWhileUnavailable)
+                    {
+                        _audioDroppedWhileUnavailable = true;
+                        _logger.LogDebug(
+                            "Discarding player audio while unavailable; chunks are dropped until this client reports available again");
+                    }
+
+                    break;
+                }
+
                 if (type != BinaryMessageTypes.PlayerAudio0)
                 {
                     // player@v1 defines one audio slot; 5-7 are allocated to the role but carry no
@@ -5374,16 +5651,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 break;
 
             case BinaryMessageCategory.Artwork:
-                var artwork = BinaryMessageParser.ParseArtworkChunk(data.Span);
-                if (artwork is not null)
-                {
-                    _logger.LogDebug("Artwork on channel {Channel}: {Length} bytes @ {Timestamp}",
-                        artwork.Channel, artwork.ImageData.Length, artwork.Timestamp);
-
-                    // Held until the timestamp's local equivalent, or raised now if that has
-                    // already passed — artwork is never dropped for lateness (#199).
-                    _displayScheduler.SubmitArtwork(artwork);
-                }
+                HandleArtworkMessage(data.Span);
                 break;
 
             case BinaryMessageCategory.Visualizer:
@@ -5409,6 +5677,94 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// Applies one artwork binary message — an announce, a part, or a cancel — and hands the
+    /// display scheduler the image a transfer completes (spec roles/artwork/v1.md).
+    /// </summary>
+    /// <remarks>
+    /// The scheduler holds each channel's pending image once it is complete; until then the
+    /// pending image is the transfer in flight. So the two things the spec says discard a
+    /// channel's pending image — an announce and a cancel — are applied to both.
+    /// </remarks>
+    private void HandleArtworkMessage(ReadOnlySpan<byte> data)
+    {
+        if (!BinaryMessageParser.TryParseArtwork(data, out var message, out var partData))
+        {
+            CloseOnArtworkProtocolError("malformed message", data);
+            return;
+        }
+
+        // "Unavailable clients SHOULD discard otherwise valid image data", but "MUST still
+        // process announces and cancels and count each part's data bytes toward total_size":
+        // dropping the message whole would leave the next one out of sequence, which is a
+        // protocol error this client closes the connection over.
+        bool discard = !CurrentAvailability;
+        if (discard)
+        {
+            DropDisplayBinaryWhileUnavailable();
+        }
+
+        ArtworkChunk? complete;
+
+        switch (message.Kind)
+        {
+            case ArtworkMessageKind.Cancel:
+                _artworkTransfer.Cancel(message.Channel);
+                _displayScheduler.FlushArtworkChannel(message.Channel);
+                return;
+
+            case ArtworkMessageKind.Announce:
+                if (!_artworkTransfer.TryBegin(message, discard, out complete))
+                {
+                    CloseOnArtworkProtocolError("announce while a transfer is in flight", data);
+                    return;
+                }
+
+                if (message.TotalSize > ArtworkTransfer.MaxImageBytes)
+                {
+                    _logger.LogWarning(
+                        "Refusing artwork image of {Size} bytes on channel {Channel}: over the {Max} byte limit",
+                        message.TotalSize, message.Channel, ArtworkTransfer.MaxImageBytes);
+                }
+
+                _displayScheduler.FlushArtworkChannel(message.Channel);
+                break;
+
+            default:
+                if (!_artworkTransfer.TryAppend(message.Channel, partData, discard, out complete))
+                {
+                    CloseOnArtworkProtocolError(
+                        "part with no transfer in flight on its channel, or extending past total_size", data);
+                    return;
+                }
+
+                break;
+        }
+
+        if (complete is not null)
+        {
+            _logger.LogDebug("Artwork on channel {Channel}: {Length} bytes @ {Timestamp}",
+                complete.Channel, complete.ImageData.Length, complete.Timestamp);
+
+            // Held until the timestamp's local equivalent, or raised now if that has
+            // already passed — artwork is never dropped for lateness (#199).
+            _displayScheduler.SubmitArtwork(complete);
+        }
+    }
+
+    /// <summary>
+    /// Closes the connection over a malformed artwork message or sequence, as the spec requires
+    /// ("the client MUST close the connection"). The goodbye reason list has no protocol-error
+    /// value, so this reuses 'unauthorized' as the malformed-text-message close does.
+    /// </summary>
+    private void CloseOnArtworkProtocolError(string what, ReadOnlySpan<byte> data)
+    {
+        _logger.LogError(
+            "Artwork protocol error ({What}): type {Type}, {Length} bytes; closing connection",
+            what, data[0], data.Length);
+        DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
     }
 
     /// <summary>
@@ -5440,6 +5796,25 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             "Dropping binary type {Type}: player@v1 defines only audio type {DefinedType}",
             type,
             BinaryMessageTypes.PlayerAudio0);
+    }
+
+    /// <summary>
+    /// Logs the first artwork/visualizer frame dropped in each unavailable period, so a server
+    /// that keeps streaming display data to an unavailable client says so once rather than at
+    /// frame rate. Re-armed in <see cref="PublishAvailabilityAsync"/> when the client becomes
+    /// available again, and on each new connection.
+    /// </summary>
+    private void DropDisplayBinaryWhileUnavailable()
+    {
+        if (_loggedDisplayDropWhileUnavailable)
+        {
+            return;
+        }
+
+        _loggedDisplayDropWhileUnavailable = true;
+        _logger.LogDebug(
+            "Dropping artwork/visualizer binary data while unavailable (available: false); the "
+            + "server should not stream display data to an unavailable client");
     }
 
     /// <summary>
@@ -5511,6 +5886,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (_pairingWindow is not null)
         {
             _pairingWindow.StateChanged -= OnPairingWindowStateChanged;
+
+            // Disposal is a drop of the connection too, and no state change reports it once
+            // the handlers above are gone.
+            _pairingWindow.CloseFor(this);
         }
     }
 

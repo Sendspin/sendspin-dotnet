@@ -70,8 +70,8 @@ public sealed class VisualizerSpectrum
 public sealed class VisualizerSupport
 {
     /// <summary>
-    /// Max total size in bytes of buffered visualizer binary messages, counting each message's
-    /// full wire size (message-type byte + timestamp + data).
+    /// Max total size in bytes of buffered visualizer binary messages, counting each reassembled
+    /// message's bytes (message-type byte + timestamp + data).
     /// </summary>
     [JsonPropertyName("buffer_capacity")]
     public int BufferCapacity { get; init; }

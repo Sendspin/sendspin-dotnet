@@ -25,12 +25,14 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Pairing | `ClientCapabilities.MinPairingCodeLength` removed; code lengths are fixed by the spec (6 digits dynamic, 8 static) | Low — compiler error where it was set |
 | Pairing | On the wire, `dynamic_pin` / `static_pin` are `dynamic_pairing_code` / `static_pairing_code`, `pin_length` is gone and `server/activate` carries the emission `format`; the `pair/abort` reason `pin_mismatch` is `pairing_code_mismatch` | Low — compiler error only if you matched the reason string; requires a server on the pairing-code wire |
 | Pairing | `ClientPairConfirmPayload.NonceB` renamed to `WrappedNonceB` (wire `nonce_B` → `wrapped_nonce_B`); the value is now the wrapped nonce_B — 48 bytes, base64url — not the raw nonce | Low — compiler error only if you construct `client/pair-confirm` yourself (dynamic pairing code) |
+| Pairing | A mistyped dynamic pairing code is retried in place (`client/pair-retry`) instead of aborting: `PresentPairingCodeAsync` is invoked once per round with the same code, and `ServerPairInitPayload.NonceA` is nullable (present in the first round only) | Low — a presenter must tolerate being called again for the same attempt |
 | Pairing | A `pairing` activity on a long-term (already paired) session is refused with `client/goodbye` reason `unauthorized` | Low — behavioural |
 | Pairing | `server/unpair` removes the pairing record for the server that sent it | Low — behavioural; a custom store sees a `Remove` |
 | Record store | `IPairingRecordStore.Upsert` returns `void`; records gain `ServerId` and `LastUsedUtc`; stores declare a `Capacity` | Low — compiler error, small fix |
 | Visualizer | `RequestVisualizerFormatAsync` removed; use `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`. `ClientCapabilities.VisualizerSupport` is now `VisualizerRoleSupport` | **High** — compiler error, see §6 |
 | Output delay | "Static delay" renamed to "output delay" across the C# surface **and the wire** (spec PR #164): `client/state` sends `output_delay_ms`, the command is `set_output_delay`, and there is no alias in either direction | Medium — compiler errors, plus a wire change; see §8 |
-| Output delay | `client/state` now always reports `output_delay_ms`, as an integer 0-5000 | Low — wire-only, unless you set a negative or fractional delay |
+| Output delay | `client/state` now always reports `output_delay_ms`, as an integer 0-5000 | Low — wire-only: the field is always present and a fractional delay is rounded |
+| Output delay | Negative and out-of-range applied delays are clamped to 0-5000 at one site (the clock synchronizer's setter); a negative no longer schedules audio later, it is clamped to 0 | Medium — behavioural, only if you set a negative or out-of-range delay |
 | `client/hello` | `trust_level` removed (spec PR #158); it is no longer sent | **Source-breaking** — `ClientHelloMessage.Create` drops its `trustLevel` parameter and `ClientHelloPayload.TrustLevel` is gone: a compiler error at any call site that passed the argument or read the property; delete them (a server parsing it must also stop requiring it) |
 | `client/hello` | `supported_commands` removed from `player@v1_support`; the real set is reported in the `client/state` player object instead (spec PR #177), now `volume`, `mute` and, when enabled, `set_output_delay` | **Source-breaking** — `PlayerSupport.SupportedCommands` is removed: a compiler error where it was set; drop it, since the advertised set now comes from `client/state`. A server derives controller group volume/mute from the state list |
 | Source role | On the wire, `client_stream/start` / `client_stream/end` are `client-stream/start` / `client-stream/end` (spec PR #163) | Low — wire-only; a server on the source wire must adopt the hyphen |
@@ -164,9 +166,9 @@ This is the same discipline `pairing_psk` has always had. **It is silent when yo
 The spec gates some pairing-code attempts on a deliberate operator gesture, and the SDK will not complete those attempts without one. Gated attempts are:
 
 - **every `static_pairing_code` attempt**;
-- a `dynamic_pairing_code` attempt once the method has **escalated** (10 recorded failures) — escalation replaces the terminal lockout earlier 10.0.0 pre-releases applied, so a method that used to become permanently unusable now becomes gesture-gated instead, and a success resets it;
+- a `dynamic_pairing_code` attempt once the method has **escalated** (10 rounds since the last verified one, counted from the moment a round's code is emitted) — escalation replaces the terminal lockout earlier 10.0.0 pre-releases applied, so a method that used to become permanently unusable now becomes gesture-gated instead, and a success resets it;
 
-The window is a property of the **device**, not of a connection: one instance is shared by every connection, and it admits exactly one attempt per opening no matter how many servers are connected.
+The window is a property of the **device**, not of a connection: one instance is shared by every connection, and an opening admits attempts only on the connection that carries its first. It stays open across attempts and closes on a completed pairing, its fifth failed attempt, the drop of that connection, `Close()`, or the expiry of its lifetime; an attempt that times out or is cancelled does not close it.
 
 ```csharp
 var window = new PairingWindow();   // one per device — share it across every connection
@@ -284,9 +286,9 @@ Three things changed, all on what goes out on the wire:
 
 - **It is no longer omitted at zero.** The spec marks `output_delay_ms` REQUIRED for players, exactly like `required_lead_time_ms` and `min_buffer_ms`. Zero is its default, so it used to be missing from almost every player's initial state — and a server reads an absent value as "unchanged", which on the first message means it has no value at all.
 - **It is an integer.** A fractional delay used to serialize as e.g. `12.5`. It is now rounded.
-- **Negatives are clamped to 0.** The spec states negative values are not supported, and `aiosendspin` raises `ValueError` on parse rather than tolerating one — so a negative delay failed the connection.
+- **It is never negative.** The spec states negative values are not supported, and `aiosendspin` raises `ValueError` on parse rather than tolerating one — so a negative delay failed the connection. The applied value is clamped where it is set (below), not on the way out.
 
-`IClockSynchronizer.OutputDelayMs` is **unchanged**: still a `double`, still accepting −5000…5000. Negative values still schedule audio *later*, and that is still applied to playback. Only the report is constrained, and the SDK logs a warning naming both values when a configured delay does not survive the projection — because the server's group calibration is then working from a different number than your playback is.
+`IClockSynchronizer.OutputDelayMs` is the **single clamp site**: setting it clamps to 0–5000 (and a non-finite value to 0), so the applied delay and the reported one always agree. A negative no longer schedules audio *later* — the spec does not support one, so it is clamped to 0 — and the command path, `SendPlayerStateAsync` and the persisted-store load all rely on the setter for it; nothing clamps again at the client or wire boundary. A custom `IClockSynchronizer` must therefore clamp on set too: the client reports and persists whatever the synchronizer holds.
 
 `PlayerStatePayload.OutputDelayMs` is an `int` rather than a `double`. Only relevant if you build these protocol messages yourself; project your own value onto 0–5000 first.
 
