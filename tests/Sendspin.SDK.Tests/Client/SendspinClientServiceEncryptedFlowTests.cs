@@ -32,15 +32,16 @@ public class SendspinClientServiceEncryptedFlowTests
             """);
 
         var hello = Assert.IsType<ClientHelloMessage>(Assert.Single(connection.SentMessages));
-        Assert.Equal("none", hello.Payload.TrustLevel);
         Assert.NotNull(hello.Payload.UnpairedAccess);
         Assert.False(hello.Payload.UnpairedAccess.Enabled);
 
-        // Serialized shape omits client_id/version entirely
+        // Serialized shape omits client_id/version, and no longer carries trust_level (spec PR
+        // #158) or a player supported_commands (spec PR #177 moved the real set to client/state).
         string json = MessageSerializer.Serialize(hello);
         Assert.DoesNotContain("client_id", json);
         Assert.DoesNotContain("\"version\"", json);
-        Assert.Contains("\"trust_level\":\"none\"", json);
+        Assert.DoesNotContain("trust_level", json);
+        Assert.DoesNotContain("supported_commands", json);
 
         // Identity comes from server/init via the Noise session
         Assert.Equal(FakeNoiseSession.FakeServerId, client.ServerId);

@@ -11,7 +11,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// Spec PR #204: "the server MUST NOT send a role's binary data until it has received that
 /// role's <c>client/state</c> object." The client enforces the same gate on the receive side,
 /// because a frame that arrives ahead of the object was scheduled against timings
-/// (<c>static_delay_ms</c>, <c>required_lead_time_ms</c>, <c>min_buffer_ms</c>) and a channel
+/// (<c>output_delay_ms</c>, <c>required_lead_time_ms</c>, <c>min_buffer_ms</c>) and a channel
 /// configuration this connection never sent — so treating it as authoritative is worse than
 /// dropping it.
 /// </summary>
@@ -25,10 +25,12 @@ public class RoleStateBinaryGatingTests
 {
     private static byte[] Frame(byte type, long timestamp, params byte[] data)
     {
-        var buf = new byte[9 + data.Length];
+        // Player audio carries send_ahead (13-byte header); artwork/visualizer keep the 9-byte one.
+        int headerLen = BinaryMessageTypes.IsPlayerAudio(type) ? 13 : 9;
+        var buf = new byte[headerLen + data.Length];
         buf[0] = type;
         BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1, 8), timestamp);
-        data.CopyTo(buf, 9);
+        data.CopyTo(buf, headerLen);
         return buf;
     }
 

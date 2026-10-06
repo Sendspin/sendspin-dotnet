@@ -1,10 +1,10 @@
 namespace Sendspin.SDK.Client;
 
 /// <summary>
-/// Optional persistence seam for a player's output delay (<c>static_delay_ms</c> on the wire).
+/// Optional persistence seam for a player's output delay (<c>output_delay_ms</c> on the wire).
 /// </summary>
 /// <remarks>
-/// The Sendspin spec requires clients to persist <c>static_delay_ms</c> locally across reboots and
+/// The Sendspin spec requires clients to persist <c>output_delay_ms</c> locally across reboots and
 /// server reconnections. Because the SDK is a library and cannot choose a storage location, the
 /// embedder implements this interface (file, registry, database, etc.) and supplies it to
 /// <see cref="SendspinClientService"/>. When no store is provided, the SDK keeps its previous
@@ -25,10 +25,10 @@ public interface IOutputDelayStore
 
     /// <summary>
     /// Persists the output delay in milliseconds. Called whenever the delay changes (e.g. an
-    /// inbound <c>set_static_delay</c> command).
+    /// inbound <c>set_output_delay</c> command).
     /// </summary>
     /// <param name="outputDelayMs">
-    /// The output delay to persist, in milliseconds, within the spec's <c>static_delay_ms</c> range
+    /// The output delay to persist, in milliseconds, within the spec's <c>output_delay_ms</c> range
     /// of 0-5000 (the SDK clamps the applied value before persisting). Store and round-trip it as-is.
     /// </param>
     void Save(double outputDelayMs);

@@ -169,7 +169,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private VisualizerRoleSupport? _visualizerRoleSupport;
 
     // Bounds for a persisted output delay loaded from the store. The applied value is 0-5000 per
-    // the spec's static_delay_ms (the clock synchronizer's setter is the single clamp site), so a
+    // the spec's output_delay_ms (the clock synchronizer's setter is the single clamp site), so a
     // stored value outside that range is bounded here before it is logged and re-applied.
     private const double MinOutputDelayMs = 0.0;
     private const double MaxOutputDelayMs = 5000.0;
@@ -535,6 +535,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // A player must advertise at least one supported_format (spec #257); check before the
         // first client/hello, where an empty list would otherwise go out.
         _capabilities.ValidateAudioFormats();
+
+        // A custom (_-prefixed) role must carry an explicit @v version (spec template.md).
+        _capabilities.ValidateCustomRoleVersions();
 
         // Implemented methods start enabled unless the app says otherwise. ANDing each with
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
@@ -1176,6 +1179,65 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
+    /// Discards the inbound display state of every role dropped from <c>active_roles</c> by a
+    /// <c>server/activate</c> (spec PR #275): the role's current object on the group model and any
+    /// future-scheduled update it left pending, raising the same cleared events a <c>null</c> role
+    /// object raises. A role still active is untouched — its state and its pending update alike.
+    /// </summary>
+    /// <remarks>
+    /// Runs on the receive loop, like the <c>server/state</c> handler whose clears it mirrors.
+    /// Does nothing before any group state exists: the server sends no <c>server/state</c> before
+    /// the first activate, so a role dropped between <c>server/hello</c> and that activate held no
+    /// state to clear and has nothing to announce.
+    /// </remarks>
+    private void DiscardDeactivatedRoleState(
+        IReadOnlySet<string> previousActiveRoleFamilies,
+        IReadOnlySet<string> currentActiveRoleFamilies)
+    {
+        if (_currentGroup is not { } group)
+        {
+            return;
+        }
+
+        bool Removed(string family)
+            => previousActiveRoleFamilies.Contains(family) && !currentActiveRoleFamilies.Contains(family);
+
+        var changed = false;
+        var colorCleared = false;
+
+        if (Removed("metadata"))
+        {
+            _displayScheduler.FlushStateUpdate(ScheduledStateRole.Metadata);
+            ApplyMetadata(group, null);
+            changed = true;
+        }
+
+        if (Removed("controller"))
+        {
+            ClearControllerState(group);
+            changed = true;
+        }
+
+        if (Removed("color"))
+        {
+            _displayScheduler.FlushStateUpdate(ScheduledStateRole.Color);
+            ApplyColor(group, null);
+            changed = true;
+            colorCleared = true;
+        }
+
+        if (changed)
+        {
+            GroupStateChanged?.Invoke(this, group);
+        }
+
+        if (colorCleared)
+        {
+            ColorChanged?.Invoke(this, group.Colors);
+        }
+    }
+
+    /// <summary>
     /// Whether this connection has sent the <c>client/state</c> object for
     /// <paramref name="family"/>, which spec PR #204 makes the gate on that role's binary data:
     /// "The server MUST NOT send a role's binary data until it has received that object."
@@ -1183,7 +1245,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// A conformant server never gets ahead of this, so a frame the gate drops is a server
     /// deviation — and dropping it is the safe reading: the player object is where
-    /// <c>static_delay_ms</c>, <c>required_lead_time_ms</c> and <c>min_buffer_ms</c> live, so
+    /// <c>output_delay_ms</c>, <c>required_lead_time_ms</c> and <c>min_buffer_ms</c> live, so
     /// audio that arrives before it was scheduled against timings the server had to guess.
     /// <para>
     /// Before any <c>server/hello</c> there is no statement about active roles at all and
@@ -1249,8 +1311,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         return ClientHelloMessage.Create(
-            // Under the encrypted protocol client_id/version travel in client/init and
-            // are omitted here; trust_level and unpaired_access are required instead.
+            // Under the encrypted protocol client_id/version travel in client/init and are
+            // omitted here; unpaired_access and supported_pair_methods travel here instead.
+            // trust_level is gone: spec PR #158 deleted it from client/hello.
             name: _capabilities.ClientName,
             supportedRoles: _capabilities.Roles,
 
@@ -1277,7 +1340,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         })
                         .ToList(),
                     BufferCapacity = _capabilities.BufferCapacity,
-                    SupportedCommands = new List<string> { "volume", "mute" }
                 }
                 : null,
             deviceInfo: new DeviceInfo
@@ -1299,7 +1361,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     Features = _capabilities.SourceRoleSupport?.LineSense == true ? new SourceFeatures { LineSense = true } : null,
                 }
                 : null,
-            trustLevel: _session.MatchedPsk?.Category == PskCategory.LongTerm ? "user" : "none",
             supportedPairMethods: BuildPairMethods(),
             unpairedAccess: new UnpairedAccess { Enabled = _unpairedAccessEnabled }
         );
@@ -1617,8 +1678,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var clampedVolume = Math.Clamp(volume, 0, 100);
 
         // A supplied delay is a client-initiated update, which the spec permits ("clients may
-        // update static_delay_ms ... when audio output changes") and requires be persisted
-        // ("clients must persist static_delay_ms locally across reboots and server
+        // update output_delay_ms ... when audio output changes") and requires be persisted
+        // ("clients must persist output_delay_ms locally across reboots and server
         // reconnections"). Applying it here is what makes the reported value true: this used to
         // report the caller's number while continuing to schedule with the old one, so the
         // server's group calibration and the client's playback disagreed, and a reconnect
@@ -1938,7 +1999,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Closes an open source input stream before this client reports <c>available: false</c>.
     /// The server rejects source chunks whenever the client is not available and treats
-    /// <c>client_stream/end</c> as an implicit stop, so the end MUST precede the state: the
+    /// <c>client-stream/end</c> as an implicit stop, so the end MUST precede the state: the
     /// other order leaves the server holding a stream open across the window in which it has
     /// already begun rejecting that stream's audio.
     /// </summary>
@@ -2006,20 +2067,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Builds the player <c>supported_commands</c> list reported in client/state. Currently
-    /// advertises 'set_static_delay' when the client accepts that command.
+    /// Builds the player <c>supported_commands</c> list reported in client/state:
+    /// <c>volume</c> and <c>mute</c> always — the client applies both unconditionally — plus
+    /// <c>set_output_delay</c> when the client accepts that command. The reference server derives
+    /// controller group volume/mute from this list, so omitting them reads as volume-incapable.
     /// </summary>
     /// <remarks>
-    /// Empty, never absent: spec PR #175 made the field required, and an empty array is its
-    /// explicit "accepts no commands". Omitting it once merging was removed would have left the
+    /// Never absent: spec PR #175 made the field required, and the list is the explicit set of
+    /// commands the server MAY send. Omitting it once merging was removed would have left the
     /// server unable to tell "no commands" from "unchanged".
     /// </remarks>
     private List<string> GetPlayerSupportedCommands()
-        => _capabilities.SupportsSetOutputDelay ? new List<string> { Commands.SetStaticDelay } : new List<string>();
+    {
+        var commands = new List<string> { "volume", "mute" };
+        if (_capabilities.SupportsSetOutputDelay)
+        {
+            commands.Add(Commands.SetOutputDelay);
+        }
+
+        return commands;
+    }
 
     /// <summary>
     /// Projects the scheduler-side output delay onto the wire type: the spec's
-    /// <c>static_delay_ms</c> is an integer and the applied value a double, so this rounds to the
+    /// <c>output_delay_ms</c> is an integer and the applied value a double, so this rounds to the
     /// nearest millisecond.
     /// </summary>
     /// <remarks>
@@ -2108,7 +2179,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             // Streaming state is per-connection (spec): a start from the old connection
             // must not survive into the next one, so tear capture down now, without a
-            // client_stream/end — the stream it would end died with the connection.
+            // client-stream/end — the stream it would end died with the connection.
             _sourcePipeline?.ResetForConnectionLossAsync().SafeFireAndForget(_logger);
 
             // Same reason, and additionally: the clock synchronizer resets on re-handshake,
@@ -2491,7 +2562,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Answers an encrypted-flow server/hello with the encrypted-shape client/hello
-    /// (client_id/version omitted; trust_level and unpaired_access included).
+    /// (client_id/version omitted; unpaired_access and supported_pair_methods included).
     /// </summary>
     private async Task SendEncryptedClientHelloAsync()
     {
@@ -2569,6 +2640,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             if (activeRolesChanged)
             {
                 RemoveRoleStateClaimsForInactiveFamilies(currentActiveRoleFamilies);
+                DiscardDeactivatedRoleState(previousActiveRoleFamilies, currentActiveRoleFamilies);
             }
         }
 
@@ -3005,10 +3077,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             case PairMethods.PairingPsk:
                 _pendingPairingPsk = PairingRecords.GenerateUniquePsk(_pairingStore!);
                 _logger.LogInformation("Pairing PSK flow: delivering long-term PSK to server {ServerId}", ServerId);
-                SendAsync(new ClientPairFinalizeMessage
-                {
-                    Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(_pendingPairingPsk) },
-                }).SafeFireAndForget(_logger);
+
+                // Spec #247: the attempt starts with client/pair-init, then client/pair-finalize,
+                // so a delayed finalize from a cancelled attempt can no longer finalize a later
+                // one. The two are one awaited flow — the finalize send is issued only after the
+                // init send completes — so the order holds even when another writer contends for
+                // the send lock, which SemaphoreSlim does not serve FIFO.
+                SendPairingPskInitThenFinalizeAsync(_pairingCounter, _pendingPairingPsk)
+                    .SafeFireAndForget(_logger);
                 ArmAttemptTimeout();
                 break;
 
@@ -3024,6 +3100,26 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 throw new System.Diagnostics.UnreachableException(
                     $"CanOffer admitted pair method '{payload.Pairing?.Method}' with no dispatch arm");
         }
+    }
+
+    /// <summary>
+    /// Sends the Pairing PSK attempt's <c>client/pair-init</c> then <c>client/pair-finalize</c> in
+    /// order (spec #247): the finalize send is issued only after the init send completes, so the
+    /// order holds even under send-lock contention, which <see cref="System.Threading.SemaphoreSlim"/>
+    /// does not serve FIFO. Both values are captured at dispatch so a later attempt cannot change
+    /// them across the awaits.
+    /// </summary>
+    private async Task SendPairingPskInitThenFinalizeAsync(int pairingIndex, byte[] pendingPairingPsk)
+    {
+        // No commit_B — that is dynamic pairing code only.
+        await SendAsync(new ClientPairInitMessage
+        {
+            Payload = new ClientPairInitPayload { PairingIndex = pairingIndex },
+        });
+        await SendAsync(new ClientPairFinalizeMessage
+        {
+            Payload = new ClientPairFinalizePayload { LongTermPsk = Base64UrlText.Encode(pendingPairingPsk) },
+        });
     }
 
     /// <summary>
@@ -3293,7 +3389,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Static pairing code: the pairing code is device-printed and known from the start.
         string pin = state.Dynamic ? state.PairingCode! : (_effectiveStaticPairingCode ?? string.Empty);
         var h = _session.HandshakeHash!.Value.ToArray();
-        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter);
+
+        // Round 1: the static flow is always round 1, and the dynamic flow has no
+        // client/pair-retry yet (separate task), so every attempt is a single round.
+        byte[] sid = PairingCodes.BuildSid(h, (uint)_pairingCounter, 1);
 
         var cpace = CPace.Start(
             CPaceRole.Responder,
@@ -3382,7 +3481,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         };
         if (state.Dynamic)
         {
-            confirm.Payload.NonceB = Base64UrlText.Encode(state.NonceB!);
+            // Spec #155: nonce_B is revealed wrapped, not raw, sealed under the round's sid + ISK.
+            confirm.Payload.WrappedNonceB = Base64UrlText.Encode(
+                PairingCodes.WrapNonceB(state.Sid!, cpace.Isk, state.NonceB!, _session.Suite));
         }
 
         SendAsync(confirm).SafeFireAndForget(_logger);
@@ -3693,7 +3794,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // and NotifyReconnect on null buffer/player is a no-op.
         _audioPipeline?.NotifyReconnect();
 
-        // Restore any persisted static_delay_ms before reporting initial state, so the server
+        // Restore any persisted output_delay_ms before reporting initial state, so the server
         // sees the calibrated delay immediately on (re)connect. No-op when no store is configured.
         LoadPersistedOutputDelay();
 
@@ -4326,21 +4427,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Each role object is itself Optional: absent = no change, present-null = clear all of
         // that role's state (sent when the role leaves active_roles, and on pairing quiesce),
-        // present-with-value = merge the delta. Clearing one role leaves the others alone.
-        // Every branch below is announced by the GroupStateChanged at the end of this method,
-        // which is how a UI learns to drop the deactivated role's data (#196). What that
-        // announcement carries is the state as it stands: a scheduled metadata or color update
-        // has not been merged yet and announces itself when it is (spec #135, pending merge).
+        // present-with-value = the role's full state (spec #175). Clearing one role leaves the
+        // others alone. Every branch below is announced by the GroupStateChanged at the end of
+        // this method, which is how a UI learns to drop the deactivated role's data (#196). What
+        // that announcement carries is the state as it stands: a scheduled metadata or color
+        // update has not been applied yet and announces itself when it is (spec #135, pending merge).
 
-        // Update metadata from server/state (merge with existing to preserve data across partial updates)
+        // Apply the metadata role. Full state per spec #175: the object is the role's complete
+        // metadata, so a leaf it omits is unset — ApplyMetadata builds from it alone rather than
+        // merging against what is held.
         if (payload.Metadata.IsPresent)
         {
             var meta = payload.Metadata.Value;
 
-            // A future timestamp defers the merge to that moment; anything else — a past or
-            // present timestamp, no timestamp, or the null role object — merges now and
+            // A future timestamp defers the apply to that moment; anything else — a past or
+            // present timestamp, no timestamp, or the null role object — applies now and
             // discards whatever update was being held.
-            long? takesEffectAt = meta is not null && meta.Timestamp.IsPresent ? meta.Timestamp.Value : null;
+            long? takesEffectAt = meta?.Timestamp.GetValueOrDefault();
 
             if (!_displayScheduler.TryScheduleStateUpdate(
                     ScheduledStateRole.Metadata,
@@ -4360,17 +4463,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             if (payload.Controller.Value is not { } controller)
             {
-                // HandleServerState is the only writer of these six, so the controller role
-                // owns them outright and clearing it returns each to the value a group carries
-                // before the server has reported any of them. Read off a fresh GroupState
-                // rather than repeating its literals, so the two cannot drift.
-                var unreported = new GroupState();
-                _currentGroup.Volume = unreported.Volume;
-                _currentGroup.Muted = unreported.Muted;
-                _currentGroup.Repeat = unreported.Repeat;
-                _currentGroup.Shuffle = unreported.Shuffle;
-                _currentGroup.SupportedCommands = unreported.SupportedCommands;
-                _currentGroup.SeekMaxMs = unreported.SeekMaxMs;
+                ClearControllerState(_currentGroup);
             }
             else
             {
@@ -4385,16 +4478,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 if (controller.SupportedCommands is not null)
                     _currentGroup.SupportedCommands = controller.SupportedCommands;
 
-                // The one OPTIONAL controller leaf, so unlike its always-reported siblings it
-                // needs Optional<T> to tell "not in this partial update" (keep the bound) from
-                // an explicit null (the seekable range became unknown — drop the bound).
-                if (controller.SeekMaxMs.IsPresent)
-                    _currentGroup.SeekMaxMs = controller.SeekMaxMs.Value;
+                // Full state per spec #175: an absent seek_max_ms is unset, not the last bound
+                // kept. Absence and an explicit null both read as unset here. The always-reported
+                // siblings above stay keep-on-absent — a conformant server never omits them, and
+                // Volume/Muted are non-nullable with no "unset" to clear to.
+                _currentGroup.SeekMaxMs = controller.SeekMaxMs.GetValueOrDefault();
             }
         }
 
-        // Merge color deltas (color role). Each field is Optional: absent keeps the existing color,
-        // present-null clears it, present-with-value updates it. Scheduled exactly as metadata is.
+        // Apply the color role. Full state per spec #175: the object is the complete palette, so a
+        // color it omits is unset — ApplyColor takes each from it alone. Scheduled as metadata is.
         var colorChanged = false;
         if (payload.Color.IsPresent)
         {
@@ -4426,12 +4519,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Merges a <c>metadata</c> role object into the current state: a null object clears the
-    /// role, anything else applies its Optional deltas (absent = keep existing, present-null =
-    /// clear, present-with-value = update).
+    /// Applies a <c>metadata</c> role object to the current state: a null object clears the role,
+    /// anything else replaces the metadata with the object's full state (spec #175). A leaf the
+    /// object omits is unset — nothing carries forward from the previous metadata.
     /// </summary>
     /// <param name="group">
-    /// The group state to merge into, resolved by the caller. Passed rather than read from
+    /// The group state to write, resolved by the caller. Passed rather than read from
     /// <see cref="_currentGroup"/> here, because the scheduled callers run on the scheduler loop
     /// and must not create a group state the disconnect that raced them has already dropped.
     /// </param>
@@ -4440,39 +4533,54 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         if (meta is null)
         {
-            // Dropping the merge base too, not just the exposed object: a later partial
-            // update must start from empty rather than resurrect pre-clear fields.
             group.Metadata = null;
             return;
         }
 
-        var existing = group.Metadata ?? new TrackMetadata();
-
-        // Merged against the state as it stands when the update takes effect, not as it stood
-        // when the message arrived: the spec's current state is the running merge of applied
-        // updates, and a scheduled update joins that running merge at its own moment.
+        // Built from the object alone, never merged against what is held: spec #175 makes the
+        // object the role's complete state, so an omitted leaf is unset (absent and explicit-null
+        // both read as null through GetValueOrDefault) rather than a value kept from before.
         group.Metadata = new TrackMetadata
         {
-            Timestamp = meta.Timestamp.IsPresent ? meta.Timestamp.Value : existing.Timestamp,
-            Title = meta.Title.IsPresent ? meta.Title.Value : existing.Title,
-            Artist = meta.Artist.IsPresent ? meta.Artist.Value : existing.Artist,
-            AlbumArtist = meta.AlbumArtist.IsPresent ? meta.AlbumArtist.Value : existing.AlbumArtist,
-            Album = meta.Album.IsPresent ? meta.Album.Value : existing.Album,
-            ArtworkUrl = meta.ArtworkUrl.IsPresent ? meta.ArtworkUrl.Value : existing.ArtworkUrl,
-            Year = meta.Year.IsPresent ? meta.Year.Value : existing.Year,
-            Track = meta.Track.IsPresent ? meta.Track.Value : existing.Track,
-            Progress = meta.Progress.IsPresent ? meta.Progress.Value : existing.Progress
+            Timestamp = meta.Timestamp.GetValueOrDefault(),
+            Title = meta.Title.GetValueOrDefault(),
+            Artist = meta.Artist.GetValueOrDefault(),
+            AlbumArtist = meta.AlbumArtist.GetValueOrDefault(),
+            Album = meta.Album.GetValueOrDefault(),
+            ArtworkUrl = meta.ArtworkUrl.GetValueOrDefault(),
+            Year = meta.Year.GetValueOrDefault(),
+            Track = meta.Track.GetValueOrDefault(),
+            Progress = meta.Progress.GetValueOrDefault()
         };
     }
 
     /// <summary>
-    /// Merges a <c>color</c> role object into the current palette, in place rather than replacing
+    /// Returns every field the controller role owns to the value a group carries before the
+    /// server has reported any of them — read off a fresh <see cref="GroupState"/> rather than
+    /// repeating its literals, so the two cannot drift. Used for an explicit <c>null</c>
+    /// controller object and when the role leaves <c>active_roles</c> (spec PR #275).
+    /// </summary>
+    private static void ClearControllerState(GroupState group)
+    {
+        var unreported = new GroupState();
+        group.Volume = unreported.Volume;
+        group.Muted = unreported.Muted;
+        group.Repeat = unreported.Repeat;
+        group.Shuffle = unreported.Shuffle;
+        group.SupportedCommands = unreported.SupportedCommands;
+        group.SeekMaxMs = unreported.SeekMaxMs;
+    }
+
+    /// <summary>
+    /// Applies a <c>color</c> role object to the current palette, in place rather than replacing
     /// it, so a consumer holding the <see cref="ColorPalette"/> it was handed by an earlier
-    /// <see cref="ColorChanged"/> sees the update — including a clear.
+    /// <see cref="ColorChanged"/> sees the update — including a clear. Full state per spec #175:
+    /// the object is the complete palette, so a color it omits is unset (a null object clears
+    /// every color), taken from the object alone rather than merged against what is held.
     /// </summary>
     /// <param name="group">
-    /// The group state whose palette is merged into — see <see cref="ApplyMetadata"/> on why it
-    /// is the caller that resolves it.
+    /// The group state whose palette is written — see <see cref="ApplyMetadata"/> on why it is
+    /// the caller that resolves it.
     /// </param>
     /// <param name="color">The role object, or null to clear the role.</param>
     private static void ApplyColor(GroupState group, ColorState? color)
@@ -4491,13 +4599,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        colors.Timestamp = color.Timestamp ?? colors.Timestamp;
-        if (color.BackgroundDark.IsPresent) colors.BackgroundDark = color.BackgroundDark.Value;
-        if (color.BackgroundLight.IsPresent) colors.BackgroundLight = color.BackgroundLight.Value;
-        if (color.Primary.IsPresent) colors.Primary = color.Primary.Value;
-        if (color.Accent.IsPresent) colors.Accent = color.Accent.Value;
-        if (color.OnDark.IsPresent) colors.OnDark = color.OnDark.Value;
-        if (color.OnLight.IsPresent) colors.OnLight = color.OnLight.Value;
+        colors.Timestamp = color.Timestamp;
+        colors.BackgroundDark = color.BackgroundDark.GetValueOrDefault();
+        colors.BackgroundLight = color.BackgroundLight.GetValueOrDefault();
+        colors.Primary = color.Primary.GetValueOrDefault();
+        colors.Accent = color.Accent.GetValueOrDefault();
+        colors.OnDark = color.OnDark.GetValueOrDefault();
+        colors.OnLight = color.OnLight.GetValueOrDefault();
     }
 
     /// <summary>
@@ -4610,18 +4718,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _capabilities.ClientName, player.Mute.Value);
         }
 
-        // Apply set_static_delay only when advertised as supported and a value is present. Per spec
+        // Apply set_output_delay only when advertised as supported and a value is present. Per spec
         // the value is 0-5000 ms (negatives are not supported); the clock synchronizer's setter is
         // the single clamp site, so the requested value is handed to it and the applied result read
         // back for persistence and the log.
-        //
-        // Spec 168a677 (spec PR #164) renamed the command to 'set_output_delay' and the field to
-        // 'output_delay_ms' with no alias, so both spellings are accepted here — a client fielded
-        // now keeps working the day a server flips. The post-rename field wins if both arrive.
-        // Only the read side changed: what this client advertises and reports is still the old
-        // naming, until servers adopt the rename.
-        var requestedDelayMs = player.OutputDelayMs ?? player.StaticDelayMs;
-        if ((player.Command == Commands.SetStaticDelay || player.Command == Commands.SetOutputDelay)
+        // Spec 168a677 (spec PR #164) renamed the command from 'set_static_delay' and the field
+        // from 'static_delay_ms' with no alias; the 10.x line accepts only the new names.
+        var requestedDelayMs = player.OutputDelayMs;
+        if (player.Command == Commands.SetOutputDelay
             && _capabilities.SupportsSetOutputDelay
             && requestedDelayMs.HasValue)
         {

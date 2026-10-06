@@ -7,14 +7,14 @@ using Sendspin.SDK.Synchronization;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// What <c>client/state</c> reports for <c>static_delay_ms</c>, and what supplying one to
+/// What <c>client/state</c> reports for <c>output_delay_ms</c>, and what supplying one to
 /// <see cref="ISendSpinClient.SendPlayerStateAsync"/> means.
 /// </summary>
 /// <remarks>
 /// Two spec rules drive this. The server "MUST merge each update into existing state, retaining
 /// the last value of any field that is absent", so a value on the wire overwrites — reporting a
 /// delay the client is not applying is not merely redundant, it replaces the real one. And
-/// clients "must persist static_delay_ms locally across reboots and server reconnections", so a
+/// clients "must persist output_delay_ms locally across reboots and server reconnections", so a
 /// client-initiated update that does not persist is not an update at all.
 /// </remarks>
 public class PlayerStateDelayReportingTests
@@ -26,7 +26,7 @@ public class PlayerStateDelayReportingTests
 
         return JsonDocument.Parse(json).RootElement
             .GetProperty("payload").GetProperty("player")
-            .GetProperty("static_delay_ms").GetInt32();
+            .GetProperty("output_delay_ms").GetInt32();
     }
 
     private static (SendspinClientService Client, FakeSendspinConnection Connection, ConvergedClock Clock, RecordingDelayStore Store)
@@ -49,12 +49,12 @@ public class PlayerStateDelayReportingTests
     public async Task VolumeChange_DoesNotOverwriteAServerSetDelay()
     {
         // The reported defect: a server sets 250 ms, then the next volume change reported
-        // static_delay_ms 0 — which the server MUST merge, wiping the delay it had just set.
+        // output_delay_ms 0 — which the server MUST merge, wiping the delay it had just set.
         var (client, connection, clock, _) = Connected();
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
-            """{"type":"server/command","payload":{"player":{"command":"set_static_delay","static_delay_ms":250}}}""");
+            """{"type":"server/command","payload":{"player":{"command":"set_output_delay","output_delay_ms":250}}}""");
         Assert.Equal(250, ReportedDelay(connection));
 
         await client.SendPlayerStateAsync(volume: 60, muted: false);

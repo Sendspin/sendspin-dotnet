@@ -48,7 +48,7 @@ internal enum ScheduledStateRole
 /// <para>
 /// The translation is <see cref="IClockSynchronizer.ServerToClientTimeUncompensated"/>, the clock
 /// offset alone: the role specs say to translate "using the offset computed from clock
-/// synchronization", and only the player role goes on to subtract <c>static_delay_ms</c>. That
+/// synchronization", and only the player role goes on to subtract <c>output_delay_ms</c>. That
 /// delay compensates for hardware past the audio port, so applying it here would show every
 /// visual ahead of the sound it belongs to by up to the 5 s the setting allows.
 /// </para>
@@ -420,6 +420,21 @@ internal sealed class MediaDisplayScheduler : IDisposable
         lock (_lock)
         {
             _artwork[channel] = null;
+        }
+    }
+
+    /// <summary>
+    /// Discards the pending update one state role is holding, leaving every other role alone. For
+    /// a <c>server/activate</c> that drops the role from <c>active_roles</c> (spec PR #275): an
+    /// update scheduled for a future moment while the role was active must not surface after the
+    /// server has removed the role.
+    /// </summary>
+    /// <param name="role">The state role whose pending update to discard.</param>
+    internal void FlushStateUpdate(ScheduledStateRole role)
+    {
+        lock (_lock)
+        {
+            _stateUpdates[(int)role] = null;
         }
     }
 

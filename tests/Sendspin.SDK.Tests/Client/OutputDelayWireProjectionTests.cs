@@ -8,12 +8,12 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// The applied output delay is a double the clock synchronizer's setter clamps to the spec's
-/// 0-5000 range; <c>static_delay_ms</c> on the wire is an integer, so the client rounds the
+/// 0-5000 range; <c>output_delay_ms</c> on the wire is an integer, so the client rounds the
 /// applied value onto it. These pin the rounding and the always-present field, and the end-to-end
 /// clamp through the public path; the clamp in isolation is <c>KalmanClockSynchronizerTests</c>.
 /// </summary>
 /// <remarks>
-/// aiosendspin's PlayerStatePayload raises <c>ValueError("static_delay_ms must be in range
+/// aiosendspin's PlayerStatePayload raises <c>ValueError("output_delay_ms must be in range
 /// 0-5000")</c> on parse, so a value the wire cannot carry fails the connection rather than being
 /// tolerated — the reason the applied value is bounded before it is ever reported.
 /// </remarks>
@@ -84,7 +84,7 @@ public class OutputDelayWireProjectionTests
         using var _c = client;
 
         var player = PlayerObjectOfLastState(connection);
-        var delay = player.GetProperty("static_delay_ms");
+        var delay = player.GetProperty("output_delay_ms");
 
         Assert.Equal(JsonValueKind.Number, delay.ValueKind);
         Assert.Equal(expected, delay.GetInt32());
@@ -100,8 +100,8 @@ public class OutputDelayWireProjectionTests
         using var _c = client;
 
         Assert.True(
-            PlayerObjectOfLastState(connection).TryGetProperty("static_delay_ms", out _),
-            "static_delay_ms is REQUIRED for players and 0 is its default, so it must still be sent");
+            PlayerObjectOfLastState(connection).TryGetProperty("output_delay_ms", out _),
+            "output_delay_ms is REQUIRED for players and 0 is its default, so it must still be sent");
     }
 
     [Theory]
@@ -140,6 +140,6 @@ public class OutputDelayWireProjectionTests
 
         await client.SendPlayerStateAsync(volume: 50, muted: false, outputDelayMs: 12.5);
 
-        Assert.Equal(13, PlayerObjectOfLastState(connection).GetProperty("static_delay_ms").GetInt32());
+        Assert.Equal(13, PlayerObjectOfLastState(connection).GetProperty("output_delay_ms").GetInt32());
     }
 }

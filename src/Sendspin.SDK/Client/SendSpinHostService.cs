@@ -280,6 +280,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         _options.Capabilities.ValidatePairingCodeMethods();
         _options.Capabilities.ValidateVisualizerRoleSupport();
         _options.Capabilities.ValidateAudioFormats();
+        _options.Capabilities.ValidateCustomRoleVersions();
 
         // Explicit seed wins; otherwise fall back to the store (best-effort).
         LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();

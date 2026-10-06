@@ -7,12 +7,15 @@ namespace Sendspin.SDK.Protocol.Messages;
 /// The <c>color</c> object in <c>server/state</c>: a palette derived from the current audio.
 /// </summary>
 /// <remarks>
-/// Each color is an <see cref="Optional{T}"/> of a nullable <see cref="RgbColor"/> so the three
-/// <c>server/state</c> delta states are distinguishable: absent (no change), present-and-null
-/// (clear), and present-with-value (update). Per the spec the server guarantees a minimum WCAG
-/// contrast ratio (4.5:1) for the background/on-color pairs (e.g. <c>on_dark</c> vs
-/// <c>background_dark</c>); <c>primary</c> and <c>accent</c> are raw and not contrast-adjusted.
-/// Clients consume all colors as-is and do no contrast math.
+/// The object is the full palette (spec #175): a color it omits is unset, which the client reads
+/// exactly as an explicit null. Each color keeps <see cref="Optional{T}"/> of a nullable
+/// <see cref="RgbColor"/> — not to distinguish absent from null (the client no longer does), but so
+/// a malformed color degrades to absent through <see cref="OptionalRgbColorJsonConverter"/> rather
+/// than aborting the whole <c>server/state</c> message and dropping co-resident metadata/controller
+/// updates. Per the spec the server guarantees a minimum WCAG contrast ratio (4.5:1) for the
+/// background/on-color pairs (e.g. <c>on_dark</c> vs <c>background_dark</c>); <c>primary</c> and
+/// <c>accent</c> are raw and not contrast-adjusted. Clients consume all colors as-is and do no
+/// contrast math.
 /// </remarks>
 public sealed class ColorState
 {

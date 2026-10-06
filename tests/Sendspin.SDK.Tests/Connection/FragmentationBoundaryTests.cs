@@ -21,16 +21,16 @@ namespace Sendspin.SDK.Tests.Connection;
 /// full frame is exactly the 65535-byte Noise ceiling once the 16-byte AEAD tag is added):
 /// a message at or under 65519 goes out whole. Above that it is split, and the original type
 /// byte moves out of the payload and into the first fragment's header — so the first fragment
-/// carries a 2-byte header <c>[2][orig_type]</c> and every later one a 1-byte header, leaving
-/// 65517 and 65518 payload bytes respectively. The final fragment's header byte is 3.
+/// carries a 3-byte header <c>[1][flags][orig_type]</c> and every later one a 2-byte header
+/// <c>[1][flags]</c>, leaving 65516 and 65517 payload bytes respectively.
 /// </para>
 /// </remarks>
 public class FragmentationBoundaryTests
 {
     private const int MaxPlaintext = 65535 - 16;   // 65519
     private const int AeadTag = 16;
-    private const int FirstFragmentPayload = MaxPlaintext - 2;   // 65517
-    private const int LaterFragmentPayload = MaxPlaintext - 1;   // 65518
+    private const int FirstFragmentPayload = MaxPlaintext - 3;   // 65516
+    private const int LaterFragmentPayload = MaxPlaintext - 2;   // 65517
 
     [Theory]
     [InlineData(MaxPlaintext - 2)]  // 65517
@@ -47,29 +47,29 @@ public class FragmentationBoundaryTests
     [Fact]
     public void OneByteOverTheCeiling_SplitsIntoTwo_WithTheSecondCarryingTwoBytes()
     {
-        // 65520 plaintext = 1 type byte + 65519 body. The first fragment spends 2 header
-        // bytes and can therefore carry 65517 of that body; the remaining 2 bytes go in a
-        // second fragment behind a 1-byte header. This is the case where an off-by-one in
-        // the header accounting is most visible: get it wrong and the tail is 1 or 3 bytes.
+        // 65520 plaintext = 1 type byte + 65519 body. The first fragment spends 3 header
+        // bytes and can therefore carry 65516 of that body; the remaining 3 bytes go in a
+        // second fragment behind a 2-byte header. This is the case where an off-by-one in
+        // the header accounting is most visible: get it wrong and the tail moves.
         var frames = Encode(MaxPlaintext + 1);
 
         Assert.Equal(2, frames.Count);
         Assert.Equal(MaxPlaintext + AeadTag, frames[0].Payload.Length);   // 65535, a full frame
-        Assert.Equal(3 + AeadTag, frames[1].Payload.Length);              // [3] + 2 bytes + tag
+        Assert.Equal(5 + AeadTag, frames[1].Payload.Length);              // [1][flags] + 3 bytes + tag
     }
 
     [Fact]
     public void AMultiFragmentMessage_MatchesTheHandComputedSplit()
     {
         // 200_000 plaintext = 1 type byte + 199_999 body.
-        //   fragment 1: 2-byte header, 65_517 body  (running total 65_517)
-        //   fragment 2: 1-byte header, 65_518 body  (131_035)
-        //   fragment 3: 1-byte header, 65_518 body  (196_553)
-        //   fragment 4: 1-byte header,  3_446 body  (199_999 — exactly the body)
+        //   fragment 1: 3-byte header, 65_516 body  (running total 65_516)
+        //   fragment 2: 2-byte header, 65_517 body  (131_033)
+        //   fragment 3: 2-byte header, 65_517 body  (196_550)
+        //   fragment 4: 2-byte header,  3_449 body  (199_999 — exactly the body)
         const int length = 200_000;
         Assert.Equal(
             length - 1,
-            FirstFragmentPayload + LaterFragmentPayload + LaterFragmentPayload + 3_446);
+            FirstFragmentPayload + LaterFragmentPayload + LaterFragmentPayload + 3_449);
 
         var frames = Encode(length);
 
@@ -77,7 +77,7 @@ public class FragmentationBoundaryTests
         Assert.Equal(MaxPlaintext + AeadTag, frames[0].Payload.Length);
         Assert.Equal(MaxPlaintext + AeadTag, frames[1].Payload.Length);
         Assert.Equal(MaxPlaintext + AeadTag, frames[2].Payload.Length);
-        Assert.Equal(1 + 3_446 + AeadTag, frames[3].Payload.Length);
+        Assert.Equal(2 + 3_449 + AeadTag, frames[3].Payload.Length);
     }
 
     [Fact]
@@ -94,18 +94,20 @@ public class FragmentationBoundaryTests
 
         Assert.Equal(2, frames.Count);
 
-        // First fragment: [MessageTypeFragmentMore][orig_type], then body. The original type
-        // must appear exactly once, in the header — not repeated in the body, and not left
-        // in the payload where a reassembler would double-count it.
+        // First fragment: [1][flags][orig_type], then body. The original type must appear
+        // exactly once, in the header — not repeated in the body, and not left in the payload
+        // where a reassembler would double-count it. The flags byte has the first bit set.
         byte[] first = server.DecryptFrame(frames[0].Payload.ToArray());
-        Assert.Equal(NoiseConstants.MessageTypeFragmentMore, first[0]);
-        Assert.Equal(origType, first[1]);
+        Assert.Equal(NoiseConstants.MessageTypeFragment, first[0]);
+        Assert.Equal(NoiseConstants.FragmentFlagFirst, first[1]);
+        Assert.Equal(origType, first[2]);
         Assert.Equal(MaxPlaintext, first.Length);
 
-        // Last fragment: [MessageTypeFragmentEnd], then body. No repeated orig_type.
+        // Last fragment: [1][flags], then body. Flags has the last bit set, no repeated orig_type.
         byte[] last = server.DecryptFrame(frames[1].Payload.ToArray());
-        Assert.Equal(NoiseConstants.MessageTypeFragmentEnd, last[0]);
-        Assert.Equal(3, last.Length);
+        Assert.Equal(NoiseConstants.MessageTypeFragment, last[0]);
+        Assert.Equal(NoiseConstants.FragmentFlagLast, last[1]);
+        Assert.Equal(5, last.Length);
     }
 
     [Fact]

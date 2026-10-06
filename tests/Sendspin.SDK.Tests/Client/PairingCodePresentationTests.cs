@@ -102,7 +102,7 @@ public class PairingCodePresentationTests
         Assert.Equal(PairingCodeFormats.Digits, presentedFormat);
 
         // Server side of the PAKE, keyed with the pairing code the presenter received.
-        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(presentedPairingCode), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             $$$"""{"type":"server/pair-auth","payload":{"pake_msg_1":"{{{B64(server.PublicShare)}}}"}}""");

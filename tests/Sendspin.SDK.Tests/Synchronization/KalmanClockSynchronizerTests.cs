@@ -118,7 +118,7 @@ public class KalmanClockSynchronizerTests
 
     // Per Sendspin protocol spec and all reference implementations
     // (sendspin-cpp, SendspinKit, sendspin-js, aiosendspin), positive
-    // static_delay_ms is SUBTRACTED from server timestamps to compensate
+    // output_delay_ms is SUBTRACTED from server timestamps to compensate
     // for hardware delay beyond the audio port. The audio is scheduled
     // earlier from the digital pipeline so it emerges from external
     // hardware (speakers, amplifiers) on time relative to peers.
@@ -152,7 +152,7 @@ public class KalmanClockSynchronizerTests
         long serverTime = 200_000L;
         long withoutDelay = _sync.ServerToClientTime(serverTime);
 
-        // The spec's static_delay_ms is 0-5000 and negatives are unsupported. This setter is the
+        // The spec's output_delay_ms is 0-5000 and negatives are unsupported. This setter is the
         // single clamp site, so a negative is pinned to zero and no scheduling shift results.
         _sync.OutputDelayMs = -5.0;
         Assert.Equal(0.0, _sync.OutputDelayMs);

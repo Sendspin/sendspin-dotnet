@@ -5,8 +5,9 @@ using Sendspin.SDK.Protocol.Messages;
 namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
-/// Coverage for the color role: server/state color updates merged onto GroupState, the ColorChanged
-/// event, the spec's absent/null/value delta semantics, and color@v1 role advertisement.
+/// Coverage for the color role: server/state color objects applied onto GroupState as full state
+/// (spec #175: a color the object omits is unset), the ColorChanged event, the null role-object
+/// clear, malformed-color tolerance, and color@v1 role advertisement.
 /// </summary>
 public class SendspinClientServiceColorTests
 {
@@ -37,25 +38,26 @@ public class SendspinClientServiceColorTests
     }
 
     [Fact]
-    public void ServerStateColor_MergesDeltas_AbsentKeepsNullClearsValueUpdates()
+    public void ServerStateColor_FullState_AbsentUnsetsNullClearsValueSets()
     {
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
-        // First update: set primary and accent.
+        // First object: set primary and accent.
         connection.RaiseTextMessageReceived("""
             { "type": "server/state", "payload": { "color": { "primary": [1, 1, 1], "accent": [2, 2, 2] } } }
             """);
 
-        // Second update: clear primary (null), update on_dark (value), leave accent absent (keep).
+        // The second object is the full palette (spec #175): primary null, on_dark set, and accent
+        // omitted — which unsets accent rather than keeping it.
         connection.RaiseTextMessageReceived("""
             { "type": "server/state", "payload": { "color": { "primary": null, "on_dark": [3, 3, 3] } } }
             """);
 
         var colors = client.CurrentGroup!.Colors;
-        Assert.Null(colors.Primary);                          // present-null -> cleared
-        Assert.Equal(new RgbColor(2, 2, 2), colors.Accent);   // absent -> kept
-        Assert.Equal(new RgbColor(3, 3, 3), colors.OnDark);   // present-value -> updated
+        Assert.Null(colors.Primary);                         // present-null -> cleared
+        Assert.Null(colors.Accent);                          // absent -> unset
+        Assert.Equal(new RgbColor(3, 3, 3), colors.OnDark);  // present-value -> set
     }
 
     [Fact]
@@ -113,7 +115,7 @@ public class SendspinClientServiceColorTests
     }
 
     [Fact]
-    public void ColorTimestamp_KeptWhenLaterUpdateOmitsIt()
+    public void ColorTimestamp_UnsetWhenLaterObjectOmitsIt()
     {
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
@@ -125,7 +127,8 @@ public class SendspinClientServiceColorTests
             { "type": "server/state", "payload": { "color": { "accent": [2, 2, 2] } } }
             """);
 
-        Assert.Equal(100, client.CurrentGroup!.Colors.Timestamp); // retained when omitted
+        // Full state per spec #175: the later object omits the timestamp, so it is unset.
+        Assert.Null(client.CurrentGroup!.Colors.Timestamp);
     }
 
     [Fact]

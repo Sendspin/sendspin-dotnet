@@ -548,7 +548,7 @@ internal sealed class PairingHarness : IAsyncDisposable
         string pin = await WaitForNextPresentedPairingCodeAsync();
 
         byte[] handshakeHash = _session.HandshakeHash!.Value.ToArray();
-        byte[] sid = PairingCodes.BuildSid(handshakeHash, (uint)init.Payload.PairingIndex);
+        byte[] sid = PairingCodes.BuildSid(handshakeHash, (uint)init.Payload.PairingIndex, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(pin), sid, ad: PairingCodes.AdServer);
 
         _connection.RaiseTextMessageReceived(
@@ -582,7 +582,7 @@ internal sealed class PairingHarness : IAsyncDisposable
             $$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{B64Url(RandomNumberGenerator.GetBytes(32))}}}"}}""");
 
         byte[] handshakeHash = _session.HandshakeHash!.Value.ToArray();
-        byte[] sid = PairingCodes.BuildSid(handshakeHash, (uint)init.Payload.PairingIndex);
+        byte[] sid = PairingCodes.BuildSid(handshakeHash, (uint)init.Payload.PairingIndex, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(_staticPairingCode), sid, ad: PairingCodes.AdServer);
 
         _connection.RaiseTextMessageReceived(

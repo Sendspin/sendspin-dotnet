@@ -18,16 +18,19 @@ internal static class PairingCodes
     internal static readonly byte[] AdClient = "client"u8.ToArray();
 
     /// <summary>
-    /// The CPace sid: <c>"sendspin-pair-pake-v1" || h || counter</c>, where h is the
-    /// Noise handshake hash and counter the number of pairing server/activate messages
-    /// since the last Noise handshake (big-endian uint32).
+    /// The CPace sid: <c>"sendspin-pair-pake-v1" || h || u32be(pairing_index) || u32be(round)</c>,
+    /// where h is the Noise handshake hash, pairing_index the number of pairing server/activate
+    /// messages since the last Noise handshake, and round the pairing round — 1 for the static flow
+    /// and for the dynamic flow's only round until <c>client/pair-retry</c> lands. Both counters are
+    /// big-endian uint32.
     /// </summary>
-    internal static byte[] BuildSid(ReadOnlySpan<byte> handshakeHash, uint pairingCounter)
+    internal static byte[] BuildSid(ReadOnlySpan<byte> handshakeHash, uint pairingIndex, uint round)
     {
-        byte[] sid = new byte[21 + handshakeHash.Length + 4];
+        byte[] sid = new byte[21 + handshakeHash.Length + 4 + 4];
         Encoding.ASCII.GetBytes("sendspin-pair-pake-v1", sid);
         handshakeHash.CopyTo(sid.AsSpan(21));
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(sid.AsSpan(21 + handshakeHash.Length), pairingCounter);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(sid.AsSpan(21 + handshakeHash.Length), pairingIndex);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(sid.AsSpan(21 + handshakeHash.Length + 4), round);
         return sid;
     }
 
@@ -87,6 +90,33 @@ internal static class PairingCodes
         {
             using var chacha = new ChaCha20Poly1305(kWrap);
             chacha.Encrypt(nonce, psk, ciphertext, tag);
+        }
+
+        return [.. ciphertext, .. tag];
+    }
+
+    /// <summary>
+    /// Seals the 32-byte nonce_B under <c>K_wrap = SHA-256("sendspin-pair-nonce-wrap-v1" ||
+    /// sid || ISK)</c> with the session suite's AEAD, a 12-byte zero nonce, and empty
+    /// associated data. Returns the 48-byte ciphertext-plus-tag carried as
+    /// <c>wrapped_nonce_B</c> in <c>client/pair-confirm</c> (dynamic pairing code only).
+    /// </summary>
+    internal static byte[] WrapNonceB(byte[] sid, byte[] isk, byte[] nonceB, NoiseCipherSuite suite)
+    {
+        byte[] kWrap = SHA256.HashData(
+            [.. "sendspin-pair-nonce-wrap-v1"u8.ToArray(), .. sid, .. isk]);
+        byte[] nonce = new byte[12];
+        byte[] ciphertext = new byte[nonceB.Length];
+        byte[] tag = new byte[16];
+        if (suite == NoiseCipherSuite.AesGcm)
+        {
+            using var aes = new AesGcm(kWrap, 16);
+            aes.Encrypt(nonce, nonceB, ciphertext, tag);
+        }
+        else
+        {
+            using var chacha = new ChaCha20Poly1305(kWrap);
+            chacha.Encrypt(nonce, nonceB, ciphertext, tag);
         }
 
         return [.. ciphertext, .. tag];

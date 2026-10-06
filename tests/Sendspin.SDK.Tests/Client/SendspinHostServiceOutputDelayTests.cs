@@ -35,7 +35,7 @@ public class SendspinHostServiceOutputDelayTests
         await using var host = await StartHostAsync(clock, store);
         await using var server = await ConnectServerAsync(host);
 
-        clock.OutputDelayMs = 250.0; // where a server/command set_static_delay would leave it
+        clock.OutputDelayMs = 250.0; // where a server/command set_output_delay would leave it
 
         await host.SendPlayerStateAsync(volume: 60, muted: false);
 

@@ -503,7 +503,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// The conversion the spec asks for wherever a server timestamp schedules something that is
     /// not audio leaving the speakers: the visualizer and artwork roles translate their display
     /// timestamps with "the offset computed from clock synchronization", and only the player
-    /// role goes on to subtract <c>static_delay_ms</c>. A visual scheduled by
+    /// role goes on to subtract <c>output_delay_ms</c>. A visual scheduled by
     /// <see cref="ServerToClientTime"/> would be shown early by exactly the hardware delay the
     /// audio is compensating for, so it would run ahead of the sound it belongs to.
     /// </remarks>
@@ -533,7 +533,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     }
 
     /// <summary>
-    /// Maximum applied output delay in milliseconds. The spec's <c>static_delay_ms</c> is 0-5000
+    /// Maximum applied output delay in milliseconds. The spec's <c>output_delay_ms</c> is 0-5000
     /// and states negatives are unsupported, so the setter clamps to that range.
     /// </summary>
     private const double MaxOutputDelayMs = 5000.0;
@@ -542,7 +542,7 @@ public sealed class KalmanClockSynchronizer : IClockSynchronizer
     /// Gets or sets the output delay in milliseconds. Compensates for hardware delay beyond the
     /// device's audio port (external speakers, amplifiers). Per the Sendspin protocol spec this
     /// value is subtracted from server timestamps when scheduling playback, and its range is
-    /// <c>static_delay_ms</c>'s 0-5000: a larger delay schedules audio that much earlier from the
+    /// <c>output_delay_ms</c>'s 0-5000: a larger delay schedules audio that much earlier from the
     /// digital pipeline.
     /// </summary>
     /// <remarks>
