@@ -46,10 +46,20 @@ public sealed class VisualizerRoleSupport
     /// Validates the configuration against the visualizer role's wire rules.
     /// </summary>
     /// <exception cref="ArgumentException">
+    /// <see cref="BufferCapacity"/> is not positive, or
     /// <see cref="Types"/> contains <c>spectrum</c> but <see cref="Spectrum"/> is null.
     /// </exception>
     internal void Validate()
     {
+        if (BufferCapacity <= 0)
+        {
+            throw new ArgumentException(
+                "ClientCapabilities.VisualizerRoleSupport sets a non-positive BufferCapacity. "
+                + "buffer_capacity is the byte budget of visualizer@v1_support in client/hello, "
+                + "and a server rejects the whole hello when it is not positive.",
+                nameof(BufferCapacity));
+        }
+
         if (Types.Contains(VisualizerTypes.Spectrum, StringComparer.Ordinal) && Spectrum is null)
         {
             throw new ArgumentException(

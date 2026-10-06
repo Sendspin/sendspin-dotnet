@@ -143,7 +143,7 @@ public class SendspinClientServiceArtworkTests
         // An array longer than four is a protocol error the server closes the connection over,
         // so an over-configured client is truncated rather than allowed to trip it.
         var (client, connection) = ArtworkClient(Enumerable.Range(0, 6)
-            .Select(i => new ArtworkChannelState { Source = ArtworkSources.Album, Format = "jpeg", Width = i, Height = i })
+            .Select(i => new ArtworkChannelState { Source = ArtworkSources.Album, Format = "jpeg", Width = i + 1, Height = i + 1 })
             .ToList());
         using var _c = client;
 
@@ -152,8 +152,23 @@ public class SendspinClientServiceArtworkTests
         var channels = StateChannels(connection);
         Assert.Equal(4, channels.Count);
         // The first four are kept, in order.
-        Assert.Equal(0, channels[0].Width);
-        Assert.Equal(3, channels[3].Width);
+        Assert.Equal(1, channels[0].Width);
+        Assert.Equal(4, channels[3].Width);
+    }
+
+    [Fact]
+    public async Task SetArtworkChannelAsync_InvalidFormat_ThrowsAndKeepsTheChannel()
+    {
+        // The runtime path reports the same client/state object the initial configuration does,
+        // so it rejects the same values rather than sending one the server disconnects over.
+        var (client, connection) = ArtworkClient();
+        using var _c = client;
+        TestClient.CompleteHandshake(connection, "artwork@v1");
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.SetArtworkChannelAsync(0, format: "gif"));
+
+        await client.SetArtworkChannelAsync(0, width: 256);
+        Assert.Equal("jpeg", StateChannels(connection)[0].Format);
     }
 
     [Fact]
