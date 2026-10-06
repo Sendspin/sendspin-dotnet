@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
@@ -426,6 +427,75 @@ public sealed class ClientCapabilities
     {
         int at = role.IndexOf("@v", StringComparison.Ordinal);
         return at >= 0 && at + 2 < role.Length && char.IsDigit(role[at + 2]);
+    }
+
+    /// <summary>
+    /// Rejects a player client whose <see cref="AudioFormats"/> lists neither <c>flac</c> nor
+    /// <c>pcm</c>. The spec (roles/player/v1.md) requires a player to list at least one of the
+    /// two codecs every server supports, so that every server can serve it.
+    /// </summary>
+    /// <remarks>
+    /// Gated on the player role, matched by family: <c>supported_formats</c> is only put in
+    /// <c>client/hello</c> when the role is advertised, so a non-player client has nothing to
+    /// violate.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <see cref="Roles"/> advertises the player role but no <see cref="AudioFormats"/> entry is
+    /// <c>flac</c> or <c>pcm</c>.
+    /// </exception>
+    internal void ValidatePlayerCodecs()
+    {
+        if (Roles.Any(r => r.StartsWith("player@", StringComparison.Ordinal))
+            && !AudioFormats.Any(f => f.Codec is AudioCodecs.Flac or AudioCodecs.Pcm))
+        {
+            throw new ArgumentException(
+                "ClientCapabilities.AudioFormats lists neither 'flac' nor 'pcm'; a player must "
+                + "list at least one of them in supported_formats so that every server can serve it.",
+                nameof(AudioFormats));
+        }
+    }
+
+    /// <summary>
+    /// Rejects an <see cref="ArtworkChannels"/> entry the server would close the connection over
+    /// when it arrives in <c>client/state</c>. See <see cref="ArtworkChannelState.Validate"/>.
+    /// </summary>
+    /// <remarks>
+    /// Gated on the artwork role, matched by family, because the artwork state object is only
+    /// reported for that role.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <see cref="Roles"/> advertises the artwork role and an <see cref="ArtworkChannels"/> entry
+    /// is invalid.
+    /// </exception>
+    internal void ValidateArtworkChannels()
+    {
+        if (!Roles.Any(r => r.StartsWith("artwork@", StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        foreach (var channel in ArtworkChannels)
+        {
+            channel.Validate();
+        }
+    }
+
+    /// <summary>
+    /// Rejects a <see cref="MacAddress"/> that is not in the lowercase colon-separated form the
+    /// spec gives <c>device_info.mac_address</c> (messaging.md), e.g. <c>aa:bb:cc:dd:ee:ff</c>.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <see cref="MacAddress"/> is set but is not six lowercase hex octets separated by colons.
+    /// </exception>
+    internal void ValidateMacAddress()
+    {
+        if (MacAddress is not null && !Regex.IsMatch(MacAddress, @"\A[0-9a-f]{2}(:[0-9a-f]{2}){5}\z"))
+        {
+            throw new ArgumentException(
+                $"ClientCapabilities.MacAddress '{MacAddress}' is not in lowercase colon-separated "
+                + "form (e.g. 'aa:bb:cc:dd:ee:ff').",
+                nameof(MacAddress));
+        }
     }
 
     /// <summary>

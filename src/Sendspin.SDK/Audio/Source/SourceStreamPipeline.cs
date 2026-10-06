@@ -53,6 +53,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     private readonly Func<IMessage, Task> _sendMessageAsync;
     private readonly Func<bool> _canStream;
     private readonly string? _configuredCodec;
+    private readonly Func<IReadOnlyCollection<string>?>? _listedCodecs;
     private readonly object _lock = new();
 
     private ISourceAudioEncoder? _encoder;
@@ -81,6 +82,11 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// Codec to encode captured audio as. Null falls back to the capture device's own format,
     /// which is the previous behaviour.
     /// </param>
+    /// <param name="listedCodecs">
+    /// The codecs the server listed in <c>server/hello</c>'s <c>source@v1_support</c>, read at
+    /// each start. A start whose codec is not among them fails without announcing a stream.
+    /// Null, or a null result, means no list is known and the codec is not checked.
+    /// </param>
     public SourceStreamPipeline(
         IAudioCaptureDevice capture,
         IClockSynchronizer clock,
@@ -89,7 +95,8 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         ILogger logger,
         Func<bool> canStream,
         ISourceAudioEncoderFactory? encoderFactory = null,
-        string? configuredCodec = null)
+        string? configuredCodec = null,
+        Func<IReadOnlyCollection<string>?>? listedCodecs = null)
     {
         _capture = capture;
         _clock = clock;
@@ -99,6 +106,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         _canStream = canStream;
         _encoderFactory = encoderFactory ?? new DefaultSourceAudioEncoderFactory();
         _configuredCodec = configuredCodec;
+        _listedCodecs = listedCodecs;
     }
 
     /// <summary>Handles a server <c>source</c> command ('start' or 'stop').</summary>
@@ -175,6 +183,17 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
             // Prefer the configured codec; fall back to the capture format when unset.
             string codec = _configuredCodec ?? format.Codec;
             encoder = _encoderFactory.Create(codec, format);
+
+            // A source MUST announce only a codec the server listed in server/hello. Refused
+            // rather than swapped for a listed codec: which one the host can also encode is not
+            // the pipeline's to guess.
+            if (_listedCodecs?.Invoke() is { } listed && !listed.Contains(encoder.Codec, StringComparer.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Source codec '{encoder.Codec}' is not among the codecs the server listed in "
+                    + $"server/hello ({string.Join(", ", listed)}); set SourceRoleSupport.Codec to "
+                    + "a listed codec.");
+            }
 
             var startMessage = new ClientStreamStartMessage
             {

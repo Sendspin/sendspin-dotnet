@@ -31,7 +31,8 @@ public class SourceCodecSelectionTests
     }
 
     private static (SendspinClientService Client, FakeSendspinConnection Connection, FakeCaptureDevice Capture) CreateSourceClient(
-        SourceRoleSupport? sourceSupport)
+        SourceRoleSupport? sourceSupport,
+        string serverHello = """{"type":"server/hello","payload":{"name":"srv"}}""")
     {
         var capture = new FakeCaptureDevice();
         var (client, connection, session) = TestClient.Create(
@@ -49,7 +50,7 @@ public class SourceCodecSelectionTests
         // SendspinClientServiceSourceTests.
         session.MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), PskCategory.LongTerm, ServerId);
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
-        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(serverHello);
         connection.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["source@v1"]}}""");
         connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
@@ -89,5 +90,33 @@ public class SourceCodecSelectionTests
         Assert.Equal("pcm", capture.Format.Codec);
         var start = connection.SentMessages.OfType<ClientStreamStartMessage>().Single();
         Assert.Equal("pcm", start.Payload.Source.Codec);
+    }
+
+    [Fact]
+    public void ConfiguredCodec_NotListedByServer_IsNotAnnounced()
+    {
+        // roles/source/v1.md: "A source MUST announce only a listed codec in
+        // client-stream/start". The server lists the two mandatory codecs and the host asked
+        // for opus, so the start is refused instead of announcing a codec the server flags.
+        var (client, connection, _) = CreateSourceClient(
+            new SourceRoleSupport { Codec = "opus" },
+            """{"type":"server/hello","payload":{"name":"srv","source@v1_support":{"supported_codecs":["flac","pcm"]}}}""");
+        using var _c = client;
+
+        Assert.Empty(connection.SentMessages.OfType<ClientStreamStartMessage>());
+    }
+
+    [Fact]
+    public void ConfiguredCodec_ListedByServer_IsAnnounced()
+    {
+        // The positive control: the same host against a server that also lists opus streams it,
+        // so the refusal above is the missing list entry and not the opus configuration.
+        var (client, connection, _) = CreateSourceClient(
+            new SourceRoleSupport { Codec = "opus" },
+            """{"type":"server/hello","payload":{"name":"srv","source@v1_support":{"supported_codecs":["opus","flac","pcm"]}}}""");
+        using var _c = client;
+
+        var start = connection.SentMessages.OfType<ClientStreamStartMessage>().Single();
+        Assert.Equal("opus", start.Payload.Source.Codec);
     }
 }

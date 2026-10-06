@@ -85,6 +85,15 @@ public sealed class ServerHelloPayload
     public List<string>? Languages { get; set; }
 
     /// <summary>
+    /// The <c>source@v1_support</c> object: the codecs the server accepts in
+    /// <c>client-stream/start</c>. Null when the server sends none, as one that does not support
+    /// the source role does.
+    /// </summary>
+    [JsonPropertyName("source@v1_support")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ServerSourceSupport? SourceV1Support { get; set; }
+
+    /// <summary>
     /// Protocol version. Not sent by an encrypted server — the version is negotiated in
     /// <c>client/init</c>/<c>server/init</c>. See the remarks on <see cref="ServerHelloPayload"/>.
     /// </summary>
@@ -107,4 +116,17 @@ public sealed class ServerHelloPayload
     /// </summary>
     [JsonPropertyName("connection_reason")]
     public string? ConnectionReason { get; set; }
+}
+
+/// <summary>
+/// The <c>source@v1_support</c> object of <c>server/hello</c> (roles/source/v1.md).
+/// </summary>
+public sealed class ServerSourceSupport
+{
+    /// <summary>
+    /// Codecs the server accepts in <c>client-stream/start</c>, each 'opus', 'flac' or 'pcm'. A
+    /// source announces only a codec listed here.
+    /// </summary>
+    [JsonPropertyName("supported_codecs")]
+    public List<string> SupportedCodecs { get; set; } = new();
 }

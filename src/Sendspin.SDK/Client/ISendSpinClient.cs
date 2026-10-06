@@ -231,6 +231,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// for the channels that changed.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The channel is outside 0-3.</exception>
+    /// <exception cref="ArgumentException">
+    /// The resulting channel has a source or format the artwork role does not define, or is
+    /// active without a positive width and height.
+    /// </exception>
     Task SetArtworkChannelAsync(
         int channel, string? source = null, string? format = null, int? width = null, int? height = null);
 
