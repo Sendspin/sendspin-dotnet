@@ -98,7 +98,6 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         string? configuredCodec = null,
         Func<IReadOnlyCollection<string>?>? listedCodecs = null)
     {
-        _listedCodecs = listedCodecs;
         _capture = capture;
         _clock = clock;
         _sendMessageAsync = sendMessageAsync;
@@ -107,6 +106,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         _canStream = canStream;
         _encoderFactory = encoderFactory ?? new DefaultSourceAudioEncoderFactory();
         _configuredCodec = configuredCodec;
+        _listedCodecs = listedCodecs;
     }
 
     /// <summary>Handles a server <c>source</c> command ('start' or 'stop').</summary>
