@@ -621,12 +621,12 @@ A server changes it with the `set_output_delay` command, which the SDK advertise
 client advertises the commands it accepts). Set `ClientCapabilities.SupportsSetOutputDelay = false`
 to decline it.
 
-> `IClockSynchronizer.OutputDelayMs` is a `double` over −5000…5000: fractional values come from
-> calibration, and negative values schedule audio *later*. The spec's wire field is an integer
-> 0–5000 and states negatives are unsupported, so what the client **reports** is rounded and
-> clamped into that range while playback keeps using the value you set. The SDK logs a warning
-> naming both numbers when they diverge — at that point the server's group calibration is working
-> from a different delay than your playback is.
+> `IClockSynchronizer.OutputDelayMs` is a `double` over 0…5000, the range of the spec's
+> `output_delay_ms`; negatives are unsupported. Its setter is the single clamp site: a value
+> outside the range is clamped (a non-finite one becomes 0), and playback, the persisted value and
+> the reported one all use the result. Fractional values come from calibration and are kept for
+> playback; the wire field is an integer, so what the client **reports** is rounded to the nearest
+> millisecond. A custom `IClockSynchronizer` must clamp on set the same way.
 
 ```csharp
 public sealed class FileOutputDelayStore : IOutputDelayStore

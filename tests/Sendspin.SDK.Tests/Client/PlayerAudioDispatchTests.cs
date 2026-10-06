@@ -1,7 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
 using Microsoft.Extensions.Logging;
-using Sendspin.SDK.Audio;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
@@ -98,7 +97,7 @@ public class PlayerAudioDispatchTests
     }
 
     [Fact]
-    public void AudioWhileUnavailable_IsDroppedButConnectionStaysOpen_ThenFlowsWhenAvailableAgain()
+    public async Task AudioWhileUnavailable_IsDroppedButConnectionStaysOpen_ThenFlowsWhenAvailableAgain()
     {
         // Spec #270: a player that has reported available: false is not consuming audio, so the
         // server's chunks are discarded rather than decoded — but the connection is kept open
@@ -107,15 +106,17 @@ public class PlayerAudioDispatchTests
         var (client, connection, pipe) = PlayerClient();
         using var _c = client;
 
-        // A pipeline error is the composed availability going false (_clientErrorReported).
-        pipe.RaiseError();
+        // An external source is a reason playing would be wrong. A pipeline error is not used
+        // here: audio must still reach an errored pipeline, since that is how it recovers (see
+        // PlaybackStartFailureRecoveryTests).
+        await client.EnterExternalSourceAsync();
         connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 5_000, 1, 2, 3));
 
         Assert.Empty(pipe.Chunks);
         Assert.Null(connection.LastDisconnectReason);
 
-        // Reaching Playing clears the error; the client is available and audio flows again.
-        pipe.SetState(AudioPipelineState.Playing);
+        // Leaving the external source makes the client available and audio flows again.
+        await client.ExitExternalSourceAsync();
         connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 6_000, 4, 5, 6));
 
         var chunk = Assert.Single(pipe.Chunks);
@@ -123,7 +124,7 @@ public class PlayerAudioDispatchTests
     }
 
     [Fact]
-    public void AudioWhileUnavailable_LogsOncePerPeriod_NotPerChunk()
+    public async Task AudioWhileUnavailable_LogsOncePerPeriod_NotPerChunk()
     {
         var logger = new CapturingLogger<SendspinClientService>();
         var (client, connection, pipe) = PlayerClient(logger);
@@ -131,7 +132,7 @@ public class PlayerAudioDispatchTests
 
         // A live stream keeps sending at chunk rate while the client is unavailable, so the drop
         // notice has to be latched per unavailable period or it buries every other diagnostic.
-        pipe.RaiseError();
+        await client.EnterExternalSourceAsync();
         for (int i = 0; i < 5; i++)
         {
             connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, i, 0xAA));
@@ -144,20 +145,20 @@ public class PlayerAudioDispatchTests
     }
 
     [Fact]
-    public void AudioWhileUnavailable_LogsAgainAfterAnAvailablePeriod_EvenWithNoAudioInIt()
+    public async Task AudioWhileUnavailable_LogsAgainAfterAnAvailablePeriod_EvenWithNoAudioInIt()
     {
         var logger = new CapturingLogger<SendspinClientService>();
         var (client, connection, pipe) = PlayerClient(logger);
         using var _c = client;
 
         // First unavailable period: one drop notice.
-        pipe.RaiseError();
+        await client.EnterExternalSourceAsync();
         connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 1, 0xAA));
 
         // Become available with no audio in the window, then unavailable again. The latch clears on
         // the availability transition, not on an available frame, so the second period logs too.
-        pipe.SetState(AudioPipelineState.Playing);
-        pipe.RaiseError();
+        await client.ExitExternalSourceAsync();
+        await client.EnterExternalSourceAsync();
         connection.RaiseBinaryMessageReceived(Chunk(BinaryMessageTypes.PlayerAudio0, 2, 0xBB));
 
         Assert.Empty(pipe.Chunks);
