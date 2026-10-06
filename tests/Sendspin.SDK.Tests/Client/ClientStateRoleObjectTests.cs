@@ -106,14 +106,41 @@ public class ClientStateRoleObjectTests
     }
 
     [Fact]
-    public void InitialState_OmitsSourceObject_WhenNothingHasReportedASignal()
+    public void InitialState_CarriesSourceObjectWithoutSignal_WhenNothingHasReportedASignal()
     {
-        // signal is the source object's only field and is itself optional, so with nothing
-        // reported there is nothing truthful to say — asserting 'absent' would invent it.
+        // The object is what the activation requires; signal is its only field and is itself
+        // optional, so with nothing reported it is left out — asserting 'absent' would invent it.
         var (client, connection) = Create(["source@v1"], lineSense: true);
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, "source@v1");
+
+        var source = LastStatePayload(connection).GetProperty("source");
+        Assert.False(source.TryGetProperty("signal", out _));
+    }
+
+    [Fact]
+    public void InitialState_CarriesEmptySourceObject_WhenLineSenseIsNotSupported()
+    {
+        // messaging.md: "When a role that defines a state object becomes active in
+        // active_roles, the client MUST send an update that includes that role's object." The
+        // server may not send a source start until it has it, and aiosendspin flags its absence
+        // ("initial client/state has an active source role but no source state").
+        var (client, connection) = Create(["source@v1"]);
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "source@v1");
+
+        Assert.Equal("{}", LastStatePayload(connection).GetProperty("source").GetRawText());
+    }
+
+    [Fact]
+    public void InitialState_OmitsSourceObject_WhenSourceIsNotActive()
+    {
+        var (client, connection) = Create(["player@v1", "source@v1"]);
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
 
         Assert.False(LastStatePayload(connection).TryGetProperty("source", out _));
     }

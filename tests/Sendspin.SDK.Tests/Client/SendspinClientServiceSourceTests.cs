@@ -195,6 +195,32 @@ public class SendspinClientServiceSourceTests
     }
 
     [Fact]
+    public async Task SourceStart_WhileUnavailable_IsIgnored_AndNotResumedOnBecomingAvailable()
+    {
+        // source/v1.md: "A client MUST ignore `start` received while it is unavailable.
+        // Becoming available again does not resume streaming without a new `start`."
+        var (client, connection, capture) = CreateSourceClient();
+        using var _c = client;
+        Activate(connection);
+        await client.EnterExternalSourceAsync();
+
+        SendSourceStart(connection);
+        await client.LastSourceCommandTask;
+
+        Assert.False(capture.Capturing, "a start received while unavailable must open no stream");
+        Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientStreamStartMessage);
+
+        await client.ExitExternalSourceAsync();
+        Assert.False(capture.Capturing, "the ignored start must not be honoured later");
+        Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientStreamStartMessage);
+
+        // Positive control: a new start, now that the client is available, streams.
+        SendSourceStart(connection);
+        await client.LastSourceCommandTask;
+        Assert.True(capture.Capturing);
+    }
+
+    [Fact]
     public async Task RoleDeactivation_StopsStreaming()
     {
         var (client, connection, capture) = CreateSourceClient();
@@ -400,6 +426,10 @@ public class SendspinClientServiceSourceTests
             {
                 CaptureDevice = capture,
                 Capabilities = new ClientCapabilities { Roles = ["source@v1"] },
+
+                // Clock already converged, so the client is available: a start is ignored
+                // while it is not, and the refusals below must be the trust/role gate's.
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
             });
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
         connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
@@ -482,6 +512,7 @@ public class SendspinClientServiceSourceTests
             {
                 CaptureDevice = capture,
                 Capabilities = new ClientCapabilities { Roles = ["source@v1"] },
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
             });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
