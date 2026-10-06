@@ -526,7 +526,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 _logger,
                 IsSourceStreamingPermitted,
                 _sourceEncoderFactory,
-                _capabilities.SourceRoleSupport?.Codec);
+                _capabilities.SourceRoleSupport?.Codec,
+                () => LastServerHello?.SourceV1Support?.SupportedCodecs);
         }
         _audioPipeline = options.AudioPipeline;
         _outputDelayStore = options.OutputDelayStore;
@@ -553,6 +554,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // A custom (_-prefixed) role must carry an explicit @v version (spec template.md).
         _capabilities.ValidateCustomRoleVersions();
+
+        // Values a server rejects the hello or the first client/state over, or that the spec
+        // gives a fixed form: a player lists flac or pcm, artwork channels stay inside the
+        // role's vocabulary, and mac_address is lowercase colon-separated.
+        _capabilities.ValidatePlayerCodecs();
+        _capabilities.ValidateArtworkChannels();
+        _capabilities.ValidateMacAddress();
 
         // Implemented methods start enabled unless the app says otherwise. ANDing each with
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
@@ -1693,6 +1701,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 Width = width ?? existing.Width ?? defaults.Width,
                 Height = height ?? existing.Height ?? defaults.Height,
             };
+            configured.Validate();
             _artworkChannels[channel] = configured;
         }
 

@@ -179,6 +179,55 @@ public sealed class ArtworkChannelState
         => string.Equals(Source, ArtworkSources.None, StringComparison.Ordinal)
             ? new ArtworkChannelState { Source = ArtworkSources.None, Format = null, Width = null, Height = null }
             : this;
+
+    /// <summary>
+    /// Rejects a channel the server closes the connection over: a source or format outside the
+    /// artwork role's vocabulary, or an active channel without a positive width and height.
+    /// </summary>
+    /// <remarks>
+    /// A channel whose source is <c>none</c> is checked no further, because
+    /// <see cref="ForWire"/> sends its source alone.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// <see cref="Source"/> is not <c>album</c>, <c>artist</c> or <c>none</c>; or the channel is
+    /// active and <see cref="Format"/> is not <c>jpeg</c> or <c>png</c>, or <see cref="Width"/>
+    /// or <see cref="Height"/> is missing or not positive.
+    /// </exception>
+    internal void Validate()
+    {
+        if (Source is not (ArtworkSources.Album or ArtworkSources.Artist or ArtworkSources.None))
+        {
+            throw new ArgumentException(
+                $"ArtworkChannelState.Source '{Source}' is not 'album', 'artist' or 'none'.",
+                nameof(Source));
+        }
+
+        if (Source is ArtworkSources.None)
+        {
+            return;
+        }
+
+        if (Format is not ("jpeg" or "png"))
+        {
+            throw new ArgumentException(
+                $"ArtworkChannelState.Format '{Format}' is not 'jpeg' or 'png'.",
+                nameof(Format));
+        }
+
+        if (Width is not > 0)
+        {
+            throw new ArgumentException(
+                $"ArtworkChannelState.Width '{Width}' is not a positive pixel count.",
+                nameof(Width));
+        }
+
+        if (Height is not > 0)
+        {
+            throw new ArgumentException(
+                $"ArtworkChannelState.Height '{Height}' is not a positive pixel count.",
+                nameof(Height));
+        }
+    }
 }
 
 /// <summary>
