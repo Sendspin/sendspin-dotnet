@@ -118,6 +118,11 @@ var paired = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuatio
 host.ServerConnected += (_, info) => connected.TrySetResult(info);
 host.PairingCompleted += (_, serverId) => paired.TrySetResult(serverId);
 
+// Taken from the message itself rather than from the pipeline being stopped, which the SDK
+// also does when it tears a client down.
+var streamEnded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+host.StreamEndReceived += (_, _) => streamEnded.TrySetResult();
+
 // Stand in for the physical operator gesture: the SDK reports it is withholding
 // client/pair-init until a window opens, and we open one. Emitting the event first makes
 // the gating observable — if it stopped happening, this line would stop appearing.
@@ -157,7 +162,7 @@ try
     {
         // The stream only starts once the server has seen our initial client/state, which
         // waits on clock sync, so this allows for that as well as the audio itself.
-        await pipeline.StreamEnded.WaitAsync(TimeSpan.FromSeconds(120));
+        await streamEnded.Task.WaitAsync(TimeSpan.FromSeconds(120));
         Emit(new
         {
             @event = "player_audio_decoded",
@@ -308,7 +313,6 @@ internal sealed class ToneCaptureDevice : IAudioCaptureDevice
 internal sealed class CountingPipeline : IAudioPipeline
 {
     private readonly AudioDecoderFactory _decoders = new();
-    private readonly TaskCompletionSource _streamEnded = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private IAudioDecoder? _decoder;
     private float[] _samples = [];
 
@@ -336,9 +340,6 @@ internal sealed class CountingPipeline : IAudioPipeline
 
     public uint MaxSendAhead { get; private set; }
 
-    /// <summary>Completes on the <c>stream/end</c> of a stream that was started.</summary>
-    public Task StreamEnded => _streamEnded.Task;
-
     public AudioPipelineState State => _decoder is null ? AudioPipelineState.Idle : AudioPipelineState.Playing;
 
     public bool IsReady => _decoder is not null;
@@ -359,15 +360,8 @@ internal sealed class CountingPipeline : IAudioPipeline
 
     public Task StopAsync()
     {
-        // The SDK also stops the pipeline on every disconnect, including the re-handshake
-        // that follows pairing; only a stop that ends a stream counts.
-        if (_decoder is not null)
-        {
-            _decoder.Dispose();
-            _decoder = null;
-            _streamEnded.TrySetResult();
-        }
-
+        _decoder?.Dispose();
+        _decoder = null;
         return Task.CompletedTask;
     }
 

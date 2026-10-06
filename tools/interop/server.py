@@ -100,7 +100,8 @@ async def drive_player(server, state_timeout: StateTimeoutWatch) -> int:
         emit(event="client_never_became_available")
         return 1
 
-    # The wait above is the client's initial client/state delay, to the polling interval.
+    # The wait above approximates the client's initial client/state delay: it starts up to
+    # one polling interval after the activation went out, and ends up to one after the state.
     emit(event="client_available", seconds_after_pairing=round(time.monotonic() - paired_at, 2))
     if state_timeout.fired:
         emit(event="initial_client_state_late")
@@ -242,7 +243,8 @@ async def main() -> int:
                     for _ in range(120):
                         with open(secret, encoding="utf-8") as client_output:
                             shown = re.search(
-                                r'"event":"pairing_code","code":"(\d+)"', client_output.read()
+                                r'"event":"pairing_code","code":"(\d+)","format":"digits"',
+                                client_output.read(),
                             )
                         if shown:
                             return shown.group(1)
