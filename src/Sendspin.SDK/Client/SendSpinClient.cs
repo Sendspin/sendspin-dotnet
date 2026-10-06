@@ -4594,6 +4594,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Log group ID changes (helps diagnose grouping issues)
         if (previousGroupId != _currentGroup.GroupId && !string.IsNullOrEmpty(previousGroupId))
         {
+            // supported_commands belongs to the previous group; drop it until the new group's server/state.
+            _currentGroup.SupportedCommands = null;
+
             _logger.LogInformation("group/update [{Player}]: Group ID changed {OldId} -> {NewId}",
                 _capabilities.ClientName, previousGroupId, _currentGroup.GroupId);
         }
