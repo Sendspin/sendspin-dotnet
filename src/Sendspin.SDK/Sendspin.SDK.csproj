@@ -20,43 +20,79 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
-v10.0.0 - Encrypted Transport (BREAKING):
-- The transport is now encrypted end to end (Noise KKpsk2). Plaintext is gone, and there
-  is no downgrade negotiation: a 10.x client requires a server speaking the encrypted
-  protocol (the aiosendspin 10.0.0 line). Use the 9.x line for older servers.
-- Clients now have a persistent Curve25519 identity. SendspinClientOptions.Identity is
-  required; build it with SendspinIdentity.FromStore(store), NOT Generate(), or the client
-  gets a new client_id every launch and silently loses every pairing on restart.
+v10.0.0 - Encrypted transport, Sendspin spec 1.0.0-rc1 (BREAKING)
+
+Implements Sendspin/spec at tag 1.0.0-rc1 (671a34d). Requires aiosendspin 10.0.0 or later,
+the release Music Assistant ships. There is no downgrade negotiation: use the 9.x line for
+an older server.
+
+Transport and identity
+- Every connection is encrypted end to end (Noise KKpsk2). Plaintext is gone.
+- Clients have a persistent Curve25519 identity. SendspinClientOptions.Identity is required;
+  build it with SendspinIdentity.FromStore(store), NOT Generate(), or the client gets a new
+  client_id every launch and silently loses every pairing on restart.
 - Construction moved to SendspinClientService.CreateForDial(loggerFactory, options) with a
   SendspinClientOptions object.
-- Pairing: Pairing PSK plus at most one optional pairing-code method, dynamic or static
-  (CPace), on the spec's pairing-code wire (dynamic_pairing_code / static_pairing_code,
-  fixed 6- and 8-digit codes, pair-method descriptors in client/hello). Pairing
-  configuration is local and manufacturer-defined: set it through ClientCapabilities; no
-  server can change it. A pairing activity on an already-paired session is refused as
-  unauthorized, and server/unpair removes that server's record.
-- Pairing record stores: IPairingRecordStore.Upsert returns void and stores declare a
-  Capacity; a pairing that completes at capacity succeeds and the SDK evicts the least
-  recently used record itself (never its own Pairing PSK, never a record backing an open
-  connection). Records carry ServerId (one record per server; re-pairing replaces) and
-  LastUsedUtc in place of Used; 9.x record files still load.
-- client/state reports 'available' as a boolean rather than the legacy state string.
-- New source@v1 role for line-in/microphone capture.
-- Neither connection teardown path waits for the peer's Close frame any longer: both now
-  return as soon as ours is sent, so neither can block forever against a peer that never
-  answers (#143 listen path, #160 dial path). This covers SendspinConnection.DisconnectAsync,
-  which DisposeAsync calls with no cancellation, so an app exit could previously hang
-  indefinitely. The socket is left in CloseSent rather than Closed until the peer replies or
-  the connection is disposed.
-- Undefined wire vocabulary removed: VisualizerTypes.Pitch and binary type 21 (the spec
-  reserves 21-23), PlayerStatePayload.BufferLevel and .Error (the spec closes the player
-  state object), and AudioChunk.Slot. Undefined player-audio types 5-7 are now dropped with
-  a warning instead of being decoded into the audio pipeline, matching the C++ reference.
-- See MIGRATION-10.0.0.md. The 9.x line remains maintained for now.
+- Neither connection teardown path waits for the peer's Close frame any longer, so an app
+  exit can no longer hang against a peer that never answers.
 
-----
+Pairing
+- Pairing PSK plus at most one optional pairing-code method, dynamic or static (CPace):
+  dynamic_pairing_code / static_pairing_code, fixed 6- and 8-digit codes. Pairing
+  configuration is local and set through ClientCapabilities; no server can change it.
+- Gesture-gated attempts (every static code attempt, and a dynamic one once held back)
+  need a PairingWindow opened by a deliberate operator gesture. Without one pairing never
+  completes, and nothing throws.
+- A mistyped dynamic pairing code is retried in place (client/pair-retry), so
+  PresentPairingCodeAsync can run more than once for one attempt.
+- IPairingRecordStore.Upsert returns void and stores declare a Capacity; the SDK evicts the
+  least recently used record itself. Records carry ServerId and LastUsedUtc; 9.x record
+  files still load. server/unpair removes that server's record.
 
-      Earlier release notes: https://github.com/Sendspin/sendspin-dotnet/releases
+Protocol
+- client/state reports 'available' as a boolean, carries the full state of every role
+  object it includes, and includes an object only for an active role.
+- stream/request-format is removed. RequestPlayerFormatAsync, RequestArtworkFormatAsync and
+  RequestVisualizerFormatAsync become SetPlayerFormatPreferenceAsync, SetArtworkChannelAsync
+  and SetVisualizerConfigurationAsync. ArtworkChannelSpec is ArtworkChannelState;
+  ClientCapabilities.VisualizerSupport is VisualizerRoleSupport.
+- "Static delay" is "output delay" on the C# surface and the wire (output_delay_ms,
+  set_output_delay), clamped to 0-5000 with no alias for the old names.
+- client/hello no longer carries trust_level, player supported_commands or
+  artwork@v1_support.
+- Artwork arrives as an announce/part/cancel transfer. ArtworkReceived and ArtworkCleared are
+  unchanged; BinaryMessageParser.ParseArtworkChunk is replaced by TryParseArtwork.
+- Controller commands are sent only while controller@v1 is active and the group lists the
+  command in supported_commands; otherwise they are dropped with a warning.
+- server/activate follows the rc1 activity table: playback keeps running during a pairing
+  attempt, active roles persist across a re-handshake, and a removed stream role is stopped
+  without a stream/end.
+- ClientCapabilities values the spec does not allow now throw ArgumentException at
+  construction: a player with no flac or pcm format, a visualizer BufferCapacity or RateMax
+  that is not positive, an invalid artwork channel, a MacAddress that is not lowercase
+  colon-separated.
+- New source@v1 role for line-in and microphone capture, on paired connections only.
+- ConnectionMode.Auto is removed. A persisted "Auto" no longer parses and the remaining
+  ordinals shift.
+
+Audio
+- Sync correction follows the spec: a 100 us dead band, continuous correction capped at
+  0.5%, and a one-shot snap above 5 ms. TimedAudioBuffer.Read applies all of it and is the
+  default path again; SyncCorrectedSampleSource does the same through a built-in resampler.
+- buffer_capacity is derived from ClientCapabilities.AudioBufferCapacityMs instead of a flat
+  32 MB. Give TimedAudioBuffer the same number.
+- Clock synchronization matches the reference implementation, and a player announces
+  itself about two seconds after connecting.
+- IAudioPipeline.StartAsync returns an AudioPipelineStartOutcome; IClockSynchronizer and
+  ISendspinConnection each gain one member. Only custom implementations are affected.
+
+Migration guide (every breaking change, with before/after code):
+https://github.com/Sendspin/sendspin-dotnet/blob/main/src/Sendspin.SDK/MIGRATION-10.0.0.md
+
+Spec pin, compatibility floor and known deviations:
+https://github.com/Sendspin/sendspin-dotnet/blob/main/docs/SPEC-VERSION.md
+
+Earlier release notes: https://github.com/Sendspin/sendspin-dotnet/releases
     </PackageReleaseNotes>
     <Copyright>Copyright © 2024-2026 Sendspin Contributors</Copyright>
 
