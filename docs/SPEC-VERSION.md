@@ -81,13 +81,18 @@ exercises:
 
 ### Differs from the spec
 
-- **Artwork messages are dropped whole while the client is unavailable.** The spec lets an
-  unavailable client discard image data, but requires it to still process announces and
-  cancels and count each part's bytes toward `total_size`. The SDK drops every artwork binary
-  message while its own availability is false, before the transfer is tracked. A zero-size
-  announce (a clear) that arrives then is lost, and a transfer that straddles a change of
-  availability leaves the two ends out of step: the next part or announce is then a malformed
-  sequence, and the SDK closes the connection.
+- **Buffered audio is not kept across every in-place format change.** On a `stream/start`
+  that changes the format of a running stream the spec says a player MUST keep buffered chunks
+  and decode each chunk in the format in effect when it was received. `AudioPipeline` does so
+  for a sample-rate or channel change by playing the old buffer out before it re-opens the
+  output, with three exceptions:
+  - a second rate or channel change that arrives before the first has switched takes the
+    restart path, and the audio still buffered is discarded;
+  - if the output stops reading for more than a second past the old audio's duration, the
+    switch goes ahead and what was left of that audio is dropped;
+  - a chunk that reaches the pipeline between the `stream/start` and the decoder swap is
+    decoded by the old decoder. The window opens only when the stream-lifecycle chain or the
+    pipeline is busy, and it exists for a codec or bit-depth change too.
 - **Multi-server arbitration ranks `['playback', 'pairing']` as playback.** The spec's rule that
   a pairing attempt is not displaced by an incoming connection is applied only to a connection
   whose activity is pairing alone. An attempt running alongside playback can be displaced by an

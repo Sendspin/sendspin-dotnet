@@ -83,6 +83,8 @@ Audio
   32 MB. Give TimedAudioBuffer the same number.
 - Clock synchronization matches the reference implementation, and a player announces
   itself about two seconds after connecting.
+- An in-place stream/start that changes sample rate or channel count keeps the buffered
+  audio: AudioPipeline plays it out before re-opening the output for the new format.
 - IAudioPipeline.StartAsync returns an AudioPipelineStartOutcome; IClockSynchronizer and
   ISendspinConnection each gain one member. Only custom implementations are affected.
 

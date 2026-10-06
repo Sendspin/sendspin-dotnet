@@ -66,6 +66,7 @@ Version 10.0.0 makes the transport encrypted end to end. Every connection now ru
 | Buffer capacity | `ClientCapabilities.BufferCapacity` is derived from the new `AudioBufferCapacityMs` instead of defaulting to a flat 32 MB | Medium — the server sends far less ahead unless you raise the duration |
 | Buffer capacity | `TimedAudioBuffer`'s `bufferCapacityMs` parameter defaults to 30 s, up from 500 ms | Low — larger default allocation |
 | Audio pipeline | `IAudioPipeline.StartAsync` returns `Task<AudioPipelineStartOutcome>` instead of `Task` | Low — compiler error, and only for a custom pipeline; see §14 |
+| Audio pipeline | An in-place `stream/start` that changes sample rate or channel count keeps the buffered audio: `AudioPipeline` plays it out, then re-opens the output for the new format, and reports `DecoderReplaced` rather than `Restarted` (spec PR #283) | Low — behavioural; `OutputFormat` lags `CurrentFormat` while the old audio drains. See §14 |
 | Connection mode | `ConnectionMode.Auto` removed; `AdvertiseOnly` is now the zero value | Medium — compiler error where it is named, but a **persisted** mode is the real risk: a stored `"Auto"` no longer parses and stored ordinals shift; see §16 |
 
 ---
@@ -704,6 +705,37 @@ error until it does:
 - Replaced the decoder and kept the buffered audio and timeline → `DecoderReplaced`
 - Re-announced the format already running and rebuilt nothing → `FormatReannounced`
 
+### A rate or channel change keeps the buffered audio
+
+The spec requires a player to keep buffered chunks across an in-place `stream/start` and decode
+each chunk in the format that was in effect when it was received. `AudioPipeline` used to send a
+sample-rate or channel-count change through a full restart, which cleared the buffer. It now
+leaves the running buffer and its player playing what they hold, replaces the decoder, and
+decodes everything after the `stream/start` into a second buffer for the new format. Once the
+first buffer has run dry — plus the output device's own latency, so the tail is heard — it
+closes the old output and opens one for the new format. The device close and re-open is the
+only gap.
+
+`StartAsync` returns `DecoderReplaced` for this case, where it used to return `Restarted`. There
+is no API change, and nothing to do unless you read the pipeline's state around a format change:
+
+- **While the old audio drains, `CurrentFormat` is the new format and `OutputFormat` is still
+  the old player's.** `BufferStats` describes the new buffer, not the one being played, so
+  buffered depth and sync error read as those of audio that has not started yet.
+- **A change that arrives while still Buffering starts the old audio playing at once**, since no
+  more is coming for it.
+- **`stream/clear` clears both buffers**; a stop, a dispose or a restart cancels the pending
+  switch.
+- **Two cases still restart.** A rate or channel change with nothing buffered has nothing to
+  keep. A second such change arriving before the first has switched does discard what is
+  buffered.
+- **The wait is bounded.** If the output stops reading for more than a second past the old
+  audio's duration, the switch goes ahead and what was left of that audio is dropped.
+
+A custom `IAudioPipeline` that restarts on a rate or channel change should keep returning
+`Restarted`: the outcome reports what the pipeline did, and the client drops its queued chunks
+either way.
+
 ---
 
 ## 15. Stream-lifecycle messages reach the pipeline one at a time
@@ -975,6 +1007,13 @@ an external source, or after a pipeline error — inbound player audio, artwork 
 data are discarded rather than decoded or scheduled. The connection stays open, and one debug
 line is logged per unavailable period. A conformant server does not stream to an unavailable
 client, so this only matters in the window around a change of availability.
+
+Artwork is discarded more carefully than the other two, because an image is a transfer of
+several messages. The SDK still follows the transfer — announces and cancels are processed and
+each part's bytes are counted toward `total_size` — and only the image is withheld, so the next
+transfer is in sequence when the client returns. An image that began while the client was
+unavailable is not raised even if the client becomes available before its last part, and a
+zero-size announce still clears the channel, since it carries no data to discard.
 
 ---
 
