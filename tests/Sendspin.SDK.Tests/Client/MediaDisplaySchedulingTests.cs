@@ -912,6 +912,30 @@ public class MediaDisplaySchedulingTests
         Assert.Null(client.CurrentGroup.Metadata);
     }
 
+    [Fact]
+    public async Task Activate_DroppingTheVisualizer_DiscardsItsPendingFrames_WithoutAStreamEnd()
+    {
+        // Spec PR #289: a removed stream role stops its remaining output and clears its buffers
+        // on the activate itself. Artwork stays active, which is what lets the drain marker
+        // prove the loop ran past the frame's display time.
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "visualizer@v1", "artwork@v1");
+
+        var frames = new List<VisualizerFrame>();
+        client.VisualizationReceived += (_, f) => frames.Add(f);
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["artwork@v1"]}}
+            """);
+
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(frames);
+    }
+
     // -- Artwork rules of spec #135 not already covered above -------------------------------
 
     [Fact]

@@ -93,6 +93,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private int _pairingCounter;
     private byte[]? _lastHandshakeHash;
 
+    // The active roles an in-band re-handshake set aside, for the server/activate that follows
+    // it to persist or remove. Null outside that window.
+    private List<string>? _activeRolesBeforeRekey;
+
     // format from the current pairing activation, validated on receipt. Null when the
     // activation is not dynamic_pairing_code.
     private string? _activationPairingCodeFormat;
@@ -2406,8 +2410,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // server/hello to reset that mirror on its own, so without this a source@v1 grant
         // from a retired session would carry forward indefinitely, rather than just until the
         // next reconnect.
+        //
+        // The roles are set aside rather than dropped: the activate that follows a
+        // re-handshake "is a subsequent one on the same connection", so it persists them when
+        // it omits active_roles and removes the ones it leaves out (spec PR #287). Nothing is
+        // granted from them until that activate has been admitted under the new PSK.
         if (LastServerHello is not null)
         {
+            _activeRolesBeforeRekey = LastServerHello.ActiveRoles;
             LastServerHello.ActiveRoles = [];
         }
 
@@ -2590,6 +2600,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         LastServerHello = payload;
         ServerName = payload.Name;
 
+        // A server/hello opens a new connection, and no role persists into one.
+        _activeRolesBeforeRekey = null;
+
         // Connection-scoped since spec #178 moved the hint here from the pairing activation.
         // Copied so a later hello cannot mutate a list already handed to a presenter.
         _serverLanguages = payload.Languages is { Count: > 0 } languages ? [.. languages] : null;
@@ -2685,11 +2698,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // active_roles persists across activates that omit it. That includes the first one
+        // after a re-handshake, whose roles DetectSessionRekey set aside (spec PR #287: "The
+        // activation rules, including those for omitted active_roles, apply under the newly
+        // matched PSK") — and one of those rules is that persisted roles are treated as empty
+        // once the connection is no longer playback-capable.
+        var previousActiveRoles = _activeRolesBeforeRekey ?? LastServerHello?.ActiveRoles ?? [];
+        bool playbackCapable = _session.MatchedPsk is { } matchedPsk
+            && IsAdmissible(matchedPsk.Category, payload.ActivitiesList, hasRoles: true, _unpairedAccessEnabled);
+        var activeRoles = payload.ActiveRoles ?? (playbackCapable ? previousActiveRoles : []);
+
         // Source role is trust-gated: it streams potentially sensitive captured audio,
         // so it MUST only run on a paired ('user'-trust) connection. If a server
         // activates source@v1 without user trust, refuse and close (spec).
-        if (payload.ActiveRoles is not null
-            && payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
+        if (activeRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
             && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
             _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
@@ -2704,18 +2726,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // defensible meaning for a value other code grants permission from.
         LastServerActivate = payload;
 
-        // Mirror roles where legacy consumers look. active_roles persists across
-        // activates that omit it, so only overwrite when present.
+        // Mirror roles where legacy consumers look.
         bool activeRolesChanged = false;
-        if (payload.ActiveRoles is not null && LastServerHello is not null)
+        if (LastServerHello is not null)
         {
-            var previousActiveRoleFamilies = ToRoleFamilies(LastServerHello.ActiveRoles);
-            var currentActiveRoleFamilies = ToRoleFamilies(payload.ActiveRoles);
+            _activeRolesBeforeRekey = null;
+
+            var previousActiveRoleFamilies = ToRoleFamilies(previousActiveRoles);
+            var currentActiveRoleFamilies = ToRoleFamilies(activeRoles);
 
             // When the source role is dropped from active_roles, stop streaming (spec:
             // the client ends its input stream on deactivation).
-            bool wasSourceActive = LastServerHello.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
-            bool isSourceActive = payload.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal));
+            bool wasSourceActive = previousActiveRoleFamilies.Contains("source");
+            bool isSourceActive = currentActiveRoleFamilies.Contains("source");
             if (wasSourceActive && !isSourceActive && _sourcePipeline is not null)
             {
                 _sourcePipeline.StopStreamingAsync().SafeFireAndForget(_logger);
@@ -2728,18 +2751,30 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // handshake and pairing decisions have run.
             activeRolesChanged = !previousActiveRoleFamilies.SetEquals(currentActiveRoleFamilies);
 
-            LastServerHello.ActiveRoles = [.. payload.ActiveRoles];
+            LastServerHello.ActiveRoles = [.. activeRoles];
 
             if (activeRolesChanged)
             {
                 RemoveRoleStateClaimsForInactiveFamilies(currentActiveRoleFamilies);
                 DiscardDeactivatedRoleState(previousActiveRoleFamilies, currentActiveRoleFamilies);
+
+                // A removed stream role stops its remaining output and clears its buffers
+                // whether or not a stream/end came first (spec PR #289). On the lifecycle
+                // chain, so it cannot overtake a stream/start still starting the pipeline.
+                var removedStreamRoles = previousActiveRoleFamilies
+                    .Except(currentActiveRoleFamilies)
+                    .Where(family => family is "player" or "artwork" or "visualizer")
+                    .ToList();
+                if (removedStreamRoles.Count > 0)
+                {
+                    DispatchStreamLifecycle(() => StopStreamRolesAsync(removedStreamRoles));
+                }
             }
         }
 
         _logger.LogInformation("Server activate: activities [{Activities}], roles [{Roles}]",
             string.Join(", ", payload.ActivitiesList),
-            string.Join(", ", payload.ActiveRoles ?? LastServerHello?.ActiveRoles ?? []));
+            string.Join(", ", activeRoles));
 
         // Pairing can run alongside playback (pairing.md, "Entering and leaving pairing"): the
         // attempt starts on any activation declaring 'pairing', but the wire is held for the
@@ -5317,32 +5352,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             StreamEndReceived?.Invoke(this, payload);
 
-            // Media held for a display time that belongs to the stream just ended must not
-            // surface after it, and the artwork on display is cleared: stream/end is playback
-            // termination (spec #266), unlike the stream/clear seek below.
-            FlushDisplayRoles(payload.Roles, endingStream: true);
-
-            if (!ReachesPlayerRole(payload.Roles))
-            {
-                return;
-            }
-
-            while (_earlyChunkQueue.TryDequeue(out _))
-            {
-            }
-
-            if (_audioPipeline != null)
-            {
-                // A pipeline-stop failure is a local fault, not peer input; it propagates
-                // to the fire-and-forget boundary so a real bug surfaces (#88 item 2).
-                await _audioPipeline.StopAsync();
-            }
-
-            if (_currentGroup != null)
-            {
-                _currentGroup.PlaybackState = PlaybackState.Idle;
-                GroupStateChanged?.Invoke(this, _currentGroup);
-            }
+            await StopStreamRolesAsync(payload.Roles);
         }
         catch (System.Text.Json.JsonException ex)
         {
@@ -5352,6 +5362,40 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // sees its failures — the close must happen here.
             _logger.LogError(ex, "Malformed stream/end from authenticated peer; closing connection");
             await DisconnectAsync("unauthorized");
+        }
+    }
+
+    /// <summary>
+    /// Stops the output and clears the buffers of the stream roles a <c>stream/end</c> names —
+    /// every one when it names none — or that a <c>server/activate</c> removed.
+    /// </summary>
+    private async Task StopStreamRolesAsync(List<string>? roles)
+    {
+        // Media held for a display time that belongs to the stream just ended must not
+        // surface after it, and the artwork on display is cleared: both a stream/end and a
+        // role's removal are playback termination (spec #266), unlike a stream/clear seek.
+        FlushDisplayRoles(roles, endingStream: true);
+
+        if (!ReachesPlayerRole(roles))
+        {
+            return;
+        }
+
+        while (_earlyChunkQueue.TryDequeue(out _))
+        {
+        }
+
+        if (_audioPipeline != null)
+        {
+            // A pipeline-stop failure is a local fault, not peer input; it propagates
+            // to the fire-and-forget boundary so a real bug surfaces (#88 item 2).
+            await _audioPipeline.StopAsync();
+        }
+
+        if (_currentGroup != null)
+        {
+            _currentGroup.PlaybackState = PlaybackState.Idle;
+            GroupStateChanged?.Invoke(this, _currentGroup);
         }
     }
 
