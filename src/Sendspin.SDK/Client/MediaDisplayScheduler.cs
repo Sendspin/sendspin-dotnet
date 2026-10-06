@@ -134,6 +134,14 @@ internal sealed class MediaDisplayScheduler : IDisposable
     private readonly long?[] _shownArtwork = new long?[ArtworkChannelCount];
 
     /// <summary>
+    /// Counts <see cref="FlushArtwork"/> calls. The loop takes due artwork out of its slot before
+    /// raising it outside <see cref="_lock"/>, so a flush in between cannot reach it there; the
+    /// loop compares this against the value it took the artwork under and drops what a flush has
+    /// since overtaken. Guarded by <see cref="_lock"/>.
+    /// </summary>
+    private int _artworkFlushGeneration;
+
+    /// <summary>
     /// One pending update per <see cref="ScheduledStateRole"/>, indexed by the enum. The roles
     /// are independent: a scheduled <c>color</c> update never displaces a scheduled
     /// <c>metadata</c> one, and neither is ordered against the other.
@@ -418,6 +426,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
         lock (_lock)
         {
             Array.Clear(_artwork);
+            _artworkFlushGeneration++;
 
             if (raiseCleared)
             {
@@ -604,12 +613,14 @@ internal sealed class MediaDisplayScheduler : IDisposable
             while (!cancellationToken.IsCancellationRequested)
             {
                 int waitMilliseconds;
+                int artworkFlushGeneration;
                 bool hasDue;
 
                 lock (_lock)
                 {
                     long now = _timer.GetCurrentTimeMicroseconds();
                     TakeDueLocked(now, dueFrames, dueArtwork, dueState);
+                    artworkFlushGeneration = _artworkFlushGeneration;
                     hasDue = dueFrames.Count > 0 || dueArtwork.Count > 0 || dueState.Count > 0;
                     _dispatching = hasDue;
                     waitMilliseconds = WaitMillisecondsLocked(now);
@@ -617,7 +628,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
                 if (hasDue)
                 {
-                    DispatchDue(dueFrames, dueArtwork, dueState);
+                    DispatchDue(dueFrames, dueArtwork, dueState, artworkFlushGeneration);
                     dueFrames.Clear();
                     dueArtwork.Clear();
                     dueState.Clear();
@@ -686,7 +697,6 @@ internal sealed class MediaDisplayScheduler : IDisposable
             if (_artwork[channel] is { } slot && DisplayTimeLocked(slot.ServerTimestamp) <= now)
             {
                 dueArtwork.Add(slot);
-                _shownArtwork[channel] = slot.ImageData.Length == 0 ? null : slot.ServerTimestamp;
                 _artwork[channel] = null;
             }
         }
@@ -731,7 +741,8 @@ internal sealed class MediaDisplayScheduler : IDisposable
     private void DispatchDue(
         List<PendingFrame> dueFrames,
         List<PendingArtwork> dueArtwork,
-        List<PendingStateUpdate> dueState)
+        List<PendingStateUpdate> dueState,
+        int artworkFlushGeneration)
     {
         // State first, so a subscriber reacting to the artwork of a track change already sees
         // the metadata and colors that image belongs to. See the class remarks.
@@ -747,6 +758,20 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
         foreach (var artwork in dueArtwork)
         {
+            lock (_lock)
+            {
+                // A flush since this image was taken has discarded it, and a stream/end has
+                // already told the app to clear: raising it now would leave it on display.
+                if (_artworkFlushGeneration != artworkFlushGeneration)
+                {
+                    break;
+                }
+
+                // Recorded as shown only now that it is being raised, so a flush clears exactly
+                // the channels the app has been given an image for.
+                _shownArtwork[artwork.Channel] = artwork.ImageData.Length == 0 ? null : artwork.ServerTimestamp;
+            }
+
             SafeRaise(_raisePendingArtwork, artwork, "artwork");
         }
     }

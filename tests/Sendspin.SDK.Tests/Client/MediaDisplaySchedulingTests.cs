@@ -994,6 +994,37 @@ public class MediaDisplaySchedulingTests
     }
 
     [Fact]
+    public async Task StreamEnd_ArrivingWhileDueArtworkIsBeingDispatched_DiscardsThatArtwork()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var frames = new List<VisualizerFrame>();
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        // A dispatch pass raises its visualizer frames before its artwork, so ending the artwork
+        // role from the frame's handler lands the stream/end exactly where the race is: after the
+        // loop has taken the due image out of its slot, before it has raised it.
+        client.VisualizationReceived += (_, f) =>
+        {
+            connection.RaiseTextMessageReceived(
+                """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+            frames.Add(f);
+        };
+
+        // Both due at the same future moment, so one pass takes them together.
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        connection.RaiseBinaryMessageReceived(ArtworkBinary(Now + 1_000, new byte[] { 1 }));
+        timer.CurrentTime = Now + 2_000;
+        await WaitUntilAsync(() => frames.Count == 1, "the frame that ends the artwork role");
+
+        // The image the loop was holding must not surface after the stream/end that discarded it.
+        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        Assert.Empty(received);
+    }
+
+    [Fact]
     public async Task StreamEnd_NamingArtwork_ClearsEveryChannelStillShowingAnImage()
     {
         var (client, connection, timer) = SchedulingClient();
