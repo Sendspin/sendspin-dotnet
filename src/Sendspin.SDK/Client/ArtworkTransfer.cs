@@ -25,6 +25,13 @@ namespace Sendspin.SDK.Client;
 /// </remarks>
 internal sealed class ArtworkTransfer
 {
+    /// <summary>
+    /// The largest image the client will hold. The spec sets no limit on <c>total_size</c>, so a
+    /// larger announce is not a protocol error: its parts are counted and discarded, as for a
+    /// client that is unavailable. Cover art is a few hundred kilobytes.
+    /// </summary>
+    internal const uint MaxImageBytes = 16 * 1024 * 1024;
+
     private readonly object _lock = new();
 
     /// <summary>The image so far; null when no transfer is in flight. Guarded by <see cref="_lock"/>.</summary>
@@ -78,7 +85,7 @@ internal sealed class ArtworkTransfer
             _timestamp = announce.Timestamp;
             _totalSize = announce.TotalSize;
             _received = 0;
-            _discarded = discard;
+            _discarded = discard || announce.TotalSize > MaxImageBytes;
             return true;
         }
     }
