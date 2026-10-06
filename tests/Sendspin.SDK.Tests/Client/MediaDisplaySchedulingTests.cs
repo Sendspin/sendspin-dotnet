@@ -396,7 +396,7 @@ public class MediaDisplaySchedulingTests
     }
 
     /// <summary>
-    /// <c>static_delay_ms</c> compensates for hardware beyond the audio port, and the spec
+    /// <c>output_delay_ms</c> compensates for hardware beyond the audio port, and the spec
     /// applies it to the player role alone: the visualizer and artwork roles translate their
     /// display timestamps with the clock offset only. Applying it here too would show every
     /// visual ahead of the sound it belongs to by the whole delay — up to the 5 s the setting

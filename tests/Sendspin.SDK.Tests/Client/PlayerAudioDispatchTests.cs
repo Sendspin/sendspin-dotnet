@@ -17,11 +17,17 @@ namespace Sendspin.SDK.Tests.Client;
 public class PlayerAudioDispatchTests
 {
     private static byte[] Chunk(byte type, long ts, params byte[] audio)
+        => ChunkWithSendAhead(type, ts, sendAhead: 0, audio);
+
+    // Player audio chunk header: type(1) + timestamp int64 BE(8) + send_ahead uint32 BE(4),
+    // audio from byte 13 (spec PR #167).
+    private static byte[] ChunkWithSendAhead(byte type, long ts, uint sendAhead, params byte[] audio)
     {
-        var buf = new byte[9 + audio.Length];
+        var buf = new byte[13 + audio.Length];
         buf[0] = type;
         BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1, 8), ts);
-        audio.CopyTo(buf, 9);
+        BinaryPrimitives.WriteUInt32BigEndian(buf.AsSpan(9, 4), sendAhead);
+        audio.CopyTo(buf, 13);
         return buf;
     }
 
@@ -49,6 +55,7 @@ public class PlayerAudioDispatchTests
 
         var chunk = Assert.Single(pipe.Chunks);
         Assert.Equal(5_000, chunk.ServerTimestamp);
+        Assert.Equal(0u, chunk.SendAhead);
         Assert.Equal(new byte[] { 1, 2, 3 }, chunk.EncodedData);
     }
 
@@ -98,5 +105,50 @@ public class PlayerAudioDispatchTests
         Assert.Null(BinaryMessageParser.ParseAudioChunk(Chunk(BinaryMessageTypes.PlayerAudio1, 1, 9)));
         Assert.Null(BinaryMessageParser.ParseAudioChunk(Chunk(BinaryMessageTypes.PlayerAudio2, 1, 9)));
         Assert.Null(BinaryMessageParser.ParseAudioChunk(Chunk(BinaryMessageTypes.PlayerAudio3, 1, 9)));
+    }
+
+    [Fact]
+    public void ParseAudioChunk_ReadsTimestampAndSendAhead_BigEndian()
+    {
+        // Hand-built 13-byte header with byte-asymmetric values, so a wrong byte order or a
+        // swapped field would change the parsed number: type(1) + timestamp int64 BE(8) +
+        // send_ahead uint32 BE(4), audio from byte 13 (spec PR #167).
+        byte[] data =
+        [
+            BinaryMessageTypes.PlayerAudio0,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,   // timestamp
+            0x0A, 0x0B, 0x0C, 0x0D,                           // send_ahead
+            0xDE, 0xAD,                                        // audio
+        ];
+
+        var chunk = BinaryMessageParser.ParseAudioChunk(data);
+
+        Assert.NotNull(chunk);
+        Assert.Equal(0x0102030405060708L, chunk.ServerTimestamp);
+        Assert.Equal(0x0A0B0C0Du, chunk.SendAhead);
+        Assert.Equal(new byte[] { 0xDE, 0xAD }, chunk.EncodedData);
+    }
+
+    [Fact]
+    public void ParseAudioChunk_RejectsAChunkShorterThanTheHeader()
+    {
+        // 12 bytes: a type-4 chunk one byte short of the 13-byte header. Rejected rather than
+        // read with a truncated send_ahead.
+        byte[] tooShort = new byte[12];
+        tooShort[0] = BinaryMessageTypes.PlayerAudio0;
+
+        Assert.Null(BinaryMessageParser.ParseAudioChunk(tooShort));
+    }
+
+    [Fact]
+    public void ParseAudioChunk_ExposesSaturatedSendAhead()
+    {
+        // Per spec send_ahead saturates: 0xFFFFFFFF is a real value the parser surfaces as-is,
+        // not a sentinel it collapses — players use it only to measure arrival delay.
+        var parsed = BinaryMessageParser.ParseAudioChunk(
+            ChunkWithSendAhead(BinaryMessageTypes.PlayerAudio0, 1, uint.MaxValue, 7));
+
+        Assert.NotNull(parsed);
+        Assert.Equal(uint.MaxValue, parsed.SendAhead);
     }
 }

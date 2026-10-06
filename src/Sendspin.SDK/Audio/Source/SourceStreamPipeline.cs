@@ -9,7 +9,7 @@ namespace Sendspin.SDK.Audio.Source;
 
 /// <summary>
 /// Drives the <c>source</c> role: on the server's <c>start</c> it opens the capture
-/// device, announces the format with <c>client_stream/start</c>, then encodes each
+/// device, announces the format with <c>client-stream/start</c>, then encodes each
 /// captured buffer and streams it as one or more binary type-12 chunks — none carrying
 /// more than <see cref="MaxChunkMilliseconds"/> of audio — each timestamped in the server
 /// time domain; on <c>stop</c> it ends the stream. Server-initiated only — a source
@@ -68,7 +68,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// <summary>Creates a source pipeline bound to a capture device and the connection's send paths.</summary>
     /// <param name="capture">The device captured audio is read from.</param>
     /// <param name="clock">Maps capture timestamps into the server time domain.</param>
-    /// <param name="sendMessageAsync">Sends a control message (client_stream/start, client_stream/end).</param>
+    /// <param name="sendMessageAsync">Sends a control message (client-stream/start, client-stream/end).</param>
     /// <param name="sendBinaryAsync">Sends an encoded binary audio chunk.</param>
     /// <param name="logger">Logger for pipeline diagnostics.</param>
     /// <param name="canStream">
@@ -280,7 +280,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
 
             if (announced)
             {
-                // client_stream/start already hit the wire, so the server believes an
+                // client-stream/start already hit the wire, so the server believes an
                 // input stream is open; close it as part of restoring the pre-start state.
                 try
                 {
@@ -304,7 +304,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// <summary>
     /// Per-connection reset (spec: streaming state does not survive reconnection). Tears
     /// down capture and the consumer exactly like a stop, but sends no
-    /// <c>client_stream/end</c>: the stream it would end died with the connection, and on
+    /// <c>client-stream/end</c>: the stream it would end died with the connection, and on
     /// the next connection no input stream is open until the server sends a fresh start.
     /// </summary>
     /// <returns>A task that completes once the reset has been applied.</returns>

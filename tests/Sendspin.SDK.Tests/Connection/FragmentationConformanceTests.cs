@@ -6,10 +6,11 @@ using Sendspin.SDK.Connection.Noise;
 namespace Sendspin.SDK.Tests.Connection;
 
 /// <summary>
-/// The spec's malformed fragment sequences (messaging.md: a fragment-end frame with no
+/// The spec's malformed fragment sequences (messaging.md: a last fragment with no
 /// fragmented message in flight, a non-fragment frame while a fragmented message is in
-/// flight, and an <c>orig_type</c> of 2 or 3 — the receiver MUST close on each), plus
-/// the local pre-first-message reassembly cap.
+/// flight, and an <c>orig_type</c> of 1 — the receiver MUST close on each), plus
+/// the local pre-first-message reassembly cap. Fragments are binary ID 1 with a flags byte:
+/// bit 1 (<c>FragmentFlagFirst</c>) opens, bit 0 (<c>FragmentFlagLast</c>) closes.
 /// </summary>
 public class FragmentationConformanceTests
 {
@@ -30,7 +31,7 @@ public class FragmentationConformanceTests
         var server = CompleteHandshake(framing, identity);
 
         // Open a reassembly.
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, 0xDE, 0xAD]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, 0xDE, 0xAD]).FatalReason);
 
         // Spec: a non-fragment frame received while a fragmented message is in flight
         // is a malformed sequence; the receiver MUST close.
@@ -38,36 +39,39 @@ public class FragmentationConformanceTests
         Assert.NotNull(result.FatalReason);
         Assert.Null(result.Text);
 
-        // The abandoned reassembly must not survive: on the next connection a
-        // fragment-more opens a NEW message, and the reassembled bytes contain
-        // nothing from the abandoned buffer.
+        // The abandoned reassembly must not survive: on the next connection an opening
+        // fragment starts a NEW message, and the reassembled bytes contain nothing from
+        // the abandoned buffer.
         framing.Reset();
         server = CompleteHandshake(framing, identity);
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, 0x01, 0x02]).FatalReason);
-        var reassembled = Feed(framing, server, [NoiseConstants.MessageTypeFragmentEnd, 0x03]);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, 0x01, 0x02]).FatalReason);
+        var reassembled = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 0x03]);
         Assert.Null(reassembled.FatalReason);
         Assert.Equal(new byte[] { 8, 0x01, 0x02, 0x03 }, reassembled.Binary!.Value.ToArray());
     }
 
     [Theory]
-    [InlineData(NoiseConstants.MessageTypeFragmentMore)]
-    [InlineData(NoiseConstants.MessageTypeFragmentEnd)]
-    public void OpeningFragment_WithFragmentOrigType_IsFatal_AndSurfacesNothing(byte origType)
+    [InlineData((byte)1)]  // the fragment id itself
+    [InlineData((byte)2)]  // reserved
+    [InlineData((byte)3)]  // reserved
+    public void OpeningFragment_WithReservedOrigType_IsFatal_AndSurfacesNothing(byte origType)
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity);
         var server = CompleteHandshake(framing, identity);
 
-        // Spec: an orig_type of 2 or 3 is a malformed sequence.
-        var opening = Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, origType, 0xAA]);
+        // Spec: orig_type must be a real message type; the fragment id (1) and the reserved ids
+        // (2, 3) are malformed and MUST close the connection without surfacing anything.
+        var opening = Feed(framing, server,
+            [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, origType, 0xAA]);
         Assert.NotNull(opening.FatalReason);
         Assert.Null(opening.Text);
         Assert.Null(opening.Binary);
 
         // Even if the peer pushes the rest of the sequence, nothing may surface to
         // BinaryMessageParser (the pre-fix defect dispatched [origType][payload] as
-        // an application binary message at fragment-end).
-        var end = Feed(framing, server, [NoiseConstants.MessageTypeFragmentEnd, 0xBB]);
+        // an application binary message at the last fragment).
+        var end = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 0xBB]);
         Assert.Null(end.Text);
         Assert.Null(end.Binary);
     }
@@ -79,9 +83,72 @@ public class FragmentationConformanceTests
         var framing = new NoiseWireFraming(identity);
         var server = CompleteHandshake(framing, identity);
 
-        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragmentEnd, 1, 2, 3]);
+        // A last fragment (bit 0 set, bit 1 clear) with no message in flight.
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 1, 2, 3]);
 
         Assert.NotNull(result.FatalReason);
+    }
+
+    [Fact]
+    public void OpeningFragment_MissingOrigType_IsFatal()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // An opening fragment ([1][flags]) with no orig_type byte and no data.
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst]);
+
+        Assert.NotNull(result.FatalReason);
+    }
+
+    [Fact]
+    public void Fragment_WithReservedFlagBits_IsFatal()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // Bits 2-7 of the flags byte MUST be zero; one is set here (0x04) alongside the first bit.
+        const byte flagsWithReservedBit = NoiseConstants.FragmentFlagFirst | 0x04;
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, flagsWithReservedBit, 8, 0xAA]);
+
+        Assert.NotNull(result.FatalReason);
+    }
+
+    [Theory]
+    [InlineData((byte)2)]
+    [InlineData((byte)3)]
+    public void ReservedBinaryId_IsSilentlyDiscarded_NotSurfaced(byte reservedId)
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // IDs 2 and 3 were the pre-1.0 fragment types; now reserved. A reserved ID is a silent
+        // failure like a malformed fragment — the connection closes and nothing is surfaced to
+        // BinaryMessageReceived, rather than being dispatched as an application binary message.
+        var result = Feed(framing, server, [reservedId, 0xAA, 0xBB]);
+
+        Assert.NotNull(result.FatalReason);
+        Assert.Null(result.Text);
+        Assert.Null(result.Binary);
+    }
+
+    [Fact]
+    public void ThreeFragments_FirstMiddleLast_Reassemble()
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = CompleteHandshake(framing, identity);
+
+        // orig_type 8 (artwork), split across an opening, one middle (neither bit), and a last.
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, 0x01, 0x02]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, 0x03, 0x04]).FatalReason);
+        var reassembled = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagLast, 0x05]);
+
+        Assert.Null(reassembled.FatalReason);
+        Assert.Equal(new byte[] { 8, 0x01, 0x02, 0x03, 0x04, 0x05 }, reassembled.Binary!.Value.ToArray());
     }
 
     [Fact]
@@ -103,14 +170,14 @@ public class FragmentationConformanceTests
         // The opening fragment spends a byte on orig_type, which is not counted toward the
         // reassembled size, so every frame here contributes exactly perFrame bytes.
         byte[] chunk = new byte[perFrame];
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. chunk]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, .. chunk]).FatalReason);
         for (int i = 0; i < 3; i++)
         {
-            Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+            Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, .. chunk]).FatalReason);
         }
 
         // Landing exactly on the cap is still legal; the very next byte is not.
-        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 0x00]);
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, 0x00]);
         Assert.Equal(CapExceededFatal, result.FatalReason);
     }
 
@@ -165,12 +232,12 @@ public class FragmentationConformanceTests
         // value is pinned by Reassembly_PastPreFirstMessageCap_...; the subject here is only
         // which cap is in force, so 3 x 50 KB is enough to cross the tight one.
         byte[] chunk = new byte[50_000];
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. chunk]).FatalReason);
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, .. chunk]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, .. chunk]).FatalReason);
 
         Assert.Equal(
             CapExceededFatal,
-            Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+            Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, .. chunk]).FatalReason);
     }
 
     [Fact]
@@ -201,12 +268,12 @@ public class FragmentationConformanceTests
         // Still before the first application message: the tight cap must apply, or a
         // hostile peer could lift it just by triggering a re-handshake.
         byte[] chunk = new byte[50_000];
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. chunk]).FatalReason);
-        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, .. chunk]).FatalReason);
+        Assert.Null(Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, .. chunk]).FatalReason);
 
         Assert.Equal(
             CapExceededFatal,
-            Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]).FatalReason);
+            Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, .. chunk]).FatalReason);
     }
 
     [Fact]
@@ -225,15 +292,15 @@ public class FragmentationConformanceTests
         // just ran a different number of times and both assertions still held (#110).
         const long ceiling = 64L * 1024 * 1024;
 
-        int dataPerFrame = NoiseConstants.MaxTransportPlaintext - 1; // continuation: [2][data]
+        int dataPerFrame = NoiseConstants.MaxTransportPlaintext - 2; // continuation: [1][flags][data]
         byte[] chunk = new byte[dataPerFrame];
-        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, 8, .. new byte[dataPerFrame - 1]]);
+        var result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, NoiseConstants.FragmentFlagFirst, 8, .. new byte[dataPerFrame - 1]]);
         long buffered = dataPerFrame - 1;
         while (result.FatalReason is null)
         {
             Assert.True(buffered <= ceiling,
                 "reassembly accepted more than the 64 MiB ceiling without a fatal");
-            result = Feed(framing, server, [NoiseConstants.MessageTypeFragmentMore, .. chunk]);
+            result = Feed(framing, server, [NoiseConstants.MessageTypeFragment, 0, .. chunk]);
             buffered += dataPerFrame;
         }
 

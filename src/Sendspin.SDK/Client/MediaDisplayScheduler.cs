@@ -48,7 +48,7 @@ internal enum ScheduledStateRole
 /// <para>
 /// The translation is <see cref="IClockSynchronizer.ServerToClientTimeUncompensated"/>, the clock
 /// offset alone: the role specs say to translate "using the offset computed from clock
-/// synchronization", and only the player role goes on to subtract <c>static_delay_ms</c>. That
+/// synchronization", and only the player role goes on to subtract <c>output_delay_ms</c>. That
 /// delay compensates for hardware past the audio port, so applying it here would show every
 /// visual ahead of the sound it belongs to by up to the 5 s the setting allows.
 /// </para>

@@ -148,7 +148,7 @@ public sealed class ClientCapabilities
     /// <para>
     /// Default (200 ms) is a conservative LAN starting point. Tune per device/network: report the
     /// lowest value that reliably avoids truncation for the lowest latency. Do NOT include
-    /// <c>static_delay_ms</c> here — the server applies that separately — and do NOT include the
+    /// <c>output_delay_ms</c> here — the server applies that separately — and do NOT include the
     /// audio backend's output latency either: the SDK adds that itself, from
     /// <see cref="ExpectedOutputLatencyMs"/> until a player has measured one and from the measured
     /// value after, and re-reports when it changes.
@@ -163,7 +163,7 @@ public sealed class ClientCapabilities
     /// <para>
     /// Default (<see cref="PlayerBufferCapacity.DefaultMinBufferMilliseconds"/>, 150 ms) is a
     /// conservative LAN starting point. Tune per network: larger for remote or high-latency
-    /// links, smaller for stable LAN. Do NOT include <c>static_delay_ms</c> here, nor the audio
+    /// links, smaller for stable LAN. Do NOT include <c>output_delay_ms</c> here, nor the audio
     /// backend's output latency: the SDK adds that to what it reports (see
     /// <see cref="ExpectedOutputLatencyMs"/>), while this value alone bounds the readiness gate
     /// below. For a live source the reported figure is the whole lead the server gives, so a
@@ -191,9 +191,8 @@ public sealed class ClientCapabilities
 
     /// <summary>
     /// Whether this client accepts the server's output-delay command. When true, the client
-    /// advertises 'set_static_delay' in the client/state player object and applies inbound
-    /// commands to its output delay — both that spelling and the <c>set_output_delay</c> one
-    /// spec 168a677 renamed it to. Default is true.
+    /// advertises <c>set_output_delay</c> in the client/state player object and applies inbound
+    /// <c>set_output_delay</c> commands to its output delay. Default is true.
     /// </summary>
     public bool SupportsSetOutputDelay { get; set; } = true;
 
@@ -365,6 +364,41 @@ public sealed class ClientCapabilities
         }
 
         VisualizerRoleSupport?.Validate();
+    }
+
+    /// <summary>
+    /// Rejects a custom role advertised without an explicit version. The spec (template.md)
+    /// requires an application-specific role — one whose name is prefixed with <c>_</c> — to
+    /// carry a <c>@v…</c> version whenever it is advertised, so <c>_myrole</c> is invalid while
+    /// <c>_myrole@v1</c> is accepted. Standard roles are unaffected.
+    /// </summary>
+    /// <remarks>
+    /// Local configuration checked once at construction, where the app can still fix it: a
+    /// versionless custom role is a client deviation the server closes the connection over, so
+    /// this fails fast rather than on the wire.
+    /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// A <see cref="Roles"/> entry begins with <c>_</c> but carries no <c>@v…</c> version.
+    /// </exception>
+    internal void ValidateCustomRoleVersions()
+    {
+        foreach (var role in Roles)
+        {
+            if (role.StartsWith('_') && !HasExplicitVersion(role))
+            {
+                throw new ArgumentException(
+                    $"ClientCapabilities.Roles advertises custom role '{role}' without an explicit "
+                    + "version; an application-specific role must be named '<name>@v<version>' "
+                    + "(e.g. '_myrole@v1').",
+                    nameof(Roles));
+            }
+        }
+    }
+
+    private static bool HasExplicitVersion(string role)
+    {
+        int at = role.IndexOf("@v", StringComparison.Ordinal);
+        return at >= 0 && at + 2 < role.Length && char.IsDigit(role[at + 2]);
     }
 
     /// <summary>

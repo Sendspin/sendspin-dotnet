@@ -45,10 +45,11 @@ public class StreamLifecycleOrderingTests
 
     private static byte[] AudioFrame(long timestamp, params byte[] audio)
     {
-        var buf = new byte[9 + audio.Length];
+        // Player audio chunk header: type + timestamp + send_ahead (13 bytes), audio from byte 13.
+        var buf = new byte[13 + audio.Length];
         buf[0] = BinaryMessageTypes.PlayerAudio0;
         BinaryPrimitives.WriteInt64BigEndian(buf.AsSpan(1, 8), timestamp);
-        audio.CopyTo(buf, 9);
+        audio.CopyTo(buf, 13);
         return buf;
     }
 

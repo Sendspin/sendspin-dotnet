@@ -126,7 +126,7 @@ public class SendspinClientServicePinPairingTests
         Assert.Equal(length, emittedPairingCode!.Length);
 
         // Server runs CPace as initiator with the operator-entered pairing code.
-        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes(emittedPairingCode), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             ServerPairAuth(B64(server.PublicShare)));
@@ -141,9 +141,19 @@ public class SendspinClientServicePinPairingTests
 
         var confirm = Last<ClientPairConfirmMessage>(conn);
         Assert.True(server.Verify(B64(confirm.Payload.ClientKc)));
-        // Dynamic pairing code: client reveals nonce_B, and it opens the earlier commit.
-        Assert.NotNull(confirm.Payload.NonceB);
-        Assert.Equal(commitB, PairingCodes.CommitB(B64(confirm.Payload.NonceB!)));
+        // Dynamic pairing code: client wraps nonce_B under the nonce-wrap key; the server
+        // unwraps it with the shared ISK and it opens the earlier commit.
+        Assert.NotNull(confirm.Payload.WrappedNonceB);
+        byte[] wrappedNonce = B64(confirm.Payload.WrappedNonceB!);
+        byte[] kNonceWrap = System.Security.Cryptography.SHA256.HashData(
+            [.. "sendspin-pair-nonce-wrap-v1"u8.ToArray(), .. sid, .. server.Isk]);
+        byte[] nonceB = new byte[32];
+        using (var nonceCipher = new System.Security.Cryptography.ChaCha20Poly1305(kNonceWrap))
+        {
+            nonceCipher.Decrypt(new byte[12], wrappedNonce[..32], wrappedNonce[32..], nonceB);
+        }
+
+        Assert.Equal(commitB, PairingCodes.CommitB(nonceB));
 
         // Finalize carries a wrapped PSK the server unwraps with the shared ISK.
         var finalize = Last<ClientPairFinalizeMessage>(conn);
@@ -189,7 +199,7 @@ public class SendspinClientServicePinPairingTests
         var init = Last<ClientPairInitMessage>(conn);
         Assert.Null(init.Payload.CommitB);
 
-        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("12345678"), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             ServerPairAuth(B64(server.PublicShare)));
@@ -200,7 +210,7 @@ public class SendspinClientServicePinPairingTests
 
         var confirm = Last<ClientPairConfirmMessage>(conn);
         Assert.True(server.Verify(B64(confirm.Payload.ClientKc)));
-        Assert.Null(confirm.Payload.NonceB); // no reveal in static pairing code
+        Assert.Null(confirm.Payload.WrappedNonceB); // no reveal in static pairing code
         Assert.NotNull(Last<ClientPairFinalizeMessage>(conn).Payload.WrappedPsk);
     }
 
@@ -220,7 +230,7 @@ public class SendspinClientServicePinPairingTests
         conn.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pairing_code"}}}""");
 
-        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("12345678"), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             ServerPairAuth(B64(server.PublicShare)));
@@ -268,7 +278,7 @@ public class SendspinClientServicePinPairingTests
         conn.RaiseTextMessageReceived(
             """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pairing_code"}}}""");
         // Server runs CPace with the WRONG pin, so its confirmation tag won't verify.
-        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1);
+        byte[] sid = PairingCodes.BuildSid(HandshakeHash, 1, 1);
         var server = CPace.Start(CPaceRole.Initiator, Encoding.ASCII.GetBytes("00000000"), sid, ad: PairingCodes.AdServer);
         conn.RaiseTextMessageReceived(
             ServerPairAuth(B64(server.PublicShare)));

@@ -42,19 +42,50 @@ public class PairingCodeTests
     [Fact]
     public void BuildSid_MatchesReference()
     {
-        var v = Kats.GetProperty("sid");
-        Assert.Equal(Hex(v.GetProperty("sid").GetString()!),
-            PairingCodes.BuildSid(Hex(v.GetProperty("h").GetString()!), (uint)v.GetProperty("counter").GetInt32()));
+        // Vectors: label || h || u32be(pairing_index) || u32be(round). Cross-checked against
+        // aiosendspin tests/noise/test_pairing.py::test_pake_sid_known_answer (commit 4ed7c45,
+        // spec #237 / aiosendspin #415). The SDK emits round 1 for both static and dynamic (no
+        // client/pair-retry yet); the round-3 vector pins that BuildSid binds the round anyway.
+        foreach (var v in Kats.GetProperty("sid").EnumerateArray())
+        {
+            Assert.Equal(
+                Hex(v.GetProperty("sid").GetString()!),
+                PairingCodes.BuildSid(
+                    Hex(v.GetProperty("h").GetString()!),
+                    (uint)v.GetProperty("pairing_index").GetInt32(),
+                    (uint)v.GetProperty("round").GetInt32()));
+        }
     }
 
     [Fact]
     public void WrapPsk_MatchesReference()
     {
+        // Provenance: the wrap KATs use a spec-current round-aware sid whose bytes match
+        // aiosendspin test_pake_sid_known_answer (index 2, round 1). The wrapped value is the
+        // reference AEAD seal — AEAD(SHA-256(label || sid || ISK), 12-byte zero nonce) over the
+        // 32-byte plaintext, 48-byte ciphertext+tag — from aiosendspin noise/pairing.py
+        // (_wrap_key + _wrap_aead), computed by the same generator used for the sid and nonce KATs.
         var v = Kats.GetProperty("wrap_psk");
         byte[] wrapped = PairingCodes.WrapPsk(
             Hex(v.GetProperty("sid").GetString()!),
             Hex(v.GetProperty("isk").GetString()!),
             Hex(v.GetProperty("psk").GetString()!),
+            NoiseCipherSuite.ChaChaPoly);
+        Assert.Equal(Hex(v.GetProperty("wrapped").GetString()!), wrapped);
+    }
+
+    [Fact]
+    public void WrapNonceB_MatchesReference()
+    {
+        // wrap_psk and wrap_nonce_B share the same round-aware sid and ISK, so this vector differs
+        // from wrap_psk only by the label (sendspin-pair-nonce-wrap-v1, spec #155 / aiosendspin
+        // #344) and the plaintext. Both are the reference AEAD seal; see WrapPsk_MatchesReference
+        // for provenance.
+        var v = Kats.GetProperty("wrap_nonce_B");
+        byte[] wrapped = PairingCodes.WrapNonceB(
+            Hex(v.GetProperty("sid").GetString()!),
+            Hex(v.GetProperty("isk").GetString()!),
+            Hex(v.GetProperty("nonce_B").GetString()!),
             NoiseCipherSuite.ChaChaPoly);
         Assert.Equal(Hex(v.GetProperty("wrapped").GetString()!), wrapped);
     }
@@ -70,7 +101,7 @@ public class PairingCodeTests
         System.Security.Cryptography.RandomNumberGenerator.Fill(nonceB);
         const int length = 6;
         string pin = PairingCodes.DerivePairingCode(h, nonceA, nonceB, length);
-        byte[] sid = PairingCodes.BuildSid(h, 1);
+        byte[] sid = PairingCodes.BuildSid(h, 1, 1);
         byte[] prs = Encoding.ASCII.GetBytes(pin);
 
         var server = CPace.Start(CPaceRole.Initiator, prs, sid, ad: PairingCodes.AdServer);

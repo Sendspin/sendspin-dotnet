@@ -64,7 +64,7 @@ public class PairingWindowEndToEndTests
         // The PAKE round. sid is built exactly as HandleServerPairAuth builds it (same
         // handshake hash, same pairing_index), and CPace.Start(CPaceRole.Initiator, ...) is
         // the real SDK type in the server's role -- not a reimplementation of its maths.
-        byte[] sid = PairingCodes.BuildSid(server.HandshakeHash!, (uint)init.Payload.PairingIndex);
+        byte[] sid = PairingCodes.BuildSid(server.HandshakeHash!, (uint)init.Payload.PairingIndex, 1);
         var serverPake = CPace.Start(
             CPaceRole.Initiator, Encoding.ASCII.GetBytes(StaticPairingCode), sid, ad: PairingCodes.AdServer);
 

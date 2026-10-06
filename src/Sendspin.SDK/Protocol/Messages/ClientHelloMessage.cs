@@ -30,7 +30,6 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
         DeviceInfo? deviceInfo = null,
         VisualizerSupport? visualizerSupport = null,
         SourceSupport? sourceSupport = null,
-        string? trustLevel = null,
         UnpairedAccess? unpairedAccess = null,
         Dictionary<string, PairMethodDescriptor>? supportedPairMethods = null)
     {
@@ -39,7 +38,6 @@ public sealed class ClientHelloMessage : IMessageWithPayload<ClientHelloPayload>
             Payload = new ClientHelloPayload
             {
                 Name = name,
-                TrustLevel = trustLevel,
                 UnpairedAccess = unpairedAccess,
                 SupportedPairMethods = supportedPairMethods,
                 SupportedRoles = supportedRoles,
@@ -62,14 +60,6 @@ public sealed class ClientHelloPayload
     /// </summary>
     [JsonPropertyName("name")]
     required public string Name { get; init; }
-
-    /// <summary>
-    /// The trust level the client extends to this server ('user' when a pairing record
-    /// exists, 'none' otherwise). Sent only under the encrypted protocol.
-    /// </summary>
-    [JsonPropertyName("trust_level")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? TrustLevel { get; init; }
 
     /// <summary>
     /// The pairing methods this client currently offers, keyed by method identifier
@@ -159,12 +149,6 @@ public sealed class PlayerSupport
                     Codec = "opus", SampleRate = 48000, Channels = 2, Bitrate = 256,
                 },
             });
-
-    /// <summary>
-    /// Supported player commands.
-    /// </summary>
-    [JsonPropertyName("supported_commands")]
-    public List<string> SupportedCommands { get; init; } = new() { "volume", "mute" };
 }
 
 /// <summary>

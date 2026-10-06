@@ -27,11 +27,22 @@ internal static class NoiseConstants
     /// <summary>Binary message type for a JSON message body (UTF-8).</summary>
     public const byte MessageTypeJsonBody = 0;
 
-    /// <summary>Binary message type for a non-final fragment frame.</summary>
-    public const byte MessageTypeFragmentMore = 2;
+    /// <summary>
+    /// Binary message ID for a fragment frame (spec messaging.md). A fragmented message is a run
+    /// of these: the first frame is <c>[1][flags][orig_type][data]</c> and each later frame
+    /// <c>[1][flags][data]</c>. IDs 2 and 3 (the pre-1.0 fragment-more / fragment-end types) are
+    /// reserved and no longer sent or accepted.
+    /// </summary>
+    public const byte MessageTypeFragment = 1;
 
-    /// <summary>Binary message type for the final fragment frame.</summary>
-    public const byte MessageTypeFragmentEnd = 3;
+    /// <summary>Fragment flags bit 1: set on the first fragment of a message.</summary>
+    public const byte FragmentFlagFirst = 0b10;
+
+    /// <summary>Fragment flags bit 0: set on the last fragment of a message.</summary>
+    public const byte FragmentFlagLast = 0b01;
+
+    /// <summary>Fragment flags bits 2-7: reserved and MUST be zero.</summary>
+    public const byte FragmentFlagsReserved = 0b1111_1100;
 
     /// <summary>
     /// Bound on a reassembled fragmented message, protecting against a peer

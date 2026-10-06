@@ -232,7 +232,7 @@ public class SourceStreamPipelineTests
     [Fact]
     public async Task FailedCaptureStart_AfterAnnounce_EndsTheHalfOpenStream_AndStaysRestartable()
     {
-        // client_stream/start hits the wire before the capture device opens, so a device
+        // client-stream/start hits the wire before the capture device opens, so a device
         // failure leaves a half-open stream the server believes exists. The rollback must
         // close it — and still leave the pipeline restartable.
         var capture = new FailingStartCaptureDevice { FailNextStart = true };
@@ -307,11 +307,11 @@ public class SourceStreamPipelineTests
             bool park;
             lock (wire)
             {
-                park = m is ClientStreamStartMessage && !wire.Contains("client_stream/start");
+                park = m is ClientStreamStartMessage && !wire.Contains("client-stream/start");
                 wire.Add(m switch
                 {
-                    ClientStreamStartMessage => "client_stream/start",
-                    ClientStreamEndMessage => "client_stream/end",
+                    ClientStreamStartMessage => "client-stream/start",
+                    ClientStreamEndMessage => "client-stream/end",
                     _ => m.GetType().Name,
                 });
             }
@@ -327,7 +327,7 @@ public class SourceStreamPipelineTests
         Task startTask = pipeline.HandleCommandAsync("start");
         await startSendEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        // The stop lands while client_stream/start is still in flight. The server's
+        // The stop lands while client-stream/start is still in flight. The server's
         // last word is stop, so it must not be lost against the not-yet-open stream:
         // once the start completes, the stream comes straight back down.
         Task stopTask = pipeline.HandleCommandAsync("stop");
@@ -340,7 +340,7 @@ public class SourceStreamPipelineTests
         Assert.False(capture.Capturing);
         lock (wire)
         {
-            Assert.Equal(new[] { "client_stream/start", "client_stream/end" }, wire);
+            Assert.Equal(new[] { "client-stream/start", "client-stream/end" }, wire);
         }
     }
 
@@ -348,7 +348,7 @@ public class SourceStreamPipelineTests
     public async Task StartWhileAStopIsStillDraining_DoesNotOverlapSessions_AndEndPrecedesTheNextStart()
     {
         // A stop's core does real async work after flipping the flags: it drains the
-        // consumer before sending client_stream/end. A start arriving in that window must
+        // consumer before sending client-stream/end. A start arriving in that window must
         // not build a second encoder/consumer or announce a second session before the
         // first session's end has gone out — sessions must never overlap on the wire.
         var capture = new FakeCaptureDevice();

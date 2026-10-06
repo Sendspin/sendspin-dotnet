@@ -581,13 +581,13 @@ var capabilities = new ClientCapabilities
     // the server was asked to keep queued.
     MinBufferMs = 150,          // default: 150 ms
 
-    // Whether to accept the server's set_static_delay command (advertised in client/state).
+    // Whether to accept the server's set_output_delay command (advertised in client/state).
     SupportsSetOutputDelay = true,
 };
 ```
 
 Report the **lowest** values that reliably avoid truncation/underruns for your device and network —
-larger for remote or high-latency links, smaller for stable LAN. Do **not** fold `static_delay_ms`
+larger for remote or high-latency links, smaller for stable LAN. Do **not** fold `output_delay_ms`
 into these values; the server applies output delay separately. For empirical tuning, the audio
 pipeline exposes measured latency (e.g. `AudioPipeline.DetectedOutputLatencyMs`).
 
@@ -602,11 +602,11 @@ Debounce these updates yourself — report only sustained changes, not transient
 
 ### Persisting output delay across restarts
 
-`static_delay_ms` compensates for hardware delay beyond the audio port (external speakers,
+`output_delay_ms` compensates for hardware delay beyond the audio port (external speakers,
 amplifiers) and must persist across reboots and reconnections. Because the SDK is a library and
 cannot choose where to store it, implement `IOutputDelayStore` and pass it to the client. The SDK
 loads on connect (before the first `client/state`) and saves whenever the delay changes (via a
-`set_static_delay` command or a GroupSync offset):
+`set_output_delay` command or a GroupSync offset):
 
 To change the delay from the app (a calibration measurement, or a new audio output), pass it to
 `SendPlayerStateAsync(volume, muted, outputDelayMs)` — that applies it, persists it through the
@@ -615,10 +615,10 @@ removed merging, so every `client/state` carries the **full** state of each role
 includes and the SDK rebuilds the player object from its current values on every send. Nothing
 you omit from a call is dropped from the message.
 
-A server changes it with the `set_static_delay` command, which the SDK advertises in
-`client/state`'s player `supported_commands` (never in `client/hello` — the spec restricts
-`player@v1_support.supported_commands` to `volume` and `mute`, so `client/state` is the only
-place any conformant client can offer it). Set `ClientCapabilities.SupportsSetOutputDelay = false`
+A server changes it with the `set_output_delay` command, which the SDK advertises in
+`client/state`'s player `supported_commands` (never in `client/hello` — spec PR #177 removed
+`player@v1_support.supported_commands` entirely, so `client/state` is the only place a conformant
+client advertises the commands it accepts). Set `ClientCapabilities.SupportsSetOutputDelay = false`
 to decline it.
 
 > `IClockSynchronizer.OutputDelayMs` is a `double` over −5000…5000: fractional values come from
@@ -872,10 +872,10 @@ await using var client = SendspinClientService.CreateForDial(
 
 Streaming is **server-driven**: the source never streams until the server sends
 `server/command { source: { command: "start" } }`. On start the SDK sends
-`client_stream/start` (announcing the capture format), then encodes each captured
+`client-stream/start` (announcing the capture format), then encodes each captured
 buffer and streams it as a binary type-12 chunk timestamped in the **server** time
 domain (local capture time mapped through the clock filter's offset+drift). On `stop`,
-role deactivation, or disposal it sends `client_stream/end` and stops capturing.
+role deactivation, or disposal it sends `client-stream/end` and stops capturing.
 
 **Trust required.** A source streams potentially sensitive audio, so `source@v1` MUST
 run on a paired (`user`-trust) connection. The SDK enforces this in two places, because
