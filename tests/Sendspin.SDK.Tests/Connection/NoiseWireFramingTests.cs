@@ -253,6 +253,65 @@ public class NoiseWireFramingTests
     }
 
     /// <summary>
+    /// connection.md § Identities: <c>server_id</c> is the "base64url-encoded (no padding)
+    /// Curve25519 public keys ... 43 characters each". The decoder skips whitespace and ignores
+    /// the two spare bits of the last character, so several strings decode to one key; only the
+    /// canonical one may become the session's server id, because that string is what the pairing
+    /// record is keyed and compared by. Anything else is a client-side rejection of
+    /// <c>server/init</c>: a silent failure, before Noise message 1 is even read.
+    /// </summary>
+    [Theory]
+    [InlineData("newline")]
+    [InlineData("crlf")]
+    [InlineData("leading-tab")]
+    [InlineData("trailing-space")]
+    [InlineData("padding")]
+    [InlineData("trailing-bits")]
+    public void ServerInit_NonCanonicalServerId_IsFatal_AndSendsNothing(string variant)
+    {
+        var identity = SendspinIdentity.Generate();
+        var framing = new NoiseWireFraming(identity);
+        var server = new TestNoiseServer(identity.PublicKey, NoiseConstants.SentinelPsk.ToArray());
+        string serverId = NonCanonicalServerId(server.ServerId, variant);
+        Assert.NotEqual(server.ServerId, serverId);
+
+        framing.Start();
+        var result = framing.ProcessInbound(WireFrame.FromText(ServerInitText(serverId)));
+
+        // net10.0's decoder already throws on the spare bits; every other variant, and that one
+        // on net8.0, decodes to the server's real key and is caught only by the re-encode.
+        Assert.NotNull(result.FatalReason);
+        Assert.Null(result.FatalKind);
+        Assert.Null(result.Replies);
+        Assert.Null(framing.ServerId);
+    }
+
+    private static string ServerInitText(string serverId) =>
+        System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["type"] = "server/init",
+            ["payload"] = new Dictionary<string, object> { ["server_id"] = serverId, ["version"] = 1 },
+        });
+
+    private static string NonCanonicalServerId(string canonical, string variant)
+    {
+        const string Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        return variant switch
+        {
+            "newline" => canonical.Insert(10, "\n"),
+            "crlf" => canonical.Insert(10, "\r\n"),
+            "leading-tab" => "\t" + canonical,
+            "trailing-space" => canonical + " ",
+            "padding" => canonical + "=",
+
+            // 32 bytes fill 42 characters and four bits of the 43rd; a canonical encoding leaves
+            // its last two bits zero. Setting one names the same key with a different string.
+            "trailing-bits" => canonical[..^1] + Alphabet[Alphabet.IndexOf(canonical[^1]) | 1],
+            _ => throw new ArgumentOutOfRangeException(nameof(variant)),
+        };
+    }
+
+    /// <summary>
     /// connection.md § Sentinel Fallback: "The signal alone MUST NOT cause either side to remove
     /// or replace a record - records change only through pairing." Falling back is
     /// a decision about one handshake, so every record the client held before it survives it.

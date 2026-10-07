@@ -253,8 +253,17 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
         if (version != NoiseConstants.ProtocolVersion)
             return Fail($"unsupported server version {version}");
 
-        _serverId = payload.GetProperty("server_id").GetString()
+        string serverId = payload.GetProperty("server_id").GetString()
             ?? throw new FormatException("server_id missing");
+
+        // connection.md § Identities: the unpadded base64url of a 32-byte key, 43 characters.
+        // The decoder is laxer than that -- it skips whitespace, takes padding and, on net8.0,
+        // ignores the last character's two spare bits -- so several strings name one key. This
+        // string is what a pairing record is keyed and compared by, so only the canonical one
+        // is let through. The reason deliberately does not echo the rejected value.
+        if (Base64UrlText.Encode(SendspinIdentity.DecodePeerId(serverId)) != serverId)
+            return Fail("server_id is not a canonical base64url public key");
+        _serverId = serverId;
 
         // Prologue binds the exact wire bytes of both init messages.
         _serverInitBytes = frame.Payload.ToArray();
