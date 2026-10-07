@@ -902,11 +902,14 @@ public sealed class SendspinHostService : IAsyncDisposable
             // expected failure type to name — a throw here is a bug in our own teardown
             // and propagates to the fire-and-forget boundary in OnServerConnected, where
             // it is logged as the error it is rather than swallowed (#88 item 2).
+            //
+            // It never held the audio pipeline or the capture device — the admitted connection
+            // does — so it must not stop or close them on its way out (#311).
             if (client is not null && !registered)
             {
                 try
                 {
-                    await client.DisposeAsync();
+                    await client.DisposeAsync(ownsPipelines: false);
                 }
                 finally
                 {
@@ -1095,11 +1098,10 @@ public sealed class SendspinHostService : IAsyncDisposable
             // arbitration tests assert on it. Dispose afterward to actually release the
             // socket/TcpClient/receive-loop CTS (#143): by then _isOpen is already false, so
             // DisposeAsync's own DisconnectAsync(GoodbyeReasons.Shutdown) short-circuits without
-            // sending a second goodbye that would overwrite this one. Disposing the connection
-            // rather than the whole client keeps this to the socket only — arbitration eviction
-            // happens on every server reconnect, so widening this to also tear down the audio/
-            // source pipelines (as Client.DisposeAsync would) is a separate change, not asked for
-            // here.
+            // sending a second goodbye that would overwrite this one. The whole client is
+            // disposed, not just its connection, or every eviction would leave one subscribed to
+            // the shared pipeline for good — but without the pipelines, which belong to the
+            // connection that just displaced this one (#311).
             //
             // A pairing farewell goes out on the connection rather than through the client: the
             // client's only farewell is client/goodbye. Its per-disconnect bookkeeping still
@@ -1113,7 +1115,7 @@ public sealed class SendspinHostService : IAsyncDisposable
                 await existing.Client.DisconnectAsync(reason);
             }
 
-            await existing.Connection.DisposeAsync();
+            await existing.Client.DisposeAsync(ownsPipelines: false);
         }
         catch (Exception ex)
         {

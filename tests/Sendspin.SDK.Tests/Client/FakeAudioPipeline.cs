@@ -116,6 +116,12 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     public event EventHandler<AudioPipelineError>? ErrorOccurred;
     public event EventHandler<int>? OutputLatencyChanged;
 
+    /// <summary>
+    /// Clients currently subscribed to <see cref="StateChanged"/>. A client subscribes when it is
+    /// built and unsubscribes only when it is disposed, so this counts the live ones.
+    /// </summary>
+    public int SubscriberCount => StateChanged?.GetInvocationList().Length ?? 0;
+
     public void RaiseError(string message = "underrun") => ErrorOccurred?.Invoke(this, new AudioPipelineError(message));
 
     public void SetState(AudioPipelineState state)
