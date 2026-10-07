@@ -80,6 +80,10 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
     /// </summary>
     public void StartReceiving()
     {
+        // The subscriber may have refused and disposed the connection it was just handed.
+        if (_disposed)
+            return;
+
         if (_receiveLoop is not null)
             throw new InvalidOperationException("Receive loop already started");
 

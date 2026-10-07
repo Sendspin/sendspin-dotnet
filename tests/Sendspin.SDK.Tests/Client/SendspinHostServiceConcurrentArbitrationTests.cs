@@ -235,6 +235,41 @@ public class SendspinHostServiceConcurrentArbitrationTests
     }
 
     [Fact]
+    public async Task PeerThatHangsUpWhileItsConnectionIsBeingSetUp_IsDisposedWithoutWaitingOutTheProvisionalWindow()
+    {
+        // Holds the connection with its client built and the host not yet watching for the
+        // handshake's outcome. A close read in there was reported to nobody, and the connection
+        // then sat until the 30 s provisional timeout.
+        var pipeline = new FakeAudioPipeline();
+        using var settingUp = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        await using var host = await StartHostAsync(
+            new HookLoggerFactory(message =>
+            {
+                if (message.StartsWith("Connection state: Disconnected -> Handshaking", StringComparison.Ordinal))
+                {
+                    settingUp.Set();
+                    release.Wait(Timeout);
+                }
+            }),
+            pipeline);
+
+        using var peer = new System.Net.WebSockets.ClientWebSocket();
+        await peer.ConnectAsync(new Uri($"ws://127.0.0.1:{host.ListeningPort}/sendspin"), CancellationToken.None);
+        Assert.True(settingUp.Wait(Timeout), "the state-change log line the hold keys on never appeared");
+
+        peer.Abort();
+
+        // Long enough for a receive loop that is already running to read the close.
+        await Task.Delay(250);
+        release.Set();
+
+        // Well inside the provisional window, which disposes it too.
+        await WaitUntilAsync(() => pipeline.SubscriberCount == 0, "the connection to be disposed")
+            .WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
     public async Task ServerInsideArbitrationWhenTheHostStops_IsNotAdmitted()
     {
         using var hold = new ArbitrationHold();
