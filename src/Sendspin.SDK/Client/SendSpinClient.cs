@@ -2686,6 +2686,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         var payload = message.Payload;
+
+        // server/hello defines no active_roles; the property is only where HandleServerActivate
+        // records the grant. One sent here anyway must not become roles a first activate that
+        // omits the field then persists.
+        payload.ActiveRoles = [];
         LastServerHello = payload;
         _serverHelloReceived = true;
         ServerName = payload.Name;
