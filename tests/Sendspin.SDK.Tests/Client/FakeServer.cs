@@ -64,6 +64,10 @@ internal class FakeServer : IAsyncDisposable
     /// <summary>Sends an encrypted application JSON message. Valid once the handshake completed.</summary>
     internal Task SendJsonAsync(string json) => SendEncryptedAsync(json);
 
+    /// <summary>Sends a binary frame as given, bypassing the Noise transport — what a desynchronised peer puts on the wire.</summary>
+    internal Task SendRawBinaryAsync(byte[] frame) =>
+        _ws.SendAsync(frame, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
+
     /// <summary>Returns the client/goodbye reason, or null if none arrives before the timeout.</summary>
     internal async Task<string?> WaitForGoodbyeAsync(TimeSpan timeout)
     {
