@@ -290,7 +290,7 @@ public class NoiseWireFramingTests
         System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["type"] = "server/init",
-            ["payload"] = new Dictionary<string, object> { ["server_id"] = serverId, ["version"] = 1 },
+            ["payload"] = new Dictionary<string, object> { ["server_id"] = serverId, ["version"] = NoiseConstants.ProtocolVersion },
         });
 
     private static string NonCanonicalServerId(string canonical, string variant)
