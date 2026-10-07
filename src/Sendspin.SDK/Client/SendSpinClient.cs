@@ -101,6 +101,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // it to persist or remove. Null outside that window.
     private List<string>? _activeRolesBeforeRekey;
 
+    // A client/state was dropped while a re-handshake awaited its server/activate (see
+    // AwaitingActivateAfterRekey); that activate sends the full state in its place.
+    private bool _clientStateWithheldForRekey;
+
     // format from the current pairing activation, validated on receipt. Null when the
     // activation is not dynamic_pairing_code.
     private string? _activationPairingCodeFormat;
@@ -840,6 +844,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private Task SendAsync<T>(T message, CancellationToken cancellationToken = default)
         where T : IMessage
     {
+        if (AwaitingActivateAfterRekey)
+        {
+            // Dropped like the pairing window's, and for the same reasons. Nothing is exempt:
+            // the handshake reply is the connection's, and neither hello is re-sent.
+            if (message is ClientStateMessage)
+            {
+                _clientStateWithheldForRekey = true;
+            }
+
+            _logger.LogDebug(
+                "Re-handshake awaiting server/activate; dropping {Type}", message.GetType().Name);
+            return Task.CompletedTask;
+        }
+
         if (_pairingActivationActive && !IsAdmissibleDuringPairing(message))
         {
             _logger.LogDebug(
@@ -853,6 +871,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>Binary counterpart of <see cref="SendAsync{T}"/>: source audio, never a pairing message.</summary>
     private Task SendBinaryAsync(ReadOnlyMemory<byte> data)
     {
+        if (AwaitingActivateAfterRekey)
+        {
+            _logger.LogDebug("Re-handshake awaiting server/activate; dropping a binary frame");
+            return Task.CompletedTask;
+        }
+
         if (_pairingActivationActive)
         {
             // A pairing activate that omits active_roles leaves the prior roles standing, so a
@@ -2595,6 +2619,37 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </remarks>
     private bool AwaitingActivate => LastServerActivate is null;
 
+    /// <summary>
+    /// The outbound counterpart of <see cref="AwaitingActivate"/> for an in-band re-handshake:
+    /// the session has been re-keyed and its <c>server/activate</c> has not been admitted yet,
+    /// so nothing may be sent.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// connection.md, Re-handshake: "The server MUST NOT start new application messages after
+    /// sending Noise message 1, nor the client after receiving it, except for the handshake and
+    /// <c>server/activate</c>. This restriction ends when the server sends, or the client
+    /// receives, the new <c>server/activate</c>." The framing swaps keys as it writes the reply,
+    /// so without this a time probe or a state update sent in the gap travels under the new keys
+    /// ahead of that activate.
+    /// </para>
+    /// <para>
+    /// The gap has two halves. Until the next message arrives the swap shows only as a
+    /// handshake hash <see cref="DetectSessionRekey"/> has not seen; from that message on, as
+    /// the grant it cleared. A connection's own handshake is not this window, and its
+    /// <c>client/hello</c> has to go out.
+    /// </para>
+    /// <para>
+    /// A send already past this check when the reply is written still follows it under the new
+    /// keys. Closing that would mean deciding under the connection's send lock; it is a few
+    /// instructions wide against a window the server keeps open for milliseconds.
+    /// </para>
+    /// </remarks>
+    private bool AwaitingActivateAfterRekey =>
+        _activateReceived
+        && (LastServerActivate is null
+            || (_session.HandshakeHash is { } hash && !hash.Span.SequenceEqual(_lastHandshakeHash)));
+
     private void OnTextMessageReceived(object? sender, TextMessageReceivedEventArgs e)
     {
         var json = e.Json;
@@ -3055,6 +3110,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // clock has yet to converge — the first-convergence branch in ApplyBestSample,
             // and the latch set inside SendInitialClientStateAsync before its first await
             // keeps any race between them from double-sending.
+            bool stateWithheldForRekey = _clientStateWithheldForRekey;
+            _clientStateWithheldForRekey = false;
+
             if (_initialClientStateHeldForPairing)
             {
                 _initialClientStateHeldForPairing = false;
@@ -3063,11 +3121,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     SendOrDeferInitialClientState();
                 }
             }
-            else if (leavingPairing && _initialClientStateSent)
+            else if ((leavingPairing || stateWithheldForRekey) && _initialClientStateSent)
             {
                 // Recovers everything the window dropped. State is last-write-wins, so one full
                 // report of the current values restores the server's view — a volume the app
                 // changed mid-window, an output delay, an availability flip — without a queue.
+                // The window is a pairing activation, or a re-handshake that dropped a
+                // client/state while it awaited this activate.
                 // Skipped when the initial state has yet to go out: the branch above owns that
                 // case, and a state message before it would become the connection's "initial".
                 ResendClientStateAfterPairingAsync().SafeFireAndForget(_logger);
@@ -4238,6 +4298,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // clock that reports unconverged after reset the two now agree).
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
+        _clientStateWithheldForRekey = false;
         _loggedDisplayDropWhileUnavailable = false;
 
         // Role-state readiness is per connection too (spec PR #204): the new server has received
@@ -4637,10 +4698,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // the transport builds them, so the rule is restated rather than inherited: the
         // reference server stops reading the socket during a pairing attempt and treats the
         // first frame it reads afterwards as the next pairing message, so a probe sent into
-        // that window aborts the attempt as a protocol error.
-        if (_pairingActivationActive)
+        // that window aborts the attempt as a protocol error. A re-handshake awaiting its
+        // activate holds probes too (see AwaitingActivateAfterRekey). Returning before the
+        // reply slot is filled is what keeps a probe that never went out from being matched
+        // to a later server/time.
+        if (_pairingActivationActive || AwaitingActivateAfterRekey)
         {
-            _logger.LogDebug("Pairing activation in effect; dropping ClientTimeMessage");
+            _logger.LogDebug("Pairing activation or re-handshake in effect; dropping ClientTimeMessage");
             return null;
         }
 
