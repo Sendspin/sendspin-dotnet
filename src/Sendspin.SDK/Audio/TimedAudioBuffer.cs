@@ -574,14 +574,20 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             // server's clock need not: a rebooted host restarts its monotonic clock near zero, and
             // a different host has another one altogether. Every chunk then sits "behind" the old
             // cursor and the check below would drop the whole stream, with nothing left to read
-            // and so nothing to re-anchor from. A server never opens a stream behind what it has
-            // already had played, so a first chunk that is means a new timeline: what is buffered
-            // belongs to the old one, and playback starts over on this chunk's own schedule.
+            // and so nothing to re-anchor from.
+            //
+            // How far behind is what tells the two apart. A packet that was merely slow is late
+            // by milliseconds and is dropped below like any other; another clock is out by far
+            // more. The line is the re-anchor threshold, which is already where a forward step
+            // in the timeline stops being corrected and becomes a restart. Past it, what is
+            // buffered belongs to the old timeline and playback starts over on this chunk's own
+            // schedule.
             if (_awaitingFirstChunkAfterReconnect)
             {
                 _awaitingFirstChunkAfterReconnect = false;
 
-                if (_playbackStarted && _readCursorValid && IsChunkTooLate(serverTimestamp))
+                if (_playbackStarted && _readCursorValid
+                    && _readCursorServerTimestamp - serverTimestamp > _syncOptions.ReanchorThresholdMicroseconds)
                 {
                     _logger.LogWarning(
                         "[Buffer] First chunk after reconnect is {BehindMs:F0}ms behind the read cursor: " +

@@ -583,6 +583,45 @@ public class TimedAudioBufferCorrectionTests
         Assert.Equal(bufferedBefore, player.Buffer.BufferedMilliseconds);
     }
 
+    [Theory]
+    [InlineData(20_000)]  // a slow first packet
+    [InlineData(400_000)] // just inside the 500 ms re-anchor threshold
+    public void LateFirstChunkAfterReconnect_IsDroppedAndBufferedAudioKeepsPlaying(long behindMicroseconds)
+    {
+        // Late is not the same as another clock: on an ordinary reconnect with audio still
+        // buffered, a first chunk that is merely late costs that chunk, not the buffer.
+        using var player = new Player().Settled();
+        var alignmentBefore = player.TrueMisalignmentUs();
+        var bufferedBefore = player.Buffer.BufferedMilliseconds;
+
+        player.Buffer.NotifyReconnect();
+        player.WriteAt(player.CursorServerTimestamp - behindMicroseconds);
+
+        var stats = player.Buffer.GetStats();
+        Assert.Equal(1, stats.LateChunksDropped);
+        Assert.True(stats.IsPlaybackActive);
+        Assert.Equal(bufferedBefore, player.Buffer.BufferedMilliseconds);
+
+        player.Steps(50);
+        Assert.True(player.LastReadSamples > 0);
+        Assert.InRange(player.TrueMisalignmentUs() - alignmentBefore, -1_000, 1_000);
+        Assert.Equal(0, player.Buffer.GetStats().ReanchorCount);
+    }
+
+    [Fact]
+    public void FirstChunkAfterReconnect_JustPastTheReanchorThreshold_IsANewTimeline()
+    {
+        using var player = new Player().Settled();
+        player.Buffer.NotifyReconnect();
+
+        player.WriteAt(player.CursorServerTimestamp - 600_000);
+
+        var stats = player.Buffer.GetStats();
+        Assert.Equal(0, stats.LateChunksDropped);
+        Assert.False(stats.IsPlaybackActive);
+        Assert.Equal(ChunkMs, player.Buffer.BufferedMilliseconds);
+    }
+
     [Fact]
     public void ReadinessGate_FollowsNegotiatedMinBuffer_NotTheTargetDepth()
     {
