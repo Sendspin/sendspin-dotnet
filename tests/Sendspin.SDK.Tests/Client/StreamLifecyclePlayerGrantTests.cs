@@ -95,4 +95,35 @@ public class StreamLifecyclePlayerGrantTests
         Assert.Single(pipe.StartCalls);
         Assert.Equal(PlaybackState.Playing, client.CurrentGroup?.PlaybackState);
     }
+
+    /// <summary>
+    /// The grant that counts is the one in effect when the message arrived. Handlers run behind
+    /// whatever the pipeline is still doing, so a later <c>server/activate</c> must not
+    /// authorize a start that was sent while the player was inactive.
+    /// </summary>
+    [Fact]
+    public async Task StreamStart_ReceivedWhilePlayerIsInactive_IsNotAuthorizedByALaterActivate()
+    {
+        var (client, connection, pipe) = ClientWithRoles(clockConverged: true, "player@v1", "artwork@v1");
+        using var _c = client;
+        var held = pipe.HoldNextStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await pipe.StartEntered.WaitAsync(TimeSpan.FromSeconds(30));
+
+        // All delivered while the first start is still opening the device.
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["artwork@v1"]}}
+            """);
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1","artwork@v1"]}}
+            """);
+        connection.RaiseTextMessageReceived("""{"type":"stream/clear","payload":{"server_transmitted":1}}""");
+
+        held.SetResult();
+        await pipe.CallsCompleted(3).WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.Equal(new[] { "start", "stop", "clear" }, pipe.CallLog);
+    }
 }
