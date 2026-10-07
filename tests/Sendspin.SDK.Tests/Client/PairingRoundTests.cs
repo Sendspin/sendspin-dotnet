@@ -1,4 +1,5 @@
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Connection.Noise.Pairing;
 using Sendspin.SDK.Protocol.Messages;
@@ -61,7 +62,8 @@ public class PairingRoundTests
 
         h.SendServerPairAuth();
 
-        Assert.Equal("unauthorized", h.LastDisconnectReason);
+        Assert.Equal(ConnectionState.Disconnected, h.Client.ConnectionState);
+        Assert.Null(h.LastDisconnectReason);
         Assert.Single(h.SentOfType<ClientPairAuthMessage>());
         Assert.Equal(1, lockouts.GetFailures("dynamic_pairing_code"));
     }
@@ -77,7 +79,8 @@ public class PairingRoundTests
 
         h.SendServerPairAuth();
 
-        Assert.Equal("unauthorized", h.LastDisconnectReason);
+        Assert.Equal(ConnectionState.Disconnected, h.Client.ConnectionState);
+        Assert.Null(h.LastDisconnectReason);
         Assert.Single(h.SentOfType<ClientPairAuthMessage>());
     }
 
@@ -162,6 +165,7 @@ public class PairingRoundTests
         h.SendServerPairInit(withNonce: false);
 
         Assert.Equal(0, presented);
-        Assert.Equal("unauthorized", h.LastDisconnectReason);
+        Assert.Equal(ConnectionState.Disconnected, h.Client.ConnectionState);
+        Assert.Null(h.LastDisconnectReason);
     }
 }

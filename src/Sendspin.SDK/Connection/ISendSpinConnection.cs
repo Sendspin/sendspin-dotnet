@@ -32,6 +32,13 @@ public interface ISendspinConnection : IAsyncDisposable
     Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Closes the connection without sending <c>client/goodbye</c>, for the ends the spec
+    /// says carry no application-level message. The WebSocket is still closed normally.
+    /// </summary>
+    /// <param name="reason">Local reason, for the state change and the log only. Never sent.</param>
+    Task CloseWithoutGoodbyeAsync(string reason);
+
+    /// <summary>
     /// Sends a JSON protocol message.
     /// </summary>
     Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default) where T : IMessage;

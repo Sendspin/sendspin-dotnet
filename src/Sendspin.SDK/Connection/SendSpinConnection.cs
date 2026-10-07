@@ -185,7 +185,20 @@ public sealed class SendspinConnection : ISendspinConnection
         }
     }
 
-    public async Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default)
+    public Task DisconnectAsync(string reason = "restart", CancellationToken cancellationToken = default)
+        => CloseAsync(reason, sendGoodbye: true, cancellationToken);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// The same teardown as <see cref="DisconnectAsync"/>, and the same terminal state: it
+    /// passes through Disconnecting, so the close is not taken for a lost connection and
+    /// nothing redials. The Close frame is a plain 1000 with no reason text — any other status,
+    /// or a description, would be the error message this close exists to withhold.
+    /// </remarks>
+    public Task CloseWithoutGoodbyeAsync(string reason)
+        => CloseAsync(reason, sendGoodbye: false, CancellationToken.None);
+
+    private async Task CloseAsync(string reason, bool sendGoodbye, CancellationToken cancellationToken)
     {
         if (State == ConnectionState.Disconnected)
             return;
@@ -199,8 +212,11 @@ public sealed class SendspinConnection : ISendspinConnection
             {
                 try
                 {
-                    var goodbye = ClientGoodbyeMessage.Create(reason);
-                    await SendMessageAsync(goodbye, cancellationToken);
+                    if (sendGoodbye)
+                    {
+                        var goodbye = ClientGoodbyeMessage.Create(reason);
+                        await SendMessageAsync(goodbye, cancellationToken);
+                    }
 
                     // CloseOutputAsync, not CloseAsync: the latter performs the full closing
                     // handshake and waits for the peer's Close frame, which a crashed, hung or
@@ -219,7 +235,7 @@ public sealed class SendspinConnection : ISendspinConnection
                     // the peer replies or CleanupWebSocketAsync disposes it.
                     await _webSocket.CloseOutputAsync(
                         WebSocketCloseStatus.NormalClosure,
-                        reason,
+                        sendGoodbye ? reason : null,
                         cancellationToken);
                 }
                 catch (Exception ex)

@@ -565,6 +565,9 @@ internal sealed class PairingHarness : IAsyncDisposable
     /// <summary>Drops the connection, as a lost socket would.</summary>
     public void SimulateConnectionLoss() => _connection.SimulateConnectionLoss();
 
+    /// <summary>Feeds one message exactly as given, for a payload no typed helper builds.</summary>
+    public void Receive(string json) => _connection.RaiseTextMessageReceived(json);
+
     /// <summary>
     /// Feeds a server/pair-init, which begins a dynamic-pairing code round. Only the first
     /// round's carries nonce_A.

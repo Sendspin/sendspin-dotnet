@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -100,6 +101,51 @@ public class SendspinConnectionReconnectTests : IAsyncDisposable
         Assert.Equal(ConnectionState.Disconnected, connection.State);
         Assert.False(sawReconnecting,
             "An explicit DisconnectAsync must not trigger the reconnect path");
+    }
+
+    [Fact]
+    public async Task CloseWithoutGoodbye_SendsOnlyANormalClose_AndDoesNotReconnect()
+    {
+        _server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        _server.ClientConnected += (_, c) => connected.TrySetResult(c);
+
+        // StubFraming for the same reason as above, turned around: a goodbye, were one sent,
+        // has to be able to reach the wire for its absence to mean anything.
+        await using var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions { ReconnectDelayMs = 100, AutoReconnect = true },
+            new StubFraming());
+
+        var sawReconnecting = false;
+        connection.StateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Reconnecting)
+                sawReconnecting = true;
+        };
+
+        await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{_server.Port}/sendspin"));
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var messages = 0;
+        var closed = new TaskCompletionSource<WebSocketCloseStatus?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        serverConn.OnText = _ => Interlocked.Increment(ref messages);
+        serverConn.OnBinary = _ => Interlocked.Increment(ref messages);
+        serverConn.OnClose = status => closed.TrySetResult(status);
+
+        await connection.CloseWithoutGoodbyeAsync("test");
+
+        Assert.Equal(WebSocketCloseStatus.NormalClosure, await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, Volatile.Read(ref messages));
+
+        // Give any stray reconnect a chance to fire before asserting it didn't.
+        await Task.Delay(500);
+
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+        Assert.False(sawReconnecting,
+            "A close without a goodbye is still a local close and must not trigger the reconnect path");
     }
 
 #if NET9_0_OR_GREATER

@@ -140,6 +140,25 @@ public class SendspinHostServiceConnectionDisposalTests
     }
 
     [Fact]
+    public async Task AdmittedServerDroppedOverAPairingProtocolError_GetsNoGoodbye_AndIsDisposed()
+    {
+        var pipeline = new FakeAudioPipeline();
+        var capture = new FakeCaptureDevice();
+        await using var host = await StartHostAsync(pipeline, capture);
+        await using var server = new FakeServer(TestPsk, ["playback"]);
+        await AdmitAsync(host, server);
+
+        await server.SendJsonAsync("""{"type":"server/pair-auth","payload":"not-an-object"}""");
+
+        // The host's Close frame ends the server's read, and a goodbye would have come first.
+        await server.WaitForReceiveLoopExitAsync(Timeout);
+        Assert.Null(await server.WaitForGoodbyeAsync(TimeSpan.Zero));
+        await WaitUntilAsync(() => pipeline.SubscriberCount == 0, "the dropped connection to be disposed");
+
+        Assert.Empty(host.ConnectedServers);
+    }
+
+    [Fact]
     public async Task DisconnectAllAsync_DisposesTheConnectionsItDrops()
     {
         var pipeline = new FakeAudioPipeline();

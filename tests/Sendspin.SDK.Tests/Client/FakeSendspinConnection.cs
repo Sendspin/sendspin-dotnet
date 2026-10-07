@@ -129,6 +129,13 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         return Task.CompletedTask;
     }
 
+    /// <summary>Closes like <see cref="DisconnectAsync"/>, leaving <see cref="LastDisconnectReason"/> alone.</summary>
+    public Task CloseWithoutGoodbyeAsync(string reason)
+    {
+        SetState(ConnectionState.Disconnected);
+        return Task.CompletedTask;
+    }
+
     public async Task SendMessageAsync<T>(T message, CancellationToken cancellationToken = default)
         where T : IMessage
     {

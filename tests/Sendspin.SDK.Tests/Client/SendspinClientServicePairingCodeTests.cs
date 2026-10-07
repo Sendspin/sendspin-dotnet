@@ -88,7 +88,8 @@ public class SendspinClientServicePinPairingTests
         // server/pair-auth without the server/pair-init that derives the pairing code.
         conn.RaiseTextMessageReceived(ServerPairAuth(B64(Enumerable.Repeat((byte)9, 32).ToArray())));
 
-        Assert.Equal("unauthorized", conn.LastDisconnectReason);
+        Assert.Equal(ConnectionState.Disconnected, conn.State);
+        Assert.Null(conn.LastDisconnectReason);
         Assert.Empty(conn.SentMessages.OfType<ClientPairAuthMessage>());
     }
 
