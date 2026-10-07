@@ -106,6 +106,37 @@ public class PreActivationGateTests
     }
 
     [Fact]
+    public void Activate_AfterAReconnect_StillNeedsThatConnectionsOwnHello()
+    {
+        var (client, connection, _, pipe) = PlayerClient();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, "player@v1");
+        Assert.NotNull(client.LastServerActivate);
+
+        connection.SimulateConnectionLoss();
+        connection.SimulateReconnected();
+
+        // The previous connection's server/hello payload is still there to read, but it is not
+        // this connection's. Roles are omitted, which on a live connection would persist them.
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"]}}
+            """);
+        connection.RaiseBinaryMessageReceived(AudioFrame(5_000));
+
+        Assert.Null(client.LastServerActivate);
+        Assert.Empty(client.LastServerHello!.ActiveRoles);
+        Assert.Empty(pipe.Chunks);
+
+        // With its own hello the new connection activates as usual.
+        connection.RaiseTextMessageReceived(Hello);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}
+            """);
+        Assert.NotNull(client.LastServerActivate);
+    }
+
+    [Fact]
     public async Task Messages_AfterTheFirstActivate_AreApplied()
     {
         var (client, connection, _, pipe) = PlayerClient();

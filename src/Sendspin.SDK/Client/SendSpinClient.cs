@@ -33,6 +33,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private readonly INoiseSessionInfo _session;
     private bool _activateReceived;
 
+    // Whether this connection has received its server/hello. Per connection, unlike
+    // LastServerHello, which keeps the previous connection's payload across a reconnect.
+    private bool _serverHelloReceived;
+
     // True while the activation in effect declares 'pairing' without 'playback'. Gates every
     // send (see SendAsync): the pairing exchange then holds the wire alone (#118); alongside
     // playback it does not (pairing.md, "Entering and leaving pairing"). Cleared with the rest
@@ -695,6 +699,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         _activateReceived = false;
+        _serverHelloReceived = false;
 
         // A new handshake means a new session, so the record this client marked used belongs
         // to the previous one. DetectSessionRekey covers the in-band case; this covers the
@@ -2526,7 +2531,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // server/activate follows server/hello (messaging.md, Communication, steps 6-8).
             // Without one there is nothing to record the activated roles against, so every
             // check that reads them would be answering for a peer that never said who it is.
-            if (messageType is MessageTypes.ServerActivate && LastServerHello is null)
+            if (messageType is MessageTypes.ServerActivate && !_serverHelloReceived)
             {
                 _logger.LogDebug("Dropping server/activate received before server/hello");
                 return;
@@ -2640,6 +2645,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         var payload = message.Payload;
         LastServerHello = payload;
+        _serverHelloReceived = true;
         ServerName = payload.Name;
 
         // A server/hello opens a new connection, and no role persists into one.
