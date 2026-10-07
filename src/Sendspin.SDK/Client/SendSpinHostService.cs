@@ -859,6 +859,16 @@ public sealed class SendspinHostService : IAsyncDisposable
             await _arbitrationGate.WaitAsync();
             try
             {
+                // It may have waited here behind another arbitration, and its server may have
+                // gone in the meantime. A connection that is no longer there must not displace
+                // the one that is.
+                if (client.ConnectionState != ConnectionState.Connected)
+                {
+                    _logger.LogInformation(
+                        "Server {ServerId} disconnected before arbitration; not admitting it", serverId);
+                    return;
+                }
+
                 // Perform multi-server arbitration: determine whether the new server
                 // should replace the existing one or be rejected
                 if (!await ArbitrateConnectionAsync(client, connection, serverId))
@@ -877,12 +887,25 @@ public sealed class SendspinHostService : IAsyncDisposable
                     ConnectedAt = DateTime.UtcNow
                 };
 
+                // Checked under the lock the disconnect handler takes, with that handler already
+                // subscribed: a disconnect that beat this either shows here, or arrives afterwards
+                // and removes the entry. One that landed while the loser was being evicted would
+                // otherwise be registered with nothing left to remove it.
                 lock (_connectionsLock)
                 {
-                    _connections[serverId] = activeConnection;
+                    if (client.ConnectionState == ConnectionState.Connected)
+                    {
+                        _connections[serverId] = activeConnection;
+                        registered = true;
+                    }
                 }
 
-                registered = true;
+                if (!registered)
+                {
+                    _logger.LogInformation(
+                        "Server {ServerId} disconnected during arbitration; not admitting it", serverId);
+                    return;
+                }
 
                 _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
                     serverId, client.ServerName);

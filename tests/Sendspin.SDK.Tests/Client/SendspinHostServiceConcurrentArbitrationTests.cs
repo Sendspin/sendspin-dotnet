@@ -15,7 +15,9 @@ namespace Sendspin.SDK.Tests.Client;
 /// <remarks>
 /// Loopback against the host's real listener, like <see cref="SendspinHostServiceArbitrationTests"/>.
 /// The interleavings are a few instructions wide, so each test holds a connection at a log line
-/// inside the window — the host's own logger is the only thing it calls there.
+/// inside the window — the host's own logger is the only thing it calls there. Every test
+/// waits for its line to be reached and fails if it never is: reworded, it would otherwise stop
+/// forcing the interleaving and leave the test passing for nothing.
 /// </remarks>
 [Collection("RealSockets")]
 public class SendspinHostServiceConcurrentArbitrationTests
@@ -24,7 +26,8 @@ public class SendspinHostServiceConcurrentArbitrationTests
 
     private static readonly byte[] TestPsk = Enumerable.Repeat((byte)0x42, 32).ToArray();
 
-    private static async Task<SendspinHostService> StartHostAsync(ILoggerFactory loggerFactory)
+    private static async Task<SendspinHostService> StartHostAsync(
+        ILoggerFactory loggerFactory, FakeAudioPipeline? pipeline = null)
     {
         var records = new InMemoryPairingRecordStore();
 
@@ -37,6 +40,7 @@ public class SendspinHostServiceConcurrentArbitrationTests
             {
                 Identity = SendspinIdentity.Generate(),
                 PairingRecordStore = records,
+                AudioPipeline = pipeline,
             },
             listenerOptions: new ListenerOptions { Port = 0 },
             advertiserOptions: new AdvertiserOptions { Enabled = false });
@@ -45,54 +49,32 @@ public class SendspinHostServiceConcurrentArbitrationTests
         return host;
     }
 
-    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    private static async Task WaitUntilAsync(Func<bool> condition, string because)
     {
-        var deadline = DateTime.UtcNow + timeout;
-        while (!condition() && DateTime.UtcNow < deadline)
+        var deadline = DateTime.UtcNow + Timeout;
+        while (!condition())
         {
+            Assert.True(DateTime.UtcNow < deadline, $"Timed out waiting for {because}");
             await Task.Delay(10);
         }
-    }
-
-    /// <summary>
-    /// Dials <paramref name="first"/> and <paramref name="second"/> together and holds whichever
-    /// decides first at its "no existing connection" verdict — after the registry was read,
-    /// before it is written — for long enough that the other reaches arbitration too.
-    /// </summary>
-    private static async Task<SendspinHostService> AdmitBothInsideOneArbitrationWindowAsync(
-        FakeServer first, FakeServer second)
-    {
-        int decided = 0;
-        using var release = new ManualResetEventSlim();
-        var host = await StartHostAsync(new HookLoggerFactory(message =>
-        {
-            if (message.StartsWith("Arbitration: no existing connection", StringComparison.Ordinal))
-            {
-                Interlocked.Increment(ref decided);
-                release.Wait(Timeout);
-            }
-        }));
-
-        await first.ConnectAsync(host.ListeningPort);
-        await second.ConnectAsync(host.ListeningPort);
-
-        // Unserialised, the second reaches the same verdict and this returns at once.
-        // Serialised, it cannot get that far while the first is held, and the wait runs out.
-        await WaitUntilAsync(() => Volatile.Read(ref decided) == 2, TimeSpan.FromSeconds(1));
-        release.Set();
-        return host;
     }
 
     [Fact]
     public async Task TwoServersHandshakingTogether_OnlyOneIsAdmitted()
     {
+        using var hold = new ArbitrationHold();
+        await using var host = await StartHostAsync(hold.LoggerFactory);
+        hold.Watch(host);
+
         await using var first = new FakeServer(TestPsk, []);
         await using var second = new FakeServer(TestPsk, []);
-        await using var host = await AdmitBothInsideOneArbitrationWindowAsync(first, second);
+        await first.ConnectAsync(host.ListeningPort);
+        await second.ConnectAsync(host.ListeningPort);
+        await hold.ReleaseOnceBothReachedArbitrationAsync();
 
         // Empty against empty with no last-played server: whichever registered first is kept.
-        var firstGoodbye = first.WaitForGoodbyeAsync(TimeSpan.FromSeconds(10));
-        var secondGoodbye = second.WaitForGoodbyeAsync(TimeSpan.FromSeconds(10));
+        var firstGoodbye = first.WaitForGoodbyeAsync(Timeout);
+        var secondGoodbye = second.WaitForGoodbyeAsync(Timeout);
         var rejected = await Task.WhenAny(firstGoodbye, secondGoodbye);
         Assert.Equal("concurrent_attempt", await rejected);
 
@@ -103,28 +85,76 @@ public class SendspinHostServiceConcurrentArbitrationTests
     [Fact]
     public async Task OneServerDiallingTwiceTogether_KeepsOneConnectionAndClosesTheOther()
     {
+        using var hold = new ArbitrationHold();
+        await using var host = await StartHostAsync(hold.LoggerFactory);
+        hold.Watch(host);
+
+        int connects = 0;
+        int disconnects = 0;
+        host.ServerConnected += (_, _) => Interlocked.Increment(ref connects);
+        host.ServerDisconnected += (_, _) => Interlocked.Increment(ref disconnects);
+
         // A dual-homed server reaching the same mDNS record over IPv4 and IPv6: two sockets,
         // one identity.
         var keys = KeyPair.Generate();
         await using var first = new FakeServer(TestPsk, [], keys);
         await using var second = new FakeServer(TestPsk, [], keys);
-        await using var host = await AdmitBothInsideOneArbitrationWindowAsync(first, second);
-
-        int disconnects = 0;
-        host.ServerDisconnected += (_, _) => Interlocked.Increment(ref disconnects);
+        await first.ConnectAsync(host.ListeningPort);
+        await second.ConnectAsync(host.ListeningPort);
+        await hold.ReleaseOnceBothReachedArbitrationAsync();
 
         // The one that registered first is the stale socket of a same-server reconnect. It used
         // to be overwritten in the registry instead: left open with no goodbye, and able to take
         // the live connection's entry with it when it eventually closed.
-        var firstGoodbye = first.WaitForGoodbyeAsync(TimeSpan.FromSeconds(10));
-        var secondGoodbye = second.WaitForGoodbyeAsync(TimeSpan.FromSeconds(10));
-        var displaced = await Task.WhenAny(firstGoodbye, secondGoodbye);
-        Assert.Equal("user_request", await displaced);
+        var firstGoodbye = first.WaitForGoodbyeAsync(Timeout);
+        var secondGoodbye = second.WaitForGoodbyeAsync(Timeout);
+        Assert.Equal("user_request", await await Task.WhenAny(firstGoodbye, secondGoodbye));
 
-        // One eviction reported, and the survivor still holds the entry afterwards.
-        await WaitUntilAsync(() => Volatile.Read(ref disconnects) == 1, TimeSpan.FromSeconds(10));
+        // The survivor registers only after the eviction has been reported.
+        await WaitUntilAsync(() => Volatile.Read(ref connects) == 2, "the second connection to be admitted");
+
         Assert.Equal(first.ServerId, Assert.Single(host.ConnectedServers).ServerId);
         Assert.Equal(1, Volatile.Read(ref disconnects));
+    }
+
+    [Fact]
+    public async Task ServerThatLeftWhileQueuedForArbitration_DoesNotDisplaceTheHolder()
+    {
+        // The pipeline is only here to say when the queued connection has been disposed.
+        var pipeline = new FakeAudioPipeline();
+        int queuedGone = 0;
+        using var hold = new ArbitrationHold(message =>
+        {
+            if (message.StartsWith("Connection state: Connected -> Disconnected", StringComparison.Ordinal))
+            {
+                Interlocked.Exchange(ref queuedGone, 1);
+            }
+        });
+        await using var host = await StartHostAsync(hold.LoggerFactory, pipeline);
+        hold.Watch(host);
+
+        int connects = 0;
+        host.ServerConnected += (_, _) => Interlocked.Increment(ref connects);
+
+        // The holder is held inside its own arbitration, so the playback server behind it —
+        // which would win — has to queue. It hangs up there.
+        await using var holder = new FakeServer(TestPsk, []);
+        await holder.ConnectAsync(host.ListeningPort);
+        await hold.WaitUntilHeldAsync();
+
+        var queued = new FakeServer(TestPsk, ["playback"]);
+        await queued.ConnectAsync(host.ListeningPort);
+        await hold.WaitUntilAnotherIsQueuedAsync();
+        await queued.DisposeAsync();
+        await WaitUntilAsync(
+            () => Volatile.Read(ref queuedGone) == 1, "the host to log the queued connection's disconnect");
+
+        hold.Release();
+        await WaitUntilAsync(() => pipeline.SubscriberCount == 1, "the queued connection to be disposed");
+
+        Assert.Equal(1, Volatile.Read(ref connects));
+        Assert.Equal(holder.ServerId, Assert.Single(host.ConnectedServers).ServerId);
+        Assert.Null(await holder.WaitForGoodbyeAsync(TimeSpan.FromMilliseconds(250)));
     }
 
     [Fact]
@@ -153,15 +183,14 @@ public class SendspinHostServiceConcurrentArbitrationTests
         var keys = KeyPair.Generate();
         await using var stale = new FakeServer(TestPsk, [], keys);
         await stale.ConnectAsync(host.ListeningPort);
-        await WaitUntilAsync(() => Volatile.Read(ref connects) == 1, Timeout);
+        await WaitUntilAsync(() => Volatile.Read(ref connects) == 1, "the first connection to be admitted");
 
         var disconnectAll = Task.Run(() => host.DisconnectAllAsync());
-        Assert.True(closing.Wait(Timeout));
+        Assert.True(closing.Wait(Timeout), "the state-change log line the hold keys on never appeared");
 
         await using var redial = new FakeServer(TestPsk, [], keys);
         await redial.ConnectAsync(host.ListeningPort);
-        await WaitUntilAsync(() => Volatile.Read(ref connects) == 2, Timeout);
-        Assert.Equal(2, Volatile.Read(ref connects));
+        await WaitUntilAsync(() => Volatile.Read(ref connects) == 2, "the redial to be admitted");
 
         // The stale connection's disconnect now runs, under the id the redial is registered by.
         release.Set();
@@ -169,6 +198,70 @@ public class SendspinHostServiceConcurrentArbitrationTests
 
         Assert.Equal(redial.ServerId, Assert.Single(host.ConnectedServers).ServerId);
         Assert.Equal(0, Volatile.Read(ref disconnects));
+    }
+
+    /// <summary>
+    /// Holds every connection that reaches a "no existing connection" verdict at that log line:
+    /// after the registry was read, before it is written.
+    /// </summary>
+    private sealed class ArbitrationHold : IDisposable
+    {
+        private readonly ManualResetEventSlim _release = new();
+        private int _held;
+        private int _hellos;
+
+        internal ArbitrationHold(Action<string>? alsoOnMessage = null)
+        {
+            LoggerFactory = new HookLoggerFactory(message =>
+            {
+                alsoOnMessage?.Invoke(message);
+                if (message.StartsWith("Arbitration: no existing connection", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref _held);
+                    _release.Wait(Timeout);
+                }
+            });
+        }
+
+        internal ILoggerFactory LoggerFactory { get; }
+
+        // A connection's hello is announced only once the handshake's completion has returned,
+        // and arbitration runs inside that completion. So a held connection has not announced
+        // one, and a connection that has is past the point where it queued behind the hold.
+        internal void Watch(SendspinHostService host) =>
+            host.ServerHelloReceived += (_, _) => Interlocked.Increment(ref _hellos);
+
+        internal Task WaitUntilHeldAsync() => WaitUntilAsync(
+            () => Volatile.Read(ref _held) >= 1,
+            "a connection to reach the arbitration log line the hold keys on");
+
+        internal async Task WaitUntilAnotherIsQueuedAsync()
+        {
+            await WaitUntilHeldAsync();
+            await WaitUntilAsync(
+                () => Volatile.Read(ref _hellos) >= 1, "the second connection to queue behind the first");
+        }
+
+        /// <summary>
+        /// Releases once two connections are inside arbitration together: both at the verdict
+        /// when nothing serialises them, or one at the verdict and one queued behind it.
+        /// </summary>
+        internal async Task ReleaseOnceBothReachedArbitrationAsync()
+        {
+            await WaitUntilHeldAsync();
+            await WaitUntilAsync(
+                () => Volatile.Read(ref _held) == 2 || Volatile.Read(ref _hellos) >= 1,
+                "the second connection to reach arbitration");
+            Release();
+        }
+
+        internal void Release() => _release.Set();
+
+        public void Dispose()
+        {
+            _release.Set();
+            _release.Dispose();
+        }
     }
 
     /// <summary>Hands every message any of the host's loggers writes to one callback, on the
