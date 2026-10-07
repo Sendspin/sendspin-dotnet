@@ -85,6 +85,86 @@ public class PairingRoundTests
     }
 
     [Fact]
+    public async Task SecondServerPairInit_BeforeTheRoundsPairAuth_IsAProtocolError_AndIsNotCounted()
+    {
+        // "A round begins with server/pair-init and ends with the client's verification of
+        // server_kc": a second one inside the round is out of sequence. Counted, ten of them
+        // back to back reached the hold-back without a single CPace run (#320).
+        var lockouts = new InMemoryPairingCodeLockoutStore();
+        int presented = 0;
+        await using var h = await PairingHarness.StartAsync(
+            lockouts: lockouts,
+            presentPairingCode: (_, _) => { presented++; return ValueTask.CompletedTask; });
+        h.SendPairingActivate(method: "dynamic_pairing_code");
+        await h.NextMessageAsync<ClientPairInitMessage>();
+        h.SendServerPairInit();
+
+        h.SendServerPairInit(withNonce: false);
+
+        Assert.Equal(ConnectionState.Disconnected, h.Client.ConnectionState);
+        Assert.Null(h.LastDisconnectReason);
+        Assert.Equal(1, presented);
+        Assert.Equal(1, lockouts.GetFailures("dynamic_pairing_code"));
+    }
+
+    [Fact]
+    public async Task ServerPairInit_WhileTheRoundsPakeIsRunning_IsAProtocolError_AndIsNotCounted()
+    {
+        var lockouts = new InMemoryPairingCodeLockoutStore();
+        await using var h = await PairingHarness.StartAsync(lockouts: lockouts);
+        h.SendPairingActivate(method: "dynamic_pairing_code");
+        await h.CompleteDynamicPairingCodeToPresentationAsync();
+        h.SendServerPairAuth();
+        await h.NextMessageAsync<ClientPairAuthMessage>();
+
+        h.SendServerPairInit(withNonce: false);
+
+        Assert.Equal(ConnectionState.Disconnected, h.Client.ConnectionState);
+        Assert.Null(h.LastDisconnectReason);
+        Assert.Equal(1, lockouts.GetFailures("dynamic_pairing_code"));
+    }
+
+    [Theory]
+    [InlineData(31)]
+    [InlineData(33)]
+    public async Task FirstServerPairInit_WithANonceAThatIsNot32Bytes_IsAProtocolError(int length)
+    {
+        var lockouts = new InMemoryPairingCodeLockoutStore();
+        int presented = 0;
+        await using var h = await PairingHarness.StartAsync(
+            lockouts: lockouts,
+            presentPairingCode: (_, _) => { presented++; return ValueTask.CompletedTask; });
+        h.SendPairingActivate(method: "dynamic_pairing_code");
+        await h.NextMessageAsync<ClientPairInitMessage>();
+
+        string nonce = Base64UrlText.Encode(new byte[length]);
+        h.Receive($$$"""{"type":"server/pair-init","payload":{"nonce_A":"{{{nonce}}}"}}""");
+
+        Assert.Equal(0, presented);
+        Assert.Equal(ConnectionState.Disconnected, h.Client.ConnectionState);
+        Assert.Null(h.LastDisconnectReason);
+        Assert.Equal(0, lockouts.GetFailures("dynamic_pairing_code"));
+    }
+
+    [Fact]
+    public async Task SecondServerPairAuth_InTheStaticFlow_IsAProtocolError()
+    {
+        var window = new PairingWindow();
+        window.Open();
+        await using var h = await PairingHarness.StartAsync(staticPairingCode: "12345678", window: window);
+        h.SendPairingActivate(method: "static_pairing_code");
+        await h.NextMessageAsync<ClientPairInitMessage>();
+        h.SendServerPairAuth();
+        await h.NextMessageAsync<ClientPairAuthMessage>();
+
+        h.SendServerPairAuth();
+
+        Assert.Equal(ConnectionState.Disconnected, h.Client.ConnectionState);
+        Assert.Null(h.LastDisconnectReason);
+        Assert.Single(h.SentOfType<ClientPairAuthMessage>());
+    }
+
+    [Fact]
     public async Task FailedServerKc_WhenHeldBack_AbortsRatherThanRetries()
     {
         // "MUST abort instead at the round limit": this round is the one that reaches it.
