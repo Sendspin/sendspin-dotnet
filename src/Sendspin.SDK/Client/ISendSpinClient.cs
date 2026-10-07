@@ -160,7 +160,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// <see cref="double"/>. A <c>seek</c> or <c>seek_relative</c> whose millisecond parameter is
     /// missing or unusable is logged and dropped rather than sent, since the spec requires those
     /// commands to carry it — prefer the typed <see cref="SeekAsync"/> and
-    /// <see cref="SeekRelativeAsync"/>, which cannot get this wrong.
+    /// <see cref="SeekRelativeAsync"/>, which cannot get this wrong. The same holds for a
+    /// <c>volume</c> without an <see cref="int"/> <c>volume</c> and a <c>mute</c> without a
+    /// <see cref="bool"/> <c>mute</c>. Only the parameter the command defines is sent, whatever
+    /// else the dictionary holds, and <c>volume</c> is clamped to 0-100.
     /// <para>
     /// The command is sent only while the <c>controller@v1</c> role is active and it appears in
     /// the group's latest <c>supported_commands</c>; otherwise it is logged and dropped. Until a

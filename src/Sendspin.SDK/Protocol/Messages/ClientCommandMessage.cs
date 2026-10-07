@@ -15,7 +15,10 @@ public sealed class ClientCommandMessage : IMessageWithPayload<ClientCommandPayl
     required public ClientCommandPayload Payload { get; init; }
 
     /// <summary>
-    /// Creates a command message with the specified command.
+    /// Creates a command message with the specified command. Each parameter is put on the wire
+    /// only for the command that defines it ("only set if `command` is ...", controller/v1.md),
+    /// and <paramref name="volume"/> is clamped to the spec's 0-100; a reference server fails to
+    /// parse a command that carries another command's parameter and ignores it whole.
     /// </summary>
     /// <param name="command">Controller command to send (see <see cref="Commands"/>).</param>
     /// <param name="volume">Volume level (0-100), only for the 'volume' command.</param>
@@ -32,10 +35,10 @@ public sealed class ClientCommandMessage : IMessageWithPayload<ClientCommandPayl
                 Controller = new ControllerCommand
                 {
                     Command = command,
-                    Volume = volume,
-                    Mute = mute,
-                    PositionMs = positionMs,
-                    OffsetMs = offsetMs
+                    Volume = command == Commands.Volume && volume is { } v ? Math.Clamp(v, 0, 100) : null,
+                    Mute = command == Commands.Mute ? mute : null,
+                    PositionMs = command == Commands.Seek ? positionMs : null,
+                    OffsetMs = command == Commands.SeekRelative ? offsetMs : null
                 }
             }
         };
