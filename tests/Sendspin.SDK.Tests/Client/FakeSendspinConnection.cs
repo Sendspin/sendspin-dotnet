@@ -325,6 +325,13 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         SetState(ConnectionState.Handshaking);
     }
 
+    /// <summary>
+    /// Simulates a close in flight: the state <see cref="SendspinConnection"/> holds between
+    /// deciding to close and the socket actually closing, which <see cref="DisconnectAsync"/>
+    /// here skips straight past.
+    /// </summary>
+    public void SimulateClosing() => SetState(ConnectionState.Disconnecting);
+
     public void RaiseTextMessageReceived(string json)
         => RaiseTextMessageReceived(json, HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds());
 
