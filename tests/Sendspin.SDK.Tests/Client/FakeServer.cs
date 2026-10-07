@@ -68,13 +68,14 @@ internal class FakeServer : IAsyncDisposable
     /// <summary>
     /// Runs an in-band re-handshake onto <paramref name="psk"/> and returns once the new keys
     /// are in place. Sends no server/activate: what follows the re-key is the test's to send.
+    /// Throws if the host has not answered within <paramref name="timeout"/>.
     /// </summary>
-    internal async Task RehandshakeAsync(byte[] psk, string pskCategory = "lt")
+    internal async Task RehandshakeAsync(byte[] psk, TimeSpan timeout, string pskCategory = "lt")
     {
         Assert.NotNull(_noise);
         _rehandshake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await SendRawBinaryAsync(_noise.StartRehandshake(psk, pskCategory));
-        await _rehandshake.Task;
+        await _rehandshake.Task.WaitAsync(timeout);
     }
 
     /// <summary>Sends a binary frame as given, bypassing the Noise transport — what a desynchronised peer puts on the wire.</summary>

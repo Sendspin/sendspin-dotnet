@@ -1,4 +1,3 @@
-using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Connection.Noise;
@@ -36,7 +35,7 @@ public class SendspinHostServiceRekeyArbitrationTests
     private const string DroppedBeforeActivate =
         """{"type":"group/update","payload":{"group_id":"g1","playback_state":"stopped"}}""";
 
-    private static async Task<SendspinHostService> StartHostAsync()
+    private static async Task<SendspinHostService> StartHostAsync(CapturingLoggerFactory log)
     {
         var records = new InMemoryPairingRecordStore();
 
@@ -45,7 +44,7 @@ public class SendspinHostServiceRekeyArbitrationTests
         records.Upsert(new PairingRecord(PairingPsk, PskCategory.Pairing));
 
         var host = new SendspinHostService(
-            NullLoggerFactory.Instance,
+            log,
             new SendspinClientOptions
             {
                 Identity = SendspinIdentity.Generate(),
@@ -86,19 +85,37 @@ public class SendspinHostServiceRekeyArbitrationTests
         }
     }
 
+    /// <summary>
+    /// Re-keys the holder and returns once the host has handled its first message under the new
+    /// keys, which is where the client notices the re-key. Sending it is not enough: the
+    /// incoming connection could otherwise be arbitrated before the holder has got that far.
+    /// </summary>
+    private static async Task ReKeyAndHoldBeforeActivateAsync(FakeServer holder, CapturingLoggerFactory log)
+    {
+        await holder.RehandshakeAsync(TestPsk, Timeout);
+        await holder.SendJsonAsync(DroppedBeforeActivate);
+
+        var deadline = DateTime.UtcNow + Timeout;
+        while (!log.Messages.Contains("Dropping group/update received before server/activate"))
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the holder never handled the message under the new keys");
+            await Task.Delay(10);
+        }
+    }
+
     [Fact]
     public async Task PairingHolder_ReKeyedOntoItsNewRecord_IsNotDisplacedByIncomingPlayback()
     {
         // The end of every successful pairing: the server re-handshakes onto the record just
         // persisted and only then activates playback. "A pairing attempt is not displaced by an
         // incoming 'playback' or 'pairing' connection."
-        await using var host = await StartHostAsync();
+        var log = new CapturingLoggerFactory();
+        await using var host = await StartHostAsync(log);
         await using var holder = new FakeServer(PairingPsk, ["pairing"], pskCategory: "pr");
         await holder.ConnectAsync(host.ListeningPort);
         await WaitForServerConnectedAsync(host, holder.ServerId);
 
-        await holder.RehandshakeAsync(TestPsk);
-        await holder.SendJsonAsync(DroppedBeforeActivate);
+        await ReKeyAndHoldBeforeActivateAsync(holder, log);
 
         await using var incoming = new FakeServer(TestPsk, ["playback"]);
         await incoming.ConnectAsync(host.ListeningPort);
@@ -118,13 +135,13 @@ public class SendspinHostServiceRekeyArbitrationTests
     [Fact]
     public async Task PlaybackHolder_ReKeyed_StillOutranksIncomingPairing()
     {
-        await using var host = await StartHostAsync();
+        var log = new CapturingLoggerFactory();
+        await using var host = await StartHostAsync(log);
         await using var holder = new FakeServer(TestPsk, ["playback"]);
         await holder.ConnectAsync(host.ListeningPort);
         await WaitForServerConnectedAsync(host, holder.ServerId);
 
-        await holder.RehandshakeAsync(TestPsk);
-        await holder.SendJsonAsync(DroppedBeforeActivate);
+        await ReKeyAndHoldBeforeActivateAsync(holder, log);
 
         await using var incoming = new FakeServer(PairingPsk, ["pairing"], pskCategory: "pr");
         await incoming.ConnectAsync(host.ListeningPort);
