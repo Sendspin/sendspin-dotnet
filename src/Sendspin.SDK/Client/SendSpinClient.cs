@@ -1979,7 +1979,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// sync, whose initial would otherwise be sent on activate. The first non-pairing
     /// activate consumes this flag and runs the send-or-defer decision
     /// (<see cref="SendOrDeferInitialClientState"/>) that was skipped. Assigned per
-    /// connection in <see cref="FinishHandshake"/> with the other per-connection latches.
+    /// connection in <see cref="FinishHandshake"/> with the other per-connection latches,
+    /// which also sets it, whatever the activation, for as long as it takes to publish
+    /// Connected and reset the per-connection state.
     /// </summary>
     private bool _initialClientStateHeldForPairing;
 
@@ -4060,6 +4062,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </returns>
     private bool FinishHandshake(bool pairing)
     {
+        // MarkConnected publishes Connected synchronously into the app's handlers, and a
+        // handler may send: restoring a saved volume there is the obvious thing to write. So
+        // both send gates are set before it. The pairing gate is set as this activate declares
+        // it, or the handler's message lands on a pairing-only wire. The initial client/state
+        // is withheld whatever the activation, or the handler's call becomes an "initial" sent
+        // ahead of the resets below and this method then sends a second one. The call still
+        // stores its values, and the initial sent from here reads them. All three fields are
+        // this client's own, so setting them for a connection that turns out to have closed
+        // touches nothing shared.
+        _pairingActivationActive = pairing;
+        _initialClientStateSent = false;
+        _initialClientStateHeldForPairing = true;
+
         // Mark connection as fully connected
         if (_connection is SendspinConnection conn)
         {
@@ -4106,10 +4121,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         LoadPersistedOutputDelay();
 
         // Per-connection latches, reset here with the rest of the per-connection state: the
-        // initial client/state must be sent again, and sync must be re-established before
+        // initial client/state must be sent again (its latch was cleared above, ahead of
+        // MarkConnected, and the hold kept it clear), and sync must be re-established before
         // this connection may claim availability (the synchronizer was reset above, so for a
         // clock that reports unconverged after reset the two now agree).
-        _initialClientStateSent = false;
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
         _loggedDisplayDropWhileUnavailable = false;
@@ -4197,7 +4212,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Not while the connection's first activation is still the pairing-only one. SendAsync
         // would drop the message without an error, and latching for a message that never went
         // out leaves the activate after pairing believing there is nothing to send. That
-        // activate sends it instead, reading every value live.
+        // activate sends it instead, reading every value live. FinishHandshake holds it the
+        // same way while it publishes Connected, and sends it itself afterwards.
         if (_initialClientStateHeldForPairing)
         {
             return;
