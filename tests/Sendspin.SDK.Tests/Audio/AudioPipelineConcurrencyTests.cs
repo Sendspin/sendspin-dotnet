@@ -2,6 +2,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Logging.Abstractions;
 using Sendspin.SDK.Audio;
 using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Synchronization;
 
 namespace Sendspin.SDK.Tests.Audio;
@@ -145,6 +146,41 @@ public class AudioPipelineConcurrencyTests
         Assert.Equal(AudioPipelineState.Buffering, harness.Pipeline.State);
         Assert.True(player1.Disposed);
         Assert.False(player2.Disposed);
+
+        await harness.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task APipelineClosingItsOutput_IsNotReadyForChunks()
+    {
+        // IsReady is what the client routes chunks on, and it stayed true until the device had
+        // finished closing. A stream/start that has to stop the running stream first is followed
+        // at once by chunks in its own format, and for as long as the close took they went to
+        // the outgoing decoder and into the ring being discarded: the head of the new stream.
+        var harness = new Harness();
+
+        var first = harness.Pipeline.StartAsync(Pcm());
+        var player1 = await harness.NextPlayerAsync();
+        await player1.Entered;
+        player1.ReleaseInitialize();
+        await first;
+        Assert.True(harness.Pipeline.IsReady);
+
+        player1.HoldDispose();
+        var stop = harness.Pipeline.StopAsync();
+        await player1.DisposeEntered;
+
+        Assert.False(harness.Pipeline.IsReady);
+
+        harness.Pipeline.ProcessAudioChunk(new AudioChunk
+        {
+            ServerTimestamp = 1_000_000,
+            EncodedData = new byte[SampleRate / 10 * 4],
+        });
+        Assert.Equal(0, harness.Buffers[0].BufferedMilliseconds);
+
+        player1.ReleaseDispose();
+        await stop;
 
         await harness.DisposeAsync();
     }

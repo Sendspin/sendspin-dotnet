@@ -96,13 +96,94 @@ public class PairingWindowEndToEndTests
         Assert.False(window.IsOpen, "a completed pairing closes the window");
     }
 
+    [Fact]
+    public async Task SendFromTheConnectedHandler_OnAPairingFirstConnection_StaysOffThePairingWire()
+    {
+        // Connected is published from inside the activate, to the app's own handlers. One that
+        // restores a saved volume there must not put a client/state on a wire the pairing
+        // exchange holds alone, nor cost the connection its initial client/state afterwards.
+        var (_, link, incoming, client) = await ConnectAndHandshakeAsync(
+            new PairingWindow(),
+            new InMemoryPairingRecordStore(),
+            options => options with { Capabilities = ArtworkOnly(options.Capabilities) });
+        await using var clientCleanup = client;
+        await using var incomingCleanup = incoming;
+        await using var linkCleanup = link;
+
+        Task handlerSend = Task.CompletedTask;
+        client.ConnectionStateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Connected)
+            {
+                handlerSend = client.SendPlayerStateAsync(volume: 30, muted: true);
+            }
+        };
+
+        link.SendServerJson(
+            """{"type":"server/activate","payload":{"activities":["pairing"],"active_roles":[],"pairing":{"method":"static_pairing_code"}}}""");
+        await link.NextMessageAsync<ClientPairPendingMessage>();
+        await handlerSend;
+        Assert.Empty(link.SentOfType<ClientStateMessage>());
+
+        link.SendServerJson(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["artwork@v1"]}}""");
+        await link.NextMessageAsync<ClientStateMessage>();
+        await Task.Delay(200);
+        Assert.NotNull(Assert.Single(link.SentOfType<ClientStateMessage>()).Payload.Artwork);
+    }
+
+    [Fact]
+    public async Task SendFromTheConnectedHandler_OnAPlaybackConnection_IsCarriedByTheOneInitialClientState()
+    {
+        var (_, link, incoming, client) = await ConnectAndHandshakeAsync(
+            new PairingWindow(),
+            new InMemoryPairingRecordStore(),
+            options => options with
+            {
+                Capabilities = new ClientCapabilities { Roles = ["player@v1"], UnpairedAccessEnabled = true },
+                ClockSynchronizer = new Client.ConvergedClockSynchronizer(),
+            });
+        await using var clientCleanup = client;
+        await using var incomingCleanup = incoming;
+        await using var linkCleanup = link;
+
+        Task handlerSend = Task.CompletedTask;
+        client.ConnectionStateChanged += (_, e) =>
+        {
+            if (e.NewState == ConnectionState.Connected)
+            {
+                handlerSend = client.SendPlayerStateAsync(volume: 30, muted: true);
+            }
+        };
+
+        link.SendServerJson(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""");
+        await link.NextMessageAsync<ClientStateMessage>();
+        await handlerSend;
+        await Task.Delay(200);
+
+        var initial = Assert.Single(link.SentOfType<ClientStateMessage>());
+        Assert.Equal(30, initial.Payload.Player!.Volume);
+        Assert.Equal(true, initial.Payload.Player.Muted);
+    }
+
+    private static ClientCapabilities ArtworkOnly(ClientCapabilities capabilities)
+    {
+        capabilities.Roles = ["artwork@v1"];
+        capabilities.UnpairedAccessEnabled = true;
+        return capabilities;
+    }
+
     // --- Harness ---
     private static async Task<(
         TestNoiseServer Server,
         ServerLink Link,
         IncomingConnection Incoming,
         SendspinClientService Client)>
-        ConnectAndHandshakeAsync(PairingWindow window, InMemoryPairingRecordStore store)
+        ConnectAndHandshakeAsync(
+            PairingWindow window,
+            InMemoryPairingRecordStore store,
+            Func<SendspinClientOptions, SendspinClientOptions>? configure = null)
     {
         var identity = SendspinIdentity.Generate();
         var framing = new NoiseWireFraming(identity, new RecordPskResolver(store));
@@ -126,6 +207,7 @@ public class PairingWindowEndToEndTests
             PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
             PairingWindow = window,
         };
+        options = configure?.Invoke(options) ?? options;
         var client = new SendspinClientService(
             NullLogger<SendspinClientService>.Instance, incoming, framing, options);
 
@@ -243,6 +325,7 @@ public class PairingWindowEndToEndTests
         private static IMessage? Decode(string json) => MessageSerializer.GetMessageType(json) switch
         {
             MessageTypes.ClientHello => MessageSerializer.Deserialize<ClientHelloMessage>(json),
+            MessageTypes.ClientState => MessageSerializer.Deserialize<ClientStateMessage>(json),
             MessageTypes.ClientPairPending => MessageSerializer.Deserialize<ClientPairPendingMessage>(json),
             MessageTypes.ClientPairInit => MessageSerializer.Deserialize<ClientPairInitMessage>(json),
             MessageTypes.ClientPairAuth => MessageSerializer.Deserialize<ClientPairAuthMessage>(json),

@@ -197,16 +197,20 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 
     /// <summary>
-    /// Gets the server ID of the server that most recently had playback_state "playing".
+    /// Gets the server ID of the last-playback server: the one that most recently held the
+    /// admitted connection while <c>'playback'</c> was among its <c>server/activate</c>
+    /// activities (connection.md). The group's playback state plays no part in it.
     /// Used to break an arbitration tie between two connections that declare no activities.
     /// </summary>
     public string? LastPlayedServerId { get; private set; }
 
     /// <summary>
     /// Updates the last-played server ID.
-    /// Call this when a server transitions to the "playing" state, regardless of connection mode.
+    /// The host calls this itself for the connections it admits. It is public for a session the
+    /// application dialled, which the host never sees activate; the spec leaves the choice of
+    /// server there to the implementation.
     /// </summary>
-    /// <param name="serverId">The server ID that is now playing.</param>
+    /// <param name="serverId">The server ID to record as the last-playback server.</param>
     public void SetLastPlayedServerId(string serverId)
     {
         if (string.IsNullOrEmpty(serverId) || serverId == LastPlayedServerId)
@@ -259,9 +263,8 @@ public sealed class SendspinHostService : IAsyncDisposable
             // Deliberately broad for the same reason as TryLoadLastPlayed (#109). Degrading is
             // clearer still on the save side: the only caller is SetLastPlayedServerId, which
             // has already updated the in-memory value and still has LastPlayedServerIdChanged
-            // to raise. Throwing would abandon that notification and propagate out of a
-            // GroupStateChanged handler — turning a failed write into a lost playback-state
-            // update for the embedder.
+            // to raise. Throwing would abandon that notification and propagate out of the
+            // client's server/activate handling, or out of the admission that called it.
             _logger.LogError(ex, "ILastPlayedServerStore.Save({ServerId}) threw; last-played applied in-memory but not persisted", serverId);
         }
     }
@@ -850,12 +853,6 @@ public sealed class SendspinHostService : IAsyncDisposable
 
             client.GroupStateChanged += (s, g) =>
             {
-                // Track which server last had playback_state "playing".
-                if (g.PlaybackState == PlaybackState.Playing && client.ServerId is not null)
-                {
-                    SetLastPlayedServerId(client.ServerId);
-                }
-
                 GroupStateChanged?.Invoke(this, g);
             };
             client.PlayerStateChanged += (s, p) => PlayerStateChanged?.Invoke(this, p);
@@ -960,6 +957,18 @@ public sealed class SendspinHostService : IAsyncDisposable
                         "Server {ServerId} disconnected, or the host stopped, during arbitration; not admitting it",
                         serverId);
                     return;
+                }
+
+                // The last-playback server is the one that "most recently held the admitted
+                // connection while 'playback' was among its activities" (connection.md), so it
+                // is read from this connection's activates only now that it is admitted — and
+                // from each later one, because a connection admitted with no activities may
+                // declare 'playback' afterwards. Subscribed before the read, so an activate
+                // landing between the two is not missed.
+                client.ServerActivateReceived += (s, activate) => RecordLastPlaybackServer(serverId, activate);
+                if (client.LastServerActivate is { } admittedActivate)
+                {
+                    RecordLastPlaybackServer(serverId, admittedActivate);
                 }
 
                 _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
@@ -1071,6 +1080,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         finally
         {
             client.ConnectionStateChanged -= OnStateChanged;
+        }
+    }
+
+    private void RecordLastPlaybackServer(string serverId, ServerActivatePayload activate)
+    {
+        if (activate.ActivitiesList.Contains(Activities.Playback))
+        {
+            SetLastPlayedServerId(serverId);
         }
     }
 
