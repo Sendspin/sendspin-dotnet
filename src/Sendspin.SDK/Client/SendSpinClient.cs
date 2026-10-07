@@ -1801,10 +1801,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // and nothing is genuinely wrong, in which case stay silent like UpdateTimingAsync does:
         // a message sent now would carry exactly the spurious available: false the deferral
         // exists to prevent, and the deferred initial reads the persisted values live, so nothing
-        // is lost.
+        // is lost. The same holds before the connection's initial server/activate, which is
+        // what makes it Connected: the client "MUST NOT send other Sendspin messages until it
+        // receives that activation", and the initial it then sends carries these values.
         if (!_initialClientStateSent)
         {
-            if (!InitialStateStillDeferredForClockSync)
+            if (_connection.State == ConnectionState.Connected && !InitialStateStillDeferredForClockSync)
             {
                 await SendInitialClientStateAsync();
             }
