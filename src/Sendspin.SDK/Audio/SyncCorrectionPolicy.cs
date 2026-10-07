@@ -46,8 +46,15 @@ namespace Sendspin.SDK.Audio;
 internal static class SyncCorrectionPolicy
 {
     /// <summary>
+    /// The spec's accuracy floor: "In steady state, implementations MUST keep this error within
+    /// ±1 ms" (roles/player/v1.md).
+    /// </summary>
+    private const long SpecAccuracyFloorMicroseconds = 1_000;
+
+    /// <summary>
     /// Logs once, at construction, when the configured speed cap exceeds the spec's and is
-    /// therefore being clamped.
+    /// therefore being clamped, and when the configured dead band is wider than the spec's
+    /// accuracy floor.
     /// </summary>
     /// <param name="options">The options a corrector was constructed with.</param>
     /// <param name="logger">Logger to warn through.</param>
@@ -56,22 +63,33 @@ internal static class SyncCorrectionPolicy
     /// configuration default written before the cap was enforced — and the client should be
     /// told; but refusing to construct would stop playback that works today, which is the worse
     /// of the two failures. Correction is applied at
-    /// <see cref="SyncCorrectionOptions.EffectiveMaxSpeedCorrection"/> either way.
+    /// <see cref="SyncCorrectionOptions.EffectiveMaxSpeedCorrection"/> either way. The dead band
+    /// is applied as configured: it is a platform-jitter setting an application may have
+    /// measured its way to, so it is reported and left alone.
     /// </remarks>
-    internal static void WarnIfSpeedCapExceeded(SyncCorrectionOptions options, ILogger logger)
+    internal static void WarnIfOutsideSpec(SyncCorrectionOptions options, ILogger logger)
     {
-        if (!options.ExceedsSpecSpeedCap)
+        if (options.ExceedsSpecSpeedCap)
         {
-            return;
+            logger.LogWarning(
+                "[Correction] MaxSpeedCorrection is {Configured:P2}, above the spec's MUST cap " +
+                "(roles/player/v1.md:134); correction will be applied at {Cap:P2} instead. Lower " +
+                "the configured value — errors too large for the cap are handled by the one-shot " +
+                "hard-sync tier, which the spec exempts.",
+                options.MaxSpeedCorrection,
+                SyncCorrectionOptions.SpecMaxSpeedCorrection);
         }
 
-        logger.LogWarning(
-            "[Correction] MaxSpeedCorrection is {Configured:P2}, above the spec's MUST cap " +
-            "(roles/player/v1.md:134); correction will be applied at {Cap:P2} instead. Lower " +
-            "the configured value — errors too large for the cap are handled by the one-shot " +
-            "hard-sync tier, which the spec exempts.",
-            options.MaxSpeedCorrection,
-            SyncCorrectionOptions.SpecMaxSpeedCorrection);
+        if (options.DeadbandMicroseconds > SpecAccuracyFloorMicroseconds)
+        {
+            logger.LogWarning(
+                "[Correction] DeadbandMicroseconds is {Configured}, above the ±{Floor} µs the " +
+                "spec requires steady-state error to stay within (roles/player/v1.md, Accuracy " +
+                "floor). An error inside the dead band is never corrected, so this player can " +
+                "sit further out than the spec allows. Applied as configured.",
+                options.DeadbandMicroseconds,
+                SpecAccuracyFloorMicroseconds);
+        }
     }
 
     /// <summary>
