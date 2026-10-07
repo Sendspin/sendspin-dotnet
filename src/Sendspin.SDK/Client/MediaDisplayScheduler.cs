@@ -416,8 +416,8 @@ internal sealed class MediaDisplayScheduler : IDisposable
     /// <param name="raiseCleared">
     /// True for a <c>stream/end</c>, which is playback termination: after discarding what is
     /// pending, raise <c>ArtworkCleared</c> for every channel still showing an image so apps blank
-    /// their display (spec #266). False for a <c>stream/clear</c> seek, which keeps the current
-    /// image and only drops what was buffered ahead.
+    /// their display (spec #266). False for a <c>stream/clear</c> naming the role, which keeps the
+    /// current image and only drops what was buffered ahead.
     /// </param>
     internal void FlushArtwork(bool raiseCleared)
     {

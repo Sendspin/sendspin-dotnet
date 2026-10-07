@@ -974,7 +974,8 @@ What did change:
   channel still showing an image when a `stream/end` reaches the artwork role, or when the role
   is removed from `active_roles`: both are playback termination. No clear message exists for
   that case, so `Timestamp` is then the timestamp of the image being cleared. A `stream/clear`
-  (a seek or track jump) keeps the image on display and drops only what was pending.
+  (a seek or track jump) does not reach artwork: the image on display stays, and so does the one
+  pending for a later moment.
 
 ---
 
