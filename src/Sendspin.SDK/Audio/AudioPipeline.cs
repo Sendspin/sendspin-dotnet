@@ -1183,22 +1183,30 @@ public sealed class AudioPipeline : IAudioPipeline
 
     private async Task CleanupAsync()
     {
+        // Taken out before the output is closed, not after: closing a device takes a while, and
+        // until IsReady goes false the client hands chunks straight in. A stream/start that has
+        // to stop the running stream first is followed at once by chunks in its format, which
+        // the outgoing decoder would turn into noise or an error apiece, in a ring about to be
+        // discarded — the head of the new stream. Not ready, they queue for the start instead.
+        var decoder = _decoder;
+        var buffer = _buffer;
+        _decoder = null;
+        _buffer = null;
+
         await DisposePlayerAsync();
         DisposeDrainingBuffer();
 
         // Unsubscribe from buffer events
-        if (_buffer is TimedAudioBuffer timedBuffer)
+        if (buffer is TimedAudioBuffer timedBuffer)
         {
             timedBuffer.ReanchorRequired -= OnReanchorRequired;
         }
 
-        _decoder?.Dispose();
-        _decoder = null;
+        decoder?.Dispose();
 
         // Kept rather than disposed: the next stream may be able to reuse the ring instead of
         // allocating another. See TakeOrCreateBuffer, which decides and releases this one.
-        _retainedBuffer = _buffer;
-        _buffer = null;
+        _retainedBuffer = buffer;
 
         _sampleSource = null;
         _decodeBuffer = Array.Empty<float>();

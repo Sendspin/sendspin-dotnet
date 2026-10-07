@@ -13,6 +13,7 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
 {
     private readonly List<string> _callLog = new();
     private readonly List<(int Count, TaskCompletionSource Source)> _callWaiters = new();
+    private readonly List<string> _timeline = new();
 
     private readonly TaskCompletionSource _startEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _stopEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -32,6 +33,23 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
             lock (_callLog)
             {
                 return _callLog.ToList();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Lifecycle calls as they finished and chunks as they were handed over, in one sequence:
+    /// <c>start</c>, <c>stop</c>, <c>clear</c>, and <c>chunk@</c> followed by the chunk's
+    /// timestamp. What <see cref="CallLog"/> and <see cref="Chunks"/> cannot say between them is
+    /// which configuration a chunk was handled under.
+    /// </summary>
+    public IReadOnlyList<string> Timeline
+    {
+        get
+        {
+            lock (_timeline)
+            {
+                return _timeline.ToList();
             }
         }
     }
@@ -174,7 +192,16 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
         Record("clear");
     }
     public void ReanchorTiming() { }
-    public void ProcessAudioChunk(AudioChunk chunk) => Chunks.Add(chunk);
+    public void ProcessAudioChunk(AudioChunk chunk)
+    {
+        Chunks.Add(chunk);
+
+        lock (_timeline)
+        {
+            _timeline.Add($"chunk@{chunk.ServerTimestamp}");
+        }
+    }
+
     public void SetVolume(int volume) { }
     public void SetMuted(bool muted) { }
     public void SetMinBufferMilliseconds(int minBufferMs) => MinBufferMsCalls.Add(minBufferMs);
@@ -184,6 +211,11 @@ internal sealed class FakeAudioPipeline : IAudioPipeline
     private void Record(string call)
     {
         List<TaskCompletionSource>? ready = null;
+
+        lock (_timeline)
+        {
+            _timeline.Add(call);
+        }
 
         lock (_callLog)
         {
