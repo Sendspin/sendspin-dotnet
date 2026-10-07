@@ -1278,21 +1278,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// deviation — and dropping it is the safe reading: the player object is where
     /// <c>output_delay_ms</c>, <c>required_lead_time_ms</c> and <c>min_buffer_ms</c> live, so
     /// audio that arrives before it was scheduled against timings the server had to guess.
-    /// <para>
-    /// Before any <c>server/hello</c> there is no statement about active roles at all and
-    /// production never receives binary data in that window (the encrypted handshake has to
-    /// complete first), so the gate opens rather than silently swallowing every frame in the test
-    /// harnesses that drive binary dispatch without a handshake. Same tolerance, and same reason,
-    /// as <see cref="MayReportRoleState"/>.
-    /// </para>
     /// </remarks>
     private bool IsRoleBinaryPermitted(string family)
     {
-        if (LastServerHello is null)
-        {
-            return true;
-        }
-
         lock (_roleStateSentLock)
         {
             return _roleStateSent.ContainsKey(family);
@@ -2481,6 +2469,33 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     internal string? MatchedRecordPskId =>
         _session.MatchedPsk is { } matched ? NoiseConstants.DerivePskId(matched.Key.Span) : null;
 
+    /// <summary>
+    /// Whether this Noise session has yet to carry an admitted <c>server/activate</c>: before
+    /// the connection's first one, and again between an in-band re-handshake and the activate
+    /// that follows it.
+    /// </summary>
+    /// <remarks>
+    /// The server may send nothing else in either window (messaging.md: "The server MUST NOT
+    /// send other Sendspin messages until it sends the initial server/activate"; connection.md,
+    /// Re-handshake: "Once the new keys are in place, the server MUST send server/activate as
+    /// its first message under the new keys"), and the activate is where this client checks
+    /// what the peer is allowed to do, so until it has been admitted nothing else the peer
+    /// sends takes effect. Such a message is dropped rather than closed over: the spec defines
+    /// no close for it, and a peer that never sends its first activate is already bounded by
+    /// the handshake timeout on the dial path and the provisional-connection timeout on the
+    /// listen path.
+    /// <para>
+    /// <c>server/time</c> is let through. It is applied only as the answer to a probe this
+    /// client has in flight (see <see cref="HandleServerTime"/>), so it cannot take effect
+    /// unasked, and the client sends no probe before its first activate.
+    /// </para>
+    /// <para>
+    /// A re-handshake is noticed on the text path (<see cref="DetectSessionRekey"/>), so the
+    /// second window opens with the first text message under the new keys.
+    /// </para>
+    /// </remarks>
+    private bool AwaitingActivate => LastServerActivate is null;
+
     private void OnTextMessageReceived(object? sender, TextMessageReceivedEventArgs e)
     {
         var json = e.Json;
@@ -2507,6 +2522,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             var messageType = MessageSerializer.GetMessageType(json);
             _logger.LogTrace("Received: {Type}", messageType);
+
+            // server/activate follows server/hello (messaging.md, Communication, steps 6-8).
+            // Without one there is nothing to record the activated roles against, so every
+            // check that reads them would be answering for a peer that never said who it is.
+            if (messageType is MessageTypes.ServerActivate && LastServerHello is null)
+            {
+                _logger.LogDebug("Dropping server/activate received before server/hello");
+                return;
+            }
+
+            if (AwaitingActivate
+                && messageType is not (MessageTypes.ServerHello or MessageTypes.ServerActivate
+                    or MessageTypes.ServerTime))
+            {
+                _logger.LogDebug("Dropping {Type} received before server/activate", messageType);
+                return;
+            }
 
             switch (messageType)
             {
@@ -5539,6 +5571,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
     {
+        if (AwaitingActivate)
+        {
+            _logger.LogDebug("Dropping binary message received before server/activate");
+            return;
+        }
+
         // Artwork is routed on its type byte alone: it does not share the timestamped header
         // TryParse reads — a cancel is two bytes — and a length that header would reject is,
         // for artwork, a protocol error to close over rather than a frame to drop.

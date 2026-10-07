@@ -107,6 +107,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         connection.RaiseTextMessageReceived("""
             {
@@ -130,6 +131,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         VisualizerFrame? frame = null;
         client.VisualizationReceived += (_, f) => frame = f;
@@ -146,6 +148,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         var frames = new List<VisualizerFrame>();
         client.VisualizationReceived += (_, f) => frames.Add(f);
@@ -174,6 +177,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         var fired = false;
         client.VisualizationReceived += (_, _) => fired = true;
@@ -189,6 +193,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         var fired = false;
         client.VisualizationReceived += (_, _) => fired = true;
@@ -279,6 +284,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         var fired = false;
         client.VisualizationReceived += (_, _) => fired = true;
@@ -295,6 +301,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         VisualizerFrame? frame = null;
         client.VisualizationReceived += (_, f) => frame = f;
@@ -311,6 +318,7 @@ public class SendspinClientServiceVisualizerTests
     {
         var (client, connection) = VisualizerClient();
         using var _c = client;
+        TestClient.CompleteHandshake(connection, "visualizer@v1");
 
         var calls = 0;
         client.VisualizationReceived += (_, _) =>

@@ -100,6 +100,14 @@ internal static class TestClient
     /// false only for tests whose subject is behavior while disconnected — the client drops
     /// received frames in that state, so no message can be delivered to an unconnected fake.
     /// </param>
+    /// <param name="activated">
+    /// Whether the handshake is driven before the client is returned: <c>server/hello</c>, then a
+    /// <c>server/activate</c> granting playback and every role the client advertises. Until an
+    /// activate has been admitted the client drops every other message (#312), so a test that
+    /// raises role, stream or binary messages without a handshake of its own passes true. The
+    /// activate has the effects it has in production — it resets the clock synchronizer and
+    /// starts the time-sync loop — so pass a synchronizer that survives a reset.
+    /// </param>
     /// <param name="logger">
     /// Logger the client is built with; <see cref="NullLogger{T}"/> by default. Pass a
     /// <see cref="CapturingLogger{T}"/> for a test whose subject is a diagnostic's text or
@@ -112,7 +120,8 @@ internal static class TestClient
             bool unpairedAccess = false,
             Func<SendspinClientOptions, SendspinClientOptions>? configure = null,
             bool connected = true,
-            ILogger<SendspinClientService>? logger = null)
+            ILogger<SendspinClientService>? logger = null,
+            bool activated = false)
     {
         var connection = new FakeSendspinConnection();
 
@@ -159,6 +168,11 @@ internal static class TestClient
             connection,
             session,
             options);
+
+        if (activated)
+        {
+            CompleteHandshake(connection, [.. options.Capabilities.Roles]);
+        }
 
         return (client, connection, session);
     }

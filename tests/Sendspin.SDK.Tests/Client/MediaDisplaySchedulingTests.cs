@@ -62,7 +62,7 @@ public class MediaDisplaySchedulingTests
             ILogger<SendspinClientService>? logger = null)
     {
         var timer = new FakePrecisionTimer { CurrentTime = now };
-        var (client, connection, _) = TestClient.Create(logger: logger, configure: options =>
+        var (client, connection, _) = TestClient.Create(activated: true, logger: logger, configure: options =>
             options with
             {
                 PrecisionTimer = timer,
@@ -920,8 +920,6 @@ public class MediaDisplaySchedulingTests
         // prove the loop ran past the frame's display time.
         var (client, connection, timer) = SchedulingClient();
         using var _c = client;
-
-        TestClient.CompleteHandshake(connection, "visualizer@v1", "artwork@v1");
 
         var frames = new List<VisualizerFrame>();
         client.VisualizationReceived += (_, f) => frames.Add(f);
