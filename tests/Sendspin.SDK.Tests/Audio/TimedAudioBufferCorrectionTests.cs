@@ -115,14 +115,35 @@ public class TimedAudioBufferCorrectionTests
         /// <summary>Reads one callback without advancing the wall clock (runs the player ahead).</summary>
         public void Read()
         {
-            if (_rawReads)
+            LastReadSamples = _rawReads
+                ? Buffer.ReadRaw(_callback, WallNow)
+                : Buffer.Read(_callback, WallNow);
+        }
+
+        /// <summary>Samples the last callback was given; zero while the buffer emits only silence.</summary>
+        public int LastReadSamples { get; private set; }
+
+        /// <summary>The connection is down: callbacks keep coming, nothing is written.</summary>
+        public void Outage(int callbacks)
+        {
+            for (var i = 0; i < callbacks; i++)
             {
-                Buffer.ReadRaw(_callback, WallNow);
+                WallNow += StepMs * 1000L;
+                Read();
             }
-            else
-            {
-                Buffer.Read(_callback, WallNow);
-            }
+        }
+
+        /// <summary>
+        /// Reconnects to a server whose clock now reads <paramref name="serverNow"/>, as a
+        /// rebooted host's does, with clock sync already re-converged on it. The producer
+        /// resumes on that timeline, <paramref name="startLead"/> ahead.
+        /// </summary>
+        public void ReconnectToServerAt(long serverNow, long startLead)
+        {
+            ClockSync.OffsetMicroseconds = serverNow - WallNow;
+            Buffer.NotifyReconnect();
+            WriteServerTs = serverNow + startLead;
+            PumpProducer();
         }
 
         /// <summary>Wall clock advances with no callback: the player falls behind.</summary>
@@ -497,6 +518,108 @@ public class TimedAudioBufferCorrectionTests
 
         Assert.Equal(0, player.Buffer.GetStats().LateChunksDropped);
         Assert.True(player.Buffer.BufferedMilliseconds > bufferedBefore);
+    }
+
+    [Theory]
+    [InlineData(100)] // host reboot: the outage outlasts the buffer, which runs dry
+    [InlineData(5)]   // another host takes over at once: audio from the old one is still buffered
+    public void ServerTimelineRestartAcrossReconnect_PlaysTheNewStreamOnItsSchedule(int outageCallbacks)
+    {
+        // Issue #351. The read cursor is a raw server timestamp, and a server's monotonic clock
+        // restarts with its host. Every chunk of the new connection then sits behind the old
+        // cursor, was dropped as late, and nothing was left to read or re-anchor from.
+        using var player = new Player().Settled();
+        var alignmentBefore = player.TrueMisalignmentUs();
+        player.Outage(outageCallbacks);
+        var before = player.Buffer.GetStats();
+
+        // The server is back 100 ms into a new clock and opens the stream 200 ms ahead.
+        player.ReconnectToServerAt(serverNow: 100_000, startLead: 200_000);
+
+        Assert.Equal(before.LateChunksDropped, player.Buffer.GetStats().LateChunksDropped);
+
+        // Only the new stream is buffered (the producer keeps its 500 ms lead, so 300 ms of it),
+        // and it is held for its scheduled time rather than played the moment it arrives.
+        Assert.InRange(player.Buffer.BufferedMilliseconds, 280, 300);
+        player.Steps(15);
+        Assert.Equal(0, player.LastReadSamples);
+
+        player.Steps(100);
+        Assert.True(player.LastReadSamples > 0, "the new stream must play");
+        Assert.InRange(player.TrueMisalignmentUs() - alignmentBefore, -1_000, 1_000);
+        Assert.Equal(before.LateChunksDropped, player.Buffer.GetStats().LateChunksDropped);
+    }
+
+    [Fact]
+    public void LateChunkDuringAnUnderrun_IsStillDropped()
+    {
+        // Running dry does not make the cursor stale: with no new connection in between, a
+        // chunk behind it is content whose time has passed and must not be played late.
+        using var player = new Player().Settled();
+        player.Outage(100);
+        Assert.Equal(0, player.Buffer.BufferedMilliseconds);
+
+        player.WriteAt(player.CursorServerTimestamp - 1_000_000);
+
+        Assert.Equal(1, player.Buffer.GetStats().LateChunksDropped);
+        Assert.Equal(0, player.Buffer.BufferedMilliseconds);
+    }
+
+    [Fact]
+    public void ReconnectOnTheSameTimeline_KeepsBufferedAudioAndStillDropsLateChunks()
+    {
+        using var player = new Player().Settled();
+
+        // The ordinary reconnect: same server, same clock, the stream resumes ahead of the cursor.
+        player.Buffer.NotifyReconnect();
+        player.Steps(2);
+        var bufferedBefore = player.Buffer.BufferedMilliseconds;
+        Assert.True(bufferedBefore > 400);
+        Assert.True(player.Buffer.GetStats().IsPlaybackActive);
+
+        player.WriteAt(player.CursorServerTimestamp - 1_000_000);
+
+        Assert.Equal(1, player.Buffer.GetStats().LateChunksDropped);
+        Assert.Equal(bufferedBefore, player.Buffer.BufferedMilliseconds);
+    }
+
+    [Theory]
+    [InlineData(20_000)]  // a slow first packet
+    [InlineData(400_000)] // just inside the 500 ms re-anchor threshold
+    public void LateFirstChunkAfterReconnect_IsDroppedAndBufferedAudioKeepsPlaying(long behindMicroseconds)
+    {
+        // Late is not the same as another clock: on an ordinary reconnect with audio still
+        // buffered, a first chunk that is merely late costs that chunk, not the buffer.
+        using var player = new Player().Settled();
+        var alignmentBefore = player.TrueMisalignmentUs();
+        var bufferedBefore = player.Buffer.BufferedMilliseconds;
+
+        player.Buffer.NotifyReconnect();
+        player.WriteAt(player.CursorServerTimestamp - behindMicroseconds);
+
+        var stats = player.Buffer.GetStats();
+        Assert.Equal(1, stats.LateChunksDropped);
+        Assert.True(stats.IsPlaybackActive);
+        Assert.Equal(bufferedBefore, player.Buffer.BufferedMilliseconds);
+
+        player.Steps(50);
+        Assert.True(player.LastReadSamples > 0);
+        Assert.InRange(player.TrueMisalignmentUs() - alignmentBefore, -1_000, 1_000);
+        Assert.Equal(0, player.Buffer.GetStats().ReanchorCount);
+    }
+
+    [Fact]
+    public void FirstChunkAfterReconnect_JustPastTheReanchorThreshold_IsANewTimeline()
+    {
+        using var player = new Player().Settled();
+        player.Buffer.NotifyReconnect();
+
+        player.WriteAt(player.CursorServerTimestamp - 600_000);
+
+        var stats = player.Buffer.GetStats();
+        Assert.Equal(0, stats.LateChunksDropped);
+        Assert.False(stats.IsPlaybackActive);
+        Assert.Equal(ChunkMs, player.Buffer.BufferedMilliseconds);
     }
 
     [Fact]
