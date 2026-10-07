@@ -1636,6 +1636,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // 'volume' and 'mute' require their parameter too (controller/v1.md:26-27).
+        if (command == Commands.Volume && volume is null)
+        {
+            _logger.LogWarning("Dropping 'volume': no usable volume parameter");
+            return;
+        }
+
+        if (command == Commands.Mute && mute is null)
+        {
+            _logger.LogWarning("Dropping 'mute': no usable mute parameter");
+            return;
+        }
+
+        // Create keeps only the parameter this command defines and clamps volume to 0-100.
         var message = ClientCommandMessage.Create(command, volume, mute, positionMs, offsetMs);
 
         _logger.LogDebug("Sending command: {Command}", command);

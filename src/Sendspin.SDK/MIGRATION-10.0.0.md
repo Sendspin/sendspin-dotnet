@@ -951,6 +951,10 @@ Two things follow that are easy to trip over:
 - **The gate comes before the transport.** The typed senders used to send unconditionally and
   rely on the transport to reject a send with no live socket. With no active controller role the
   call now returns having sent nothing, rather than throwing.
+- **A command carries only its own parameter.** `ClientCommandMessage.Create`, and so
+  `SendCommandAsync`, sends `volume` only on `volume` (clamped to 0-100), `mute` only on `mute`,
+  `position_ms` only on `seek` and `offset_ms` only on `seek_relative`. `SendCommandAsync` drops a
+  `volume` or `mute` whose parameter is missing, with a warning, as it does a bare seek.
 
 Read `GroupState.SupportedCommands` — from `GroupStateChanged` — and enable a control only for a
 command it lists:

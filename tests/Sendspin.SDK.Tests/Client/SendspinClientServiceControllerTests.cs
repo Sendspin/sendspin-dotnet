@@ -1,5 +1,6 @@
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -311,6 +312,118 @@ public class SendspinClientServiceControllerTests
         await client.SendCommandAsync(Commands.SeekRelative);
 
         Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientCommandMessage);
+    }
+
+    private static string LastCommandOnTheWire(FakeSendspinConnection connection) =>
+        MessageSerializer.Serialize(connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Last());
+
+    [Theory]
+    [InlineData("play")]
+    [InlineData("volume")]
+    [InlineData("mute")]
+    [InlineData("seek")]
+    [InlineData("seek_relative")]
+    public async Task SendCommandAsync_SendsOnlyTheParameterItsCommandDefines(string command)
+    {
+        // A reused parameter bag: each field is "only set if command is" its own
+        // (controller/v1.md:14-17), and aiosendspin 10.0.0 fails to parse a client/command that
+        // carries another command's parameter and ignores it whole, so the 'play' would be lost.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        ActivateController(connection);
+        await client.SendCommandAsync(command, new Dictionary<string, object>
+        {
+            ["volume"] = 50,
+            ["mute"] = true,
+            ["position_ms"] = 42_000,
+            ["offset_ms"] = -15_000,
+        });
+
+        var expectedController = command switch
+        {
+            "volume" => """{"command":"volume","volume":50}""",
+            "mute" => """{"command":"mute","mute":true}""",
+            "seek" => """{"command":"seek","position_ms":42000}""",
+            "seek_relative" => """{"command":"seek_relative","offset_ms":-15000}""",
+            _ => """{"command":"play"}""",
+        };
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":""" + expectedController + "}}",
+            LastCommandOnTheWire(connection));
+    }
+
+    [Theory]
+    [InlineData(150, 100)]
+    [InlineData(-5, 0)]
+    [InlineData(37, 37)]
+    public async Task SendCommandAsync_Volume_IsClampedAsSetVolumeAsyncClamps(int requested, int onTheWire)
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        ActivateController(connection);
+        await client.SendCommandAsync(Commands.Volume, new Dictionary<string, object> { ["volume"] = requested });
+        string viaSendCommand = LastCommandOnTheWire(connection);
+        await client.SetVolumeAsync(requested);
+
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":{"command":"volume","volume":""" + onTheWire + "}}}",
+            viaSendCommand);
+        Assert.Equal(viaSendCommand, LastCommandOnTheWire(connection));
+    }
+
+    [Theory]
+    [InlineData("volume", null)] // no parameters at all
+    [InlineData("volume", "50")] // a string, not an integer
+    [InlineData("mute", null)]
+    [InlineData("mute", "true")]
+    public async Task SendCommandAsync_VolumeOrMuteWithoutItsParameter_SendsNothing(string command, object? value)
+    {
+        // 'volume' and 'mute' require their parameter (controller/v1.md:26-27); the bare command
+        // has no valid wire form, so it is dropped the way a bare seek is.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        ActivateController(connection);
+        await client.SendCommandAsync(
+            command, value is null ? null : new Dictionary<string, object> { [command] = value });
+
+        Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientCommandMessage);
+    }
+
+    [Fact]
+    public async Task ControllerCommands_WellFormed_AreUnchangedOnTheWire()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        ActivateController(connection);
+
+        await client.SendCommandAsync(Commands.Play);
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":{"command":"play"}}}""",
+            LastCommandOnTheWire(connection));
+
+        await client.SendCommandAsync(Commands.Mute, new Dictionary<string, object> { ["muted"] = false });
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":{"command":"mute","mute":false}}}""",
+            LastCommandOnTheWire(connection));
+
+        await client.SetMuteAsync(true);
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":{"command":"mute","mute":true}}}""",
+            LastCommandOnTheWire(connection));
+
+        await client.SeekAsync(90_000);
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":{"command":"seek","position_ms":90000}}}""",
+            LastCommandOnTheWire(connection));
+
+        await client.SeekRelativeAsync(-15_000);
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":{"command":"seek_relative","offset_ms":-15000}}}""",
+            LastCommandOnTheWire(connection));
     }
 
     [Fact]
