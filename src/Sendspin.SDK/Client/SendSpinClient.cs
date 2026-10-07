@@ -1432,7 +1432,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    public async Task DisconnectAsync(string reason = "restart")
+    public Task DisconnectAsync(string reason = "restart") => DisconnectAsync(reason, sendGoodbye: true);
+
+    private async Task DisconnectAsync(string reason, bool sendGoodbye)
     {
         if (_disposed) return;
 
@@ -1441,7 +1443,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         StopTimeSyncLoop();
         EndConnectionLifetime();
 
-        await _connection.DisconnectAsync(reason);
+        if (sendGoodbye)
+        {
+            await _connection.DisconnectAsync(reason);
+        }
+        else
+        {
+            await _connection.CloseWithoutGoodbyeAsync(reason);
+        }
 
         ServerId = null;
         ServerName = null;
@@ -2523,9 +2532,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         DetectSessionRekey();
         MarkMatchedPskUsed();
 
+        string? messageType = null;
         try
         {
-            var messageType = MessageSerializer.GetMessageType(json);
+            messageType = MessageSerializer.GetMessageType(json);
             _logger.LogTrace("Received: {Type}", messageType);
 
             // server/activate follows server/hello (messaging.md, Communication, steps 6-8).
@@ -2632,12 +2642,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // FormatException from base64url fields (pairing nonces/shares/tags),
             // InvalidOperationException from JsonElement.GetString()/GetBoolean() on a
             // wrong-kind element (type routing), and
-            // CPaceException from a hostile or mis-sequenced PAKE share. The goodbye
-            // reason list is closed with no protocol-error value, so the close reuses
+            // CPaceException from a hostile or mis-sequenced PAKE share. Anything not
+            // named here is a bug in our own handling and propagates so the receive loop
+            // surfaces it as a lost connection.
+            if (messageType is MessageTypes.ServerPairInit or MessageTypes.ServerPairAuth
+                or MessageTypes.ServerPairConfirm or MessageTypes.ServerPairFinalize
+                or MessageTypes.PairAbort)
+            {
+                CloseOnPairingProtocolError(ex);
+                return;
+            }
+
+            // The spec gives no other malformed message a silent close, and the goodbye
+            // reason list is closed with no protocol-error value, so this close reuses
             // 'unauthorized' — the reason this client already sends for peer-violation
-            // closes — rather than inventing a wire value. Anything not named here is a
-            // bug in our own handling and propagates so the receive loop surfaces it as
-            // a lost connection.
+            // closes — rather than inventing a wire value. It is also the one that stops a
+            // server redialling a playback connection only to send the same message again.
             _logger.LogError(ex, "Malformed message from authenticated peer; closing connection");
             DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
         }
@@ -3616,7 +3636,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         state.Sid = sid;
 
         // Derive stays on the synchronous path: a hostile pake_msg_1 raises CPaceException
-        // into the dispatch catch, which closes the connection as with any malformed input.
+        // into the dispatch catch, which closes the connection as a pairing protocol error.
         cpace.Derive(Base64UrlText.Decode(msg.Payload.PakeMsg1), PairingCodes.AdServer);
 
         SendPairAuthAfterPairingCodePresentedAsync(state, cpace.PublicShare).SafeFireAndForget(_logger);
@@ -3734,6 +3754,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // Success resets the method's failure counter.
         _pairingCodeLockoutStore?.SetFailures(state.Method, 0);
+    }
+
+    /// <summary>
+    /// Closes the connection over a pairing protocol error: "the detecting side closes the
+    /// WebSocket without sending any application-level error message, and persists nothing"
+    /// (pairing.md, Protocol Errors). So no client/goodbye and no pair/abort — 'unauthorized'
+    /// in particular would tell the server its activation had been refused. Every pairing
+    /// protocol error ends here: the dispatch catch routes whatever a pairing message's
+    /// handler throws.
+    /// </summary>
+    private void CloseOnPairingProtocolError(Exception? ex)
+    {
+        _logger.LogError(ex, "Pairing protocol error; closing the connection without client/goodbye");
+
+        // Dropped now rather than when the close completes, the wrapped PSK awaiting
+        // server/pair-finalize included.
+        ClearPairingCodeState();
+        DisconnectAsync("pairing protocol error", sendGoodbye: false).SafeFireAndForget(_logger);
     }
 
     private void AbortPairingCode(string reason)
