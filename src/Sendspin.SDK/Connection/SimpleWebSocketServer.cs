@@ -51,7 +51,8 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
 
     /// <summary>
     /// Raised when a new WebSocket client connects. The handler receives a
-    /// <see cref="WebSocketClientConnection"/> with the receive loop already started.
+    /// <see cref="WebSocketClientConnection"/> whose receive loop starts when the handler
+    /// returns, so callbacks attached inside it miss nothing.
     /// </summary>
     public event EventHandler<WebSocketClientConnection>? ClientConnected;
 
@@ -243,12 +244,14 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
                 path,
                 _logger);
 
-            connection.StartReceiving();
-
             _logger?.LogDebug("WebSocket connection established from {Endpoint} on path {Path}",
                 remoteEndPoint, path);
 
             ClientConnected?.Invoke(this, connection);
+
+            // Only now: a loop already running reads the peer's first message, or its close,
+            // while the subscriber is still attaching its handlers, and hands it to nobody.
+            connection.StartReceiving();
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

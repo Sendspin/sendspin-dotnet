@@ -422,6 +422,35 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Server_DeliversWhatArrivedBeforeTheSubscriberAttachedItsHandlers()
+    {
+        // A subscriber that is slow to wire up, as on a busy device: the peer's first message
+        // and its close are both on the socket before a handler exists to take them. They
+        // used to be read by a loop that was already running, and dropped.
+        _server.Start(0);
+
+        using var sent = new ManualResetEventSlim();
+        var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var closed = new TaskCompletionSource<WebSocketCloseStatus?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _server.ClientConnected += (s, c) =>
+        {
+            sent.Wait(TimeSpan.FromSeconds(5));
+            Thread.Sleep(250);
+            c.OnText = data => received.TrySetResult(Encoding.UTF8.GetString(data));
+            c.OnClose = status => closed.TrySetResult(status);
+        };
+
+        using var client = new ClientWebSocket();
+        await client.ConnectAsync(new Uri($"ws://127.0.0.1:{_server.Port}/sendspin"), CancellationToken.None);
+        await client.SendAsync(Encoding.UTF8.GetBytes("first"), WebSocketMessageType.Text, true, CancellationToken.None);
+        await client.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
+        sent.Set();
+
+        Assert.Equal("first", await received.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(WebSocketCloseStatus.NormalClosure, await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public async Task Server_HandlesPartialHttpUpgradeReads()
     {
         // Simulate a client that sends the HTTP upgrade request in multiple
