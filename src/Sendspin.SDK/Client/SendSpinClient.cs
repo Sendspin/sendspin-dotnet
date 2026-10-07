@@ -229,7 +229,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Queue for audio chunks that arrive before pipeline is ready.
     /// Prevents chunk loss during the ~50ms decoder/buffer initialization.
     /// </summary>
-    private readonly ConcurrentQueue<AudioChunk> _earlyChunkQueue = new();
+    /// <remarks>
+    /// Each chunk is queued with the number of the player configuration it was received under:
+    /// the value of <see cref="_playerConfigReceived"/> at that moment.
+    /// </remarks>
+    private readonly ConcurrentQueue<(AudioChunk Chunk, int Config)> _earlyChunkQueue = new();
+
+    // Counts the lifecycle messages that change what the pipeline does with the next chunk — a
+    // stream/start carrying a player object, a stream/clear or stream/end reaching the player,
+    // the player role's removal — as they are received and as they take effect. A chunk is
+    // "received under" the count at its arrival. The two differ only while such a message is
+    // waiting on the lifecycle chain behind an earlier one, and chunks received meanwhile queue
+    // instead of going to a pipeline that message has yet to reach. Both under _audioHandoffLock.
+    private int _playerConfigReceived;
+    private int _playerConfigApplied;
 
     // Whether the "discarding audio while unavailable" line has already been logged for the
     // current unavailable period (external source or unsynchronized clock; a pipeline error alone
@@ -2609,14 +2622,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 case MessageTypes.StreamStart:
                 {
                     bool playerActive = IsRoleActive("player");
-                    DispatchStreamLifecycle(() => HandleStreamStartAsync(json, playerActive));
+                    DispatchStreamLifecycle(
+                        config => HandleStreamStartAsync(json, playerActive, config),
+                        changesPlayer: playerActive && HasPlayerObject(json));
                     break;
                 }
 
                 case MessageTypes.StreamEnd:
                 {
                     bool playerActive = IsRoleActive("player");
-                    DispatchStreamLifecycle(() => HandleStreamEndAsync(json, playerActive));
+                    DispatchStreamLifecycle(
+                        config => HandleStreamEndAsync(json, playerActive, config),
+                        changesPlayer: playerActive && EndNamesPlayer(json));
                     break;
                 }
 
@@ -2861,8 +2878,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     .ToList();
                 if (removedStreamRoles.Count > 0)
                 {
-                    DispatchStreamLifecycle(() => StopStreamRolesAsync(
-                        removedStreamRoles, stopPlayer: removedStreamRoles.Contains("player")));
+                    bool playerRemoved = removedStreamRoles.Contains("player");
+                    DispatchStreamLifecycle(
+                        config => StopStreamRolesAsync(removedStreamRoles, playerRemoved, config),
+                        changesPlayer: playerRemoved);
                 }
             }
         }
@@ -5242,12 +5261,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// fire-and-forget did. The receive loop never waits for a handler already in flight.
     /// </para>
     /// <para>
-    /// Only the lifecycle messages take this path. Everything else — including the binary audio
-    /// chunks, which arrive at chunk rate — keeps its current dispatch.
+    /// Only the lifecycle messages take this path. The binary audio chunks, which arrive at chunk
+    /// rate, stay on the receive loop — so a message that has to wait here would be overtaken by
+    /// the chunks sent after it, and they would be decoded, or cleared, under the configuration
+    /// it replaces. Such a message holds them back instead: they queue from the moment it is
+    /// received and are handed over, in order, once it has run. A message that runs at once
+    /// holds nothing back, and neither does one that leaves the player alone.
     /// </para>
     /// </remarks>
-    /// <param name="handler">The handler to run once the chain reaches it.</param>
-    private void DispatchStreamLifecycle(Func<Task> handler)
+    /// <param name="handler">
+    /// The handler to run once the chain reaches it, given the number of the player configuration
+    /// its message was received under — its own, when <paramref name="changesPlayer"/>.
+    /// </param>
+    /// <param name="changesPlayer">
+    /// Whether the message changes what the pipeline does with the chunks that follow it.
+    /// </param>
+    private void DispatchStreamLifecycle(Func<int, Task> handler, bool changesPlayer)
     {
         Task predecessor;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -5260,11 +5289,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _streamLifecycleChain = completion.Task;
         }
 
-        RunStreamLifecycleAsync(predecessor, handler, completion).SafeFireAndForget(_logger);
+        int config;
+        lock (_audioHandoffLock)
+        {
+            config = changesPlayer ? ++_playerConfigReceived : _playerConfigReceived;
+
+            // Nothing ahead of it: the handler runs below, on this thread, before the receive
+            // loop reads another frame. The pipeline's own readiness covers the rest of it.
+            if (changesPlayer && predecessor.IsCompleted)
+            {
+                _playerConfigApplied = config;
+            }
+        }
+
+        RunStreamLifecycleAsync(predecessor, handler, changesPlayer, config, completion).SafeFireAndForget(_logger);
     }
 
-    private static async Task RunStreamLifecycleAsync(
-        Task predecessor, Func<Task> handler, TaskCompletionSource completion)
+    private async Task RunStreamLifecycleAsync(
+        Task predecessor, Func<int, Task> handler, bool changesPlayer, int config, TaskCompletionSource completion)
     {
         try
         {
@@ -5276,19 +5318,117 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 await predecessor.ConfigureAwait(false);
             }
 
-            await handler().ConfigureAwait(false);
+            await handler(config).ConfigureAwait(false);
         }
         finally
         {
-            completion.SetResult();
+            try
+            {
+                // Before the slot completes, so a chain that reads as idle has nothing held
+                // back — and here, so a handler that throws does not leave audio queueing.
+                if (changesPlayer)
+                {
+                    ReleaseEarlyChunks(config);
+                }
+            }
+            finally
+            {
+                completion.SetResult();
+            }
         }
     }
 
-    private async Task HandleStreamStartAsync(string json, bool playerActive)
+    /// <summary>
+    /// Whether a <c>stream/start</c> carries a <c>player</c> object. Asked on the receive loop,
+    /// where the message is otherwise only dispatched: the display roles' streams are started by
+    /// messages of the same type, and one of those waiting behind the player's device open must
+    /// not hold the opening burst back.
+    /// </summary>
+    private static bool HasPlayerObject(string json)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+
+        return doc.RootElement.TryGetProperty("payload", out var payload)
+            && payload.ValueKind == System.Text.Json.JsonValueKind.Object
+            && payload.TryGetProperty("player", out var player)
+            && player.ValueKind != System.Text.Json.JsonValueKind.Null;
+    }
+
+    /// <summary>
+    /// Whether a <c>stream/end</c> names the <c>player</c> role, or names none and so ends every
+    /// stream. Asked on the receive loop for the same reason as <see cref="HasPlayerObject"/>: a
+    /// server ends the visualizer's stream in the same breath as the player's, and that end
+    /// waiting behind the player's device close must not hold audio back.
+    /// </summary>
+    private static bool EndNamesPlayer(string json)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+
+        if (!doc.RootElement.TryGetProperty("payload", out var payload)
+            || payload.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !payload.TryGetProperty("roles", out var roles)
+            || roles.ValueKind != System.Text.Json.JsonValueKind.Array)
+        {
+            return true;
+        }
+
+        foreach (var role in roles.EnumerateArray())
+        {
+            if (role.ValueKind == System.Text.Json.JsonValueKind.String && role.ValueEquals("player"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Marks the player configuration numbered <paramref name="config"/> as in effect and hands
+    /// the pipeline the chunks that were held back for it, stopping at the first one received
+    /// under a later configuration.
+    /// </summary>
+    private void ReleaseEarlyChunks(int config)
+    {
+        lock (_audioHandoffLock)
+        {
+            _playerConfigApplied = config;
+
+            // After a stream/end there is no pipeline to take them: they stay queued, and the
+            // next stream/start drops them as the previous stream's.
+            if (_audioPipeline is not { IsReady: true } pipeline)
+            {
+                return;
+            }
+
+            while (_earlyChunkQueue.TryPeek(out var queued) && queued.Config <= config)
+            {
+                _earlyChunkQueue.TryDequeue(out _);
+                pipeline.ProcessAudioChunk(queued.Chunk);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Drops the queued chunks received before the message that brought the player configuration
+    /// numbered <paramref name="config"/>.
+    /// </summary>
+    private void DropEarlyChunksReceivedBefore(int config)
+    {
+        lock (_audioHandoffLock)
+        {
+            while (_earlyChunkQueue.TryPeek(out var queued) && queued.Config < config)
+            {
+                _earlyChunkQueue.TryDequeue(out _);
+            }
+        }
+    }
+
+    private async Task HandleStreamStartAsync(string json, bool playerActive, int config)
     {
         try
         {
-            await HandleStreamStartCoreAsync(json, playerActive);
+            await HandleStreamStartCoreAsync(json, playerActive, config);
         }
         catch (System.Text.Json.JsonException ex)
         {
@@ -5311,7 +5451,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private async Task HandleStreamStartCoreAsync(string json, bool playerActive)
+    private async Task HandleStreamStartCoreAsync(string json, bool playerActive, int config)
     {
         var message = MessageSerializer.Deserialize<StreamStartMessage>(json);
         if (message is null)
@@ -5367,7 +5507,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _logger.LogWarning(
                 "Stream start: player format {Format} is not one of this client's supported_formats; stopping the player stream",
                 payload.Format);
-            await StopStreamRolesAsync(new List<string> { "player" }, stopPlayer: true);
+            await StopStreamRolesAsync(new List<string> { "player" }, stopPlayer: true, config);
             return;
         }
 
@@ -5412,12 +5552,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        // Chunks only queue while the pipeline cannot take them, so everything queued at this
-        // point arrived before this stream/start and belongs to the stream it is replacing.
-        // Counted rather than dropped now: the start below is awaited, and chunks arriving
-        // during it belong to the new stream and are drained into it.
-        var queuedForPreviousStream = _earlyChunkQueue.Count;
-
         // The group this start reports Playing on, resolved before the start rather than after
         // it. Creating one is what a stream/start means for a server that sends no group/update,
         // but it must not happen on the far side of the await: DisconnectAsync drops
@@ -5446,18 +5580,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // leaves anything encoded for the previous stream unreadable. Which of the two happened
             // is the pipeline's to decide and to report — deriving it here from its state and format
             // meant a second copy of the rule, free to drift from the one that matters.
+            //
+            // "Previous" goes by when a chunk was received, not by when this handler got to run:
+            // behind a stream/end still closing the device, the new stream's opening chunks are
+            // queued before this point, and they are this start's.
             if (outcome != AudioPipelineStartOutcome.FormatReannounced)
             {
-                for (int i = 0; i < queuedForPreviousStream && _earlyChunkQueue.TryDequeue(out _); i++)
-                {
-                }
+                DropEarlyChunksReceivedBefore(config);
             }
 
-            // Drain what is left: the chunks kept above, plus any that arrived during initialization
+            // Drain what is left: the chunks kept above, plus any that arrived during
+            // initialization. Not the ones behind a later stream/start or stream/clear still
+            // waiting its turn — that message hands them over when it has run.
             drainedCount = 0;
-            while (_earlyChunkQueue.TryDequeue(out var chunk))
+            while (_earlyChunkQueue.TryPeek(out var queued) && queued.Config <= config)
             {
-                _audioPipeline.ProcessAudioChunk(chunk);
+                _earlyChunkQueue.TryDequeue(out _);
+                _audioPipeline.ProcessAudioChunk(queued.Chunk);
                 drainedCount++;
             }
         }
@@ -5558,7 +5697,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                && left.Height == right.Height;
     }
 
-    private async Task HandleStreamEndAsync(string json, bool playerActive)
+    private async Task HandleStreamEndAsync(string json, bool playerActive, int config)
     {
         try
         {
@@ -5584,7 +5723,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             StreamEndReceived?.Invoke(this, payload);
 
-            await StopStreamRolesAsync(payload.Roles, ReachesPlayerRole(payload.Roles, playerActive));
+            await StopStreamRolesAsync(payload.Roles, ReachesPlayerRole(payload.Roles, playerActive), config);
         }
         catch (System.Text.Json.JsonException ex)
         {
@@ -5606,7 +5745,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Whether the player is among them. The caller's to say: a <c>stream/end</c> reaches the
     /// player only while the role is active, a removal exactly when it no longer is.
     /// </param>
-    private async Task StopStreamRolesAsync(List<string>? roles, bool stopPlayer)
+    /// <param name="config">
+    /// The number of the player configuration the message was received under. Chunks queued
+    /// before it are the ended stream's.
+    /// </param>
+    private async Task StopStreamRolesAsync(List<string>? roles, bool stopPlayer, int config)
     {
         // Media held for a display time that belongs to the stream just ended must not
         // surface after it, and the artwork on display is cleared: both a stream/end and a
@@ -5618,9 +5761,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
-        while (_earlyChunkQueue.TryDequeue(out _))
-        {
-        }
+        DropEarlyChunksReceivedBefore(config);
 
         if (_audioPipeline != null)
         {
@@ -5666,12 +5807,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // Deserialization stays on the receive loop above — that is what routes a malformed
             // payload into OnTextMessageReceived's close — but the pipeline call joins the
             // lifecycle chain, so a seek cannot clear buffers ahead of the stream/start that
-            // creates them.
-            DispatchStreamLifecycle(() =>
-            {
-                pipeline.Clear();
-                return Task.CompletedTask;
-            });
+            // creates them. Nor, waiting there, can it clear the chunks received after it: those
+            // are held back until it has run, and the ones still queued from before it go too.
+            DispatchStreamLifecycle(
+                config =>
+                {
+                    DropEarlyChunksReceivedBefore(config);
+                    pipeline.Clear();
+                    return Task.CompletedTask;
+                },
+                changesPlayer: true);
         }
     }
 
@@ -5855,10 +6000,14 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     // Excludes the stream/start handler's drain, which feeds the same pipeline
                     // from another thread — see _audioHandoffLock. The queue must be empty as
                     // well as the pipeline ready: a chunk handed over while earlier ones are
-                    // still queued would overtake them.
+                    // still queued would overtake them. And no lifecycle message received before
+                    // this chunk may still be waiting to run: the pipeline is then ready for the
+                    // stream that message ends, clears or reconfigures.
                     lock (_audioHandoffLock)
                     {
-                        if (_audioPipeline?.IsReady == true && _earlyChunkQueue.IsEmpty)
+                        if (_playerConfigApplied == _playerConfigReceived
+                            && _audioPipeline?.IsReady == true
+                            && _earlyChunkQueue.IsEmpty)
                         {
                             // Pipeline ready - process immediately
                             _audioPipeline.ProcessAudioChunk(audioChunk);
@@ -5867,7 +6016,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                         {
                             // Pipeline not ready yet - queue for later processing
                             // This prevents chunk loss during decoder/buffer initialization
-                            _earlyChunkQueue.Enqueue(audioChunk);
+                            _earlyChunkQueue.Enqueue((audioChunk, _playerConfigReceived));
                             _logger.LogTrace("Queued early chunk ({QueueSize} in queue)", _earlyChunkQueue.Count);
                         }
 
