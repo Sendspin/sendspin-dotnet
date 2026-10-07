@@ -132,6 +132,52 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
         await session.WaitForAsync("client/goodbye").WaitAsync(Wait);
     }
 
+    [Fact]
+    public async Task InBandRehandshake_HoldsApplicationMessagesUntilTheNewActivate()
+    {
+        // The real framing swaps keys as the client's reply is written, so anything sent from
+        // then on would reach the server under the new keys ahead of its server/activate (#317).
+        var identity = SendspinIdentity.Generate();
+        byte[] rotated = Enumerable.Repeat((byte)0x3C, 32).ToArray();
+        var store = new InMemoryPairingRecordStore();
+        store.Upsert(new PairingRecord(Psk, PskCategory.LongTerm));
+        store.Upsert(new PairingRecord(rotated, PskCategory.LongTerm));
+        var (port, sessions) = StartServer(identity, KeyPair.Generate(), Psk);
+
+        await using var client = SendspinClientService.CreateForDial(
+            NullLoggerFactory.Instance,
+            new SendspinClientOptions
+            {
+                Identity = identity,
+                Suite = NoiseCipherSuite.ChaChaPoly,
+                PairingRecordStore = store,
+                Capabilities = new ClientCapabilities { Roles = ["controller@v1", "metadata@v1"] },
+            },
+            new ConnectionOptions { AutoReconnect = false });
+
+        var connecting = client.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/sendspin"));
+        var session = await sessions.Reader.ReadAsync().AsTask().WaitAsync(Wait);
+        await session.WaitForAsync("client/hello").WaitAsync(Wait);
+        await session.SendAsync(Activate("controller@v1", "metadata@v1"));
+        await connecting.WaitAsync(Wait);
+        await session.WaitForAsync("client/state").WaitAsync(Wait);
+
+        // Message 1 out, message 2 back: both ends are now on the new keys.
+        await session.StartRehandshakeAsync(rotated);
+        await session.WaitForAsync("noise/handshake").WaitAsync(Wait);
+        int statesBefore = session.Count("client/state");
+
+        // Availability, because it is a client/state that needs no particular role.
+        await client.EnterExternalSourceAsync();
+        await Task.Delay(200);
+        Assert.Equal(statesBefore, session.Count("client/state"));
+
+        // The activate ends the hold, and the state it withheld follows.
+        await session.SendAsync(Activate("controller@v1", "metadata@v1"));
+        await session.WaitForAsync("client/state").WaitAsync(Wait);
+        Assert.Equal(ConnectionState.Connected, client.ConnectionState);
+    }
+
     public ValueTask DisposeAsync()
     {
         _stop.Cancel();
@@ -170,7 +216,8 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
     /// <summary>
     /// The server end of one dialled connection: runs the Noise handshake as the initiator,
     /// sends <c>server/hello</c> when it completes, and records the type of every JSON message
-    /// the client sends after that. Everything else is sent by the test.
+    /// the client sends after that, completing an in-band re-handshake when the client's reply
+    /// to one arrives. Everything else is sent by the test.
     /// </summary>
     /// <remarks>
     /// Accepts the WebSocket itself rather than through <see cref="SimpleWebSocketServer"/>,
@@ -184,6 +231,7 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
         private readonly KeyPair _keys;
         private readonly byte[] _psk;
         private readonly Channel<string> _received = Channel.CreateUnbounded<string>();
+        private readonly ConcurrentQueue<string> _seen = new();
         private TestNoiseServer? _noise;
 
         private ServerSession(WebSocket socket, SendspinIdentity clientIdentity, KeyPair keys, byte[] psk)
@@ -239,6 +287,13 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
             }
         }
 
+        /// <summary>How many messages of the given type the client has sent so far.</summary>
+        public int Count(string type) => _seen.Count(t => t == type);
+
+        /// <summary>Sends Noise message 1 of an in-band re-handshake onto <paramref name="psk"/>.</summary>
+        public Task StartRehandshakeAsync(byte[] psk) =>
+            SendAsync(_noise!.StartRehandshake(psk), WebSocketMessageType.Binary);
+
         /// <summary>Drops the connection the way a restarting server does.</summary>
         public Task CloseAsync() =>
             _socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
@@ -284,8 +339,16 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
                 byte[] plaintext = _noise!.DecryptFrame(data);
                 if (plaintext.Length > 0 && plaintext[0] == 0)
                 {
-                    _received.Writer.TryWrite(
-                        MessageSerializer.GetMessageType(Encoding.UTF8.GetString(plaintext, 1, plaintext.Length - 1))!);
+                    string message = Encoding.UTF8.GetString(plaintext, 1, plaintext.Length - 1);
+                    string type = MessageSerializer.GetMessageType(message)!;
+                    if (type == "noise/handshake")
+                    {
+                        // The client's reply to a re-handshake, under the keys it retires.
+                        _noise.CompleteHandshake(message);
+                    }
+
+                    _seen.Enqueue(type);
+                    _received.Writer.TryWrite(type);
                 }
 
                 return;
