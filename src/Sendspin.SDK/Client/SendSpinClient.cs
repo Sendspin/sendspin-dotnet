@@ -2841,7 +2841,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // attempt "does not count against a pairing window". A gated attempt still waiting on
             // a gesture goes with it, or the next opening would send client/pair-init outside
             // any pairing activation and bind the shared window to this connection.
+            bool attemptInFlight = _pairingCodeState is not null || _pendingPairingPsk is not null;
+            lock (_attemptLock)
+            {
+                attemptInFlight |= _pendingGatedMethod is not null;
+            }
+
             ClearPairingCodeState();
+            if (attemptInFlight)
+            {
+                _logger.LogInformation(
+                    "Activation no longer declares the pairing activity; the pairing attempt is abandoned");
+            }
         }
 
         bool first = !_activateReceived;

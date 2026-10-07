@@ -63,8 +63,8 @@ public class PairingCancellingActivateTests
         h.SendNonPairingActivate();
         h.SendServerPairAuth();
 
-        // Nothing is expected to be sent, so there is no message to wait for.
-        await Task.Delay(200);
+        // No wait: the static flow has no presentation to await, so the reply is sent during
+        // the dispatch of server/pair-auth, which has returned.
         Assert.Empty(h.SentOfType<ClientPairAuthMessage>());
     }
 
@@ -84,10 +84,15 @@ public class PairingCancellingActivateTests
         h.SendPairingActivate(method: "dynamic_pairing_code");
         await h.CompleteDynamicPairingCodeToPresentationAsync();
 
+        // The client now holds client/pair-auth back on the presentation. When that is cancelled
+        // it must not report the presentation as its own failure with a pair/abort.
+        h.SendServerPairAuth();
+
         h.SendNonPairingActivate();
 
         await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
         await Task.Delay(200);
+        Assert.Empty(h.SentOfType<ClientPairAuthMessage>());
         Assert.Empty(h.SentOfType<PairAbortMessage>());
     }
 }
