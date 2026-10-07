@@ -31,11 +31,11 @@ public static class PairingToken
 
     /// <summary>
     /// Parses a token, tolerating case, surrounding whitespace and a missing <c>SP:</c> prefix.
-    /// Accepts versions 0 and 1, which carry an identical payload.
+    /// Accepts version 0 only: version 1 is the dynamic pairing code a client shows as a QR code,
+    /// not a Pairing PSK. Payload bytes past the 64 that version 0 defines are ignored.
     /// </summary>
     /// <exception cref="FormatException">
-    /// The token is malformed, carries an unrecognised version, or does not decode to exactly
-    /// 64 bytes.
+    /// The token is malformed, carries a version other than 0, or decodes to fewer than 64 bytes.
     /// </exception>
     public static (byte[] ClientKey, byte[] PairingPsk) Decode(string token)
     {
@@ -48,17 +48,17 @@ public static class PairingToken
             throw new FormatException("Pairing token is empty.");
 
         char version = trimmed[0];
-        if (version != '0' && version != '1')
-            throw new FormatException($"Pairing token has unrecognised version '{version}'; expected 0 or 1.");
+        if (version != '0')
+            throw new FormatException($"Pairing token has version '{version}'; expected 0, the Pairing PSK token.");
 
         string body = trimmed.Substring(1).Replace('9', '2');
 
         byte[] payload = Base32.Decode(body);
-        if (payload.Length != PayloadSize)
-            throw new FormatException($"Pairing token payload is {payload.Length} bytes; expected {PayloadSize}.");
+        if (payload.Length < PayloadSize)
+            throw new FormatException($"Pairing token payload is {payload.Length} bytes; expected at least {PayloadSize}.");
 
         byte[] clientKey = payload[..KeySize];
-        byte[] pairingPsk = payload[KeySize..];
+        byte[] pairingPsk = payload[KeySize..PayloadSize];
         return (clientKey, pairingPsk);
     }
 
