@@ -42,9 +42,9 @@ internal static class PeerMessageValidation
         switch (message)
         {
             case ServerHelloMessage m:
+                // server_id and active_roles are not checked: the spec defines neither for
+                // server/hello, so a null in one is an unrecognized field to ignore.
                 Require(m.Payload, "server/hello", "payload");
-                Require(m.Payload.ServerId, "server/hello", "payload.server_id");
-                Require(m.Payload.ActiveRoles, "server/hello", "payload.active_roles");
                 break;
 
             case ServerActivateMessage m:

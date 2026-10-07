@@ -47,8 +47,6 @@ public class PeerNullRejectionTests
 
     [Theory]
     [InlineData("""{"type":"server/hello","payload":null}""")]
-    [InlineData("""{"type":"server/hello","payload":{"server_id":null}}""")]
-    [InlineData("""{"type":"server/hello","payload":{"active_roles":null}}""")]
     [InlineData("""{"type":"server/activate","payload":{"activities":null}}""")]
     [InlineData("""{"type":"server/activate","payload":{"activities":[],"pairing":{"method":null}}}""")]
     [InlineData("""{"type":"pair/abort","payload":{"reason":null}}""")]
@@ -66,6 +64,20 @@ public class PeerNullRejectionTests
         // Deserialize(string) is the receive path's entry point; the typed overload above is
         // what the individual handlers call. Both validate, so neither is a way around it.
         Assert.Throws<JsonException>(() => MessageSerializer.Deserialize(json));
+    }
+
+    [Theory]
+    [InlineData("""{"type":"server/hello","payload":{"name":"MA","server_id":null}}""")]
+    [InlineData("""{"type":"server/hello","payload":{"name":"MA","active_roles":null}}""")]
+    public void ServerHello_NullInAMemberTheSpecDoesNotDefine_IsNotRejected(string json)
+    {
+        // messaging.md, "Forward compatibility": "Clients and servers MUST ignore unrecognized
+        // payload fields (keys not defined for the message) rather than treating them as an
+        // error." server/hello defines name, languages and source@v1_support; server_id and
+        // active_roles are properties the model kept from the pre-encryption protocol (#355).
+        var msg = Assert.IsType<ServerHelloMessage>(MessageSerializer.Deserialize(json));
+
+        Assert.Equal("MA", msg.Payload.Name);
     }
 
     [Fact]

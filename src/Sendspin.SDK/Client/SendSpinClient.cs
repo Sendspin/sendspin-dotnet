@@ -2867,6 +2867,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // records the grant. One sent here anyway must not become roles a first activate that
         // omits the field then persists.
         payload.ActiveRoles = [];
+        payload.ServerId ??= string.Empty;
         LastServerHello = payload;
         _serverHelloReceived = true;
         ServerName = payload.Name;
