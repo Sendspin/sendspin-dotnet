@@ -894,7 +894,7 @@ client.VisualizationReceived += (_, frame) =>
 
 `Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Reconfigure at runtime with `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`, which updates that connection's own visualizer configuration (not the `ClientCapabilities` you supplied) and resends the full `client/state`.
 
-> **Note:** `visualizer@v1` is **opt-in** (off by default). Frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
+> **Note:** `visualizer@v1` is **opt-in** (off by default). Frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork: an exception it throws is logged and the connection stays up. `ArtworkReceived` and `ArtworkCleared` handlers are isolated the same way.
 
 ## Stream teardown
 

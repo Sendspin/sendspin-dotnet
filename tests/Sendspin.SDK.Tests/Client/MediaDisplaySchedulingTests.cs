@@ -1092,6 +1092,37 @@ public class MediaDisplaySchedulingTests
     }
 
     [Fact]
+    public void ThrowingArtworkHandlers_DoNotFaultTheReceiveLoop_AndEveryChannelIsStillCleared()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = 0;
+        var cleared = new List<int>();
+        client.ArtworkReceived += (_, _) =>
+        {
+            received++;
+            throw new InvalidOperationException("decoder boom");
+        };
+        client.ArtworkCleared += (_, e) =>
+        {
+            cleared.Add(e.Channel);
+            throw new InvalidOperationException("clear boom");
+        };
+
+        // Past-stamped, so both are raised on arrival, on the receive loop (#337).
+        SendArtwork(connection, Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now - 1, new byte[] { 2 }, BinaryMessageTypes.Artwork1);
+        Assert.Equal(2, received);
+
+        // The first channel's subscriber throwing must not leave the second on display.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+
+        Assert.Equal(new[] { 0, 1 }, cleared.OrderBy(c => c).ToArray());
+    }
+
+    [Fact]
     public void StreamClear_NamingArtwork_KeepsTheImageOnDisplay()
     {
         var (client, connection, _) = SchedulingClient();
