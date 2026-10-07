@@ -55,6 +55,18 @@ public class StreamLifecycleAudioChunkTests
 
     private static Task WithTimeout(Task task) => task.WaitAsync(TimeSpan.FromSeconds(30));
 
+    /// <summary>
+    /// Waits until every lifecycle message delivered so far has run to its end, hand-over of the
+    /// chunks behind it included. A pipeline call finishing says less: the handler that made it
+    /// is still running. So a stream/clear is sent last, and its turn on the chain is the proof.
+    /// It appears as the final <c>clear</c> of the timeline.
+    /// </summary>
+    private static async Task Settled(FakeSendspinConnection connection, FakeAudioPipeline pipe, int calls)
+    {
+        connection.RaiseTextMessageReceived(StreamClear);
+        await WithTimeout(pipe.CallsCompleted(calls + 1));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -86,9 +98,9 @@ public class StreamLifecycleAudioChunkTests
 
         pipe.IsReady = true;
         held.SetResult();
-        await WithTimeout(pipe.CallsCompleted(3));
+        await Settled(connection, pipe, calls: 3);
 
-        Assert.Equal(new[] { "start", "stop", "start", "chunk@1000", "chunk@2000" }, pipe.Timeline);
+        Assert.Equal(new[] { "start", "stop", "start", "chunk@1000", "chunk@2000", "clear" }, pipe.Timeline);
     }
 
     [Fact]
@@ -112,9 +124,9 @@ public class StreamLifecycleAudioChunkTests
         connection.RaiseBinaryMessageReceived(AudioFrame(2_000));
 
         held.SetResult();
-        await WithTimeout(pipe.CallsCompleted(2));
+        await Settled(connection, pipe, calls: 2);
 
-        Assert.Equal(new[] { "chunk@1000", "start", "start", "chunk@2000" }, pipe.Timeline);
+        Assert.Equal(new[] { "chunk@1000", "start", "start", "chunk@2000", "clear" }, pipe.Timeline);
     }
 
     [Fact]
@@ -140,10 +152,10 @@ public class StreamLifecycleAudioChunkTests
         connection.RaiseBinaryMessageReceived(AudioFrame(3_000));
 
         held.SetResult();
-        await WithTimeout(pipe.CallsCompleted(3));
+        await Settled(connection, pipe, calls: 3);
 
         Assert.Equal(
-            new[] { "chunk@1000", "start", "clear", "chunk@2000", "clear", "chunk@3000" },
+            new[] { "chunk@1000", "start", "clear", "chunk@2000", "clear", "chunk@3000", "clear" },
             pipe.Timeline);
     }
 
@@ -168,5 +180,68 @@ public class StreamLifecycleAudioChunkTests
 
         held.SetResult();
         await WithTimeout(pipe.CallsCompleted(1));
+    }
+
+    [Theory]
+    [InlineData("""["visualizer"]""")]
+    [InlineData("""["artwork","visualizer"]""")]
+    [InlineData("[]")]
+    public async Task AQueuedEndThatDoesNotNameThePlayer_DoesNotHoldAudioBack(string roles)
+    {
+        // The end of a display role's stream, waiting behind the player's device open. It leaves
+        // the audio alone, so the chunks received after it are not its to hold.
+        var pipe = new FakeAudioPipeline { HoldNextStart = Hold() };
+        var (client, connection) = PlayerClient(pipe);
+        using var _c = client;
+
+        var held = pipe.HoldNextStart!;
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.StartEntered);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1000,"roles":""" + roles + "}}");
+        connection.RaiseBinaryMessageReceived(AudioFrame(1_000));
+
+        Assert.Equal(new[] { "chunk@1000" }, pipe.Timeline);
+
+        held.SetResult();
+        await WithTimeout(pipe.CallsCompleted(1));
+        Assert.Equal(0, pipe.StopCount);
+    }
+
+    [Fact]
+    public async Task ATrackChangeEndingPlayerThenVisualizer_GivesTheBurstToTheNewStream()
+    {
+        // What the reference server sends at a track change, within one millisecond: the
+        // player's stream/end, the visualizer's, the player's stream/start, then the burst.
+        var pipe = new FakeAudioPipeline { HoldNextStop = Hold() };
+        var (client, connection) = PlayerClient(pipe);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+        await WithTimeout(pipe.CallsCompleted(1));
+
+        var held = pipe.HoldNextStop!;
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1000,"roles":["player"]}}""");
+        await WithTimeout(pipe.StopEntered);
+
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1000,"roles":["visualizer"]}}""");
+        connection.RaiseTextMessageReceived(PlayerStreamStart);
+
+        var burst = Enumerable.Range(1, 20).Select(i => i * 1_000L).ToArray();
+        foreach (var timestamp in burst)
+        {
+            connection.RaiseBinaryMessageReceived(AudioFrame(timestamp));
+        }
+
+        held.SetResult();
+        await Settled(connection, pipe, calls: 3);
+
+        Assert.Equal(
+            new[] { "start", "stop", "start" }.Concat(burst.Select(t => $"chunk@{t}")).Append("clear"),
+            pipe.Timeline);
+        Assert.Equal(1, pipe.StopCount);
     }
 }

@@ -2628,7 +2628,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     bool playerActive = IsRoleActive("player");
                     DispatchStreamLifecycle(
                         config => HandleStreamEndAsync(json, playerActive, config),
-                        changesPlayer: playerActive);
+                        changesPlayer: playerActive && EndNamesPlayer(json));
                     break;
                 }
 
@@ -5297,6 +5297,35 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && payload.ValueKind == System.Text.Json.JsonValueKind.Object
             && payload.TryGetProperty("player", out var player)
             && player.ValueKind != System.Text.Json.JsonValueKind.Null;
+    }
+
+    /// <summary>
+    /// Whether a <c>stream/end</c> names the <c>player</c> role, or names none and so ends every
+    /// stream. Asked on the receive loop for the same reason as <see cref="HasPlayerObject"/>: a
+    /// server ends the visualizer's stream in the same breath as the player's, and that end
+    /// waiting behind the player's device close must not hold audio back.
+    /// </summary>
+    private static bool EndNamesPlayer(string json)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+
+        if (!doc.RootElement.TryGetProperty("payload", out var payload)
+            || payload.ValueKind != System.Text.Json.JsonValueKind.Object
+            || !payload.TryGetProperty("roles", out var roles)
+            || roles.ValueKind != System.Text.Json.JsonValueKind.Array)
+        {
+            return true;
+        }
+
+        foreach (var role in roles.EnumerateArray())
+        {
+            if (role.ValueKind == System.Text.Json.JsonValueKind.String && role.ValueEquals("player"))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
