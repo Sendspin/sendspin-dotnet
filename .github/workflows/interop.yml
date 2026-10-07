@@ -12,6 +12,8 @@ on:
 jobs:
   interop:
     runs-on: ubuntu-latest
+    # Normally 1-2 minutes.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 

@@ -1,4 +1,4 @@
-// <copyright file="StreamStartArtwork.cs" company="Sendspin Windows Client">
+// <copyright file="StreamStartArtwork.cs" company="Sendspin">
 // Licensed under the MIT License. See LICENSE file in the project root.
 // </copyright>
 
