@@ -483,7 +483,13 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     }
 
     /// <inheritdoc/>
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => DisposeAsync(disposeCapture: true);
+
+    /// <summary>
+    /// Disposes this pipeline, and the capture device with it unless the device is shared with
+    /// other pipelines that outlive this one.
+    /// </summary>
+    internal async ValueTask DisposeAsync(bool disposeCapture)
     {
         lock (_lock)
         {
@@ -493,6 +499,9 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         }
 
         await StopStreamingAsync();
-        await _capture.DisposeAsync();
+        if (disposeCapture)
+        {
+            await _capture.DisposeAsync();
+        }
     }
 }
