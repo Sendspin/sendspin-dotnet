@@ -353,11 +353,38 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         await _advertiser.StopAsync();
 
+        // The listener first: registration refuses a connection once it is down, so everything
+        // this host will ever hold is in the snapshot below (#344).
+        await _listener.StopAsync();
+
         List<ActiveServerConnection> connectionsToClose;
+        List<SendspinClientService> provisionalClients;
         lock (_connectionsLock)
         {
             connectionsToClose = _connections.Values.ToList();
             _connections.Clear();
+
+            // The connections that have not been admitted — still handshaking, or inside
+            // arbitration — are only in _openClients. Left alone, one could activate and be
+            // admitted after this returned.
+            provisionalClients = _openClients
+                .Where(open => !connectionsToClose.Exists(conn => ReferenceEquals(conn.Client, open)))
+                .ToList();
+            _openClients.Clear();
+        }
+
+        foreach (var client in provisionalClients)
+        {
+            try
+            {
+                // Never admitted, so the pipelines are not its to stop (#311).
+                await client.DisposeAsync(ownsPipelines: false);
+            }
+            catch (Exception ex)
+            {
+                // Deliberately broad, for the reason given on the loop below.
+                _logger.LogWarning(ex, "Error closing a connection that had not been admitted");
+            }
         }
 
         foreach (var conn in connectionsToClose)
@@ -375,14 +402,10 @@ public sealed class SendspinHostService : IAsyncDisposable
                 // IAudioPipeline.StopAsync and the source pipeline's capture device, both
                 // embedder-supplied, so the failure set is open — a driver that throws on
                 // teardown is exactly the case this must survive. And this is a loop on the
-                // shutdown path: an escape would strand the remaining connections undisposed
-                // and skip _listener.StopAsync() below, leaving the socket accepting
-                // connections after the caller was told the host had stopped.
+                // shutdown path: an escape would strand the remaining connections undisposed.
                 _logger.LogWarning(ex, "Error disconnecting from {ServerId}", conn.ServerId);
             }
         }
-
-        await _listener.StopAsync();
 
         _logger.LogInformation("Sendspin host service stopped");
     }
@@ -786,6 +809,9 @@ public sealed class SendspinHostService : IAsyncDisposable
             if (!_listener.IsListening)
             {
                 _logger.LogDebug("Ignoring connection — listener is stopping");
+
+                // Nothing else holds the socket or its receive loop.
+                await webSocket.DisposeAsync();
                 return;
             }
             connectionId = Guid.NewGuid().ToString("N")[..8];
@@ -869,6 +895,14 @@ public sealed class SendspinHostService : IAsyncDisposable
                     return;
                 }
 
+                // Nor may one that activated after the host stopped displace anything, or be
+                // admitted to a host that is not running (#344).
+                if (!_listener.IsListening)
+                {
+                    _logger.LogInformation("Host stopped before arbitration; not admitting {ServerId}", serverId);
+                    return;
+                }
+
                 // Perform multi-server arbitration: determine whether the new server
                 // should replace the existing one or be rejected
                 if (!await ArbitrateConnectionAsync(client, connection, serverId))
@@ -879,6 +913,24 @@ public sealed class SendspinHostService : IAsyncDisposable
 
                 // Subscribe to connection state AFTER handshake so we use the correct serverId
                 client.ConnectionStateChanged += (s, e) => OnClientConnectionStateChanged(serverId, client, e);
+
+                // Nothing else disposes a connection whose server closed it, broke framing or
+                // was sent away by DisconnectAllAsync: without this each one keeps its socket,
+                // its receive loop and its subscription to the shared pipeline for good (#344).
+                // On the connection rather than the client, so that it runs after the client's
+                // own handling of the loss, which resets what a dispose would otherwise try to
+                // end over the dead connection. Not awaited: this is raised on the connection's
+                // receive loop, which the dispose waits for, and inside the arbitration gate
+                // when a loser is evicted. The pipelines stay as that handling left them — they
+                // are shared, and the next server to connect may already be using them (#311).
+                connection.StateChanged += (s, e) =>
+                {
+                    if (e.NewState == ConnectionState.Disconnected)
+                    {
+                        client.DisposeAsync(ownsPipelines: false).AsTask().SafeFireAndForget(_logger);
+                    }
+                };
+
                 var activeConnection = new ActiveServerConnection
                 {
                     ServerId = serverId,
@@ -890,10 +942,12 @@ public sealed class SendspinHostService : IAsyncDisposable
                 // Checked under the lock the disconnect handler takes, with that handler already
                 // subscribed: a disconnect that beat this either shows here, or arrives afterwards
                 // and removes the entry. One that landed while the loser was being evicted would
-                // otherwise be registered with nothing left to remove it.
+                // otherwise be registered with nothing left to remove it. Likewise StopAsync, which
+                // takes its snapshot under this lock after the listener is down: a connection it
+                // did not see is not registered behind it.
                 lock (_connectionsLock)
                 {
-                    if (client.ConnectionState == ConnectionState.Connected)
+                    if (_listener.IsListening && client.ConnectionState == ConnectionState.Connected)
                     {
                         _connections[serverId] = activeConnection;
                         registered = true;
@@ -903,7 +957,8 @@ public sealed class SendspinHostService : IAsyncDisposable
                 if (!registered)
                 {
                     _logger.LogInformation(
-                        "Server {ServerId} disconnected during arbitration; not admitting it", serverId);
+                        "Server {ServerId} disconnected, or the host stopped, during arbitration; not admitting it",
+                        serverId);
                     return;
                 }
 

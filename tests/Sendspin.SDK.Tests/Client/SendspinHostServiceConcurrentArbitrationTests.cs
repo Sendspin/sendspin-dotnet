@@ -200,6 +200,79 @@ public class SendspinHostServiceConcurrentArbitrationTests
         Assert.Equal(0, Volatile.Read(ref disconnects));
     }
 
+    [Fact]
+    public async Task ServerThatActivatesAfterTheHostStopped_IsNotAdmitted()
+    {
+        // Holds the connection with its server/hello read and its server/activate still on the
+        // socket: provisional, which is where StopAsync used to leave it (#344).
+        using var provisional = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        await using var host = await StartHostAsync(new HookLoggerFactory(message =>
+        {
+            if (message.StartsWith("Received text: {\"type\":\"server/hello\"", StringComparison.Ordinal))
+            {
+                provisional.Set();
+                release.Wait(Timeout);
+            }
+        }));
+
+        int connects = 0;
+        host.ServerConnected += (_, _) => Interlocked.Increment(ref connects);
+
+        await using var server = new FakeServer(TestPsk, []);
+        var goodbye = server.WaitForGoodbyeAsync(Timeout);
+        await server.ConnectAsync(host.ListeningPort);
+        Assert.True(provisional.Wait(Timeout), "the server/hello log line the hold keys on never appeared");
+
+        await StopWhileHeldAsync(host, release.Set);
+
+        await WaitUntilAsync(
+            () => goodbye.IsCompleted || Volatile.Read(ref connects) == 1,
+            "the connection to be closed or admitted");
+        Assert.Equal(0, Volatile.Read(ref connects));
+        Assert.Equal("shutdown", await goodbye);
+        Assert.Empty(host.ConnectedServers);
+    }
+
+    [Fact]
+    public async Task ServerInsideArbitrationWhenTheHostStops_IsNotAdmitted()
+    {
+        using var hold = new ArbitrationHold();
+        await using var host = await StartHostAsync(hold.LoggerFactory);
+
+        int connects = 0;
+        host.ServerConnected += (_, _) => Interlocked.Increment(ref connects);
+
+        // Past the decision and not yet registered, so StopAsync finds no connection to close
+        // and the registration that follows used to land on a host that had stopped (#344).
+        await using var server = new FakeServer(TestPsk, []);
+        var goodbye = server.WaitForGoodbyeAsync(Timeout);
+        await server.ConnectAsync(host.ListeningPort);
+        await hold.WaitUntilHeldAsync();
+
+        await StopWhileHeldAsync(host, hold.Release);
+
+        await WaitUntilAsync(
+            () => goodbye.IsCompleted || Volatile.Read(ref connects) == 1,
+            "the connection to be closed or admitted");
+        Assert.Equal(0, Volatile.Read(ref connects));
+        Assert.Equal("shutdown", await goodbye);
+        Assert.Empty(host.ConnectedServers);
+    }
+
+    /// <summary>
+    /// Stops the host around a connection held on its receive thread. The listener going down
+    /// is the last thing StopAsync does that is visible from here without that thread, so the
+    /// hold is released then: closing the held connection has to wait for it.
+    /// </summary>
+    private static async Task StopWhileHeldAsync(SendspinHostService host, Action release)
+    {
+        var stop = Task.Run(() => host.StopAsync());
+        await WaitUntilAsync(() => !host.IsRunning, "the listener to stop");
+        release();
+        await stop.WaitAsync(Timeout);
+    }
+
     /// <summary>
     /// Holds every connection that reaches a "no existing connection" verdict at that log line:
     /// after the registry was read, before it is written.
