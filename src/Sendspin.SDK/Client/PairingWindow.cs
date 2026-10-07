@@ -33,7 +33,9 @@ public sealed class PairingWindow
     private readonly TimeProvider _timeProvider;
     private readonly object _gate = new();
 
-    private DateTimeOffset? _openedAt;
+    // A TimeProvider timestamp, not a wall-clock time: a device that boots without a valid
+    // clock has it stepped by NTP, often while the window the operator just opened is running.
+    private long? _openedAt;
 
     // The connection carrying this opening's attempts, bound by its first; null until then.
     private object? _connection;
@@ -46,7 +48,10 @@ public sealed class PairingWindow
     /// an attempt already in progress runs to its own end, but starting another needs a new
     /// opening.
     /// </param>
-    /// <param name="timeProvider">Clock; defaults to <see cref="TimeProvider.System"/>.</param>
+    /// <param name="timeProvider">
+    /// Clock; defaults to <see cref="TimeProvider.System"/>. The lifetime is measured with
+    /// <see cref="TimeProvider.GetTimestamp"/>, so stepping the wall clock does not move it.
+    /// </param>
     public PairingWindow(TimeSpan? lifetime = null, TimeProvider? timeProvider = null)
     {
         _lifetime = lifetime ?? DefaultLifetime;
@@ -79,7 +84,7 @@ public sealed class PairingWindow
     {
         lock (_gate)
         {
-            _openedAt = _timeProvider.GetUtcNow();
+            _openedAt = _timeProvider.GetTimestamp();
             _connection = null;
             _failedAttempts = 0;
         }
@@ -208,5 +213,5 @@ public sealed class PairingWindow
     /// </summary>
     private bool IsExpiredLocked()
         => _openedAt is not { } openedAt
-           || _timeProvider.GetUtcNow() - openedAt > _lifetime;
+           || _timeProvider.GetElapsedTime(openedAt) > _lifetime;
 }

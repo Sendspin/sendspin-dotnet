@@ -184,6 +184,36 @@ public class PairingWindowTests
     }
 
     [Fact]
+    public void WallClockSteppingForward_DoesNotCloseTheWindow()
+    {
+        // A device that boots without a valid clock: the operator presses the pairing button,
+        // then NTP steps the clock forward by years. A minute has passed, not the lifetime.
+        var clock = new FakeClock();
+        var window = new PairingWindow(TimeSpan.FromMinutes(5), clock);
+        window.Open();
+
+        clock.StepWallClock(TimeSpan.FromDays(365 * 50));
+        clock.Advance(TimeSpan.FromMinutes(1));
+
+        Assert.True(window.IsOpen);
+        Assert.True(window.TryAdmit(new object()));
+    }
+
+    [Fact]
+    public void WallClockSteppingBack_DoesNotExtendTheWindow()
+    {
+        var clock = new FakeClock();
+        var window = new PairingWindow(TimeSpan.FromMinutes(5), clock);
+        window.Open();
+
+        clock.StepWallClock(TimeSpan.FromHours(-1));
+        clock.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
+
+        Assert.False(window.IsOpen);
+        Assert.False(window.TryAdmit(new object()));
+    }
+
+    [Fact]
     public void Reopening_RestartsTheLifetime()
     {
         var clock = new FakeClock();
@@ -247,13 +277,27 @@ public class PairingWindowTests
         Assert.Equal(2, reached);
     }
 
-    /// <summary>Clock stub: only GetUtcNow matters, since the window expires lazily.</summary>
+    /// <summary>
+    /// Clock stub with the two clocks a device has: elapsed time, which only moves forward, and
+    /// the wall clock, which can also be stepped. The window expires lazily, so nothing fires.
+    /// </summary>
     private sealed class FakeClock : TimeProvider
     {
         private DateTimeOffset _now = DateTimeOffset.UnixEpoch;
+        private long _elapsedTicks;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
         public override DateTimeOffset GetUtcNow() => _now;
 
-        public void Advance(TimeSpan by) => _now += by;
+        public override long GetTimestamp() => _elapsedTicks;
+
+        public void Advance(TimeSpan by)
+        {
+            _now += by;
+            _elapsedTicks += by.Ticks;
+        }
+
+        public void StepWallClock(TimeSpan by) => _now += by;
     }
 }
