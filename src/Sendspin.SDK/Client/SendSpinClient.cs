@@ -5300,6 +5300,22 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // "The format MUST be one the client listed in its supported_formats." The decoder, the
+        // ring and the output device are all sized from this object, and an unpaired session's
+        // peer is unauthenticated, so one this client never offered opens nothing. The spec
+        // names no close for it, so the connection stays up — but the server now sends that
+        // format, and a stream left running would put those chunks through the previous
+        // format's decoder. The player stream ends as on a stream/end; chunks arriving after it
+        // queue up to MaxEarlyChunks and are dropped by the next start as the previous stream's.
+        if (!IsListedPlayerFormat(payload.Format))
+        {
+            _logger.LogWarning(
+                "Stream start: player format {Format} is not one of this client's supported_formats; stopping the player stream",
+                payload.Format);
+            await StopStreamRolesAsync(new List<string> { "player" }, stopPlayer: true);
+            return;
+        }
+
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
         // Smart sync burst: only trigger if clock isn't already synced
@@ -5406,6 +5422,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         group.PlaybackState = PlaybackState.Playing;
         GroupStateChanged?.Invoke(this, group);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="format"/> is an entry of the <c>supported_formats</c> this client
+    /// sends in <c>client/hello</c>.
+    /// </summary>
+    /// <remarks>
+    /// Codec, channels and sample rate always; bit depth for <c>pcm</c> only, where it is the
+    /// decoder's sample width. The spec has it "ignored" for <c>opus</c>. For <c>flac</c> this is
+    /// deliberately looser than the spec's "meaningful for pcm and flac": servers have announced
+    /// 32 for 24-bit content (PyAV's s32 container), the decoder takes its scaling from
+    /// STREAMINFO, and nothing on the FLAC path is sized from the announced depth — so matching
+    /// it would only silence a stream that plays. An absent bit depth is 16 on both sides, which
+    /// is what <c>client/hello</c> sends for an entry listed without one and what the PCM decoder
+    /// assumes. <c>codec_header</c> is not part of an entry.
+    /// </remarks>
+    private bool IsListedPlayerFormat(AudioFormat format)
+    {
+        bool pcm = string.Equals(format.Codec, AudioCodecs.Pcm, StringComparison.OrdinalIgnoreCase);
+
+        return _capabilities.AudioFormats.Any(f =>
+            string.Equals(f.Codec, format.Codec, StringComparison.OrdinalIgnoreCase)
+            && f.Channels == format.Channels
+            && f.SampleRate == format.SampleRate
+            && (!pcm || (f.BitDepth ?? 16) == (format.BitDepth ?? 16)));
     }
 
     /// <summary>
