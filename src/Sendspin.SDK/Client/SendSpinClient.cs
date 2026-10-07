@@ -5991,9 +5991,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // No catch here, deliberately: every binary parser is Try-style (a malformed frame
         // parses to null and is dropped above or inside DispatchBinaryMessage, or for artwork
         // closes the connection there), so nothing a hostile payload produces can throw.
-        // Anything that does throw — a buggy event subscriber or pipeline — is a bug in our own
-        // handling and must propagate so the receive loop surfaces it as a lost connection, not
-        // be collapsed into a log line (#88 item 2).
+        // Anything that does throw is a bug in our own handling or the pipeline's and must
+        // propagate so the receive loop surfaces it as a lost connection, not be collapsed into
+        // a log line (#88 item 2). The subscribers to the display events are not ours: the
+        // scheduler guards those raises, and only those (#337).
         DispatchBinaryMessage(category, type, timestamp, payload, data);
     }
 

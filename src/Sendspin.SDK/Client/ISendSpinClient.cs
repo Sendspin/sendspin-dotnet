@@ -433,7 +433,8 @@ public interface ISendspinClient : IAsyncDisposable
     /// image pre-sent for the next track is raised when that track starts. A timestamp already
     /// past on arrival raises immediately; artwork is never dropped for lateness, and a newer
     /// image for a channel supersedes one still held for it. See
-    /// <see cref="VisualizationReceived"/> for which thread raises the event.
+    /// <see cref="VisualizationReceived"/> for which thread raises the event, and for what
+    /// happens to an exception a subscriber throws.
     /// </remarks>
     event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
 
@@ -480,9 +481,11 @@ public interface ISendspinClient : IAsyncDisposable
     /// <b>Threading:</b> a frame already due on arrival is raised on the receive loop, as before;
     /// a frame held for a future display time is raised on an SDK background thread instead. Both
     /// orderings are preserved, but a subscriber must be safe to call from either thread, and
-    /// must marshal to a UI thread itself. An exception from a subscriber still faults the
-    /// connection when the event was raised inline; on the scheduled path it is logged and the
-    /// remaining frames continue.
+    /// must marshal to a UI thread itself. An exception from a subscriber is logged and the
+    /// remaining frames continue, on either thread: a fault in a renderer does not cost the
+    /// connection, and with it the audio. The same holds for <see cref="ArtworkReceived"/> and
+    /// <see cref="ArtworkCleared"/>, and for those three events only — a subscriber to any other
+    /// event that throws on the receive loop drops the connection.
     /// </para>
     /// </remarks>
     event EventHandler<VisualizerFrame>? VisualizationReceived;

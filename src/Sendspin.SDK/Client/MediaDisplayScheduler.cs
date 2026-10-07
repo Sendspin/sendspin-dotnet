@@ -65,8 +65,9 @@ internal enum ScheduledStateRole
 /// </para>
 /// <para>
 /// Data that is already due on arrival is raised inline, on the caller's thread, so the common
-/// case keeps the receive loop's existing threading contract (including a throwing subscriber
-/// escaping into the receive loop). Only data with a future display time is deferred to this
+/// case keeps the receive loop's existing threading contract. What a subscriber to a media event
+/// throws is logged on either thread; see <see cref="SafeRaise(Action, string)"/>. Only data
+/// with a future display time is deferred to this
 /// class's background loop, and while that loop is raising an event, a newly arrived due item
 /// queues behind it rather than racing past it — so each role's events stay in timestamp order
 /// whichever thread raises them. Within one dispatch pass the state roles are applied before the
@@ -258,7 +259,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
         if (raiseNow)
         {
-            _raiseVisualization(frame);
+            SafeRaise(_raiseVisualization, frame, "visualizer frame");
         }
     }
 
@@ -302,7 +303,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
         if (raiseNow is not null)
         {
-            RaiseArtwork(raiseNow);
+            SafeRaise(_raisePendingArtwork, raiseNow, "artwork");
         }
     }
 
@@ -447,7 +448,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
         {
             foreach (var args in cleared)
             {
-                _raiseArtworkCleared(args);
+                SafeRaise(_raiseArtworkCleared, args, "artwork clear");
             }
         }
     }
@@ -790,13 +791,14 @@ internal sealed class MediaDisplayScheduler : IDisposable
     }
 
     /// <summary>
-    /// Raises one scheduled event, logging rather than propagating what a subscriber throws.
+    /// Raises one event, logging rather than propagating what a subscriber throws.
     /// </summary>
     /// <remarks>
-    /// Deliberately unlike the inline path, where a throwing subscriber escapes into the receive
-    /// loop and is surfaced as a lost connection. There is no connection to lose here, and
-    /// letting the exception out would end this loop — silently stopping every later frame and
-    /// image for the life of the client. Mirrors the time-sync loop's reasoning.
+    /// On the scheduler loop, letting the exception out would end the loop — silently stopping
+    /// every later frame and image for the life of the client. On the receive loop it would be
+    /// surfaced as a lost connection, so one bad frame in a renderer would stop the audio, and
+    /// only for the frames that happened to be due on arrival (#337). Only the subscriber is
+    /// guarded: the SDK's own parsing and dispatch still propagate.
     /// </remarks>
     private void SafeRaise(Action raise, string what)
     {
@@ -806,7 +808,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Subscriber threw while a scheduled {What} was being raised", what);
+            _logger.LogError(ex, "A subscriber threw from a display event ({What})", what);
         }
     }
 
@@ -823,7 +825,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Subscriber threw while a scheduled {What} was being raised", what);
+            _logger.LogError(ex, "A subscriber threw from a display event ({What})", what);
         }
     }
 
