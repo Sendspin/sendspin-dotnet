@@ -2815,7 +2815,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     .ToList();
                 if (removedStreamRoles.Count > 0)
                 {
-                    DispatchStreamLifecycle(() => StopStreamRolesAsync(removedStreamRoles));
+                    DispatchStreamLifecycle(() => StopStreamRolesAsync(
+                        removedStreamRoles, stopPlayer: removedStreamRoles.Contains("player")));
                 }
             }
         }
@@ -5228,6 +5229,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // The player object is valid "only if the player role is active": a connection the
+        // server left player out of may not open this client's output. Keyed on the grant and
+        // not on IsRoleBinaryPermitted — the reference server starts a held player without its
+        // state object once its wait for one times out, and a start dropped then is never sent
+        // again, so the stream would stay closed after the object did go out.
+        if (!IsRoleActive("player"))
+        {
+            _logger.LogDebug("Stream start: ignoring player object, player is not an active role");
+            return;
+        }
+
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
         // Smart sync burst: only trigger if clock isn't already synced
@@ -5416,7 +5428,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             StreamEndReceived?.Invoke(this, payload);
 
-            await StopStreamRolesAsync(payload.Roles);
+            await StopStreamRolesAsync(payload.Roles, ReachesPlayerRole(payload.Roles));
         }
         catch (System.Text.Json.JsonException ex)
         {
@@ -5433,14 +5445,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Stops the output and clears the buffers of the stream roles a <c>stream/end</c> names —
     /// every one when it names none — or that a <c>server/activate</c> removed.
     /// </summary>
-    private async Task StopStreamRolesAsync(List<string>? roles)
+    /// <param name="roles">The roles named, or null for every stream role.</param>
+    /// <param name="stopPlayer">
+    /// Whether the player is among them. The caller's to say: a <c>stream/end</c> reaches the
+    /// player only while the role is active, a removal exactly when it no longer is.
+    /// </param>
+    private async Task StopStreamRolesAsync(List<string>? roles, bool stopPlayer)
     {
         // Media held for a display time that belongs to the stream just ended must not
         // surface after it, and the artwork on display is cleared: both a stream/end and a
         // role's removal are playback termination (spec #266), unlike a stream/clear seek.
         FlushDisplayRoles(roles, endingStream: true);
 
-        if (!ReachesPlayerRole(roles))
+        if (!stopPlayer)
         {
             return;
         }
@@ -5505,7 +5522,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Whether a stream/end or stream/clear reaches the <c>player</c> role, and so the audio
     /// pipeline. An omitted <c>roles</c> means every active stream, which is the case that
-    /// makes an absent array and an empty one behave differently.
+    /// makes an absent array and an empty one behave differently — and no stream is active for
+    /// a player the server did not activate, so on such a connection neither message reaches it.
     /// </summary>
     /// <remarks>
     /// Role-targeted teardown is routine, not exotic: whenever a <c>server/activate</c> drops a
@@ -5517,7 +5535,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <see cref="StreamEndReceived"/> / <see cref="StreamClearReceived"/> rather than being
     /// validated here, since only the consumer of a role knows its names.
     /// </remarks>
-    private static bool ReachesPlayerRole(List<string>? roles) => roles is null || roles.Contains("player");
+    private bool ReachesPlayerRole(List<string>? roles)
+        => IsRoleActive("player") && (roles is null || roles.Contains("player"));
 
     /// <summary>
     /// Discards the media a <c>stream/end</c> or <c>stream/clear</c> ends the display of: the
