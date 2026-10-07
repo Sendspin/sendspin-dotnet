@@ -40,8 +40,10 @@ public sealed class SourceCommand
 }
 
 /// <summary>
-/// Player command details from server.
-/// Null properties indicate the server is not requesting a change to that setting.
+/// Player command details from server: one command per message, named by
+/// <see cref="Command"/>. The client applies only that command's own parameter, and ignores
+/// the object when the player role is not active or the command is not one it advertised in
+/// <c>supported_commands</c>.
 /// </summary>
 public sealed class PlayerCommand
 {
@@ -53,13 +55,14 @@ public sealed class PlayerCommand
     public string? Command { get; init; }
 
     /// <summary>
-    /// Volume level (0-100). Null if volume is not being changed.
+    /// Volume level (0-100), the parameter of the "volume" command. The client clamps an
+    /// out-of-range value.
     /// </summary>
     [JsonPropertyName("volume")]
     public int? Volume { get; init; }
 
     /// <summary>
-    /// Mute state. Null if mute is not being changed.
+    /// Mute state, the parameter of the "mute" command.
     /// </summary>
     [JsonPropertyName("mute")]
     public bool? Mute { get; init; }

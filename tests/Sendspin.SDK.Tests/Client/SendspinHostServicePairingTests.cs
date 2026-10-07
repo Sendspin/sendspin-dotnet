@@ -75,7 +75,7 @@ public class SendspinHostServicePairingTests
     {
         var records = new InMemoryPairingRecordStore();
 
-        // An unbound LongTerm record makes the session trust 'user', so the discovery FakeServer
+        // An unbound LongTerm record makes the session paired, so the discovery FakeServer
         // below is admitted — see SendspinHostServiceArbitrationTests for the full reasoning.
         records.Upsert(new PairingRecord(TestPsk, PskCategory.LongTerm));
 

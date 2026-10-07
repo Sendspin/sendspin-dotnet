@@ -677,8 +677,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             : [.. channels];
 
     /// <summary>
-    /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
-    /// connection with the source role currently active, on a client that is available ("A
+    /// The spec's precondition for streaming captured audio: a paired
+    /// (<see cref="SendspinTrustLevel.Paired"/>) connection with the source role currently active, on a client that is available ("A
     /// client MUST ignore <c>start</c> received while it is unavailable"). Evaluated per start
     /// attempt, because trust, the active-role set and availability can all change over a
     /// connection's life.
@@ -2262,7 +2262,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Builds the player <c>supported_commands</c> list reported in client/state:
-    /// <c>volume</c> and <c>mute</c> always — the client applies both unconditionally — plus
+    /// <c>volume</c> and <c>mute</c> always — the client accepts both whenever the player role
+    /// is active — plus
     /// <c>set_output_delay</c> when the client accepts that command. The reference server derives
     /// controller group volume/mute from this list, so omitting them reads as volume-incapable.
     /// </summary>
@@ -2895,8 +2896,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Surfaces the spec's credential-mismatch signal to the operator: a Sentinel-keyed session
     /// with a stored long-term record for this very server means the server referenced a
     /// credential this client could not use, and the client answered with the published Sentinel
-    /// PSK (connection.md § Sentinel Fallback). The connection works, but at trust level 'none'
-    /// — no playback until someone re-pairs.
+    /// PSK (connection.md § Sentinel Fallback). The connection works, but unpaired
+    /// (<see cref="SendspinTrustLevel.Unpaired"/>) — no playback until someone re-pairs.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -2979,12 +2980,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var activeRoles = payload.ActiveRoles ?? (playbackCapable ? previousActiveRoles : []);
 
         // Source role is trust-gated: it streams potentially sensitive captured audio,
-        // so it MUST only run on a paired ('user'-trust) connection. If a server
-        // activates source@v1 without user trust, refuse and close (spec).
+        // so it MUST only run on a paired connection (SendspinTrustLevel.Paired). If a server
+        // activates source@v1 on any other, refuse and close (spec).
         if (activeRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
             && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
-            _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
+            _logger.LogWarning("server/activate activated source@v1 on a connection that is not paired; closing");
             RefuseActivation("unauthorized", "source role without a pairing");
             return;
         }
@@ -3314,19 +3315,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (CanRun(PairMethods.DynamicPairingCode))
         {
-            // 'speaker' is filtered out rather than passed through: a client advertising it
-            // must also advertise a digit_audio object and be able to play the server's digit
-            // audio pack, neither of which this SDK implements. Advertising it would invite a
-            // server to pick a flow that reaches nobody. If that leaves no channel at all, the
-            // method is withheld entirely — an empty out_channels is not a usable offer.
+            // 'speaker' is filtered out rather than passed through: the SDK does not speak a
+            // pairing code (docs/SPEC-VERSION.md, "Known deviations"). If that leaves no channel
+            // at all, the method is withheld entirely — an empty out_channels is not a usable
+            // offer.
             var outChannels = _capabilities.PairingCodeOutChannels
                 .Where(c => !string.Equals(c, "speaker", StringComparison.Ordinal))
                 .ToList();
             if (outChannels.Count != _capabilities.PairingCodeOutChannels.Count)
             {
                 _logger.LogWarning(
-                    "ClientCapabilities.PairingCodeOutChannels lists 'speaker', which requires the "
-                    + "digit-audio flow this SDK does not implement; it is omitted from the "
+                    "ClientCapabilities.PairingCodeOutChannels lists 'speaker', but this SDK does "
+                    + "not speak a pairing code; it is omitted from the "
                     + "{Method} descriptor",
                     PairMethods.DynamicPairingCode);
             }
@@ -3699,8 +3699,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Starts the attempt timeout. Called from the attempt's first message — client/pair-init
-    /// for the pairing code flows, client/pair-finalize for Pairing PSK.
+    /// Starts the attempt timeout. Called from the attempt's first message, which is
+    /// client/pair-init in every flow.
     /// </summary>
     private void ArmAttemptTimeout()
     {
@@ -4976,7 +4976,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // others alone. Every branch below is announced by the GroupStateChanged at the end of
         // this method, which is how a UI learns to drop the deactivated role's data (#196). What
         // that announcement carries is the state as it stands: a scheduled metadata or color
-        // update has not been applied yet and announces itself when it is (spec #135, pending merge).
+        // update has not been applied yet and announces itself when it is (spec #135).
 
         // Each object counts "only if the ... role is active" (messaging.md). One for a role that
         // is not is ignored, a null one included: the activate that removed the role already
@@ -5787,7 +5787,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Drops the image a channel is still holding when a <c>stream/start</c> changes that
-    /// channel's configuration, per spec #135 (pending merge): the held image was encoded for a
+    /// channel's configuration, per spec #135: the held image was encoded for a
     /// configuration that no longer applies, and the server re-sends it if it still does.
     /// </summary>
     /// <param name="previous">The artwork stream's configuration so far, if it has one.</param>
@@ -5987,8 +5987,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// that names <c>artwork</c> outright is honoured anyway, as the C++ reference client
     /// switches on the same three names for either message.
     /// A present-but-empty array names no role and so ends nothing, as everywhere else.
-    /// Dropping the artwork still held is what spec #135 (pending merge) means by "on
-    /// <c>stream/end</c>, clearing buffers includes discarding pending images".
+    /// Dropping the artwork still held is the artwork role's "On <c>stream/end</c> for the
+    /// artwork role, clients MUST clear the current image and discard any pending image".
     /// <para>
     /// <paramref name="endingStream"/> separates the two messages for the artwork already on
     /// display: a <c>stream/end</c> is playback termination and additionally clears it (spec #266),
@@ -6002,8 +6002,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // Every stream the message reaches: both media roles for a stream/end, the
             // visualizer alone for a stream/clear. The state roles hold no stream, and spec
-            // #135 (pending merge) ties a pending metadata or color update to nothing a stream
-            // teardown says.
+            // #135 ties a pending metadata or color update to nothing a stream teardown says.
             FlushVisualizer(endingStream);
             if (endingStream)
             {

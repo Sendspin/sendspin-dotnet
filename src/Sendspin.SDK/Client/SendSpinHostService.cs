@@ -1266,7 +1266,9 @@ public sealed class SendspinHostService : IAsyncDisposable
             // application still showing a server the host service has already forgotten — a
             // worse outcome than a goodbye that did not make it onto a socket that is closing
             // anyway. The surface is open regardless: DisposeAsync releases the socket, and the
-            // disconnect dispatches state changes into subscriber code.
+            // disconnect runs the client's teardown, which cancels the token of a pairing-code
+            // presenter still showing a code and with it whatever the application registered
+            // on that token.
             _logger.LogWarning(ex, "Error disconnecting existing server {ServerId} during arbitration",
                 existing.ServerId);
         }

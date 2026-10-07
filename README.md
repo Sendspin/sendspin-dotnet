@@ -56,8 +56,8 @@ The encrypted transport protects a session's confidentiality and integrity, but 
 *authenticates* depends on how the client is paired and configured.
 
 - **Pair before trusting.** An unpaired connection runs under the published Sentinel PSK,
-  which authenticates nothing — its trust level is `none`. Pairing establishes a per-server
-  pre-shared key and raises the session to trust `user`.
+  which authenticates nothing — `ISendspinClient.TrustLevel` reports `Unpaired`. Pairing
+  establishes a per-server pre-shared key, and a session keyed with it reports `Paired`.
 - **Unpaired access is off by default; leave it off unless you need it.**
   `ClientCapabilities.UnpairedAccessEnabled = true` lets a server play to the client with no
   pairing record. Because the Sentinel PSK is a published constant and neither peer's static

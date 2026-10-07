@@ -10,7 +10,7 @@ A cross-platform .NET SDK for the Sendspin synchronized multi-room audio protoco
 - **Multi-room Audio Sync**: Microsecond-precision clock synchronization using Kalman filtering
 - **Sync Correction Built In**: `TimedAudioBuffer.Read()` applies the spec's full correction strategy — a conformant player writes no correction code
 - **Platform Flexibility**: `ReadRaw()` hands the error out instead, for platforms with their own rate-control mechanism (hardware rate adjust, playback rate, an existing resampler)
-- **Fast Startup**: Audio plays within ~300ms of connection
+- **Fast Startup**: A player announces itself about two seconds after connecting, once clock sync has converged
 - **Protocol Support**: Sendspin spec `1.0.0-rc1` over an end-to-end encrypted WebSocket — player, controller, metadata, artwork, color, visualizer and source roles
 - **Server Discovery**: mDNS-based automatic server discovery
 - **Audio Decoding**: Built-in PCM, FLAC, and Opus codec support
@@ -948,10 +948,10 @@ domain (local capture time mapped through the clock filter's offset+drift). On `
 role deactivation, or disposal it sends `client-stream/end` and stops capturing.
 
 **Trust required.** A source streams potentially sensitive audio, so `source@v1` MUST
-run on a paired (`user`-trust) connection. The SDK enforces this in two places, because
-one is not enough: a `server/activate` that activates the role at trust `none` is
+run on a paired connection (`TrustLevel` is `Paired`). The SDK enforces this in two places, because
+one is not enough: a `server/activate` that activates the role on an unpaired connection is
 refused and the connection is closed, per spec — and, independently, the capture device
-is never opened unless the connection is at trust `user` *and* the source role is
+is never opened unless the connection is paired *and* the source role is
 currently in `active_roles`. The second check is what stops a `server/command
 { source: { command: "start" } }` that skips activation entirely.
 

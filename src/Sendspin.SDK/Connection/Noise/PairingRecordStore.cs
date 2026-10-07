@@ -535,10 +535,11 @@ internal sealed class RecordPskResolver : INoisePskResolver
     }
 
     /// <summary>
-    /// Whether the record belongs in the handshake's candidate set. Per connection.md, a PSK
-    /// for a disabled pairing method is excluded, so a handshake referencing it misses
-    /// outright instead of authenticating a channel that would only be refused later, at the
-    /// pairing activation (#202).
+    /// Whether the record belongs in the handshake's candidate set. A PSK for a disabled
+    /// pairing method is excluded, so a handshake referencing it misses outright instead of
+    /// authenticating a channel that would only be refused later, at the pairing activation.
+    /// That is this SDK's decision (#202), not a spec rule: the spec's requirement to keep the
+    /// pairing PSK among the candidates at all times is met while the method is enabled.
     /// </summary>
     /// <remarks>
     /// Only the <c>pairing_psk</c> method's own bootstrap secret is affected. A long-term

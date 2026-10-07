@@ -359,7 +359,7 @@ public sealed class NoiseWireFraming : IWireFraming, INoiseSessionInfo
             // client has disabled. On the INITIAL handshake the client completes message 2 with
             // the published Sentinel PSK instead of failing; the server recognises that as an
             // authenticated credential-mismatch signal and the session proceeds as an ordinary
-            // Sentinel connection at trust level 'none'. Nothing here touches the record store:
+            // Sentinel connection, which is unpaired. Nothing here touches the record store:
             // the signal alone must not remove or replace a record.
             //
             // A re-handshake keeps failing. There is no unauthenticated peer to rescue by then,

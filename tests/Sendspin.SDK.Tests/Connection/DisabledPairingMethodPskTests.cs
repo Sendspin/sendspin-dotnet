@@ -15,7 +15,7 @@ namespace Sendspin.SDK.Tests.Connection;
 /// <remarks>
 /// A lookup miss in the initial handshake is answered with the Sentinel PSK (connection.md
 /// § Sentinel Fallback), so the observable outcome of the exclusion is a Sentinel-keyed
-/// session at trust 'none' rather than a failed handshake. Either way the disabled record
+/// session, which is unpaired, rather than a failed handshake. Either way the disabled record
 /// never authenticates the channel, which is the property #202 is about.
 /// </remarks>
 public class DisabledPairingMethodPskTests

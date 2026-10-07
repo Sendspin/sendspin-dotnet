@@ -51,7 +51,7 @@ public class SendspinHostServiceClientInitiatedTests
     {
         var records = new InMemoryPairingRecordStore();
 
-        // Unbound LongTerm record, so the session trusts 'user' and a playback activate is
+        // Unbound LongTerm record, so the session is paired and a playback activate is
         // admissible — see SendspinHostServiceArbitrationTests for the full reasoning.
         records.Upsert(new PairingRecord(TestPsk, PskCategory.LongTerm));
 

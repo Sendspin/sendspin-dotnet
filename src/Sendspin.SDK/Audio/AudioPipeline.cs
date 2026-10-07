@@ -1014,18 +1014,10 @@ public sealed class AudioPipeline : IAudioPipeline
     }
 
     /// <summary>
-    /// Gets the current local time in microseconds, preferring audio hardware clock when available.
-    /// Used by the sample source to know when to release audio.
+    /// Records a chunk's arrival for the diagnostic statistics: counts, inter-arrival average
+    /// and jitter, and the largest recent gap.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Priority: Audio hardware clock (if player provides it) → MonotonicTimer (wall clock fallback).
-    /// </para>
-    /// <para>
-    /// Audio hardware clocks are immune to VM wall clock issues because they run on the
-    /// audio device's crystal oscillator, not the hypervisor's timer.
-    /// </para>
-    /// </remarks>
+    /// <param name="encodedBytes">Size of the chunk's encoded audio.</param>
     private void TrackChunkArrival(int encodedBytes)
     {
         var nowMs = Environment.TickCount64;
@@ -1057,6 +1049,19 @@ public sealed class AudioPipeline : IAudioPipeline
         }
     }
 
+    /// <summary>
+    /// Gets the current local time in microseconds, preferring audio hardware clock when available.
+    /// Used by the sample source to know when to release audio.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Priority: Audio hardware clock (if player provides it) → MonotonicTimer (wall clock fallback).
+    /// </para>
+    /// <para>
+    /// Audio hardware clocks are immune to VM wall clock issues because they run on the
+    /// audio device's crystal oscillator, not the hypervisor's timer.
+    /// </para>
+    /// </remarks>
     private long GetCurrentLocalTimeMicroseconds()
     {
         // Try audio hardware clock first (VM-immune)
