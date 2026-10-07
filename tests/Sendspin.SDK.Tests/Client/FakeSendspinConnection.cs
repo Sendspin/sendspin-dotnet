@@ -115,6 +115,15 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
     {
         ServerUri = serverUri;
+
+        // A dial passes through Connecting, as SendspinConnection's does. Only from
+        // Disconnected: tests also call this on a fake that is already up, to stand in for the
+        // promotion to Connected, and that is not a new connection.
+        if (State == ConnectionState.Disconnected)
+        {
+            SetState(ConnectionState.Connecting);
+        }
+
         SetState(ConnectionState.Connected);
         return Task.CompletedTask;
     }
@@ -307,10 +316,14 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
 
     /// <summary>
     /// Simulates the redial succeeding after <see cref="SimulateConnectionLoss"/>:
-    /// Reconnecting → Handshaking, the transition the client's reconnect handshake
-    /// listens for.
+    /// Reconnecting → Connecting → Handshaking, the sequence <see cref="SendspinConnection"/>
+    /// walks on each reconnect attempt.
     /// </summary>
-    public void SimulateReconnected() => SetState(ConnectionState.Handshaking);
+    public void SimulateReconnected()
+    {
+        SetState(ConnectionState.Connecting);
+        SetState(ConnectionState.Handshaking);
+    }
 
     /// <summary>
     /// Simulates a close in flight: the state <see cref="SendspinConnection"/> holds between
