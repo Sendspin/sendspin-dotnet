@@ -4936,55 +4936,64 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         var player = message.Payload.Player;
-        var changed = false;
+
+        // The player object is valid "only if the player role is active": a server that left
+        // player out of active_roles has no say over this client's output.
+        if (!IsRoleActive("player"))
+        {
+            _logger.LogDebug("server/command: ignoring player command '{Command}', player is not an active role",
+                player.Command);
+            return;
+        }
 
         _logger.LogDebug("server/command: {Command}", player.Command);
 
-        // Updates _playerState (this player's volume), not _currentGroup (group average).
-        if (player.Volume.HasValue)
+        // One command per message, named by 'command'; each applies only its own parameter, so a
+        // parameter belonging to another command is not acted on. Anything else — an unknown
+        // command, one missing its parameter, or one absent from supported_commands — is ignored.
+        switch (player.Command)
         {
-            _playerState.Volume = player.Volume.Value;
-            _audioPipeline?.SetVolume(player.Volume.Value);
-            changed = true;
-            _logger.LogInformation("server/command [{Player}]: Applied volume {Volume}",
-                _capabilities.ClientName, player.Volume.Value);
+            // Updates _playerState (this player's volume), not _currentGroup (group average).
+            // Clamped to the spec's 0-100 here, as SendPlayerStateAsync does for an app-set
+            // volume, so the app and the acknowledgement see the same value.
+            case Commands.Volume when player.Volume is { } requestedVolume:
+                var volume = Math.Clamp(requestedVolume, 0, 100);
+                _playerState.Volume = volume;
+                _audioPipeline?.SetVolume(volume);
+                _logger.LogInformation("server/command [{Player}]: Applied volume {Volume}",
+                    _capabilities.ClientName, volume);
+                break;
+
+            case Commands.Mute when player.Mute is { } mute:
+                _playerState.Muted = mute;
+                _audioPipeline?.SetMuted(mute);
+                _logger.LogInformation("server/command [{Player}]: Applied mute {Muted}",
+                    _capabilities.ClientName, mute);
+                break;
+
+            // Apply set_output_delay only when advertised as supported and a value is present. Per spec
+            // the value is 0-5000 ms (negatives are not supported); the clock synchronizer's setter is
+            // the single clamp site, so the requested value is handed to it and the applied result read
+            // back for persistence and the log.
+            // Spec 168a677 (spec PR #164) renamed the command from 'set_static_delay' and the field
+            // from 'static_delay_ms' with no alias; the 10.x line accepts only the new names.
+            case Commands.SetOutputDelay
+                when _capabilities.SupportsSetOutputDelay && player.OutputDelayMs is { } requestedDelayMs:
+                _clockSynchronizer.OutputDelayMs = requestedDelayMs;
+                var applied = _clockSynchronizer.OutputDelayMs;
+                TrySaveOutputDelay(applied);
+                _logger.LogInformation("server/command [{Player}]: Applied output delay {Delay}ms",
+                    _capabilities.ClientName, applied);
+                break;
+
+            default:
+                return;
         }
 
-        if (player.Mute.HasValue)
-        {
-            _playerState.Muted = player.Mute.Value;
-            _audioPipeline?.SetMuted(player.Mute.Value);
-            changed = true;
-            _logger.LogInformation("server/command [{Player}]: Applied mute {Muted}",
-                _capabilities.ClientName, player.Mute.Value);
-        }
+        PlayerStateChanged?.Invoke(this, _playerState);
 
-        // Apply set_output_delay only when advertised as supported and a value is present. Per spec
-        // the value is 0-5000 ms (negatives are not supported); the clock synchronizer's setter is
-        // the single clamp site, so the requested value is handed to it and the applied result read
-        // back for persistence and the log.
-        // Spec 168a677 (spec PR #164) renamed the command from 'set_static_delay' and the field
-        // from 'static_delay_ms' with no alias; the 10.x line accepts only the new names.
-        var requestedDelayMs = player.OutputDelayMs;
-        if (player.Command == Commands.SetOutputDelay
-            && _capabilities.SupportsSetOutputDelay
-            && requestedDelayMs.HasValue)
-        {
-            _clockSynchronizer.OutputDelayMs = requestedDelayMs.Value;
-            var applied = _clockSynchronizer.OutputDelayMs;
-            TrySaveOutputDelay(applied);
-            changed = true;
-            _logger.LogInformation("server/command [{Player}]: Applied output delay {Delay}ms",
-                _capabilities.ClientName, applied);
-        }
-
-        if (changed)
-        {
-            PlayerStateChanged?.Invoke(this, _playerState);
-
-            // Per spec: send client/state to confirm the applied state back to the server.
-            SendPlayerStateAckAsync().SafeFireAndForget(_logger);
-        }
+        // Per spec: send client/state to confirm the applied state back to the server.
+        SendPlayerStateAckAsync().SafeFireAndForget(_logger);
     }
 
     /// <summary>
