@@ -127,7 +127,7 @@ public class SourceStreamPipelineTests
         {
             // Chunk 1 is dequeued and parked mid-send: a stalled network write with the
             // device still capturing. Everything after it piles up behind the stall.
-            capture.Emit([1], 1_000);
+            capture.Emit([1, 1, 1, 1], 1_000);
             await firstSendEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
             // Fill the channel to capacity, then keep going. Every Emit must return
@@ -136,7 +136,7 @@ public class SourceStreamPipelineTests
             // still parked is itself part of the proof.
             for (int i = 2; i <= 1 + SourceStreamPipeline.MaxBufferedCaptures + overflow; i++)
             {
-                capture.Emit([(byte)i], i * 1_000);
+                capture.Emit([(byte)i, 0, 0, 0], i * 1_000);
             }
         }
         finally
@@ -185,7 +185,7 @@ public class SourceStreamPipelineTests
         Assert.True(capture.Capturing);
 
         // Positive control: the restarted stream actually streams.
-        capture.Emit([7], 1000);
+        capture.Emit([7, 7, 7, 7], 1000);
         await WaitUntilAsync(
             () =>
             {
@@ -218,7 +218,7 @@ public class SourceStreamPipelineTests
         Assert.DoesNotContain(sent, m => m is ClientStreamEndMessage);
 
         // A capture arriving now goes nowhere: no session is open.
-        capture.Emit([1], 1000);
+        capture.Emit([1, 1, 1, 1], 1000);
         lock (frames)
         {
             Assert.Empty(frames);
@@ -394,7 +394,7 @@ public class SourceStreamPipelineTests
         {
             // Park the first session's consumer mid-send, then stop: the stop's core runs
             // to its drain await and is provably mid-drain when the next start arrives.
-            capture.Emit([1], 1_000);
+            capture.Emit([1, 1, 1, 1], 1_000);
             await firstSendEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             stopTask = pipeline.HandleCommandAsync("stop");
 
@@ -420,7 +420,7 @@ public class SourceStreamPipelineTests
         Assert.True(pipeline.IsStreaming);
         Assert.True(capture.Capturing);
         Assert.Equal(2, factory.CreateCalls);
-        capture.Emit([9], 9_000);
+        capture.Emit([9, 9, 9, 9], 9_000);
         await WaitUntilAsync(
             () =>
             {
@@ -538,6 +538,40 @@ public class SourceStreamPipelineTests
         byte[] chunk = Assert.Single(frames);
         Assert.Equal(CeilingBytes, chunk.Length - ChunkHeaderBytes);
         Assert.Equal(7_000, BinaryPrimitives.ReadInt64BigEndian(chunk.AsSpan(1, 8)));
+    }
+
+    [Theory]
+    [InlineData(100)] // sent whole
+    [InlineData(400)] // split across chunks
+    public async Task ACaptureEndingPartWayThroughAFrame_IsSentAsWholeFramesOnly(int milliseconds)
+    {
+        // roles/source/v1.md, "Codec framing": a pcm chunk is "any whole number of PCM frames".
+        // The partial frame used to ride along on the last chunk, and aiosendspin rejects a
+        // chunk like that outright.
+        var capture = new FakeCaptureDevice();
+        var frames = new List<byte[]>();
+        var pipeline = CreatePipeline(capture, Collect(new List<IMessage>()), Collect(frames));
+        await pipeline.HandleCommandAsync("start");
+
+        var pcm = new byte[(milliseconds * BytesPerMillisecond) + 3];
+        for (int i = 0; i < pcm.Length; i++)
+        {
+            pcm[i] = (byte)(i % 251);
+        }
+
+        capture.Emit(pcm, 1_000_000);
+        await pipeline.StopStreamingAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        byte[][] sent;
+        lock (frames)
+        {
+            sent = frames.ToArray();
+        }
+
+        Assert.All(sent, frame => Assert.Equal(0, (frame.Length - ChunkHeaderBytes) % BytesPerFrame));
+        Assert.Equal(
+            pcm.Take(milliseconds * BytesPerMillisecond).ToArray(),
+            sent.SelectMany(frame => frame.Skip(ChunkHeaderBytes)).ToArray());
     }
 
     private static SourceStreamPipeline CreatePipeline(

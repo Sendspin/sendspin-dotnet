@@ -334,7 +334,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _clockSync = clockSync;
         _syncOptions = syncOptions?.Clone() ?? SyncCorrectionOptions.Default;
         _syncOptions.Validate();
-        SyncCorrectionPolicy.WarnIfSpeedCapExceeded(_syncOptions, _logger);
+        SyncCorrectionPolicy.WarnIfOutsideSpec(_syncOptions, _logger);
         _sampleRate = format.SampleRate;
         _channels = format.Channels;
         _samplesPerMs = (_sampleRate * _channels) / 1000;
@@ -636,14 +636,20 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
                     return; // Discard incoming chunk — do NOT drop oldest
                 }
 
-                // During playback, drop oldest to make room (normal overrun behavior)
-                var toDrop = (_count + samples.Length) - _buffer.Length;
-                DropOldestSamples(toDrop);
+                // During playback it is still the incoming chunk that goes. The server resends
+                // neither, but making room at the read end discards the audio due next and puts
+                // the cursor ahead of the schedule, and the silence that would bring it back
+                // drains nothing, so the next chunk finds the ring just as full: while the
+                // server stays ahead of the ring, nothing plays on time again. A chunk missing
+                // at the write end is an ordinary hole, seen at its boundary when playback
+                // reaches it and covered by silence of its own length (issue #352).
+                _droppedSamples += samples.Length;
                 _logger.LogDebug(
-                    "[Buffer] Overrun #{Count}: dropped {DroppedMs:F1}ms of oldest audio (buffer full at {CapacityMs}ms)",
+                    "[Buffer] Overrun #{Count}: discarding incoming {ChunkMs:F1}ms (buffer full at {CapacityMs}ms)",
                     _overrunCount,
-                    toDrop / (double)_samplesPerMs,
+                    samples.Length / (double)_samplesPerMs,
                     _buffer.Length / (double)_samplesPerMs);
+                return;
             }
 
             // Write samples to circular buffer
@@ -1458,38 +1464,6 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _needsReanchor = true;
         _reanchorCount++;
         return true;
-    }
-
-    /// <summary>
-    /// Drops the oldest samples to make room for new data.
-    /// Must be called under lock.
-    /// </summary>
-    private void DropOldestSamples(int toDrop)
-    {
-        var dropped = 0;
-        while (dropped < toDrop && _count > 0)
-        {
-            var chunkSize = Math.Min(toDrop - dropped, _buffer.Length - _readPos);
-            chunkSize = Math.Min(chunkSize, _count);
-            _readPos = (_readPos + chunkSize) % _buffer.Length;
-            _count -= chunkSize;
-            dropped += chunkSize;
-        }
-
-        _droppedSamples += dropped;
-
-        // Also update segment tracking
-        ConsumeSegments(dropped);
-
-        // Content discarded mid-play is a hole: everything after it now plays that much
-        // early. ConsumeSegments moves the read cursor over it silently (so the next
-        // segment boundary looks continuous), so the shift has to be recorded here or it
-        // would never reach the sync error at all (issue #229).
-        if (_playbackStarted && dropped > 0)
-        {
-            _segmentGapMicroseconds += SamplesToMicroseconds(dropped);
-            _contentHolesDetected++;
-        }
     }
 
     /// <summary>

@@ -140,7 +140,7 @@ public class SendspinClientServiceSourceTests
             "client-stream/end after the stop");
 
         int binaryBefore = connection.SnapshotSentBinary().Count;
-        capture.Emit([9, 9], 6000);
+        capture.Emit([9, 9, 9, 9], 6000);
         Assert.Equal(binaryBefore, connection.SnapshotSentBinary().Count); // no chunk after stop
     }
 
@@ -269,7 +269,7 @@ public class SendspinClientServiceSourceTests
         Assert.False(capture.Capturing);
         Assert.Equal(announcesBefore, connection.SnapshotSentMessages().OfType<ClientStreamStartMessage>().Count());
         int binaryBefore = connection.SnapshotSentBinary().Count;
-        capture.Emit([5, 5], 7000);
+        capture.Emit([5, 5, 5, 5], 7000);
         Assert.Equal(binaryBefore, connection.SnapshotSentBinary().Count);
 
         // No client-stream/end either: the old stream died with its connection, and
@@ -281,7 +281,7 @@ public class SendspinClientServiceSourceTests
         connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
         await WaitUntilAsync(() => capture.Capturing, "capture to open after the fresh start");
         Assert.Equal(announcesBefore + 1, connection.SnapshotSentMessages().OfType<ClientStreamStartMessage>().Count());
-        capture.Emit([6, 6], 8000);
+        capture.Emit([6, 6, 6, 6], 8000);
         await WaitUntilAsync(
             () => connection.SnapshotSentBinary().Count == binaryBefore + 1,
             "a chunk to flow after the fresh start");

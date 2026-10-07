@@ -23,6 +23,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly ILogger<SendspinHostService> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly SendspinListener _listener;
+    private readonly ListenerOptions _listenerOptions;
     private readonly MdnsServiceAdvertiser _advertiser;
     private readonly AdvertiserOptions _advertiserOptions;
     private readonly SendspinClientOptions _options;
@@ -197,16 +198,20 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 
     /// <summary>
-    /// Gets the server ID of the server that most recently had playback_state "playing".
+    /// Gets the server ID of the last-playback server: the one that most recently held the
+    /// admitted connection while <c>'playback'</c> was among its <c>server/activate</c>
+    /// activities (connection.md). The group's playback state plays no part in it.
     /// Used to break an arbitration tie between two connections that declare no activities.
     /// </summary>
     public string? LastPlayedServerId { get; private set; }
 
     /// <summary>
     /// Updates the last-played server ID.
-    /// Call this when a server transitions to the "playing" state, regardless of connection mode.
+    /// The host calls this itself for the connections it admits. It is public for a session the
+    /// application dialled, which the host never sees activate; the spec leaves the choice of
+    /// server there to the implementation.
     /// </summary>
-    /// <param name="serverId">The server ID that is now playing.</param>
+    /// <param name="serverId">The server ID to record as the last-playback server.</param>
     public void SetLastPlayedServerId(string serverId)
     {
         if (string.IsNullOrEmpty(serverId) || serverId == LastPlayedServerId)
@@ -259,9 +264,8 @@ public sealed class SendspinHostService : IAsyncDisposable
             // Deliberately broad for the same reason as TryLoadLastPlayed (#109). Degrading is
             // clearer still on the save side: the only caller is SetLastPlayedServerId, which
             // has already updated the in-memory value and still has LastPlayedServerIdChanged
-            // to raise. Throwing would abandon that notification and propagate out of a
-            // GroupStateChanged handler — turning a failed write into a lost playback-state
-            // update for the embedder.
+            // to raise. Throwing would abandon that notification and propagate out of the
+            // client's server/activate handling, or out of the admission that called it.
             _logger.LogError(ex, "ILastPlayedServerStore.Save({ServerId}) threw; last-played applied in-memory but not persisted", serverId);
         }
     }
@@ -298,6 +302,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();
 
         var listenOpts = listenerOptions ?? new ListenerOptions();
+        _listenerOptions = listenOpts;
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
         {
             InstanceName = _options.Capabilities.ClientName,
@@ -329,7 +334,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         await _listener.StartAsync(cancellationToken);
         if (_advertiserOptions.Enabled)
         {
-            await _advertiser.StartAsync(cancellationToken);
+            await StartAdvertiserAsync(cancellationToken);
         }
         else
         {
@@ -338,6 +343,13 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         _logger.LogInformation("Sendspin host service started - waiting for server connections");
     }
+
+    // Advertises what the listener is serving, read once it has started, rather than the port
+    // and path in the advertiser options: "Port: The port the Sendspin client is listening on"
+    // (connection.md). The configured port is not that when it is 0 and the OS assigned one,
+    // and a caller's own AdvertiserOptions need not agree with its ListenerOptions at all.
+    private Task StartAdvertiserAsync(CancellationToken cancellationToken)
+        => _advertiser.StartAsync(_listener.BoundPort, _listenerOptions.Path, cancellationToken);
 
     /// <summary>
     /// Stops the host service.
@@ -412,8 +424,9 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     /// <summary>
     /// Stops mDNS advertising without stopping the listener.
-    /// Call this when manually connecting to a server to prevent
-    /// other servers from trying to connect to this client.
+    /// Call this before manually connecting to a server: connection.md forbids it while
+    /// advertising ("Clients MUST NOT manually connect to servers while advertising
+    /// <c>_sendspin._tcp</c>"), and it keeps other servers from trying to connect to this client.
     /// </summary>
     public async Task StopAdvertisingAsync()
     {
@@ -443,7 +456,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         _logger.LogInformation("Resuming mDNS advertisement");
         if (_advertiserOptions.Enabled)
         {
-            await _advertiser.StartAsync(cancellationToken);
+            await StartAdvertiserAsync(cancellationToken);
         }
         else
         {
@@ -535,6 +548,16 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// connections keep running while every new one is refused on the adopted session's behalf,
     /// which is rarely what the caller meant. Call <see cref="DisconnectAllAsync"/> first.
     /// </para>
+    /// <para>
+    /// <b>Advertising is the caller's to stop.</b> connection.md: "Clients MUST use exactly one
+    /// of the two methods at a time, advertising or discovering accordingly", and "Clients MUST
+    /// NOT manually connect to servers while advertising <c>_sendspin._tcp</c>". That applies
+    /// from the dial, which happens before there is a session to adopt, so adopting cannot do it
+    /// for you: call <see cref="StopAdvertisingAsync"/> before dialling, and
+    /// <see cref="StartAdvertisingAsync"/> once the session has ended, whether you closed it or
+    /// it dropped. Adopting while still advertising is allowed but logs a warning: every server
+    /// the advertisement invites is refused with <c>concurrent_attempt</c> and may keep retrying.
+    /// </para>
     /// </remarks>
     /// <param name="client">
     /// The dialled client. Its <c>server/activate</c> activities supply the holder's arbitration
@@ -600,6 +623,14 @@ public sealed class SendspinHostService : IAsyncDisposable
                 + "active; they keep running while incoming servers are refused. Call DisconnectAllAsync first.",
                 serverId,
                 hostModeConnections);
+        }
+
+        if (_advertiser.IsAdvertising)
+        {
+            _logger.LogWarning(
+                "Adopted client-initiated {ServerId} while still advertising _sendspin._tcp; servers keep "
+                + "being invited and refused. Call StopAdvertisingAsync before dialling.",
+                serverId);
         }
 
         if (client.ConnectionState == ConnectionState.Disconnected)
@@ -850,12 +881,6 @@ public sealed class SendspinHostService : IAsyncDisposable
 
             client.GroupStateChanged += (s, g) =>
             {
-                // Track which server last had playback_state "playing".
-                if (g.PlaybackState == PlaybackState.Playing && client.ServerId is not null)
-                {
-                    SetLastPlayedServerId(client.ServerId);
-                }
-
                 GroupStateChanged?.Invoke(this, g);
             };
             client.PlayerStateChanged += (s, p) => PlayerStateChanged?.Invoke(this, p);
@@ -960,6 +985,18 @@ public sealed class SendspinHostService : IAsyncDisposable
                         "Server {ServerId} disconnected, or the host stopped, during arbitration; not admitting it",
                         serverId);
                     return;
+                }
+
+                // The last-playback server is the one that "most recently held the admitted
+                // connection while 'playback' was among its activities" (connection.md), so it
+                // is read from this connection's activates only now that it is admitted — and
+                // from each later one, because a connection admitted with no activities may
+                // declare 'playback' afterwards. Subscribed before the read, so an activate
+                // landing between the two is not missed.
+                client.ServerActivateReceived += (s, activate) => RecordLastPlaybackServer(serverId, activate);
+                if (client.LastServerActivate is { } admittedActivate)
+                {
+                    RecordLastPlaybackServer(serverId, admittedActivate);
                 }
 
                 _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
@@ -1071,6 +1108,14 @@ public sealed class SendspinHostService : IAsyncDisposable
         finally
         {
             client.ConnectionStateChanged -= OnStateChanged;
+        }
+    }
+
+    private void RecordLastPlaybackServer(string serverId, ServerActivatePayload activate)
+    {
+        if (activate.ActivitiesList.Contains(Activities.Playback))
+        {
+            SetLastPlayedServerId(serverId);
         }
     }
 

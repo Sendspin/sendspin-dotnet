@@ -92,7 +92,7 @@ public sealed class SyncCorrectionCalculator : ISyncCorrectionProvider
 
         _options = options?.Clone() ?? SyncCorrectionOptions.Default;
         _options.Validate();
-        SyncCorrectionPolicy.WarnIfSpeedCapExceeded(_options, logger ?? NullLogger.Instance);
+        SyncCorrectionPolicy.WarnIfOutsideSpec(_options, logger ?? NullLogger.Instance);
         _sampleRate = sampleRate;
         _channels = channels;
         _hardSyncStall = new HardSyncStallDetector(_options);

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Connection.Noise.Pairing;
@@ -45,10 +46,15 @@ public class TimeSyncPairingGatingTests
     /// to narrow them.
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection, ScriptedClockSynchronizer Clock)
-        CreatePairingCodePairableClient(PskCategory category, bool unpairedAccess = false, string[]? roles = null)
+        CreatePairingCodePairableClient(
+            PskCategory category,
+            bool unpairedAccess = false,
+            string[]? roles = null,
+            Action<FakeNoiseSession>? onSession = null,
+            ILogger<SendspinClientService>? logger = null)
     {
         var clock = new ScriptedClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(
+        var (client, connection, session) = TestClient.Create(
             category,
             unpairedAccess,
             configure: options =>
@@ -69,7 +75,9 @@ public class TimeSyncPairingGatingTests
                     PairingCodeLockoutStore = new InMemoryPairingCodeLockoutStore(),
                     PresentPairingCodeAsync = (_, _) => ValueTask.CompletedTask,
                 };
-            });
+            },
+            logger: logger);
+        onSession?.Invoke(session);
         return (client, connection, clock);
     }
 
@@ -253,6 +261,76 @@ public class TimeSyncPairingGatingTests
         await Task.Delay(200);
         var initial = Assert.Single(ClientStates(connection));
         Assert.Equal(true, initial.Payload.Available);
+    }
+
+    [Theory]
+    [InlineData("player-state")]
+    [InlineData("external-source")]
+    public async Task ArtworkOnlyClient_PairingFirstActivate_ACallInsideTheWindowDoesNotCostTheInitialClientState(string kind)
+    {
+        // The pairing gate drops the send without an error, so a call that promotes the initial
+        // client/state inside the window used to mark it sent with nothing on the wire. The
+        // activate after pairing then sent none, and the server "MUST NOT send that role's
+        // binary data until it has received that object": no artwork for the whole connection
+        // (#327).
+        var session = default(FakeNoiseSession)!;
+        var (client, connection, _) = CreatePairingCodePairableClient(
+            PskCategory.Sentinel, unpairedAccess: true, roles: ["artwork@v1"], onSession: s => session = s);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(ServerHello);
+        connection.RaiseTextMessageReceived(PairingActivate);
+
+        switch (kind)
+        {
+            case "player-state": await client.SendPlayerStateAsync(volume: 50, muted: false); break;
+            case "external-source": await client.EnterExternalSourceAsync(); break;
+            default: throw new ArgumentOutOfRangeException(nameof(kind));
+        }
+
+        Assert.Empty(ClientStates(connection));
+
+        // Pairing done: the server re-handshakes onto the new long-term PSK, then activates.
+        session.MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), PskCategory.LongTerm);
+        session.HandshakeHash = Enumerable.Repeat((byte)0xAB, 32).ToArray();
+        connection.RaiseTextMessageReceived(ArtworkActivate);
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+
+        await Task.Delay(200);
+        var initial = Assert.Single(ClientStates(connection));
+        Assert.NotNull(initial.Payload.Artwork);
+
+        // Read live when it finally goes: what the window dropped is in it.
+        Assert.Equal(kind != "external-source", initial.Payload.Available);
+    }
+
+    [Fact]
+    public async Task ReconnectAfterADropInsideAPairingWindow_StartsOutsideTheWindow()
+    {
+        // The window belongs to the connection whose activate opened it. Left standing across a
+        // reconnect, it dropped the new connection's initial client/state, which reached the
+        // server only because the same stale flag made the activate look like one leaving
+        // pairing and re-report. The wire came out right by coincidence; the log shows it.
+        var logger = new CapturingLogger<SendspinClientService>();
+        var (client, connection, _) = CreatePairingCodePairableClient(
+            PskCategory.Sentinel, unpairedAccess: true, roles: ["artwork@v1"], logger: logger);
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(ServerHello);
+        connection.RaiseTextMessageReceived(PairingActivate);
+        await connection.DisconnectAsync("network_drop");
+
+        var connectTask = client.ConnectAsync(new Uri("ws://test.local:8927/sendspin"));
+        connection.RaiseTextMessageReceived(ServerHello);
+        connection.RaiseTextMessageReceived(ArtworkActivate);
+        await connectTask;
+
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
+        Assert.Single(ClientStates(connection));
+        Assert.DoesNotContain(
+            logger.MessagesAt(LogLevel.Debug),
+            m => m.Contains("dropping ClientStateMessage", StringComparison.Ordinal));
     }
 
     [Fact]

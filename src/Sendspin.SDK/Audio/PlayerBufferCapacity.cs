@@ -23,7 +23,16 @@ namespace Sendspin.SDK.Audio;
 /// The conversion is per codec, and the binding one is whichever advertised codec packs the
 /// most audio into a byte — a megabyte of Opus is minutes, a megabyte of PCM is seconds. The
 /// advertisement therefore uses the <em>minimum</em> byte rate across the advertised formats,
-/// so the promise holds whichever format the server picks.
+/// so the same figure serves whichever format the server picks.
+/// </para>
+/// <para>
+/// How firm the figure is depends on the codec. For PCM the byte rate is fixed, so the
+/// advertised bytes never decode to more than the buffer holds. For Opus that is true of any
+/// stream at or above the assumed 64 kbps. For FLAC it is an estimate at an assumed compression
+/// ratio: material that compresses better fits more audio into the same bytes, and a server
+/// that fills by bytes can then send more than a buffer shorter than the server's own time cap
+/// holds. <see cref="TimedAudioBuffer"/> drops the chunk it has no room for, and playback
+/// covers the gap with silence when it reaches it.
 /// </para>
 /// </remarks>
 public static class PlayerBufferCapacity
@@ -66,7 +75,8 @@ public static class PlayerBufferCapacity
     public const int AdvertisedFractionDenominator = 5;
 
     /// <summary>
-    /// Assumed worst-case FLAC compression, as a fraction of the equivalent PCM byte rate.
+    /// Assumed FLAC compression, as a fraction of the equivalent PCM byte rate. An estimate for
+    /// music, not a worst case.
     /// </summary>
     /// <remarks>
     /// FLAC is lossless, so its byte rate is bounded above by PCM but has no useful lower
@@ -74,6 +84,13 @@ public static class PlayerBufferCapacity
     /// combined with <see cref="AdvertisedFractionDenominator"/> this keeps the advertisement
     /// conservative without collapsing it to something unusable. If a deployment streams
     /// material that compresses much harder than music, advertise explicitly.
+    /// <para>
+    /// So for FLAC the advertisement is an estimate, not a bound: a stream under two fifths of
+    /// the PCM rate fits more audio into the advertised bytes than the buffer holds. aiosendspin
+    /// also stops at 30 s outstanding whatever the byte count (<c>max_duration_us</c>,
+    /// server/roles/player/v1.py), so against it only a buffer shorter than that is exposed.
+    /// <see cref="TimedAudioBuffer"/> discards the chunks it has no room for.
+    /// </para>
     /// </remarks>
     private const double FlacCompressionFloor = 0.5;
 
@@ -125,8 +142,9 @@ public static class PlayerBufferCapacity
     /// <param name="decodedBufferMilliseconds">Decoded audio the player can hold.</param>
     /// <param name="formats">Formats being advertised in the same <c>client/hello</c>.</param>
     /// <returns>
-    /// Compressed bytes the server may legally have queued, guaranteed to decode to no more
-    /// than <paramref name="decodedBufferMilliseconds"/> for any of <paramref name="formats"/>.
+    /// Compressed bytes the server may legally have queued, which decode to no more than
+    /// <paramref name="decodedBufferMilliseconds"/> for any of <paramref name="formats"/> whose
+    /// stream runs at or above its <see cref="CompressedBytesPerSecond"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="formats"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">

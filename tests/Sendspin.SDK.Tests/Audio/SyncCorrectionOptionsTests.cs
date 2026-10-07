@@ -1,4 +1,6 @@
+using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
+using Sendspin.SDK.Models;
 
 namespace Sendspin.SDK.Tests.Audio;
 
@@ -129,5 +131,29 @@ public class SyncCorrectionOptionsTests
     {
         var options = new SyncCorrectionOptions { TrackClockDrift = false };
         Assert.False(options.Clone().TrackClockDrift);
+    }
+
+    [Theory]
+    [InlineData(100, 0)]   // the default
+    [InlineData(1_000, 0)] // exactly the floor
+    [InlineData(5_000, 1)]
+    public void DeadbandWiderThanTheSpecAccuracyFloor_IsReportedNotChanged(long deadband, int warnings)
+    {
+        // Issue #353: roles/player/v1.md requires steady-state error within ±1 ms, and an error
+        // inside the dead band is never corrected. An application may have measured its way to a
+        // wide band, so the value is applied as configured — but, like the speed cap, not silently.
+        var logger = new CapturingLogger<TimedAudioBuffer>();
+        var format = new AudioFormat { Codec = "pcm", SampleRate = 48_000, Channels = 2 };
+
+        using var buffer = new TimedAudioBuffer(
+            format,
+            new FakeClockSynchronizer(),
+            syncOptions: new SyncCorrectionOptions { DeadbandMicroseconds = deadband },
+            logger: logger);
+
+        Assert.Equal(deadband, buffer.SyncOptions.DeadbandMicroseconds);
+        Assert.Equal(
+            warnings,
+            logger.MessagesAt(LogLevel.Warning).Count(m => m.Contains("DeadbandMicroseconds", StringComparison.Ordinal)));
     }
 }

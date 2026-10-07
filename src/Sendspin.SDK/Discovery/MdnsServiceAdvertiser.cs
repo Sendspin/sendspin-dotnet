@@ -41,6 +41,14 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
     /// Starts advertising this client as a Sendspin service.
     /// </summary>
     public Task StartAsync(CancellationToken cancellationToken = default)
+        => StartAsync(_options.Port, _options.Path, cancellationToken);
+
+    /// <summary>
+    /// Starts advertising with the port and path given rather than the configured ones. For
+    /// <see cref="Client.SendspinHostService"/>, which knows what its listener is actually
+    /// serving: the configured port is not it when the listener bound an OS-assigned one.
+    /// </summary>
+    internal Task StartAsync(int port, string path, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
@@ -115,7 +123,7 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
             _serviceProfile = new ServiceProfile(
                 instanceName: _options.InstanceName,
                 serviceName: "_sendspin._tcp",
-                port: (ushort)_options.Port,
+                port: (ushort)port,
                 addresses: addresses);
 
             if (!string.IsNullOrEmpty(_options.PlayerName))
@@ -123,14 +131,14 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
                 _serviceProfile.AddProperty("name", _options.PlayerName);
             }
 
-            _serviceProfile.AddProperty("path", _options.Path);
+            _serviceProfile.AddProperty("path", path);
 
             _logger.LogInformation(
                 "mDNS Service Profile: FullName={FullName}, ServiceName={Service}, HostName={Host}, Port={Port}",
                 _serviceProfile.FullyQualifiedName,
                 _serviceProfile.ServiceName,
                 _serviceProfile.HostName,
-                _options.Port);
+                port);
 
             foreach (var resource in _serviceProfile.Resources)
             {
@@ -147,7 +155,7 @@ public sealed class MdnsServiceAdvertiser : IAsyncDisposable
             IsAdvertising = true;
             _logger.LogInformation(
                 "Advertising Sendspin client: {InstanceName} on port {Port} (path={Path})",
-                _options.InstanceName, _options.Port, _options.Path);
+                _options.InstanceName, port, path);
 
             return Task.CompletedTask;
         }
@@ -321,6 +329,11 @@ public sealed class AdvertiserOptions
     /// Port the WebSocket server is listening on.
     /// Default: 8928
     /// </summary>
+    /// <remarks>
+    /// Read only by an <see cref="MdnsServiceAdvertiser"/> started on its own.
+    /// <see cref="Client.SendspinHostService"/> advertises the port and path its listener is
+    /// serving, whatever is set here and in <see cref="Path"/>.
+    /// </remarks>
     public int Port { get; set; } = 8928;
 
     /// <summary>

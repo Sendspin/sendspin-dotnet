@@ -426,9 +426,20 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
         {
             try
             {
-                if (captured.Pcm.Length <= maxChunkBytes)
+                // A chunk carries whole frames (roles/source/v1.md, "Codec framing"), so a
+                // partial trailing frame, from a device that under-delivers, stops here.
+                ReadOnlyMemory<byte> pcm = bytesPerFrame > 0
+                    ? captured.Pcm.Slice(0, captured.Pcm.Length - (captured.Pcm.Length % bytesPerFrame))
+                    : captured.Pcm;
+
+                if (pcm.IsEmpty)
                 {
-                    await SendChunkAsync(encoder.Encode(captured.Pcm.Span), captured.CaptureTimeMicroseconds);
+                    continue;
+                }
+
+                if (pcm.Length <= maxChunkBytes)
+                {
+                    await SendChunkAsync(encoder.Encode(pcm.Span), captured.CaptureTimeMicroseconds);
                     continue;
                 }
 
@@ -436,18 +447,16 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
                 // than greedy full-size ones: 400 ms becomes three 133 ms chunks, not
                 // 150 + 150 + 100, so a buffer that overshoots the ceiling by a hair cannot
                 // leave a sliver of a chunk behind it — the same spec line sets a 5 ms floor.
-                // A partial trailing frame, from a device that under-delivers, rides along on
-                // the last piece.
                 int maxChunkFrames = maxChunkBytes / bytesPerFrame;
-                int totalFrames = (captured.Pcm.Length + bytesPerFrame - 1) / bytesPerFrame;
+                int totalFrames = pcm.Length / bytesPerFrame;
                 int pieces = (totalFrames + maxChunkFrames - 1) / maxChunkFrames;
                 int framesPerPiece = (totalFrames + pieces - 1) / pieces;
 
                 for (int piece = 0; piece < pieces; piece++)
                 {
                     int offset = piece * framesPerPiece * bytesPerFrame;
-                    int length = Math.Min(framesPerPiece * bytesPerFrame, captured.Pcm.Length - offset);
-                    byte[] encoded = encoder.Encode(captured.Pcm.Span.Slice(offset, length));
+                    int length = Math.Min(framesPerPiece * bytesPerFrame, pcm.Length - offset);
+                    byte[] encoded = encoder.Encode(pcm.Span.Slice(offset, length));
 
                     // Each piece is timestamped at the instant it was captured, not at the
                     // whole buffer's, or the server would resample several chunks onto one
