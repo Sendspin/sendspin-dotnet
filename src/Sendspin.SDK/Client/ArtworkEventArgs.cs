@@ -16,8 +16,15 @@ public sealed class ArtworkReceivedEventArgs : EventArgs
     public long Timestamp { get; }
 
     /// <summary>
-    /// Encoded image bytes (JPEG/PNG).
+    /// The image as the server sent it: by the spec, encoded in the format declared for the
+    /// channel (JPEG or PNG) at the declared size.
     /// </summary>
+    /// <remarks>
+    /// The SDK reassembles these bytes and does not inspect them, so treat them as input from the
+    /// peer: they may be up to 16 MiB, in another format, or not an image at all. Decode them
+    /// with a decoder that fails cleanly on bad input, and bound the decoded dimensions if the
+    /// declared size matters to you.
+    /// </remarks>
     public byte[] ImageData { get; }
 
     /// <summary>

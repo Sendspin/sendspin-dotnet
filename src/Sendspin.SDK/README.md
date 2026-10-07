@@ -819,7 +819,7 @@ Images arrive per channel, with the display timestamp and channel number:
 ```csharp
 client.ArtworkReceived += (_, e) =>
 {
-    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png bytes)
+    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (the encoded image)
     displays[e.Channel].Show(e.ImageData);
 };
 
@@ -827,6 +827,8 @@ client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // an empty imag
 ```
 
 On the wire an image is a transfer — an announce carrying the timestamp and total size, then parts, with a cancel that discards a pending image — and the SDK reassembles it, so `ArtworkReceived` always delivers a complete image. An announce with a total size of zero clears the channel.
+
+`e.ImageData` is what the server sent. The spec requires the channel's declared format and size, but the SDK does not decode or inspect the bytes: it discards an image larger than 16 MiB and hands any other over as received. Treat it as input from the peer and decode it with something that fails cleanly on bad data. An exception from the handler is logged and does not affect the connection.
 
 `ArtworkCleared` is also raised, once per channel still showing an image, when a `stream/end` ends the artwork role or the server removes the role from `active_roles`. No clear message exists for that case, so `e.Timestamp` is then the timestamp of the image being cleared rather than a moment to clear at.
 
