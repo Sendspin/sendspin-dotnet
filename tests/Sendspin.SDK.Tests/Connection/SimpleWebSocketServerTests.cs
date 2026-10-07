@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -482,9 +483,150 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
         }
     }
 
+    [Fact]
+    public async Task Server_DropsAPeerThatNeverCompletesTheUpgrade()
+    {
+        // #343: nothing bounded the header read, so a peer that connected and stopped — a port
+        // scanner — held its socket, buffer and task until the server stopped.
+        await using var server = new SimpleWebSocketServer { UpgradeTimeout = TimeSpan.FromMilliseconds(300) };
+        server.Start(0);
+
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", server.Port);
+        var stream = tcp.GetStream();
+        await stream.WriteAsync("GET /sendspin HTTP/1.1\r\n"u8.ToArray());
+
+        Assert.Equal(string.Empty, await ReadResponseAsync(stream, TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task Server_BacksOffAfterAnAcceptFailure()
+    {
+        // #343: an accept that fails for a reason other than a stop was retried at once, and
+        // the failures that reach here persist (descriptor exhaustion). Stopping the listener
+        // underneath the loop is the nearest portable stand-in: every accept then throws.
+        var logger = new CapturingLogger<SimpleWebSocketServer>();
+        await using var server = new SimpleWebSocketServer(logger);
+        server.Start(0);
+
+        var listener = (TcpListener)typeof(SimpleWebSocketServer)
+            .GetField("_listener", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(server)!;
+        listener.Stop();
+
+        await Task.Delay(600);
+
+        var failures = logger.Entries.Count(e => e.Message.Contains("Error accepting TCP connection"));
+        Assert.InRange(failures, 1, 5);
+    }
+
+    [Fact]
+    public async Task Server_RejectsAnEmptyWebSocketKeyHeader()
+    {
+        // #343: the key pattern's \s* crossed the line end, so this request was upgraded with
+        // "Host:" as its key.
+        _server.Start(0);
+
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync("127.0.0.1", _server.Port);
+        var stream = tcp.GetStream();
+        await stream.WriteAsync(Encoding.UTF8.GetBytes(
+            "GET /sendspin HTTP/1.1\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Sec-WebSocket-Key:\r\n" +
+            "Host: 127.0.0.1\r\n" +
+            "Sec-WebSocket-Version: 13\r\n" +
+            "\r\n"));
+
+        Assert.StartsWith("HTTP/1.1 400", await ReadResponseAsync(stream, TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task Listener_RefusesAPathOtherThanItsOwn()
+    {
+        // #343: ListenerOptions.Path was only logged against, so every path was served.
+        await using var listener = new SendspinListener(
+            NullLogger<SendspinListener>.Instance,
+            new ListenerOptions { Port = 0, Path = "/private" });
+
+        var connections = new List<WebSocketClientConnection>();
+        var connected = new SemaphoreSlim(0);
+        listener.ServerConnected += (s, c) =>
+        {
+            lock (connections)
+            {
+                connections.Add(c);
+            }
+
+            connected.Release();
+        };
+        await listener.StartAsync();
+
+        using (var tcp = new TcpClient())
+        {
+            await tcp.ConnectAsync("127.0.0.1", listener.BoundPort);
+            var stream = tcp.GetStream();
+            var key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
+            await stream.WriteAsync(Encoding.UTF8.GetBytes(
+                "GET /sendspin HTTP/1.1\r\n" +
+                "Host: 127.0.0.1\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Connection: Upgrade\r\n" +
+                $"Sec-WebSocket-Key: {key}\r\n" +
+                "Sec-WebSocket-Version: 13\r\n" +
+                "\r\n"));
+
+            Assert.StartsWith("HTTP/1.1 404", await ReadResponseAsync(stream, TimeSpan.FromSeconds(5)));
+        }
+
+        // The advertised path still connects however a server spells it: exactly, with a
+        // trailing slash, in another case, or with a query string.
+        foreach (var path in new[] { "/private", "/private/", "/Private", "/private?x=1" })
+        {
+            using var client = new ClientWebSocket();
+            await client.ConnectAsync(new Uri($"ws://127.0.0.1:{listener.BoundPort}{path}"), CancellationToken.None);
+            Assert.True(await connected.WaitAsync(TimeSpan.FromSeconds(5)), $"{path} was not served");
+        }
+
+        Assert.Equal(4, connections.Count);
+        foreach (var connection in connections)
+        {
+            await connection.DisposeAsync();
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _server.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Everything the server sends before it closes the connection, or what had arrived when
+    /// the bound ran out. Empty when it closed without a word; a reset counts as closing.
+    /// </summary>
+    private static async Task<string> ReadResponseAsync(NetworkStream stream, TimeSpan within)
+    {
+        var response = new MemoryStream();
+        var buffer = new byte[256];
+        using var cts = new CancellationTokenSource(within);
+
+        try
+        {
+            int read;
+            while ((read = await stream.ReadAsync(buffer.AsMemory(), cts.Token)) > 0)
+            {
+                response.Write(buffer, 0, read);
+            }
+        }
+        catch (IOException)
+        {
+        }
+        catch (OperationCanceledException) when (response.Length > 0)
+        {
+        }
+
+        return Encoding.UTF8.GetString(response.ToArray());
     }
 
     /// <summary>

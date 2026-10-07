@@ -66,7 +66,7 @@ public sealed class SendspinListener : IAsyncDisposable
             return Task.CompletedTask;
         }
 
-        _server = new SimpleWebSocketServer(_logger, _connectionOptions);
+        _server = new SimpleWebSocketServer(_logger, _connectionOptions) { RequiredPath = _options.Path };
         _server.ClientConnected += OnClientConnected;
         _server.Start(_options.Port);
 
@@ -81,15 +81,6 @@ public sealed class SendspinListener : IAsyncDisposable
     {
         _logger.LogInformation("WebSocket connection opened from {ClientIp}",
             connection.ClientIpAddress);
-
-        // Check if this is the correct path
-        var path = connection.Path;
-        if (!string.Equals(path, _options.Path, StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(path, _options.Path + "/", StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogWarning("Connection to unexpected path: {Path}, expected: {Expected}",
-                path, _options.Path);
-        }
 
         // Raise the event
         ServerConnected?.Invoke(this, connection);
@@ -141,7 +132,7 @@ public sealed class ListenerOptions
     public int Port { get; set; } = 8928;
 
     /// <summary>
-    /// WebSocket endpoint path.
+    /// WebSocket endpoint path. A connection to any other path is refused with a 404.
     /// Default: "/sendspin"
     /// </summary>
     public string Path { get; set; } = "/sendspin";
