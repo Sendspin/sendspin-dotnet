@@ -22,6 +22,7 @@ public sealed class FilePairingCodeLockoutStore : IPairingCodeLockoutStore
     private readonly string _path;
     private readonly ILogger _logger;
     private readonly Dictionary<string, int> _failures;
+    private readonly object _lock = new();
 
     /// <summary>Creates a store backed by the given file path, loading existing counters.</summary>
     /// <param name="path">File to hold the counters.</param>
@@ -37,7 +38,11 @@ public sealed class FilePairingCodeLockoutStore : IPairingCodeLockoutStore
     }
 
     /// <inheritdoc/>
-    public int GetFailures(string method) => _failures.GetValueOrDefault(method);
+    public int GetFailures(string method)
+    {
+        lock (_lock)
+            return _failures.GetValueOrDefault(method);
+    }
 
     /// <inheritdoc/>
     public void SetFailures(string method, int failures)
@@ -45,12 +50,18 @@ public sealed class FilePairingCodeLockoutStore : IPairingCodeLockoutStore
         // Persist first, then take it in memory. The other order left a failed write with the
         // in-memory counter ahead of disk, so a restart silently rolled the count back — a
         // fail-open on the brute-force guard, small but in the wrong direction (#103).
-        var updated = new Dictionary<string, int>(_failures) { [method] = failures };
-        SecureFile.WriteAllTextAtomic(
-            _path,
-            JsonSerializer.Serialize(updated, PairingCodeLockoutStoreJsonContext.Default.DictionaryStringInt32));
+        //
+        // The write stays inside the lock: two writers each persisting their own snapshot
+        // would leave the file without whichever counter the later snapshot was missing.
+        lock (_lock)
+        {
+            var updated = new Dictionary<string, int>(_failures) { [method] = failures };
+            SecureFile.WriteAllTextAtomic(
+                _path,
+                JsonSerializer.Serialize(updated, PairingCodeLockoutStoreJsonContext.Default.DictionaryStringInt32));
 
-        _failures[method] = failures;
+            _failures[method] = failures;
+        }
     }
 
     private static Dictionary<string, int> Read(string path, ILogger logger)

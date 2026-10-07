@@ -3846,7 +3846,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }).SafeFireAndForget(_logger);
 
         // Success resets the method's failure counter.
-        _pairingCodeLockoutStore?.SetFailures(state.Method, 0);
+        if (_pairingCodeLockoutStore is not null)
+        {
+            lock (PairingCodeLockoutStoreSynchronization.For(_pairingCodeLockoutStore))
+                _pairingCodeLockoutStore.SetFailures(state.Method, 0);
+        }
     }
 
     /// <summary>
@@ -3893,7 +3897,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     {
         if (_pairingCodeLockoutStore is null)
             return;
-        _pairingCodeLockoutStore.SetFailures(method, _pairingCodeLockoutStore.GetFailures(method) + 1);
+
+        // Every connection of a host counts into the one store. Unserialized, two of them
+        // counting at once both read the same value and one count is lost.
+        lock (PairingCodeLockoutStoreSynchronization.For(_pairingCodeLockoutStore))
+            _pairingCodeLockoutStore.SetFailures(method, _pairingCodeLockoutStore.GetFailures(method) + 1);
     }
 
     private sealed class PairingCodeState
