@@ -74,6 +74,13 @@ public static class PlayerBufferCapacity
     /// combined with <see cref="AdvertisedFractionDenominator"/> this keeps the advertisement
     /// conservative without collapsing it to something unusable. If a deployment streams
     /// material that compresses much harder than music, advertise explicitly.
+    /// <para>
+    /// So for FLAC the advertisement is an estimate, not a bound: a stream under two fifths of
+    /// the PCM rate fits more audio into the advertised bytes than the buffer holds. aiosendspin
+    /// also stops at 30 s outstanding whatever the byte count (<c>max_duration_us</c>,
+    /// server/roles/player/v1.py), so against it only a buffer shorter than that is exposed.
+    /// <see cref="TimedAudioBuffer"/> discards the chunks it has no room for.
+    /// </para>
     /// </remarks>
     private const double FlacCompressionFloor = 0.5;
 
@@ -125,8 +132,9 @@ public static class PlayerBufferCapacity
     /// <param name="decodedBufferMilliseconds">Decoded audio the player can hold.</param>
     /// <param name="formats">Formats being advertised in the same <c>client/hello</c>.</param>
     /// <returns>
-    /// Compressed bytes the server may legally have queued, guaranteed to decode to no more
-    /// than <paramref name="decodedBufferMilliseconds"/> for any of <paramref name="formats"/>.
+    /// Compressed bytes the server may legally have queued, which decode to no more than
+    /// <paramref name="decodedBufferMilliseconds"/> for any of <paramref name="formats"/> whose
+    /// stream runs at or above its <see cref="CompressedBytesPerSecond"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException">Thrown when <paramref name="formats"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">
