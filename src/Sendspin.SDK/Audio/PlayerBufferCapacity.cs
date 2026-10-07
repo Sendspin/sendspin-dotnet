@@ -23,7 +23,16 @@ namespace Sendspin.SDK.Audio;
 /// The conversion is per codec, and the binding one is whichever advertised codec packs the
 /// most audio into a byte — a megabyte of Opus is minutes, a megabyte of PCM is seconds. The
 /// advertisement therefore uses the <em>minimum</em> byte rate across the advertised formats,
-/// so the promise holds whichever format the server picks.
+/// so the same figure serves whichever format the server picks.
+/// </para>
+/// <para>
+/// How firm the figure is depends on the codec. For PCM the byte rate is fixed, so the
+/// advertised bytes never decode to more than the buffer holds. For Opus that is true of any
+/// stream at or above the assumed 64 kbps. For FLAC it is an estimate at an assumed compression
+/// ratio: material that compresses better fits more audio into the same bytes, and a server
+/// that fills by bytes can then send more than a buffer shorter than the server's own time cap
+/// holds. <see cref="TimedAudioBuffer"/> drops the chunk it has no room for, and playback
+/// covers the gap with silence when it reaches it.
 /// </para>
 /// </remarks>
 public static class PlayerBufferCapacity
@@ -66,7 +75,8 @@ public static class PlayerBufferCapacity
     public const int AdvertisedFractionDenominator = 5;
 
     /// <summary>
-    /// Assumed worst-case FLAC compression, as a fraction of the equivalent PCM byte rate.
+    /// Assumed FLAC compression, as a fraction of the equivalent PCM byte rate. An estimate for
+    /// music, not a worst case.
     /// </summary>
     /// <remarks>
     /// FLAC is lossless, so its byte rate is bounded above by PCM but has no useful lower
