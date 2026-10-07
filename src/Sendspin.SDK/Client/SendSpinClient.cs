@@ -5880,7 +5880,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _clientStateSendGate.Dispose();
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync() => DisposeAsync(ownsPipelines: true);
+
+    /// <summary>
+    /// Disposes this client, leaving the audio pipeline and the capture device alone when
+    /// <paramref name="ownsPipelines"/> is false.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SendspinHostService"/> builds every connection it accepts over the same
+    /// <see cref="IAudioPipeline"/> and <see cref="IAudioCaptureDevice"/>, and only the one it
+    /// admitted is playing through them. Disposing any other — one that never activated, lost
+    /// arbitration, or was displaced — must not stop that playback or close that device (#311).
+    /// </remarks>
+    internal async ValueTask DisposeAsync(bool ownsPipelines)
     {
         if (_disposed) return;
         _disposed = true;
@@ -5894,15 +5906,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // NOTE: We do NOT dispose _audioPipeline here - it's a shared singleton
         // managed by the DI container. We only stop playback if active.
-        if (_audioPipeline != null)
+        if (_audioPipeline != null && ownsPipelines)
         {
             await _audioPipeline.StopAsync();
         }
 
-        // The source pipeline owns its capture device, so dispose it here.
+        // The source pipeline owns its capture device, so dispose it here — unless a host
+        // shares that device across its connections, when only the streaming stops.
         if (_sourcePipeline is not null)
         {
-            await _sourcePipeline.DisposeAsync();
+            await _sourcePipeline.DisposeAsync(disposeCapture: ownsPipelines);
         }
 
         await _connection.DisposeAsync();

@@ -65,6 +65,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     private long _contentHolesDetected;
     private long _lateChunksDropped;
     private long _lastTimelineLogTime;
+    private bool _awaitingFirstChunkAfterReconnect; // Next chunk may be on a restarted server timeline
 
     // Segment timestamps that tile exactly still round by up to a microsecond per chunk.
     // Anything at or below this is rounding and is absorbed silently; a real hole is at
@@ -568,6 +569,34 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         lock (_lock)
         {
+            // The first chunk of a new connection decides whether the read cursor still means
+            // anything. The cursor is a raw server timestamp and outlives the connection, but the
+            // server's clock need not: a rebooted host restarts its monotonic clock near zero, and
+            // a different host has another one altogether. Every chunk then sits "behind" the old
+            // cursor and the check below would drop the whole stream, with nothing left to read
+            // and so nothing to re-anchor from.
+            //
+            // How far behind is what tells the two apart. A packet that was merely slow is late
+            // by milliseconds and is dropped below like any other; another clock is out by far
+            // more. The line is the re-anchor threshold, which is already where a forward step
+            // in the timeline stops being corrected and becomes a restart. Past it, what is
+            // buffered belongs to the old timeline and playback starts over on this chunk's own
+            // schedule.
+            if (_awaitingFirstChunkAfterReconnect)
+            {
+                _awaitingFirstChunkAfterReconnect = false;
+
+                if (_playbackStarted && _readCursorValid
+                    && _readCursorServerTimestamp - serverTimestamp > _syncOptions.ReanchorThresholdMicroseconds)
+                {
+                    _logger.LogWarning(
+                        "[Buffer] First chunk after reconnect is {BehindMs:F0}ms behind the read cursor: " +
+                        "the server's timeline restarted, starting playback over on the new one",
+                        (_readCursorServerTimestamp - serverTimestamp) / 1000.0);
+                    Clear();
+                }
+            }
+
             // Drop chunks that arrived too late to play. The read cursor has already passed
             // their content, so enqueueing them would splice already-played audio back into
             // the timeline and shift everything after it. Spec roles/player/v1.md:145 says to
@@ -923,6 +952,9 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
             _pendingHardSyncSamples = 0;
             _hardSyncCompleted = false;
             ResetHardSyncStall();
+
+            // The new connection may be to a server whose clock restarted; see Write.
+            _awaitingFirstChunkAfterReconnect = true;
 
             _logger.LogInformation("[Correction] Reconnect stabilization started (suppressing corrections for {DurationMs}ms)",
                 _syncOptions.ReconnectStabilizationMicroseconds / 1000);

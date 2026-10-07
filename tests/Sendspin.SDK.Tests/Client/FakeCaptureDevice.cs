@@ -15,7 +15,8 @@ internal sealed class FakeCaptureDevice : IAudioCaptureDevice
 
     public Task StartAsync(CancellationToken ct = default) { Capturing = true; return Task.CompletedTask; }
     public Task StopAsync(CancellationToken ct = default) { Capturing = false; return Task.CompletedTask; }
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public int DisposeCount { get; private set; }
+    public ValueTask DisposeAsync() { DisposeCount++; return ValueTask.CompletedTask; }
 
     public void Emit(byte[] pcm, long captureTimeUs) =>
         AudioCaptured?.Invoke(this, new CapturedAudio(pcm, captureTimeUs));

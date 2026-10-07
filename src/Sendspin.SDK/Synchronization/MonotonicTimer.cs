@@ -28,6 +28,10 @@ public sealed class MonotonicTimer : IHighPrecisionTimer
     private readonly IHighPrecisionTimer _inner;
     private readonly ILogger? _logger;
 
+    // The pipeline reads this timer from the audio callback and from the receive thread, and
+    // resets it from a third, so the read-modify-write below is serialised.
+    private readonly object _lock = new();
+
     private long _lastRawTime;
     private long _lastReturnedTime;
     private bool _initialized;
@@ -102,60 +106,81 @@ public sealed class MonotonicTimer : IHighPrecisionTimer
     /// <inheritdoc/>
     public long GetCurrentTimeMicroseconds()
     {
-        _totalCalls++;
-        var rawTime = _inner.GetCurrentTimeMicroseconds();
+        long result;
+        long backwardJump = 0;
+        long forwardJump = 0;
+        long jumpCount = 0;
 
-        if (!_initialized)
+        // Held for a handful of arithmetic operations; the inner clock is read inside so that
+        // reads and their deltas are applied in the same order. Logging stays outside.
+        lock (_lock)
         {
-            _lastRawTime = rawTime;
-            _lastReturnedTime = rawTime;
-            _initialized = true;
-            return rawTime;
-        }
+            _totalCalls++;
+            var rawTime = _inner.GetCurrentTimeMicroseconds();
 
-        var rawDelta = rawTime - _lastRawTime;
-        _lastRawTime = rawTime;
-
-        // Handle backward jump (timer went backwards)
-        if (rawDelta < 0)
-        {
-            var absJump = -rawDelta;
-            _backwardJumpCount++;
-            _totalBackwardJumpMicroseconds += absJump;
-            if (absJump > _maxBackwardJumpMicroseconds)
+            if (!_initialized)
             {
-                _maxBackwardJumpMicroseconds = absJump;
+                _lastRawTime = rawTime;
+                _lastReturnedTime = rawTime;
+                _initialized = true;
+                return rawTime;
             }
 
+            var rawDelta = rawTime - _lastRawTime;
+            _lastRawTime = rawTime;
+
+            // Handle backward jump (timer went backwards)
+            if (rawDelta < 0)
+            {
+                backwardJump = -rawDelta;
+                jumpCount = ++_backwardJumpCount;
+                _totalBackwardJumpMicroseconds += backwardJump;
+                if (backwardJump > _maxBackwardJumpMicroseconds)
+                {
+                    _maxBackwardJumpMicroseconds = backwardJump;
+                }
+
+                // Return last value (time doesn't go backward)
+            }
+            else
+            {
+                // Handle forward jump (timer jumped ahead)
+                if (rawDelta > MaxDeltaMicroseconds)
+                {
+                    forwardJump = rawDelta;
+                    jumpCount = ++_forwardJumpCount;
+                    _totalForwardJumpMicroseconds += rawDelta - MaxDeltaMicroseconds;
+                    if (rawDelta > _maxForwardJumpMicroseconds)
+                    {
+                        _maxForwardJumpMicroseconds = rawDelta;
+                    }
+
+                    rawDelta = MaxDeltaMicroseconds;
+                }
+
+                _lastReturnedTime += rawDelta;
+            }
+
+            result = _lastReturnedTime;
+        }
+
+        if (backwardJump > 0)
+        {
             _logger?.LogDebug(
                 "Timer went backward by {DeltaMs:F2}ms, holding at last value (total backward jumps: {Count})",
-                absJump / 1000.0,
-                _backwardJumpCount);
-            // Return last value (time doesn't go backward)
-            return _lastReturnedTime;
+                backwardJump / 1000.0,
+                jumpCount);
         }
-
-        // Handle forward jump (timer jumped ahead)
-        if (rawDelta > MaxDeltaMicroseconds)
+        else if (forwardJump > 0)
         {
-            var excessMicroseconds = rawDelta - MaxDeltaMicroseconds;
-            _forwardJumpCount++;
-            _totalForwardJumpMicroseconds += excessMicroseconds;
-            if (rawDelta > _maxForwardJumpMicroseconds)
-            {
-                _maxForwardJumpMicroseconds = rawDelta;
-            }
-
             _logger?.LogDebug(
                 "Timer jumped forward by {DeltaMs:F2}ms, clamping to {MaxMs}ms (total forward jumps: {Count})",
-                rawDelta / 1000.0,
+                forwardJump / 1000.0,
                 MaxDeltaMicroseconds / 1000.0,
-                _forwardJumpCount);
-            rawDelta = MaxDeltaMicroseconds;
+                jumpCount);
         }
 
-        _lastReturnedTime += rawDelta;
-        return _lastReturnedTime;
+        return result;
     }
 
     /// <inheritdoc/>
@@ -175,19 +200,22 @@ public sealed class MonotonicTimer : IHighPrecisionTimer
     /// </remarks>
     public void Reset(bool resetTelemetry = false)
     {
-        _initialized = false;
-        _lastRawTime = 0;
-        _lastReturnedTime = 0;
-
-        if (resetTelemetry)
+        lock (_lock)
         {
-            _totalCalls = 0;
-            _backwardJumpCount = 0;
-            _forwardJumpCount = 0;
-            _totalBackwardJumpMicroseconds = 0;
-            _totalForwardJumpMicroseconds = 0;
-            _maxBackwardJumpMicroseconds = 0;
-            _maxForwardJumpMicroseconds = 0;
+            _initialized = false;
+            _lastRawTime = 0;
+            _lastReturnedTime = 0;
+
+            if (resetTelemetry)
+            {
+                _totalCalls = 0;
+                _backwardJumpCount = 0;
+                _forwardJumpCount = 0;
+                _totalBackwardJumpMicroseconds = 0;
+                _totalForwardJumpMicroseconds = 0;
+                _maxBackwardJumpMicroseconds = 0;
+                _maxForwardJumpMicroseconds = 0;
+            }
         }
     }
 
