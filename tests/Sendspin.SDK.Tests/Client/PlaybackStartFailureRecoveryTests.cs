@@ -48,12 +48,16 @@ public class PlaybackStartFailureRecoveryTests
             (buffer, _) => new SilentSampleSource(buffer),
             precisionTimer: new StubTimer(),
             useMonotonicTimer: false);
-        var (client, connection, _) = TestClient.Create(configure: options => options with
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with
         {
             AudioPipeline = pipeline,
             ClockSynchronizer = clock,
         });
         using var _c = client;
+
+        // The activate reset the clock for its connection; this client has synced since.
+        clock.HasMinimalSync = true;
+        clock.IsConverged = true;
         await pipeline.StartAsync(
             new AudioFormat { Codec = "pcm", SampleRate = SampleRate, Channels = Channels, BitDepth = 16 });
 

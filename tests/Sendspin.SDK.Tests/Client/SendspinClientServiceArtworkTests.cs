@@ -29,7 +29,7 @@ public class SendspinClientServiceArtworkTests
         SchedulingClient()
     {
         var timer = new FakePrecisionTimer();
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options =>
             options with { PrecisionTimer = timer, ClockSynchronizer = new ConvergedClockSynchronizer() });
         return (client, connection, timer);
     }
@@ -40,8 +40,8 @@ public class SendspinClientServiceArtworkTests
     /// </summary>
     private static (SendspinClientService Client, FakeSendspinConnection Connection) SyncedClient()
     {
-        var (client, connection, _) = TestClient.Create(configure: options =>
-            options with { ClockSynchronizer = new FakeClockSynchronizer { IsConverged = true } });
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options =>
+            options with { ClockSynchronizer = new ConvergedClockSynchronizer() });
         return (client, connection);
     }
 
@@ -222,7 +222,7 @@ public class SendspinClientServiceArtworkTests
         // scheduling that MediaDisplaySchedulingTests covers.
         const long timestamp = 0x0102030405060708;
 
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options =>
             options with
             {
                 PrecisionTimer = new FakePrecisionTimer { CurrentTime = timestamp },
@@ -307,7 +307,7 @@ public class SendspinClientServiceArtworkTests
     {
         // A converged clock keeps this default (player) client available; display binary is
         // dropped while unavailable (spec #266/#271).
-        var (client, connection, _) = TestClient.Create(configure: options =>
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options =>
             options with { ClockSynchronizer = new ConvergedClockSynchronizer() });
         using var _c = client;
 

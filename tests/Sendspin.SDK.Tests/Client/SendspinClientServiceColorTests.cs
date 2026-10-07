@@ -14,7 +14,7 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void ServerStateColor_PopulatesGroupAndRaisesColorChanged()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         ColorPalette? raised = null;
@@ -40,7 +40,7 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void ServerStateColor_FullState_AbsentUnsetsNullClearsValueSets()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         // First object: set primary and accent.
@@ -66,7 +66,7 @@ public class SendspinClientServiceColorTests
         // messaging.md: a whole role object set to null clears all of that role's state — sent
         // when color leaves active_roles. Cleared in place, so a consumer holding the palette
         // it was handed earlier sees the clear rather than a detached stale copy.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -101,7 +101,7 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void MalformedColor_DoesNotDropSiblingControllerUpdate()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         // One bad color channel must not abort the whole server/state and lose the volume update.
@@ -117,7 +117,7 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void ColorTimestamp_UnsetWhenLaterObjectOmitsIt()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -134,7 +134,7 @@ public class SendspinClientServiceColorTests
     [Fact]
     public void ServerState_WithoutColor_DoesNotRaiseColorChanged()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         var fired = false;

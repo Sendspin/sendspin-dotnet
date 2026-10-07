@@ -29,7 +29,7 @@ public class SendspinClientServiceStreamTeardownTests
         PlayingClient()
     {
         var pipe = new FakeAudioPipeline();
-        var (client, connection, _) = TestClient.Create(configure: options => options with
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with
         {
             AudioPipeline = pipe,
             ClockSynchronizer = new ConvergedClockSynchronizer(),

@@ -13,7 +13,7 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void RepeatAndShuffle_ReadFromControllerObject()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -33,7 +33,7 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void RepeatAndShuffle_InMetadataObject_AreIgnored()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         // Old wire layout: repeat/shuffle under metadata. They moved to the controller object,
@@ -61,7 +61,7 @@ public class SendspinClientServiceServerStateTests
         // messaging.md: "a whole role object set to null clears all of that role's state".
         // The server sends this when metadata leaves active_roles, and on pairing quiesce, so
         // the client must stop exposing the last track rather than holding it indefinitely.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -98,7 +98,7 @@ public class SendspinClientServiceServerStateTests
     {
         // The control the null case turns on: a server/state carrying only another role must
         // not be mistaken for a metadata clear.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -118,7 +118,7 @@ public class SendspinClientServiceServerStateTests
     {
         // The clear must drop the merge base too, not just the exposed object: a later partial
         // update has to start from empty rather than resurrecting pre-clear fields.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -140,7 +140,7 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void ControllerRoleObject_ExplicitNull_ClearsControllerState()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -176,7 +176,7 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void ControllerRoleObject_Absent_LeavesControllerState()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -195,7 +195,7 @@ public class SendspinClientServiceServerStateTests
     {
         // "Clear all of THAT role's state": deactivating metadata must not disturb the
         // controller or color state carried on the same GroupState.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -224,7 +224,7 @@ public class SendspinClientServiceServerStateTests
         // Full state per spec #175: the second object carries only artist (null), so title —
         // absent — is unset too, not kept from the first object. The role object itself is still
         // present, though: a leaf null is not a whole-role clear (that needs `metadata: null`).
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -245,7 +245,7 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void Metadata_ArtworkUrl_WithValue_SetsMergedMetadata()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -265,7 +265,7 @@ public class SendspinClientServiceServerStateTests
     {
         // Regression: artwork_url: null is the spec's "clear" signal (sent by MA on artless tracks).
         // The SDK must not retain the old URL via the ?? merge operator.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -292,7 +292,7 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void Metadata_ArtworkUrl_Absent_IsUnset()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -326,7 +326,7 @@ public class SendspinClientServiceServerStateTests
     {
         // cleared_update() in aiosendspin nulls every field when playback stops.
         // All fields must forward the null rather than silently retaining old values.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -371,7 +371,7 @@ public class SendspinClientServiceServerStateTests
     [Fact]
     public void Metadata_NumericFields_ExplicitNull_ClearMergedMetadata()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -406,7 +406,7 @@ public class SendspinClientServiceServerStateTests
         // Full state per spec #175: a metadata object that omits progress leaves it unset, so the
         // exposed Position clears too — no extrapolation continues from a stale progress instance
         // (e.g. the Windows client's seek bar stops advancing rather than drifting).
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -447,7 +447,7 @@ public class SendspinClientServiceServerStateTests
         // Every server/state that carries the progress field yields a newly deserialized
         // PlaybackProgress instance — even when the values are identical to the previous
         // update. This is the other half of the reference-identity freshness contract.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -486,7 +486,7 @@ public class SendspinClientServiceServerStateTests
     {
         // progress: null is the spec's "track ended" signal and must clear the merged value,
         // not retain the previous instance.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -520,7 +520,7 @@ public class SendspinClientServiceServerStateTests
         // Each leaf comes from the object alone (spec #175): a later object carrying a new
         // timestamp but no progress sets the timestamp and unsets progress. A newer timestamp is
         // never evidence that a progress object survived — there is nothing to carry it.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""

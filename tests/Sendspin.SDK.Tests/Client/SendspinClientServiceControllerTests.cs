@@ -170,7 +170,7 @@ public class SendspinClientServiceControllerTests
     [Fact]
     public void ServerState_SupportedCommands_SurfacedOnGroup()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -189,7 +189,7 @@ public class SendspinClientServiceControllerTests
     [Fact]
     public void ServerState_SeekSupport_SurfacedOnGroup()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -214,7 +214,7 @@ public class SendspinClientServiceControllerTests
     {
         // The controller object is full state (spec #175): a later object carrying only volume
         // omits seek_max_ms, which unsets the bound rather than keeping it.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -236,7 +236,7 @@ public class SendspinClientServiceControllerTests
         // spec #175. The server nulls it when the seekable range becomes unknown (a seekable track
         // giving way to a live stream); keeping the old bound would leave a seek bar pointing at
         // the length of a track that is no longer playing.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""
@@ -334,6 +334,7 @@ public class SendspinClientServiceControllerTests
         // The command is listed, but the controller role was never activated - nothing may be sent.
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
+        TestClient.CompleteHandshake(connection);
 
         connection.RaiseTextMessageReceived("""
             {"type":"server/state","payload":{"controller":{"supported_commands":["play"]}}}

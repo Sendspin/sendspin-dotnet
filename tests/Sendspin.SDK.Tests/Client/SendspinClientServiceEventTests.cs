@@ -118,7 +118,7 @@ public class SendspinClientServiceEventTests
     [Fact]
     public void StreamStart_WithPlayerAndArtwork_RaisesEventAndCachesPayload()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         StreamStartPayload? received = null;
@@ -147,7 +147,7 @@ public class SendspinClientServiceEventTests
     [Fact]
     public void StreamStart_ArtworkOnly_StillRaisesEvent()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         StreamStartPayload? received = null;
@@ -173,7 +173,7 @@ public class SendspinClientServiceEventTests
     [Fact]
     public void StreamStart_PlayerOnly_ArtworkNullOnPayload()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         StreamStartPayload? received = null;

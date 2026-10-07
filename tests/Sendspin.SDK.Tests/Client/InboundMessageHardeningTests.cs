@@ -20,7 +20,7 @@ public class InboundMessageHardeningTests
     [Fact]
     public void MalformedPayload_OnAuthenticatedTextMessage_ClosesTheConnection()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         // Routes (the document parses and carries a known type) but the payload is not
@@ -39,7 +39,7 @@ public class InboundMessageHardeningTests
     {
         // stream/start is handled on the fire-and-forget async path, so its parse failure
         // never reaches the dispatch catch: the handler itself must close.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"stream/start","payload":"not-an-object"}""");
@@ -51,7 +51,7 @@ public class InboundMessageHardeningTests
     [Fact]
     public void MalformedStreamEndPayload_ClosesTheConnection()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"stream/end","payload":"not-an-object"}""");
@@ -69,7 +69,7 @@ public class InboundMessageHardeningTests
         // NullReferenceException a dereference produces is not JsonException, so it would
         // escape the handler's catch and die in the fire-and-forget swallow with the
         // connection still up.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"stream/start","payload":null}""");
@@ -81,7 +81,7 @@ public class InboundMessageHardeningTests
     [Fact]
     public void NullStreamEndPayload_ClosesTheConnection()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"stream/end","payload":null}""");
@@ -97,7 +97,7 @@ public class InboundMessageHardeningTests
         // payload with no guard of its own, so this pins that the central null-member
         // validation reaches it: the deliberate malformed-payload close, not the
         // NullReferenceException that would tear the receive loop down as an internal fault.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"stream/clear","payload":null}""");
@@ -113,7 +113,7 @@ public class InboundMessageHardeningTests
         // arm (#206), so "payload": null reached HandleServerState and died dereferencing it. A
         // NullReferenceException is not in the dispatch catch filter, so the connection tore down
         // as an internal bug instead of via the deliberate malformed-peer close.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived("""{"type":"server/state","payload":null}""");
@@ -127,7 +127,7 @@ public class InboundMessageHardeningTests
     {
         // Positive control for the arm above: null role objects are the spec's "clear this
         // role" signal, so the arm must reject a null payload without rejecting these.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -143,7 +143,7 @@ public class InboundMessageHardeningTests
         // The same annotation hole one level down: "player" is present, so the
         // artwork-only skip does not apply, but its "codec" — declared non-nullable and
         // dereferenced by the decoder factory when the pipeline starts — is null.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         connection.RaiseTextMessageReceived(
@@ -204,7 +204,7 @@ public class InboundMessageHardeningTests
         // message whose type this SDK does not know must be logged and ignored, so a newer
         // server can add message types without killing older clients. Without this test, a
         // fix that closes on everything unrecognised would pass the two tests above.
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
 
         // The connection is genuinely up before delivery, so the still-up assertion below
@@ -220,7 +220,7 @@ public class InboundMessageHardeningTests
     [Fact]
     public void ThrowingRoleEventHandler_PropagatesOutOfTheReceiveCallback()
     {
-        var (client, connection, _) = TestClient.Create();
+        var (client, connection, _) = TestClient.Create(activated: true);
         using var _c = client;
         client.GroupStateChanged += (_, _) => throw new HandlerFaultException();
 

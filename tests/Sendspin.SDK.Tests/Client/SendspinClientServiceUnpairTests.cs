@@ -104,6 +104,8 @@ public class SendspinClientServiceUnpairTests
             configure: options => options with { PairingRecordStore = store });
         using var _c = client;
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived("""{"type":"server/activate","payload":{"activities":[]}}""");
 
         connection.RaiseTextMessageReceived("""{"type":"server/unpair","payload":{}}""");
 

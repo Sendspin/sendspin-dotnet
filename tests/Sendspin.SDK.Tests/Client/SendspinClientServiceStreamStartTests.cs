@@ -70,7 +70,7 @@ public class SendspinClientServiceStreamStartTests
         // queuing player audio has completed clock sync and reported available (spec #270 discards
         // audio only while unavailable). Without it the default unconverged clock leaves the client
         // available: false, and the queued chunks these tests drain would be discarded on arrival.
-        var (client, connection, _) = TestClient.Create(configure: options => options with
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with
         {
             AudioPipeline = pipeline,
             ClockSynchronizer = new ConvergedClockSynchronizer(),
@@ -172,7 +172,7 @@ public class SendspinClientServiceStreamStartTests
     public void StreamStart_WhilePipelineIdle_DropsStaleChunksAndStartsCold()
     {
         var pipeline = new FakeAudioPipeline { IsReady = false };
-        var (client, connection, _) = TestClient.Create(configure: options => options with { AudioPipeline = pipeline });
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with { AudioPipeline = pipeline });
         using var _c = client;
 
         connection.RaiseBinaryMessageReceived(AudioFrame(1_000, new byte[] { 1, 2, 3, 4 }));

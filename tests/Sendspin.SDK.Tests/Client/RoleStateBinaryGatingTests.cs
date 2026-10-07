@@ -17,9 +17,7 @@ namespace Sendspin.SDK.Tests.Client;
 /// </summary>
 /// <remarks>
 /// The gate is per connection and keyed on what this connection actually reported, which is why
-/// every test here drives a real handshake: before <c>server/hello</c> there is no statement
-/// about active roles at all, and the gate deliberately stays open in that window so the many
-/// harnesses that raise binary frames without a handshake are unaffected.
+/// every test here drives a real handshake.
 /// </remarks>
 public class RoleStateBinaryGatingTests
 {

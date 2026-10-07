@@ -36,10 +36,11 @@ public class PlayerAudioDispatchTests
     {
         var pipe = new FakeAudioPipeline();
         var (client, connection, _) = TestClient.Create(
+            activated: true,
             configure: options => options with
             {
                 AudioPipeline = pipe,
-                ClockSynchronizer = new FakeClockSynchronizer { IsConverged = true },
+                ClockSynchronizer = new ConvergedClockSynchronizer(),
             },
             logger: logger);
         return (client, connection, pipe);

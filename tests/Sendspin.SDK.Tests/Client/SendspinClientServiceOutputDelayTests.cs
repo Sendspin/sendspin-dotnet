@@ -33,7 +33,7 @@ public class SendspinClientServiceOutputDelayTests
         // persisted.
         var sync = new KalmanClockSynchronizer();
         var store = new FakeOutputDelayStore();
-        var (client, connection, _) = TestClient.Create(configure: options => options with
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with
         {
             ClockSynchronizer = sync,
             OutputDelayStore = store,
@@ -52,7 +52,7 @@ public class SendspinClientServiceOutputDelayTests
     public void SetOutputDelay_ClampsToSpecRange(int requested, double expected)
     {
         var sync = new KalmanClockSynchronizer();
-        var (client, connection, _) = TestClient.Create(configure: options => options with { ClockSynchronizer = sync });
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with { ClockSynchronizer = sync });
         using var _c = client;
 
         connection.RaiseTextMessageReceived(SetOutputDelayCommand(requested));
@@ -67,7 +67,7 @@ public class SendspinClientServiceOutputDelayTests
         // adopted the rename must land on the same delay as the pre-rename shape does.
         var sync = new KalmanClockSynchronizer();
         var store = new FakeOutputDelayStore();
-        var (client, connection, _) = TestClient.Create(configure: options => options with
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with
         {
             ClockSynchronizer = sync,
             OutputDelayStore = store,
@@ -85,7 +85,7 @@ public class SendspinClientServiceOutputDelayTests
     {
         var sync = new KalmanClockSynchronizer();
         var store = new FakeOutputDelayStore();
-        var (client, connection, _) = TestClient.Create(configure: options => options with
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with
         {
             ClockSynchronizer = sync,
             Capabilities = new ClientCapabilities { SupportsSetOutputDelay = false },
@@ -249,7 +249,7 @@ public class SendspinClientServiceOutputDelayTests
     {
         var sync = new KalmanClockSynchronizer();
         var store = new FakeOutputDelayStore { ThrowOnSave = true };
-        var (client, connection, _) = TestClient.Create(configure: options => options with
+        var (client, connection, _) = TestClient.Create(activated: true, configure: options => options with
         {
             ClockSynchronizer = sync,
             OutputDelayStore = store,
