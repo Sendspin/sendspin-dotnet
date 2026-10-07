@@ -290,6 +290,10 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
         Assert.True(
             await Task.WhenAny(disconnect, Task.Delay(TimeSpan.FromSeconds(10))) == disconnect,
             "DisconnectAsync must not wait on a send the peer will never read");
+
+        // Awaited, not just seen to finish: the host awaits this inside the arbitration gate,
+        // so it has to return rather than throw.
+        await disconnect;
         Assert.Equal(ConnectionState.Disconnected, incoming.State);
 
         // The parked send has to end too, or it keeps the lock and the socket for good.
@@ -301,6 +305,7 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
         Assert.True(
             await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(10))) == dispose,
             "DisposeAsync must complete after a stalled close");
+        await dispose;
     }
 
     [Fact]
@@ -327,6 +332,9 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
         Assert.True(
             await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(10))) == dispose,
             "DisposeAsync must not wait on a send the peer will never read");
+
+        // Awaited, not just seen to finish: the host's StopAsync awaits this.
+        await dispose;
     }
 
     [Fact]
