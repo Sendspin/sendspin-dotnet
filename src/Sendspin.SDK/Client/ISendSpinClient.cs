@@ -50,6 +50,13 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Current group state (volume/mute represent group averages for display).
     /// </summary>
+    /// <remarks>
+    /// Null until the server reports a group, and again once the connection is
+    /// <see cref="ConnectionState.Disconnected"/>. While a lost connection is being re-established
+    /// the group is kept for display, with <see cref="GroupState.SupportedCommands"/> and
+    /// <see cref="GroupState.SeekMaxMs"/> unset and <see cref="GroupState.PlaybackState"/> idle
+    /// until the new connection reports them; <see cref="GroupStateChanged"/> announces that.
+    /// </remarks>
     GroupState? CurrentGroup { get; }
 
     /// <summary>
