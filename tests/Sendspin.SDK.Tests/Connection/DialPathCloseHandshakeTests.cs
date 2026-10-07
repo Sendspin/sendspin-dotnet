@@ -73,6 +73,7 @@ public class DialPathCloseHandshakeTests
             new ConnectionOptions { AutoReconnect = false },
             new StubFraming());
 
+        Task disconnect = Task.CompletedTask;
         bool completed;
         bool released;
         try
@@ -81,7 +82,7 @@ public class DialPathCloseHandshakeTests
 
             var stalled = await StalledPeer.SendUntilStalledAsync(chunk => connection.SendBinaryAsync(chunk));
 
-            var disconnect = connection.DisconnectAsync(GoodbyeReasons.Shutdown);
+            disconnect = connection.DisconnectAsync(GoodbyeReasons.Shutdown);
 
             completed = await Task.WhenAny(disconnect, Task.Delay(TimeSpan.FromSeconds(10)))
                 == disconnect;
@@ -95,6 +96,9 @@ public class DialPathCloseHandshakeTests
         }
 
         Assert.True(completed, "DisconnectAsync must not wait on a send the peer will never read");
+
+        // Awaited, not just seen to finish: it has to return rather than throw.
+        await disconnect;
         Assert.True(released, "the stalled send must be released when the connection closes");
         Assert.Equal(ConnectionState.Disconnected, connection.State);
 
