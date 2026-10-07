@@ -77,7 +77,15 @@ public class PeerNullRejectionTests
         // active_roles are properties the model kept from the pre-encryption protocol (#355).
         var msg = Assert.IsType<ServerHelloMessage>(MessageSerializer.Deserialize(json));
 
+        // Ignored means the model's defaults stand: the null must not reach a caller through
+        // properties declared non-nullable.
         Assert.Equal("MA", msg.Payload.Name);
+        Assert.Equal(string.Empty, msg.Payload.ServerId);
+        Assert.Empty(msg.Payload.ActiveRoles);
+
+        var typed = MessageSerializer.Deserialize<ServerHelloMessage>(json);
+        Assert.Equal(string.Empty, typed!.Payload.ServerId);
+        Assert.Empty(typed.Payload.ActiveRoles);
     }
 
     [Fact]
