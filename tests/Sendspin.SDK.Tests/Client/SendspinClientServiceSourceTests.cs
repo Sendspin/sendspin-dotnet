@@ -292,8 +292,8 @@ public class SendspinClientServiceSourceTests
     {
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles, which
         // is the other half of IsSourceStreamingPermitted's gate (the trust half is covered
-        // by the tests below). SendHandshakeAsync clears LastServerActivate as soon as the
-        // reconnect handshake begins, but before this fix left the mirror standing until the
+        // by the tests below). ResetHandshakeStateForNewConnection clears LastServerActivate as
+        // soon as the reconnect dial begins, but before this fix left the mirror standing until the
         // new session's own server/hello happened to replace LastServerHello wholesale.
         // OnTextMessageReceived drops nothing while Handshaking (only on Disconnected or
         // Disconnecting), so a peer that sends server/command before its own server/hello —
@@ -314,7 +314,7 @@ public class SendspinClientServiceSourceTests
         connection.SimulateConnectionLoss();
         await WaitUntilAsync(() => !capture.Capturing, "the per-connection streaming reset after the connection drop");
 
-        // The reconnect handshake begins synchronously here — SendHandshakeAsync resets
+        // The reconnect begins synchronously here — ResetHandshakeStateForNewConnection resets
         // LastServerActivate (and, with the fix, the ActiveRoles mirror) before any message
         // from the new session has arrived.
         connection.SimulateReconnected();
@@ -464,14 +464,14 @@ public class SendspinClientServiceSourceTests
 
         SendSourceStart(connection);
 
-        Assert.False(capture.Capturing, "the capture device must never open at trust 'none'");
+        Assert.False(capture.Capturing, "the capture device must never open on an unpaired session");
         Assert.DoesNotContain(connection.SentMessages, m => m is ClientStreamStartMessage);
     }
 
     [Fact]
     public void SourceStart_WithSourceRoleInactive_NeverOpensTheCaptureDevice()
     {
-        // Even at user trust, a source that was never activated must not stream.
+        // Even on a paired session, a source that was never activated must not stream.
         var (client, connection, capture) = CreateSourceClient(PskCategory.LongTerm, activateSourceRole: false);
         using var _c = client;
 
@@ -495,16 +495,13 @@ public class SendspinClientServiceSourceTests
     [Fact]
     public void SourceStart_AtSentinelTrustWithRoleGrantedOnlyInHello_NeverOpensTheCaptureDevice()
     {
-        // The three tests above never exercise the trust half of IsSourceStreamingPermitted
-        // independently of the role half — a predicate that dropped the trust check and kept
-        // only the role check would still pass all three. This test reaches (Sentinel trust,
-        // source role active) by a route that never touches server/activate's role list:
-        // ServerHelloPayload.ActiveRoles is a plain deserialized field, so a Sentinel-keyed
-        // server can grant source@v1 in server/hello, then send an activate that OMITS
-        // active_roles entirely. HandleServerActivate only overwrites LastServerHello.ActiveRoles
-        // when the activate payload carries the field, so the hello's grant survives, and the
-        // activate-time admissibility check (keyed off the activate payload's own active_roles,
-        // not the mirrored hello) never sees it either.
+        // ServerHelloPayload.ActiveRoles is a plain deserialized field, and a Sentinel-keyed
+        // server used to be able to grant source@v1 through it: put the role in server/hello,
+        // then send an activate that OMITS active_roles, which the activate-time admissibility
+        // check (keyed off the activate payload's own active_roles) never sees. That route is
+        // closed since #330: HandleServerHello discards a hello's active_roles, so the role is
+        // never active here and this pins that a hello cannot grant it. It no longer separates
+        // the trust half of IsSourceStreamingPermitted from the role half.
         var capture = new FakeCaptureDevice();
         var (client, connection, _) = TestClient.Create(
             PskCategory.Sentinel,

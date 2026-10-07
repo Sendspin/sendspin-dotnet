@@ -56,8 +56,8 @@ The encrypted transport protects a session's confidentiality and integrity, but 
 *authenticates* depends on how the client is paired and configured.
 
 - **Pair before trusting.** An unpaired connection runs under the published Sentinel PSK,
-  which authenticates nothing — its trust level is `none`. Pairing establishes a per-server
-  pre-shared key and raises the session to trust `user`.
+  which authenticates nothing — `ISendspinClient.TrustLevel` reports `Unpaired`. Pairing
+  establishes a per-server pre-shared key, and a session keyed with it reports `Paired`.
 - **Unpaired access is off by default; leave it off unless you need it.**
   `ClientCapabilities.UnpairedAccessEnabled = true` lets a server play to the client with no
   pairing record. Because the Sentinel PSK is a published constant and neither peer's static
@@ -135,11 +135,18 @@ catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.Lega
     Console.Error.WriteLine(ex.Message);
     return;
 }
+catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.PairingRequired)
+{
+    // The normal first contact with a new server: it offered playback, and this client is
+    // not paired with it and has unpaired access off. Pair, then connect again.
+    Console.Error.WriteLine(ex.Message);
+    return;
+}
 catch (SendspinHandshakeException ex)
 {
-    // HandshakeRejected: no usable pairing record, unsupported cipher suite, or a version
-    // mismatch. Pair again rather than retrying.
-    Console.Error.WriteLine($"Handshake rejected: {ex.Message}");
+    // Any other Kind: the handshake was rejected, or the connection closed before it
+    // completed. ex.Message carries the detail.
+    Console.Error.WriteLine($"Handshake failed: {ex.Message}");
     return;
 }
 

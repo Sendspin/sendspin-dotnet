@@ -34,7 +34,7 @@ public class SendspinHostServiceArbitrationTests
     {
         var records = new InMemoryPairingRecordStore();
 
-        // A LongTerm record makes the session trust 'user', so a server/activate granting
+        // A LongTerm record makes the session paired, so a server/activate granting
         // 'playback' is admissible. On the sentinel PSK it would be refused by the spec's
         // admissibility table, which is not what these tests are exercising. The record is
         // deliberately unbound: each FakeServer generates a fresh server identity, and a

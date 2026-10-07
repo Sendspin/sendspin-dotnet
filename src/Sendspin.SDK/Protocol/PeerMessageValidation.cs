@@ -43,8 +43,12 @@ internal static class PeerMessageValidation
         {
             case ServerHelloMessage m:
                 Require(m.Payload, "server/hello", "payload");
-                Require(m.Payload.ServerId, "server/hello", "payload.server_id");
-                Require(m.Payload.ActiveRoles, "server/hello", "payload.active_roles");
+
+                // The spec defines neither server_id nor active_roles for server/hello, so a
+                // null in one is an unrecognized field to ignore, not a malformed message.
+                // Ignoring it means the model's default stands, as for an absent member.
+                m.Payload.ServerId ??= string.Empty;
+                m.Payload.ActiveRoles ??= [];
                 break;
 
             case ServerActivateMessage m:

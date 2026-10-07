@@ -10,7 +10,7 @@ A cross-platform .NET SDK for the Sendspin synchronized multi-room audio protoco
 - **Multi-room Audio Sync**: Microsecond-precision clock synchronization using Kalman filtering
 - **Sync Correction Built In**: `TimedAudioBuffer.Read()` applies the spec's full correction strategy — a conformant player writes no correction code
 - **Platform Flexibility**: `ReadRaw()` hands the error out instead, for platforms with their own rate-control mechanism (hardware rate adjust, playback rate, an existing resampler)
-- **Fast Startup**: Audio plays within ~300ms of connection
+- **Fast Startup**: A player announces itself about two seconds after connecting, once clock sync has converged
 - **Protocol Support**: Sendspin spec `1.0.0-rc1` over an end-to-end encrypted WebSocket — player, controller, metadata, artwork, color, visualizer and source roles
 - **Server Discovery**: mDNS-based automatic server discovery
 - **Audio Decoding**: Built-in PCM, FLAC, and Opus codec support
@@ -194,10 +194,11 @@ no policy to win back; see [Sync Correction System](#sync-correction-system) for
 
 ### Handling handshake failures
 
-`ConnectAsync` **throws** `SendspinHandshakeException` when a handshake fails permanently, so
+`ConnectAsync` **throws** `SendspinHandshakeException` when a handshake does not complete, so
 an application that never subscribes to `ConnectionStateChanged` still finds out. Without
 handling it the call previously returned as though it had succeeded, and the problem surfaced
-when the first command threw *"WebSocket is not connected"*.
+when the first command threw *"WebSocket is not connected"*. It returns normally only when the
+client is connected.
 
 `Kind` classifies the failure; each calls for a different response:
 
@@ -205,6 +206,9 @@ when the first command threw *"WebSocket is not connected"*.
 - `ServerError` — the server answered `client/init` with a cleartext `server/error`; its (unauthenticated) reason is in `Message`.
 - `PairingStateDiverged` — a stored PSK is bound to a different server; the pairing record is stale, so pair again.
 - `HandshakeRejected` — the server refused the handshake for any other reason: an unsupported cipher suite, a version mismatch, or malformed input.
+- `PairingRequired` — the server activated playback, but this client is not paired with it and `UnpairedAccessEnabled` is off, so the client closed with `pairing_required`. This is the normal result of dialling a server for the first time: pair, then connect again.
+- `ActivationRefused` — the server's `server/activate` declared something the session's trust does not permit, so the client closed with `unauthorized`.
+- `ConnectionClosed` — the connection closed before the handshake completed for any other reason: lost with `AutoReconnect` off, disconnected by the application, or closed by the client on a malformed handshake message. The only kind that is not permanent — dialling again may succeed.
 
 ```csharp
 try
@@ -216,10 +220,15 @@ catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.Lega
     // The server predates the encrypted protocol. Upgrade it to aiosendspin 10.0.0 or
     // later, or pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
 }
-catch (SendspinHandshakeException ex)   // ServerError, PairingStateDiverged, or HandshakeRejected
+catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.PairingRequired)
+{
+    // First contact with this server: start pairing, then connect again.
+}
+catch (SendspinHandshakeException ex)   // every other Kind
 {
     // See the list above. ex.Message carries the detail; re-pair for a diverged pairing
-    // record. Retrying cannot help for any of these, and the SDK does not retry.
+    // record. The SDK does not retry any of these, and only ConnectionClosed can be helped
+    // by dialling again.
 }
 catch (TimeoutException)
 {
@@ -810,7 +819,7 @@ Images arrive per channel, with the display timestamp and channel number:
 ```csharp
 client.ArtworkReceived += (_, e) =>
 {
-    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (jpeg/png bytes)
+    // e.Channel (0-3), e.Timestamp (server clock, microseconds), e.ImageData (the encoded image)
     displays[e.Channel].Show(e.ImageData);
 };
 
@@ -818,6 +827,8 @@ client.ArtworkCleared += (_, e) => displays[e.Channel].Clear(); // an empty imag
 ```
 
 On the wire an image is a transfer — an announce carrying the timestamp and total size, then parts, with a cancel that discards a pending image — and the SDK reassembles it, so `ArtworkReceived` always delivers a complete image. An announce with a total size of zero clears the channel.
+
+`e.ImageData` is what the server sent. The spec requires the channel's declared format and size, but the SDK does not decode or inspect the bytes: it discards an image larger than 16 MiB and hands any other over as received. Treat it as input from the peer and decode it with something that fails cleanly on bad data. An exception from the handler is logged and does not affect the connection.
 
 `ArtworkCleared` is also raised, once per channel still showing an image, when a `stream/end` ends the artwork role or the server removes the role from `active_roles`. No clear message exists for that case, so `e.Timestamp` is then the timestamp of the image being cleared rather than a moment to clear at.
 
@@ -885,7 +896,7 @@ client.VisualizationReceived += (_, frame) =>
 
 `Spectrum` frames are validated against the negotiated `NDispBins` from the latest `stream/start`; malformed frames are dropped (no event). Reconfigure at runtime with `SetVisualizerConfigurationAsync(types, rateMax, spectrum)`, which updates that connection's own visualizer configuration (not the `ClientCapabilities` you supplied) and resends the full `client/state`.
 
-> **Note:** `visualizer@v1` is **opt-in** (off by default). Frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork.
+> **Note:** `visualizer@v1` is **opt-in** (off by default). Frames that don't match the negotiated/expected format are **dropped** (logged at `Trace`) rather than throwing, and a misbehaving `VisualizationReceived` handler is isolated so it can't disrupt audio or artwork: an exception it throws is logged and the connection stays up. `ArtworkReceived` and `ArtworkCleared` handlers are isolated the same way.
 
 ## Stream teardown
 
@@ -937,10 +948,10 @@ domain (local capture time mapped through the clock filter's offset+drift). On `
 role deactivation, or disposal it sends `client-stream/end` and stops capturing.
 
 **Trust required.** A source streams potentially sensitive audio, so `source@v1` MUST
-run on a paired (`user`-trust) connection. The SDK enforces this in two places, because
-one is not enough: a `server/activate` that activates the role at trust `none` is
+run on a paired connection (`TrustLevel` is `Paired`). The SDK enforces this in two places, because
+one is not enough: a `server/activate` that activates the role on an unpaired connection is
 refused and the connection is closed, per spec — and, independently, the capture device
-is never opened unless the connection is at trust `user` *and* the source role is
+is never opened unless the connection is paired *and* the source role is
 currently in `active_roles`. The second check is what stops a `server/command
 { source: { command: "start" } }` that skips activation entirely.
 

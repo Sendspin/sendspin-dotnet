@@ -11,7 +11,7 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// Display-timestamp scheduling for the visualizer and artwork roles (#198, #199) and for the
-/// scheduled <c>metadata</c> and <c>color</c> updates of spec #135 (pending merge): each carries a
+/// scheduled <c>metadata</c> and <c>color</c> updates of spec #135: each carries a
 /// server-clock time at which its data takes effect, which the SDK translates to the local clock
 /// and holds against. The roles differ on lateness — a stale visualizer frame is never rendered,
 /// whereas late artwork and late state are applied immediately.
@@ -666,7 +666,7 @@ public class MediaDisplaySchedulingTests
         Assert.Empty(frames);
     }
 
-    // -- Scheduled metadata and color updates (spec #135, pending merge) --------------------
+    // -- Scheduled metadata and color updates (spec #135) -----------------------------------
 
     /// <summary>A <c>server/state</c> carrying only the given <c>metadata</c> role object.</summary>
     private static string MetadataState(string metadata) =>
@@ -1089,6 +1089,37 @@ public class MediaDisplaySchedulingTests
         // Nothing pending is left to surface afterwards.
         await DrainPastAsync(client, connection, timer, Now + 5_000);
         Assert.Equal(2, received.Count);
+    }
+
+    [Fact]
+    public void ThrowingArtworkHandlers_DoNotFaultTheReceiveLoop_AndEveryChannelIsStillCleared()
+    {
+        var (client, connection, _) = SchedulingClient();
+        using var _c = client;
+
+        var received = 0;
+        var cleared = new List<int>();
+        client.ArtworkReceived += (_, _) =>
+        {
+            received++;
+            throw new InvalidOperationException("decoder boom");
+        };
+        client.ArtworkCleared += (_, e) =>
+        {
+            cleared.Add(e.Channel);
+            throw new InvalidOperationException("clear boom");
+        };
+
+        // Past-stamped, so both are raised on arrival, on the receive loop (#337).
+        SendArtwork(connection, Now - 1, new byte[] { 1 }, BinaryMessageTypes.Artwork0);
+        SendArtwork(connection, Now - 1, new byte[] { 2 }, BinaryMessageTypes.Artwork1);
+        Assert.Equal(2, received);
+
+        // The first channel's subscriber throwing must not leave the second on display.
+        connection.RaiseTextMessageReceived(
+            """{"type":"stream/end","payload":{"server_transmitted":1,"roles":["artwork"]}}""");
+
+        Assert.Equal(new[] { 0, 1 }, cleared.OrderBy(c => c).ToArray());
     }
 
     [Fact]

@@ -3,7 +3,9 @@ using System.Text.Json.Serialization;
 namespace Sendspin.SDK.Protocol.Messages;
 
 /// <summary>
-/// Server response to client hello, confirming role activations.
+/// The first message the server sends once the Noise handshake completes, ahead of the
+/// client's <c>client/hello</c>. It names the server; roles are activated by
+/// <c>server/activate</c>, not here.
 /// Uses the envelope format: { "type": "server/hello", "payload": { ... } }
 /// </summary>
 public sealed class ServerHelloMessage : IMessageWithPayload<ServerHelloPayload>
@@ -32,9 +34,9 @@ public sealed class ServerHelloMessage : IMessageWithPayload<ServerHelloPayload>
 /// </summary>
 /// <remarks>
 /// <para>
-/// Under the encrypted protocol the spec defines exactly one field here — <c>name</c>
-/// (messaging.md, "Server → Client: <c>server/hello</c>"). The four properties below it are
-/// residue from the pre-encryption protocol, retained rather than removed because they are
+/// The spec defines three fields here — <c>name</c>, <c>languages</c> and
+/// <c>source@v1_support</c> (messaging.md, "Server → Client: <c>server/hello</c>"). The other
+/// four properties are residue from the pre-encryption protocol, retained rather than removed because they are
 /// public API and dropping them would break compilation for consumers reading them. They are
 /// left populated-if-present so a server that still sends them does not fail the parse, but no
 /// conformant encrypted server sends any of them, and application code should not read them:

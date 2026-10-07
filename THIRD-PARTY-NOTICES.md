@@ -5,7 +5,8 @@ third-party components listed below, each under its own license. The notices her
 reproduced in full as those licenses require; the license text at the top of each vendored
 source file is authoritative and must not be removed or rewritten.
 
-Components taken as NuGet package references (Concentus, Noise.NET, and their transitive
+Components taken as NuGet package references (Concentus, Noise.NET, libsodium, Zeroconf,
+Makaretu.Dns.Multicast, Microsoft.Extensions.Logging.Abstractions, and their transitive
 dependencies) carry their own notices in their packages and are not restated here. This file
 covers source vendored **into** this repository.
 

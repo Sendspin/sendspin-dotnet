@@ -35,7 +35,7 @@ public interface IAudioPlayer : IAsyncDisposable
     /// Since 9.0.6 this is <b>applied to the playback schedule</b> - the buffer pre-rolls the scheduled
     /// start by this amount (see <see cref="ITimedAudioBuffer.OutputLatencyMicroseconds"/>) so audio
     /// reaches the speaker on the server's clock. An implementation that reports a real latency therefore
-    /// keeps multi-room alignment automatically and must NOT also compensate it via StaticDelay. Return
+    /// keeps multi-room alignment automatically and must NOT also compensate it via the output delay. Return
     /// 0 if the latency is unknown or already accounted for elsewhere.
     /// </para>
     /// <para>

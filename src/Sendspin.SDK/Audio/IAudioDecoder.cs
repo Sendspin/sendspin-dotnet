@@ -19,7 +19,8 @@ public interface IAudioDecoder : IDisposable
 
     /// <summary>
     /// Gets the maximum samples that can be output from a single decode call.
-    /// Used to pre-allocate buffers. Typically 960*2 for 20ms Opus stereo at 48kHz.
+    /// Used to pre-allocate buffers, so it is the worst case rather than the usual chunk: the
+    /// built-in decoders size it for a 120 ms Opus frame or the spec's 150 ms chunk limit.
     /// </summary>
     int MaxSamplesPerFrame { get; }
 

@@ -1,4 +1,5 @@
 using Sendspin.SDK.Client;
+using Sendspin.SDK.Models;
 using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
@@ -392,28 +393,92 @@ public class SendspinClientServiceControllerTests
     }
 
     [Fact]
-    public async Task SendCommandAsync_AfterGroupChangeBeforeServerState_Drops()
+    public async Task GroupChange_KeepsTheControllerStateThatArrivedAheadOfTheGroupUpdate()
     {
-        // supported_commands belongs to the group that reported it: a group/update that moves the
-        // client to a different group id clears the list until that group's server/state arrives,
-        // while one that keeps the id leaves it alone.
+        // The order aiosendspin 10.0.0 puts a group change on the wire: the new group's
+        // controller object first, then the group/update naming the group, and no second
+        // controller object after it. Clearing on the id change would discard the state that
+        // belongs to the new group and leave every command dropped until it next changes (#338).
         var (client, connection, _) = TestClient.Create();
         using var _c = client;
 
         TestClient.CompleteHandshake(connection, ClientRoles.Controller);
-        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"group_id":"g1"}}""");
+        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"playback_state":"playing","group_id":"g1","group_name":"one"}}""");
         connection.RaiseTextMessageReceived("""
-            {"type":"server/state","payload":{"controller":{"supported_commands":["play"]}}}
+            {"type":"server/state","payload":{"controller":{"supported_commands":["play","seek"],"volume":40,"muted":false,"repeat":"off","shuffle":false,"seek_max_ms":240000}}}
             """);
 
-        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"group_id":"g1","playback_state":"playing"}}""");
-        await client.SendCommandAsync(Commands.Play);
-        int sent = connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Count();
-        Assert.Equal(1, sent);
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"controller":{"supported_commands":["pause","switch"],"volume":70,"muted":false,"repeat":"off","shuffle":false}}}
+            """);
+        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"playback_state":"stopped","group_id":"g2","group_name":"two"}}""");
 
-        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"group_id":"g2"}}""");
+        Assert.NotNull(client.CurrentGroup);
+        Assert.Equal("g2", client.CurrentGroup.GroupId);
+        Assert.Equal(new[] { "pause", "switch" }, client.CurrentGroup.SupportedCommands);
+        Assert.Equal(70, client.CurrentGroup.Volume);
+
+        // The controller object is full state, so the new group's object already unset the
+        // previous group's seek range.
+        Assert.Null(client.CurrentGroup.SeekMaxMs);
+
+        await client.SendCommandAsync(Commands.Pause);
+        Assert.Equal(Commands.Pause, LastControllerCommand(connection).Command);
+    }
+
+    [Fact]
+    public async Task ConnectionLoss_DropsWhatAuthorisesCommands_AndKeepsWhatIsDisplayed()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        TestClient.CompleteHandshake(connection, ClientRoles.Controller, ClientRoles.Metadata);
+        connection.RaiseTextMessageReceived("""{"type":"group/update","payload":{"playback_state":"playing","group_id":"g1","group_name":"one"}}""");
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/state","payload":{"metadata":{"title":"Track A"},"controller":{"supported_commands":["play","seek"],"volume":40,"seek_max_ms":240000}}}
+            """);
+
+        var announced = new List<PlaybackState>();
+        client.GroupStateChanged += (_, group) => announced.Add(group.PlaybackState);
+
+        connection.SimulateConnectionLoss();
+
+        // The list and the seek range were the old connection's, and nothing is playing from a
+        // server that is not there. The track stays up for the reconnect to replace.
+        var group = client.CurrentGroup;
+        Assert.NotNull(group);
+        Assert.Null(group.SupportedCommands);
+        Assert.Null(group.SeekMaxMs);
+        Assert.Equal(PlaybackState.Idle, group.PlaybackState);
+        Assert.Equal("Track A", group.Metadata?.Title);
+        Assert.Equal(40, group.Volume);
+        Assert.Equal(new[] { PlaybackState.Idle }, announced);
+
+        // The new connection's activate re-grants the role before any server/state: the old
+        // list must not authorise a command in between.
+        connection.SimulateReconnected();
+        connection.RaiseTextMessageReceived("""{"type":"server/hello","payload":{"name":"srv"}}""");
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["controller@v1","metadata@v1"]}}""");
+
         await client.SendCommandAsync(Commands.Play);
 
-        Assert.Equal(sent, connection.SnapshotSentMessages().OfType<ClientCommandMessage>().Count());
+        Assert.DoesNotContain(connection.SnapshotSentMessages(), m => m is ClientCommandMessage);
+    }
+
+    [Fact]
+    public async Task ConnectionClosedUnderTheClient_DropsTheGroup_AsDisconnectAsyncDoes()
+    {
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        ActivateController(connection);
+        Assert.NotNull(client.CurrentGroup);
+
+        // The connection ends without the application asking: no auto-reconnect, or one that
+        // gave up.
+        await connection.CloseWithoutGoodbyeAsync("lost");
+
+        Assert.Null(client.CurrentGroup);
     }
 }

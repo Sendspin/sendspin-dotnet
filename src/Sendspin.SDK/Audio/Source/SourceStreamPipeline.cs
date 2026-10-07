@@ -19,8 +19,8 @@ namespace Sendspin.SDK.Audio.Source;
 /// Timestamps are the local capture time mapped to the server clock via
 /// <see cref="IClockSynchronizer.ClientToServerTime"/> (offset + drift), per the spec.
 /// The pipeline enforces the spec's trust rule itself, at the point the capture device
-/// opens: it refuses to stream unless <c>canStream</c> reports user trust and an active
-/// source role. Activate-time checking alone is insufficient, because server/command
+/// opens: it refuses to stream unless <c>canStream</c> reports a paired connection and an
+/// active source role. Activate-time checking alone is insufficient, because server/command
 /// reaches this pipeline without passing through server/activate.
 /// Start, stop, and the per-connection reset (<see cref="ResetForConnectionLossAsync"/>)
 /// run one at a time in arrival order, so commands are idempotent against the stream's
@@ -74,7 +74,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
     /// <param name="logger">Logger for pipeline diagnostics.</param>
     /// <param name="canStream">
     /// Evaluated immediately before the capture device is opened. Must be false unless the
-    /// connection is at trust 'user' and the source role is currently active. Called while the
+    /// connection is paired and the source role is currently active. Called while the
     /// pipeline's lock is held, so it must not block, await, or take a lock of its own.
     /// </param>
     /// <param name="encoderFactory">Chooses an encoder for the capture format; PCM by default.</param>
@@ -167,7 +167,7 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
             if (!_canStream())
             {
                 _logger.LogWarning(
-                    "Refusing to stream: source@v1 requires user trust, an active source role and an available client");
+                    "Refusing to stream: source@v1 requires a paired connection, an active source role and an available client");
                 return;
             }
         }

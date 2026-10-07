@@ -46,7 +46,7 @@ public class SourceCodecSelectionTests
                 ClockSynchronizer = new ConvergedClockSynchronizer(),
             });
 
-        // Bound to ServerId so the source trust gate (user trust) is satisfied, same as
+        // Bound to ServerId so the source trust gate (a paired session) is satisfied, same as
         // SendspinClientServiceSourceTests.
         session.MatchedPsk = new NoisePsk(NoiseConstants.SentinelPsk.ToArray(), PskCategory.LongTerm, ServerId);
         connection.ConnectAsync(new Uri("ws://test.local:8927/sendspin")).GetAwaiter().GetResult();

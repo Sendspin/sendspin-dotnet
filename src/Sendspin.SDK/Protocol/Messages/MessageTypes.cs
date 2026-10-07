@@ -2,7 +2,9 @@ namespace Sendspin.SDK.Protocol.Messages;
 
 /// <summary>
 /// Sendspin protocol message type identifiers.
-/// Format: "direction/action" where direction is "client" or "server"
+/// Format: "prefix/name". <c>client/</c> and <c>server/</c> name the sender; <c>stream/</c>
+/// and <c>client-stream/</c> group the messages controlling a binary channel from the server
+/// and from the client; <c>group/</c>, <c>pair/</c> and <c>noise/</c> name a subject.
 /// </summary>
 public static class MessageTypes
 {

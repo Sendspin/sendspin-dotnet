@@ -11,7 +11,7 @@ namespace Sendspin.SDK.Client;
 /// which it takes effect, so a future-stamped update is held rather than merged on receipt.
 /// </summary>
 /// <remarks>
-/// The two roles spec #135 (pending merge) gives the current-plus-pending model to, alongside
+/// The two roles spec #135 gives the current-plus-pending model to, alongside
 /// artwork. Used as an index into <see cref="MediaDisplayScheduler"/>'s pending slots, so each
 /// role holds at most one update and neither can displace the other's.
 /// </remarks>
@@ -39,7 +39,7 @@ internal enum ScheduledStateRole
 /// </para>
 /// <para>
 /// Artwork (per channel) and the two <see cref="ScheduledStateRole"/>s follow one model, spec
-/// #135 (pending merge): each slot keeps <em>at most one</em> pending item, a future-stamped
+/// #135: each slot keeps <em>at most one</em> pending item, a future-stamped
 /// message replaces whatever the slot held, and a past-or-present one takes effect at once and
 /// discards what the slot held. Timestamps are never compared between messages — the newest
 /// message always wins its slot, even when it is due sooner than the item it displaces — because
@@ -47,8 +47,8 @@ internal enum ScheduledStateRole
 /// </para>
 /// <para>
 /// The translation is <see cref="IClockSynchronizer.ServerToClientTimeUncompensated"/>, the clock
-/// offset alone: the role specs say to translate "using the offset computed from clock
-/// synchronization", and only the player role goes on to subtract <c>output_delay_ms</c>. That
+/// offset alone: the role specs have the timestamp "translated to the local clock via the time
+/// filter", and only the player role goes on to subtract <c>output_delay_ms</c>. That
 /// delay compensates for hardware past the audio port, so applying it here would show every
 /// visual ahead of the sound it belongs to by up to the 5 s the setting allows.
 /// </para>
@@ -65,8 +65,9 @@ internal enum ScheduledStateRole
 /// </para>
 /// <para>
 /// Data that is already due on arrival is raised inline, on the caller's thread, so the common
-/// case keeps the receive loop's existing threading contract (including a throwing subscriber
-/// escaping into the receive loop). Only data with a future display time is deferred to this
+/// case keeps the receive loop's existing threading contract. What a subscriber to a media event
+/// throws is logged on either thread; see <see cref="SafeRaise(Action, string)"/>. Only data
+/// with a future display time is deferred to this
 /// class's background loop, and while that loop is raising an event, a newly arrived due item
 /// queues behind it rather than racing past it — so each role's events stay in timestamp order
 /// whichever thread raises them. Within one dispatch pass the state roles are applied before the
@@ -258,14 +259,14 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
         if (raiseNow)
         {
-            _raiseVisualization(frame);
+            SafeRaise(_raiseVisualization, frame, "visualizer frame");
         }
     }
 
     /// <summary>
     /// Raises artwork now if its display time has passed, and otherwise holds it until then.
     /// The newest image for a channel supersedes one still pending for it, per "latest wins" —
-    /// arrival order, not timestamp order (spec #135, pending merge).
+    /// arrival order, not timestamp order (spec #135).
     /// </summary>
     /// <param name="chunk">The parsed artwork message; empty image data means clear.</param>
     internal void SubmitArtwork(ArtworkChunk chunk)
@@ -302,7 +303,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
 
         if (raiseNow is not null)
         {
-            RaiseArtwork(raiseNow);
+            SafeRaise(_raisePendingArtwork, raiseNow, "artwork");
         }
     }
 
@@ -447,7 +448,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
         {
             foreach (var args in cleared)
             {
-                _raiseArtworkCleared(args);
+                SafeRaise(_raiseArtworkCleared, args, "artwork clear");
             }
         }
     }
@@ -790,13 +791,14 @@ internal sealed class MediaDisplayScheduler : IDisposable
     }
 
     /// <summary>
-    /// Raises one scheduled event, logging rather than propagating what a subscriber throws.
+    /// Raises one event, logging rather than propagating what a subscriber throws.
     /// </summary>
     /// <remarks>
-    /// Deliberately unlike the inline path, where a throwing subscriber escapes into the receive
-    /// loop and is surfaced as a lost connection. There is no connection to lose here, and
-    /// letting the exception out would end this loop — silently stopping every later frame and
-    /// image for the life of the client. Mirrors the time-sync loop's reasoning.
+    /// On the scheduler loop, letting the exception out would end the loop — silently stopping
+    /// every later frame and image for the life of the client. On the receive loop it would be
+    /// surfaced as a lost connection, so one bad frame in a renderer would stop the audio, and
+    /// only for the frames that happened to be due on arrival (#337). Only the subscriber is
+    /// guarded: the SDK's own parsing and dispatch still propagate.
     /// </remarks>
     private void SafeRaise(Action raise, string what)
     {
@@ -806,7 +808,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Subscriber threw while a scheduled {What} was being raised", what);
+            _logger.LogError(ex, "A subscriber threw from a display event ({What})", what);
         }
     }
 
@@ -823,7 +825,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Subscriber threw while a scheduled {What} was being raised", what);
+            _logger.LogError(ex, "A subscriber threw from a display event ({What})", what);
         }
     }
 

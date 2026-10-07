@@ -2,6 +2,12 @@
 
 **Prepared 2026-08-13 against spec `3f8528a9` and `aiosendspin` 9.1.0. Not filed — for the maintainers to route.**
 
+> **Postscript, 2026-10-07.** Kept as written; "Our position" below no longer describes the
+> SDK in full. Spec `1.0.0-rc1` says "Pairing can run alongside playback", and since PR #299
+> (2026-10-06) the client holds the wire for the pairing exchange only when the activation
+> declares `'pairing'` without `'playback'`. Under `['playback', 'pairing']` it keeps sending
+> `client/time`, `client/state`, commands and source audio.
+
 ## The short version
 
 The spec and the reference server disagree about whether a client may send `client/time` while a
