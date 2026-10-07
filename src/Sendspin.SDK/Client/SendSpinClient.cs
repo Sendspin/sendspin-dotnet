@@ -2587,13 +2587,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandleGroupUpdate(json);
                     break;
 
+                // The player grant is read here, on the receive loop, for all three: that is
+                // the grant the server had declared when it sent the message. Their handlers run
+                // later, behind whatever the pipeline is still doing, and a server/activate
+                // handled in between must not decide for a message that preceded it.
                 case MessageTypes.StreamStart:
-                    DispatchStreamLifecycle(() => HandleStreamStartAsync(json));
+                {
+                    bool playerActive = IsRoleActive("player");
+                    DispatchStreamLifecycle(() => HandleStreamStartAsync(json, playerActive));
                     break;
+                }
 
                 case MessageTypes.StreamEnd:
-                    DispatchStreamLifecycle(() => HandleStreamEndAsync(json));
+                {
+                    bool playerActive = IsRoleActive("player");
+                    DispatchStreamLifecycle(() => HandleStreamEndAsync(json, playerActive));
                     break;
+                }
 
                 case MessageTypes.StreamClear:
                     HandleStreamClear(json);
@@ -2815,7 +2825,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     .ToList();
                 if (removedStreamRoles.Count > 0)
                 {
-                    DispatchStreamLifecycle(() => StopStreamRolesAsync(removedStreamRoles));
+                    DispatchStreamLifecycle(() => StopStreamRolesAsync(
+                        removedStreamRoles, stopPlayer: removedStreamRoles.Contains("player")));
                 }
             }
         }
@@ -5168,11 +5179,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private async Task HandleStreamStartAsync(string json)
+    private async Task HandleStreamStartAsync(string json, bool playerActive)
     {
         try
         {
-            await HandleStreamStartCoreAsync(json);
+            await HandleStreamStartCoreAsync(json, playerActive);
         }
         catch (System.Text.Json.JsonException ex)
         {
@@ -5195,7 +5206,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private async Task HandleStreamStartCoreAsync(string json)
+    private async Task HandleStreamStartCoreAsync(string json, bool playerActive)
     {
         var message = MessageSerializer.Deserialize<StreamStartMessage>(json);
         if (message is null)
@@ -5225,6 +5236,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (payload.Format is null)
         {
             _logger.LogDebug("Stream start is artwork-only (no player key), skipping pipeline start");
+            return;
+        }
+
+        // The player object is valid "only if the player role is active": a connection the
+        // server left player out of may not open this client's output. Keyed on the grant and
+        // not on IsRoleBinaryPermitted — the reference server starts a held player without its
+        // state object once its wait for one times out, and a start dropped then is never sent
+        // again, so the stream would stay closed after the object did go out.
+        if (!playerActive)
+        {
+            _logger.LogDebug("Stream start: ignoring player object, player is not an active role");
             return;
         }
 
@@ -5390,7 +5412,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                && left.Height == right.Height;
     }
 
-    private async Task HandleStreamEndAsync(string json)
+    private async Task HandleStreamEndAsync(string json, bool playerActive)
     {
         try
         {
@@ -5416,7 +5438,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
             StreamEndReceived?.Invoke(this, payload);
 
-            await StopStreamRolesAsync(payload.Roles);
+            await StopStreamRolesAsync(payload.Roles, ReachesPlayerRole(payload.Roles, playerActive));
         }
         catch (System.Text.Json.JsonException ex)
         {
@@ -5433,14 +5455,19 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Stops the output and clears the buffers of the stream roles a <c>stream/end</c> names —
     /// every one when it names none — or that a <c>server/activate</c> removed.
     /// </summary>
-    private async Task StopStreamRolesAsync(List<string>? roles)
+    /// <param name="roles">The roles named, or null for every stream role.</param>
+    /// <param name="stopPlayer">
+    /// Whether the player is among them. The caller's to say: a <c>stream/end</c> reaches the
+    /// player only while the role is active, a removal exactly when it no longer is.
+    /// </param>
+    private async Task StopStreamRolesAsync(List<string>? roles, bool stopPlayer)
     {
         // Media held for a display time that belongs to the stream just ended must not
         // surface after it, and the artwork on display is cleared: both a stream/end and a
         // role's removal are playback termination (spec #266), unlike a stream/clear seek.
         FlushDisplayRoles(roles, endingStream: true);
 
-        if (!ReachesPlayerRole(roles))
+        if (!stopPlayer)
         {
             return;
         }
@@ -5488,7 +5515,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // seek keeps the image already on screen, so the flush drops only what is pending.
         FlushDisplayRoles(payload.Roles, endingStream: false);
 
-        if (ReachesPlayerRole(payload.Roles) && _audioPipeline is { } pipeline)
+        if (ReachesPlayerRole(payload.Roles, IsRoleActive("player")) && _audioPipeline is { } pipeline)
         {
             // Deserialization stays on the receive loop above — that is what routes a malformed
             // payload into OnTextMessageReceived's close — but the pipeline call joins the
@@ -5505,7 +5532,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>
     /// Whether a stream/end or stream/clear reaches the <c>player</c> role, and so the audio
     /// pipeline. An omitted <c>roles</c> means every active stream, which is the case that
-    /// makes an absent array and an empty one behave differently.
+    /// makes an absent array and an empty one behave differently — and no stream is active for
+    /// a player the server did not activate, so on such a connection neither message reaches it.
     /// </summary>
     /// <remarks>
     /// Role-targeted teardown is routine, not exotic: whenever a <c>server/activate</c> drops a
@@ -5517,7 +5545,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <see cref="StreamEndReceived"/> / <see cref="StreamClearReceived"/> rather than being
     /// validated here, since only the consumer of a role knows its names.
     /// </remarks>
-    private static bool ReachesPlayerRole(List<string>? roles) => roles is null || roles.Contains("player");
+    private static bool ReachesPlayerRole(List<string>? roles, bool playerActive)
+        => playerActive && (roles is null || roles.Contains("player"));
 
     /// <summary>
     /// Discards the media a <c>stream/end</c> or <c>stream/clear</c> ends the display of: the
