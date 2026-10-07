@@ -20,6 +20,11 @@ public sealed class SendspinConnection : ISendspinConnection
     private readonly IWireFraming _framing;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
+    // How long a goodbye and close may take before the socket is torn down without them. See
+    // IncomingConnection.CloseTimeout: a server that has stopped reading parks a send inside
+    // the socket holding _sendLock, and the goodbye waited on that lock for good (#354).
+    private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(3);
+
     private ClientWebSocket? _webSocket;
     private CancellationTokenSource? _receiveCts;
     private Task? _receiveTask;
@@ -212,10 +217,15 @@ public sealed class SendspinConnection : ISendspinConnection
             {
                 try
                 {
+                    // When this runs out, the cleanup below disposes the socket, which is
+                    // what ends a send parked on a peer that has stopped reading.
+                    using var closeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    closeTimeout.CancelAfter(CloseTimeout);
+
                     if (sendGoodbye)
                     {
                         var goodbye = ClientGoodbyeMessage.Create(reason);
-                        await SendMessageAsync(goodbye, cancellationToken);
+                        await SendMessageAsync(goodbye, closeTimeout.Token);
                     }
 
                     // CloseOutputAsync, not CloseAsync: the latter performs the full closing
@@ -236,7 +246,7 @@ public sealed class SendspinConnection : ISendspinConnection
                     await _webSocket.CloseOutputAsync(
                         WebSocketCloseStatus.NormalClosure,
                         sendGoodbye ? reason : null,
-                        cancellationToken);
+                        closeTimeout.Token);
                 }
                 catch (Exception ex)
                 {

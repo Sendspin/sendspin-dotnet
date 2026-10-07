@@ -59,6 +59,48 @@ public class DialPathCloseHandshakeTests
         await connection.DisposeAsync();
     }
 
+    [Fact]
+    public async Task DisconnectAsync_WhileASendIsStalledOnAPeerThatStoppedReading_StillCompletes()
+    {
+        // #354, the send-side twin of the test above: the peer has stopped reading, the socket
+        // buffers are full, and a send is parked inside the socket holding the send lock. The
+        // goodbye waited on that lock with no bound, so the close after it was never reached.
+        var peer = new SilentUpgradingPeer();
+        peer.Start();
+
+        var connection = new SendspinConnection(
+            NullLogger<SendspinConnection>.Instance,
+            new ConnectionOptions { AutoReconnect = false },
+            new StubFraming());
+
+        bool completed;
+        bool released;
+        try
+        {
+            await connection.ConnectAsync(new Uri($"ws://127.0.0.1:{peer.Port}/sendspin"));
+
+            var stalled = await StalledPeer.SendUntilStalledAsync(chunk => connection.SendBinaryAsync(chunk));
+
+            var disconnect = connection.DisconnectAsync(GoodbyeReasons.Shutdown);
+
+            completed = await Task.WhenAny(disconnect, Task.Delay(TimeSpan.FromSeconds(10)))
+                == disconnect;
+            released = await Task.WhenAny(stalled, Task.Delay(TimeSpan.FromSeconds(5)))
+                == stalled;
+        }
+        finally
+        {
+            // As above: dropping the peer faults whatever is still parked on it.
+            peer.Dispose();
+        }
+
+        Assert.True(completed, "DisconnectAsync must not wait on a send the peer will never read");
+        Assert.True(released, "the stalled send must be released when the connection closes");
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+
+        await connection.DisposeAsync();
+    }
+
     /// <summary>
     /// Accepts one TCP connection, completes the RFC 6455 upgrade, and then never reads the
     /// socket again — so it receives no Close frame and therefore never sends one.

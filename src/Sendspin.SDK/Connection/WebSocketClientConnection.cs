@@ -152,6 +152,12 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Ends the connection at once, with no Close frame. Fails any send or receive in flight,
+    /// including a send parked on a peer that has stopped reading (#354).
+    /// </summary>
+    internal void Abort() => _webSocket.Abort();
+
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(8192);
