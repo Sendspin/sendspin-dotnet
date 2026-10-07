@@ -51,6 +51,28 @@ public class ActiveRoleGrantTests
         Assert.Empty(client.LastServerHello!.ActiveRoles);
     }
 
+    [Fact]
+    public void ActiveRoles_InServerHello_AreNotAGrant()
+    {
+        // server/hello defines no active_roles, and messaging.md has it that "A client treats a
+        // first server/activate that omits it as carrying an empty active_roles" - so a list
+        // read out of the hello must not be what such an activate persists.
+        var (client, connection) = ClientListing("metadata@v1");
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv","active_roles":["metadata@v1"]}}
+            """);
+        Assert.Empty(client.LastServerHello!.ActiveRoles);
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/activate","payload":{"activities":["playback"]}}
+            """);
+
+        Assert.NotNull(client.LastServerActivate);
+        Assert.Empty(client.LastServerHello!.ActiveRoles);
+    }
+
     [Theory]
     [InlineData("""{"metadata":{"title":"Track A"}}""")]
     [InlineData("""{"controller":{"volume":40,"muted":false,"repeat":"all","shuffle":true}}""")]

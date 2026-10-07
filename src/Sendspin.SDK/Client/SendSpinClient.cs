@@ -698,19 +698,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Sends the ClientHello message and waits for the ServerHello response.
-    /// Used for both initial connection and reconnection handshakes.
+    /// Starts over the handshake state that belongs to one connection: whether its
+    /// <c>server/hello</c> and first <c>server/activate</c> have arrived, and everything the
+    /// previous connection's activation granted.
     /// </summary>
-    private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
+    /// <remarks>
+    /// Runs when the connection enters <see cref="ConnectionState.Connecting"/>, which
+    /// <see cref="SendspinConnection"/> does at the start of every dial — the application's own
+    /// and each automatic reconnect attempt — before the socket is opened. So it is done before
+    /// the new connection can deliver anything, and an automatic reconnect, which no caller is
+    /// waiting on, gets it as well. An in-band re-handshake does not pass through here; see
+    /// <see cref="DetectSessionRekey"/>.
+    /// </remarks>
+    private void ResetHandshakeStateForNewConnection()
     {
-        TaskCompletionSource<bool> handshakeTcs;
-        SendspinHandshakeException? alreadyFailed;
-        lock (_handshakeLock)
-        {
-            handshakeTcs = _handshakeTcs = new TaskCompletionSource<bool>();
-            alreadyFailed = _handshakeFailure;
-        }
-
         _activateReceived = false;
         _serverHelloReceived = false;
         _pairingActivationActive = false;
@@ -723,8 +724,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         // A new handshake is a new session, and an activate authorises the session it arrived
         // on — not the next one. Cleared here rather than on
-        // disconnect because SendHandshakeAsync is private to the dial path (ConnectAsync and
-        // the reconnect handshake): this particular clear does not reach the listen path's
+        // disconnect because this runs on the dial path only (a listen-path connection never
+        // passes through Connecting): this particular clear does not reach the listen path's
         // arbitration, SendspinHostService.PriorityOf, which also reads LastServerActivate.
         // That is no longer the whole story, though — DetectSessionRekey clears the same
         // field for the in-band re-key case, and it runs from OnTextMessageReceived, which
@@ -752,6 +753,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // server/pair-finalize on a later session — even one an anonymous Sentinel-keyed peer
         // opened — would persist a permanent LongTerm record.
         _pendingPairingPsk = null;
+    }
+
+    /// <summary>
+    /// Sends the ClientHello message and waits for the ServerHello response.
+    /// Used for both initial connection and reconnection handshakes.
+    /// </summary>
+    private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
+    {
+        TaskCompletionSource<bool> handshakeTcs;
+        SendspinHandshakeException? alreadyFailed;
+        lock (_handshakeLock)
+        {
+            handshakeTcs = _handshakeTcs = new TaskCompletionSource<bool>();
+            alreadyFailed = _handshakeFailure;
+        }
 
         // The connection's receive loop is already running when we get here, so a permanent
         // failure can be raised before there is a TCS to fail — the continuation that resumes
@@ -2325,8 +2341,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             ServerName = null;
         }
 
+        // Every dial starts here, the application's and each automatic reconnect attempt alike,
+        // and nothing of the new connection has been received yet.
+        if (e.NewState == ConnectionState.Connecting)
+        {
+            ResetHandshakeStateForNewConnection();
+        }
+
         // Re-handshake when WebSocket reconnects successfully
         // Use e.OldState instead of a separate field to avoid race conditions
+        // Not reached on a SendspinConnection, whose reconnect goes Reconnecting -> Connecting
+        // -> Handshaking: a reconnect completes without this bounded wait, on the reset above.
         if (e.NewState == ConnectionState.Handshaking && e.OldState == ConnectionState.Reconnecting)
         {
             PerformReconnectHandshakeAsync().SafeFireAndForget(_logger);
@@ -2424,7 +2449,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // this, a grant from the retired session was honoured on the new one until
         // its first activate, on a PSK that could never have been granted it.
         //
-        // Unlike SendHandshakeAsync's clear of the same field, this one reaches both the dial
+        // Unlike ResetHandshakeStateForNewConnection's clear of the same field, this one reaches
+        // both the dial
         // and listen paths — DetectSessionRekey runs from OnTextMessageReceived, which both
         // share — so it also reaches SendspinHostService.PriorityOf's read of this field. In
         // the window between a re-key and this session's next activate, PriorityOf reports
@@ -2436,7 +2462,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         LastServerActivate = null;
 
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles (see
-        // SendHandshakeAsync's comment on the same clear). The in-band case has no bounding
+        // ResetHandshakeStateForNewConnection's comment on the same clear). The in-band case has
+        // no bounding
         // server/hello to reset that mirror on its own, so without this a source@v1 grant
         // from a retired session would carry forward indefinitely, rather than just until the
         // next reconnect.
@@ -2451,7 +2478,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             LastServerHello.ActiveRoles = [];
         }
 
-        // Same reasoning as SendHandshakeAsync's clear of this field: the PSK belongs to the
+        // Same reasoning as ResetHandshakeStateForNewConnection's clear of this field: the PSK
+        // belongs to the
         // attempt that generated it, not to whatever session happens to be current when
         // server/pair-finalize arrives.
         _pendingPairingPsk = null;
@@ -2562,6 +2590,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             if (messageType is MessageTypes.ServerActivate && !_serverHelloReceived)
             {
                 _logger.LogDebug("Dropping server/activate received before server/hello");
+                return;
+            }
+
+            // server/hello is "Sent once per connection", and a re-handshake re-sends neither
+            // hello (connection.md, Re-handshake), so any later one is a repeat. It is dropped
+            // like the other out-of-sequence messages here: handled, it would be answered with a
+            // second client/hello and would replace the payload the active roles are recorded on.
+            if (messageType is MessageTypes.ServerHello && _serverHelloReceived)
+            {
+                _logger.LogDebug("Dropping repeated server/hello");
                 return;
             }
 
@@ -2696,6 +2734,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
 
         var payload = message.Payload;
+
+        // server/hello defines no active_roles; the property is only where HandleServerActivate
+        // records the grant. One sent here anyway must not become roles a first activate that
+        // omits the field then persists.
+        payload.ActiveRoles = [];
         LastServerHello = payload;
         _serverHelloReceived = true;
         ServerName = payload.Name;
@@ -2737,8 +2780,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// A shared-PSK record carries no server id by design, so it is not evidence of a mismatch
     /// — treating one as evidence would warn on every connection to an unrelated server.
     /// Raised from server/hello rather than the handshake because that is where the client
-    /// learns the session's PSK category, and it runs once per Noise session, including after
-    /// an in-band re-handshake.
+    /// learns the session's PSK category, and it runs once per connection.
     /// </para>
     /// </remarks>
     private void WarnOnCredentialMismatch()
