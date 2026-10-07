@@ -4459,16 +4459,21 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _convergingBurstsSpent = 0;
         _convergingBudgetExhausted = false;
 
-        _timeSyncCts = new CancellationTokenSource();
-        TimeSyncLoopAsync(_timeSyncCts.Token).SafeFireAndForget(_logger);
+        var cts = new CancellationTokenSource();
+        var token = cts.Token;
+        _timeSyncCts = cts;
+        TimeSyncLoopAsync(token).SafeFireAndForget(_logger);
         _logger.LogDebug("Time sync loop started (adaptive intervals)");
     }
 
     private void StopTimeSyncLoop()
     {
-        _timeSyncCts?.Cancel();
-        _timeSyncCts?.Dispose();
-        _timeSyncCts = null;
+        // Taken out with an exchange: a disconnect, a pairing activation and a dispose can each
+        // stop the loop from a different thread, and two of them reading the field at once
+        // would have the second cancel a source the first had already disposed.
+        var cts = Interlocked.Exchange(ref _timeSyncCts, null);
+        cts?.Cancel();
+        cts?.Dispose();
         _logger.LogDebug("Time sync loop stopped");
     }
 
