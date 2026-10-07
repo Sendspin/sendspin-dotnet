@@ -5363,21 +5363,24 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// sends in <c>client/hello</c>.
     /// </summary>
     /// <remarks>
-    /// Compared the way the reference server compares a format against the same list: codec,
-    /// channels and sample rate always, and bit depth except for <c>opus</c>, where the spec has
-    /// it "ignored". An absent bit depth is 16 on both sides — what <c>client/hello</c> sends for
-    /// an entry listed without one, and what the decoders assume. <c>codec_header</c> is not part
-    /// of an entry.
+    /// Codec, channels and sample rate always; bit depth for <c>pcm</c> only, where it is the
+    /// decoder's sample width. The spec has it "ignored" for <c>opus</c>. For <c>flac</c> this is
+    /// deliberately looser than the spec's "meaningful for pcm and flac": servers have announced
+    /// 32 for 24-bit content (PyAV's s32 container), the decoder takes its scaling from
+    /// STREAMINFO, and nothing on the FLAC path is sized from the announced depth — so matching
+    /// it would only silence a stream that plays. An absent bit depth is 16 on both sides, which
+    /// is what <c>client/hello</c> sends for an entry listed without one and what the PCM decoder
+    /// assumes. <c>codec_header</c> is not part of an entry.
     /// </remarks>
     private bool IsListedPlayerFormat(AudioFormat format)
     {
-        bool opus = string.Equals(format.Codec, AudioCodecs.Opus, StringComparison.OrdinalIgnoreCase);
+        bool pcm = string.Equals(format.Codec, AudioCodecs.Pcm, StringComparison.OrdinalIgnoreCase);
 
         return _capabilities.AudioFormats.Any(f =>
             string.Equals(f.Codec, format.Codec, StringComparison.OrdinalIgnoreCase)
             && f.Channels == format.Channels
             && f.SampleRate == format.SampleRate
-            && (opus || (f.BitDepth ?? 16) == (format.BitDepth ?? 16)));
+            && (!pcm || (f.BitDepth ?? 16) == (format.BitDepth ?? 16)));
     }
 
     /// <summary>

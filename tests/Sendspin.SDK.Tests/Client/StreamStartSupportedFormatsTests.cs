@@ -66,6 +66,10 @@ public class StreamStartSupportedFormatsTests
     // An entry listed without a bit depth goes out in client/hello as 16.
     [InlineData("""{"codec":"flac","channels":2,"sample_rate":48000,"bit_depth":16}""")]
 
+    // Announced as 32 for 24-bit content by servers encoding through PyAV's s32 container; the
+    // decoder scales from STREAMINFO, so the announced depth decides nothing.
+    [InlineData("""{"codec":"flac","channels":2,"sample_rate":44100,"bit_depth":32,"codec_header":"ZkxhQw=="}""")]
+
     // "bit_depth: integer - bit depth to be used; ignored for opus".
     [InlineData("""{"codec":"opus","channels":2,"sample_rate":48000,"bit_depth":16}""")]
     [InlineData("""{"codec":"opus","channels":2,"sample_rate":48000,"bit_depth":24}""")]
