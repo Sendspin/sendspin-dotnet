@@ -73,6 +73,24 @@ public class ActiveRoleGrantTests
         Assert.Empty(client.LastServerHello!.ActiveRoles);
     }
 
+    [Fact]
+    public void ServerHello_WithNullResidueMembers_IsAcceptedAndLeavesThemEmpty()
+    {
+        // Neither member is defined for server/hello, so a null in one is an unrecognized field
+        // to ignore, not a malformed message to close on (#355).
+        var (client, connection) = ClientListing("metadata@v1");
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv","server_id":null,"active_roles":null}}
+            """);
+
+        Assert.Equal(ConnectionState.Connected, connection.State);
+        Assert.Equal("srv", client.ServerName);
+        Assert.Equal(string.Empty, client.LastServerHello!.ServerId);
+        Assert.Empty(client.LastServerHello.ActiveRoles);
+    }
+
     [Theory]
     [InlineData("""{"metadata":{"title":"Track A"}}""")]
     [InlineData("""{"controller":{"volume":40,"muted":false,"repeat":"all","shuffle":true}}""")]

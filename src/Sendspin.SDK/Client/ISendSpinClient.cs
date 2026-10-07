@@ -30,9 +30,13 @@ public interface ISendspinClient : IAsyncDisposable
     /// or <c>null</c> if the handshake has not yet completed.
     /// </summary>
     /// <remarks>
-    /// Exposes fields that the scalar <see cref="ServerId"/>/<see cref="ServerName"/> properties
-    /// don't surface, notably <see cref="ServerHelloPayload.ActiveRoles"/> and
-    /// <see cref="ServerHelloPayload.Version"/>. Re-set on every reconnect handshake.
+    /// Exposes what the scalar <see cref="ServerName"/> property doesn't surface:
+    /// <see cref="ServerHelloPayload.Languages"/> and
+    /// <see cref="ServerHelloPayload.SourceV1Support"/>. The role grant comes from
+    /// <c>server/activate</c>, not from this message, and the payload's
+    /// <see cref="ServerHelloPayload.ServerId"/> and <see cref="ServerHelloPayload.Version"/> are
+    /// pre-encryption residue an encrypted server does not send — see the remarks on
+    /// <see cref="ServerHelloPayload"/>. Re-set on every reconnect handshake.
     /// </remarks>
     ServerHelloPayload? LastServerHello { get; }
 
@@ -288,7 +292,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// connection's initial client/state is still deferred pending clock sync, the call sends
     /// nothing yet — the deferred initial reports the persisted values once sync converges —
     /// unless something genuinely holds availability false, in which case it sends the full
-    /// initial message instead of a player-only delta.
+    /// initial message at once.
     /// </remarks>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
@@ -306,9 +310,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// </para>
     /// <para>
     /// Omit it for an ordinary volume or mute change. The reported delay is always the one
-    /// actually applied: the server MUST merge each client/state into existing state, so a
-    /// value present on the wire overwrites, and reporting a delay you are not applying leaves
-    /// the server's group calibration working from a different number than your playback.
+    /// actually applied: every client/state carries the player object's full state, so the
+    /// delay is on the wire each time and replaces what the server held, and reporting a delay
+    /// you are not applying leaves the server's group calibration working from a different
+    /// number than your playback.
     /// </para>
     /// </remarks>
     Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null);
@@ -533,8 +538,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// the time it fires the role grant has been applied and the client may already send.
     /// </para>
     /// <para>
-    /// The payload's <see cref="ServerHelloPayload.Name"/> is the only field an encrypted
-    /// server populates. In particular <see cref="ServerHelloPayload.ServerId"/> is empty:
+    /// An encrypted server populates only the payload's <see cref="ServerHelloPayload.Name"/>,
+    /// <see cref="ServerHelloPayload.Languages"/> and
+    /// <see cref="ServerHelloPayload.SourceV1Support"/>. In particular
+    /// <see cref="ServerHelloPayload.ServerId"/> is empty:
     /// the server's identity is its authenticated Noise static key, exposed as
     /// <see cref="ISendspinClient.ServerId"/>. Key per-server state off that, never off the
     /// payload's copy. See the remarks on <see cref="ServerHelloPayload"/>.

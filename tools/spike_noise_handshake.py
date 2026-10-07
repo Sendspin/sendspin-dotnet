@@ -1,5 +1,11 @@
 """Phase 0 spike: prove the Sendspin Noise KKpsk2 handshake from raw primitives.
 
+Status: historical, pre-rc1. Kept as the record of the Phase 0 Noise evaluation; it is
+not maintained and does not speak the 1.0.0-rc1 wire (it sends trust_level in
+client/hello, which aiosendspin 10.0.0 takes as marking a legacy client). See
+docs/SPEC-VERSION.md for the current spec pin and tools/interop for the maintained
+interop harness.
+
 Server side: real aiosendspin 7.0.0 SendspinServer (the pinned interop target).
 Client side: NO aiosendspin client code — raw WebSocket + noiseprotocol state
 machine + hand-built JSON, mirroring exactly what the .NET SDK will implement.

@@ -1,3 +1,8 @@
+// Status: historical, pre-rc1. Kept as the record of the Phase 0 Noise evaluation; it is not
+// maintained and does not speak the 1.0.0-rc1 wire (it sends trust_level in client/hello,
+// which aiosendspin 10.0.0 takes as marking a legacy client). See docs/SPEC-VERSION.md for
+// the current spec pin and tools/interop for the maintained interop client.
+//
 // Phase 0 spike (.NET side): Sendspin Noise KKpsk2 handshake using Noise.NET
 // against a real aiosendspin 7.0.0 server. Mirrors spike_noise_handshake.py.
 

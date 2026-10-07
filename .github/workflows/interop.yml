@@ -61,7 +61,7 @@ jobs:
         run: bash tools/interop/run.sh player
 
       # Slower than the others by design: the client withholds its initial client/state
-      # until clock sync converges, which takes ~30s of burst sampling, and the server
+      # until clock sync converges, which takes about two seconds of burst sampling, and the server
       # discards source chunks until that state arrives.
       - name: Source streaming (server start command, client-stream/start, decoded audio)
         run: bash tools/interop/run.sh source

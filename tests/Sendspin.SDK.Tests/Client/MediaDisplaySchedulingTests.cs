@@ -11,7 +11,7 @@ namespace Sendspin.SDK.Tests.Client;
 
 /// <summary>
 /// Display-timestamp scheduling for the visualizer and artwork roles (#198, #199) and for the
-/// scheduled <c>metadata</c> and <c>color</c> updates of spec #135 (pending merge): each carries a
+/// scheduled <c>metadata</c> and <c>color</c> updates of spec #135: each carries a
 /// server-clock time at which its data takes effect, which the SDK translates to the local clock
 /// and holds against. The roles differ on lateness — a stale visualizer frame is never rendered,
 /// whereas late artwork and late state are applied immediately.
@@ -666,7 +666,7 @@ public class MediaDisplaySchedulingTests
         Assert.Empty(frames);
     }
 
-    // -- Scheduled metadata and color updates (spec #135, pending merge) --------------------
+    // -- Scheduled metadata and color updates (spec #135) -----------------------------------
 
     /// <summary>A <c>server/state</c> carrying only the given <c>metadata</c> role object.</summary>
     private static string MetadataState(string metadata) =>

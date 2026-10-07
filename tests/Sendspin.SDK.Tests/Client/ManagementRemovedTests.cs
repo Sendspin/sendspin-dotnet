@@ -43,7 +43,7 @@ public class ManagementRemovedTests
     [InlineData("""{"type":"management/open-pairing-window","payload":{}}""")]
     public void ManagementRequest_OnAFullyTrustedSession_IsNotAccepted(string json)
     {
-        // Even at trust 'user' with every activity a server can now hold, the request must be
+        // Even on a paired session with every activity a server can now hold, the request must be
         // ignored: unknown vocabulary draws no reply, nothing is written to the record store,
         // and the connection is left alone rather than closed.
         var (client, connection, store) = CreatePairedClient();

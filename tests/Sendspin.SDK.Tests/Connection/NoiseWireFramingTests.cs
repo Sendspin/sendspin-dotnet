@@ -87,7 +87,7 @@ public class NoiseWireFramingTests
     /// <summary>
     /// connection.md § Sentinel Fallback: a psk_id the client cannot match in the <b>initial</b>
     /// handshake completes message 2 with the published Sentinel PSK instead of failing, and
-    /// the session proceeds as an ordinary Sentinel connection at trust level 'none'.
+    /// the session proceeds as an ordinary Sentinel connection, which is unpaired.
     /// </summary>
     /// <remarks>
     /// The server does here what the spec has a server do on this path: it names a credential

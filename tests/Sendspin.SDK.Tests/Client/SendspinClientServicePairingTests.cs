@@ -241,11 +241,12 @@ public class SendspinClientServicePairingTests
     public void PendingPairingPsk_AbandonedAcrossAnInBandRekey_DoesNotFinalizeOnTheNewSession()
     {
         // The in-band twin of the reconnect test above, isolating DetectSessionRekey's
-        // clear the same way that test isolates SendHandshakeAsync's: no reconnect here —
+        // clear the same way that test isolates ResetHandshakeStateForNewConnection's: no
+        // reconnect here —
         // just a fresh handshake hash on the same connection, with no server/hello or any
         // other bounding message in between. pairing.md:63's down-re-handshake to the
         // Pairing PSK is exactly this
-        // shape. Unlike the reconnect test, there is no SendHandshakeAsync call at all here,
+        // shape. Unlike the reconnect test, nothing waits on a handshake here,
         // so there is no 30s handshake-timeout wait to avoid; and HandleServerPairFinalize's
         // store write is fully synchronous (no SafeFireAndForget in its path), so the
         // assertions below need no WaitUntilAsync/Task.Delay — a plain synchronous read of
@@ -475,7 +476,7 @@ public class SendspinClientServicePairingTests
     /// connection.md § Sentinel Fallback: the mismatch "SHOULD" be surfaced and re-pairing
     /// offered. The client side of that is a log line — a session that landed on the Sentinel
     /// while this client still holds a long-term record for the very server it is talking to is
-    /// a credential mismatch, and it stays at trust 'none' until someone re-pairs.
+    /// a credential mismatch, and it stays unpaired until someone re-pairs.
     /// </summary>
     [Fact]
     public void SentinelSession_WithARecordForThisServer_WarnsThatTheCredentialIsGone()

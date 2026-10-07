@@ -62,7 +62,7 @@ public class PairingRecordStoreResilienceTests : IDisposable
     public void UnparseableDocument_IsQuarantined_AndTheStoreStillOpens()
     {
         // A device that cannot construct its store cannot boot. Quarantine, log, continue
-        // empty: trust drops to 'none', which fails closed, and the user re-pairs.
+        // empty: every server is unpaired again, which fails closed, and the user re-pairs.
         string path = WriteStoreFile("this is not json at all");
 
         var store = new FilePairingRecordStore(path);

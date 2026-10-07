@@ -11,7 +11,7 @@ namespace Sendspin.SDK.Client;
 /// which it takes effect, so a future-stamped update is held rather than merged on receipt.
 /// </summary>
 /// <remarks>
-/// The two roles spec #135 (pending merge) gives the current-plus-pending model to, alongside
+/// The two roles spec #135 gives the current-plus-pending model to, alongside
 /// artwork. Used as an index into <see cref="MediaDisplayScheduler"/>'s pending slots, so each
 /// role holds at most one update and neither can displace the other's.
 /// </remarks>
@@ -39,7 +39,7 @@ internal enum ScheduledStateRole
 /// </para>
 /// <para>
 /// Artwork (per channel) and the two <see cref="ScheduledStateRole"/>s follow one model, spec
-/// #135 (pending merge): each slot keeps <em>at most one</em> pending item, a future-stamped
+/// #135: each slot keeps <em>at most one</em> pending item, a future-stamped
 /// message replaces whatever the slot held, and a past-or-present one takes effect at once and
 /// discards what the slot held. Timestamps are never compared between messages — the newest
 /// message always wins its slot, even when it is due sooner than the item it displaces — because
@@ -47,8 +47,8 @@ internal enum ScheduledStateRole
 /// </para>
 /// <para>
 /// The translation is <see cref="IClockSynchronizer.ServerToClientTimeUncompensated"/>, the clock
-/// offset alone: the role specs say to translate "using the offset computed from clock
-/// synchronization", and only the player role goes on to subtract <c>output_delay_ms</c>. That
+/// offset alone: the role specs have the timestamp "translated to the local clock via the time
+/// filter", and only the player role goes on to subtract <c>output_delay_ms</c>. That
 /// delay compensates for hardware past the audio port, so applying it here would show every
 /// visual ahead of the sound it belongs to by up to the 5 s the setting allows.
 /// </para>
@@ -266,7 +266,7 @@ internal sealed class MediaDisplayScheduler : IDisposable
     /// <summary>
     /// Raises artwork now if its display time has passed, and otherwise holds it until then.
     /// The newest image for a channel supersedes one still pending for it, per "latest wins" —
-    /// arrival order, not timestamp order (spec #135, pending merge).
+    /// arrival order, not timestamp order (spec #135).
     /// </summary>
     /// <param name="chunk">The parsed artwork message; empty image data means clear.</param>
     internal void SubmitArtwork(ArtworkChunk chunk)
