@@ -106,6 +106,9 @@ exercises:
   apply once the client has received the initial `server/activate`. The SDK's framing layer
   drops binary IDs 2 and 3 at any point after the handshake. A server may not send them before
   activation, so the difference is not observable against a conformant one.
+- **A `stream/clear` that names `artwork` discards that role's pending images.** The spec's
+  `roles` for `stream/clear` are `player` and `visualizer`, so a conformant server does not send
+  it. With `roles` omitted, artwork is left alone as the spec says.
 - **A role version replacement is not treated as a removal.** Active roles are compared by
   family (`player`, not `player@v1`). Every role has only a `v1`, so no replacement can occur on
   the rc1 wire.

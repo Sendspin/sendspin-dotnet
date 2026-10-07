@@ -5746,9 +5746,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         StreamClearReceived?.Invoke(this, payload);
 
-        // "Clients should clear all buffered visualization data and continue with data received
-        // after this message" — the same boundary applies to artwork still held for display. A
-        // seek keeps the image already on screen, so the flush drops only what is pending.
+        // "Clients MUST clear all buffered visualization data and continue with data received
+        // after this message". Artwork is not a role this message reaches: a seek keeps the
+        // image on screen and the one pending.
         FlushDisplayRoles(payload.Roles, endingStream: false);
 
         if (ReachesPlayerRole(payload.Roles, IsRoleActive("player")) && _audioPipeline is { } pipeline)
@@ -5790,33 +5790,41 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Discards the media a <c>stream/end</c> or <c>stream/clear</c> ends the display of: the
-    /// roles it names, or both media roles when it names none.
+    /// roles it names, or when it names none, every media role the message reaches.
     /// </summary>
     /// <remarks>
     /// Runs outside <see cref="ReachesPlayerRole"/>'s gate, because the roles holding data here
     /// are exactly the ones that gate turns away — a <c>stream/end</c> for <c>visualizer</c>
     /// alone must still drop the frames waiting for their display moment. <c>artwork</c> is in
-    /// <c>stream/end</c>'s role vocabulary but not <c>stream/clear</c>'s; it is honoured in both
-    /// anyway, as the C++ reference client switches on the same three names for either message.
+    /// <c>stream/end</c>'s role vocabulary but not <c>stream/clear</c>'s, whose omitted
+    /// <c>roles</c> "clears all active player and visualizer streams": a seek leaves the pending
+    /// image alone, which the server sent once and does not send again. A <c>stream/clear</c>
+    /// that names <c>artwork</c> outright is honoured anyway, as the C++ reference client
+    /// switches on the same three names for either message.
     /// A present-but-empty array names no role and so ends nothing, as everywhere else.
     /// Dropping the artwork still held is what spec #135 (pending merge) means by "on
     /// <c>stream/end</c>, clearing buffers includes discarding pending images".
     /// <para>
     /// <paramref name="endingStream"/> separates the two messages for the artwork already on
     /// display: a <c>stream/end</c> is playback termination and additionally clears it (spec #266),
-    /// while a <c>stream/clear</c> is a seek or track jump that keeps it and only drops the pending
-    /// image.
+    /// while a <c>stream/clear</c> is a seek or track jump that keeps it, and drops the pending
+    /// image only when it names <c>artwork</c>.
     /// </para>
     /// </remarks>
     private void FlushDisplayRoles(List<string>? roles, bool endingStream)
     {
         if (roles is null)
         {
-            // Every stream, which for this scheduler is the two media roles. The state roles
-            // hold no stream, and spec #135 (pending merge) ties a pending metadata or color
-            // update to nothing a stream teardown says.
+            // Every stream the message reaches: both media roles for a stream/end, the
+            // visualizer alone for a stream/clear. The state roles hold no stream, and spec
+            // #135 (pending merge) ties a pending metadata or color update to nothing a stream
+            // teardown says.
             FlushVisualizer(endingStream);
-            FlushArtwork(endingStream);
+            if (endingStream)
+            {
+                FlushArtwork(endingStream);
+            }
+
             return;
         }
 

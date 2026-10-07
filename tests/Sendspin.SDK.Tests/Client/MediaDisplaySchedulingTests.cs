@@ -457,8 +457,13 @@ public class MediaDisplaySchedulingTests
             () => frames.Count == 1 && artwork.Count == 1, "both items at their display time");
     }
 
+    /// <summary>
+    /// "If omitted, clears all active player and visualizer streams": artwork is not among the
+    /// roles a <c>stream/clear</c> reaches, and nothing in the artwork role lets a seek discard a
+    /// pending image. The server sent the next track's cover once and will not send it again.
+    /// </summary>
     [Fact]
-    public async Task StreamClear_WithNoRoles_DiscardsMediaStillPending()
+    public async Task StreamClear_WithNoRoles_DiscardsPendingFramesAndKeepsPendingArtwork()
     {
         var (client, connection, timer) = SchedulingClient();
         using var _c = client;
@@ -475,9 +480,32 @@ public class MediaDisplaySchedulingTests
         // Handled synchronously, so the flush has happened by the time this returns.
         connection.RaiseTextMessageReceived("""{"type":"stream/clear","payload":{}}""");
 
-        await DrainPastAsync(client, connection, timer, Now + 5_000);
+        // Artwork is dispatched after any frame due in the same pass, so its arrival is the
+        // point at which a surviving frame would have surfaced too.
+        timer.CurrentTime = Now + 1_000;
+        await WaitUntilAsync(() => received.Count == 1, "the artwork a seek does not reach");
         Assert.Empty(frames);
-        Assert.Empty(received);
+    }
+
+    [Fact]
+    public async Task StreamClear_ArrivingWhileDueArtworkIsBeingDispatched_StillRaisesIt()
+    {
+        var (client, connection, timer) = SchedulingClient();
+        using var _c = client;
+
+        var received = new List<ArtworkReceivedEventArgs>();
+        client.ArtworkReceived += (_, e) => received.Add(e);
+
+        // As in StreamEnd_ArrivingWhileDueArtworkIsBeingDispatched_DiscardsThatArtwork: the seek
+        // lands after the loop has taken the due image out of its slot and before it raises it.
+        client.VisualizationReceived += (_, _) =>
+            connection.RaiseTextMessageReceived("""{"type":"stream/clear","payload":{}}""");
+
+        connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
+        SendArtwork(connection, Now + 1_000, new byte[] { 1 });
+        timer.CurrentTime = Now + 2_000;
+
+        await WaitUntilAsync(() => received.Count == 1, "the image that was already due");
     }
 
     [Fact]
