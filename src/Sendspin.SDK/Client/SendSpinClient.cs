@@ -449,17 +449,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public ServerActivatePayload? LastServerActivate { get; private set; }
 
-    // The activate a re-handshake retired, until the next one is admitted; see ArbitrationActivate.
-    private ServerActivatePayload? _activateBeforeRekey;
+    // Volatile: written on the receive loop, read by the host's arbitration on another thread.
+    private volatile ServerActivatePayload? _arbitrationActivate;
 
     /// <summary>
-    /// The activate that classifies this connection for multi-server arbitration: the last
-    /// accepted one, or, between an in-band re-handshake and the activate that follows it, the
-    /// one accepted before the re-key. That window grants nothing
-    /// (<see cref="LastServerActivate"/> is null in it), but the connection is still the one
-    /// it was.
+    /// The activate that classifies this connection for multi-server arbitration: the last one
+    /// accepted on it. Unlike <see cref="LastServerActivate"/> it is not cleared by an in-band
+    /// re-handshake — the window before the next activate grants nothing, but the connection
+    /// is still the one it was (#340).
     /// </summary>
-    internal ServerActivatePayload? ArbitrationActivate => LastServerActivate ?? _activateBeforeRekey;
+    internal ServerActivatePayload? ArbitrationActivate => _arbitrationActivate;
 
     /// <inheritdoc />
     public StreamStartPayload? LastStreamStart { get; private set; }
@@ -790,10 +789,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // passes through Connecting): this particular clear does not reach the listen path's
         // arbitration, SendspinHostService.PriorityOf, which also reads LastServerActivate.
         // DetectSessionRekey clears the same field for the in-band re-key case on both
-        // paths, and keeps the outgoing activate for arbitration; a new connection keeps
-        // nothing.
+        // paths, but leaves what arbitration reads; a new connection keeps neither.
         LastServerActivate = null;
-        _activateBeforeRekey = null;
+        _arbitrationActivate = null;
 
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles so
         // IsSourceStreamingPermitted has a single field to read the source-role grant from.
@@ -2551,9 +2549,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // share. The host's arbitration must not read the cleared grant as a holder with no
         // activities, though: what a connection is doing "persists across a re-handshake"
         // (connection.md), and a pairing attempt being promoted onto its new record is
-        // exactly the holder that "is not displaced". So the outgoing activate is kept for
-        // ArbitrationActivate, and kept first, so that a reader never finds both empty (#340).
-        _activateBeforeRekey = LastServerActivate ?? _activateBeforeRekey;
+        // exactly the holder that "is not displaced". So arbitration reads ArbitrationActivate,
+        // which this does not touch (#340).
         LastServerActivate = null;
 
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles (see
@@ -2995,6 +2992,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // not leave its activities behind. 'Last accepted activation' is the only
         // defensible meaning for a value other code grants permission from.
         LastServerActivate = payload;
+        _arbitrationActivate = payload;
 
         // Mirror roles where legacy consumers look.
         bool activeRolesChanged = false;
