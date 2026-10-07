@@ -135,7 +135,9 @@ public sealed class FlacDecoder : IAudioDecoder
 
             // Calibrate scale factor from actual FLAC STREAMINFO bit depth.
             // The stream/start message may report a different bit depth (e.g., 32 from PyAV's s32
-            // container) than the actual FLAC encoding (e.g., 24-bit precision).
+            // container) than the actual FLAC encoding (e.g., 24-bit precision). Only the scale
+            // factor follows it: Format is the instance the pipeline holds as what the server
+            // announced, and compares the next stream/start against.
             if (!_scaleFactorCalibrated)
             {
                 var actualBits = flacDecoder.BitsPerSample;
@@ -147,7 +149,6 @@ public sealed class FlacDecoder : IAudioDecoder
                     _logger.LogWarning(
                         "FLAC actual bit depth ({ActualBits}) differs from stream/start ({ReportedBits}), using actual",
                         actualBits, Format.BitDepth ?? 16);
-                    Format.BitDepth = actualBits;
                 }
             }
 

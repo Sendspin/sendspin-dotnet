@@ -169,6 +169,41 @@ public class AudioPipelineStreamStartTests
     }
 
     [Fact]
+    public async Task StartAsync_ReAnnouncingFlacWhoseStreamInfoDepthDiffersFromTheAnnouncedOne_IsStillAReannounce()
+    {
+        // #350: the FLAC decoder takes its scaling from STREAMINFO, which may say 24 where
+        // stream/start said 32. It used to write the 24 back into the format it was given — the
+        // instance the pipeline compares the next stream/start against — so the same announcement
+        // sent again no longer matched and the decoder was rebuilt for nothing.
+        await using var harness = new Harness();
+        var announced = FlacAnnouncedAs32BitWith24BitStreamInfo();
+        await harness.Pipeline.StartAsync(announced);
+        harness.Pipeline.ProcessAudioChunk(
+            new AudioChunk { EncodedData = Flac24BitFrame(0x400000), ServerTimestamp = 1_000_000 });
+
+        Assert.Equal(ChunkMs, harness.Buffer.BufferedMilliseconds);
+
+        var outcome = await harness.Pipeline.StartAsync(FlacAnnouncedAs32BitWith24BitStreamInfo());
+
+        Assert.Equal(AudioPipelineStartOutcome.FormatReannounced, outcome);
+        Assert.Equal(32, announced.BitDepth);
+    }
+
+    [Fact]
+    public void FlacDecoder_StreamInfoDepthDiffersFromTheAnnouncedOne_ScalesByStreamInfo()
+    {
+        // The control for the test above: leaving the announced format alone must not cost the
+        // calibration. Half of 24-bit full scale is 0.5, and would be 1/512 scaled as 32-bit.
+        using var decoder = new Sendspin.SDK.Audio.Codecs.FlacDecoder(FlacAnnouncedAs32BitWith24BitStreamInfo());
+        var decoded = new float[decoder.MaxSamplesPerFrame];
+
+        var written = decoder.Decode(Flac24BitFrame(0x400000), decoded);
+
+        Assert.Equal(ChunkSamples, written);
+        Assert.All(decoded.AsSpan(0, written).ToArray(), sample => Assert.Equal(0.5f, sample));
+    }
+
+    [Fact]
     public async Task StartAsync_SampleRateChange_KeepsBufferedAudioPlaying()
     {
         await using var harness = new Harness();
@@ -484,6 +519,54 @@ public class AudioPipelineStreamStartTests
         Assert.Equal(
             AudioPipelineStartOutcome.Restarted,
             await harness.Pipeline.StartAsync(Pcm(bitDepth: 24, sampleRate: 44_100)));
+    }
+
+    /// <summary>
+    /// 48 kHz stereo FLAC announced as 32-bit, with a <c>codec_header</c> whose STREAMINFO says 24.
+    /// </summary>
+    private static AudioFormat FlacAnnouncedAs32BitWith24BitStreamInfo()
+    {
+        var header = new byte[42];
+        new byte[]
+        {
+            0x66, 0x4C, 0x61, 0x43, // fLaC
+            0x80, 0x00, 0x00, 0x22, // last metadata block, STREAMINFO, 34 bytes
+            0x00, 0x10, 0x20, 0x00, // block size 16 to 8192
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // frame sizes unknown
+            0x0B, 0xB8, 0x03, 0x70, // 48000 Hz, 2 channels, 24 bits per sample
+        }.CopyTo(header, 0);
+
+        return new AudioFormat
+        {
+            Codec = "flac",
+            SampleRate = SampleRate,
+            Channels = Channels,
+            BitDepth = 32,
+            CodecHeader = Convert.ToBase64String(header),
+        };
+    }
+
+    /// <summary>
+    /// One FLAC frame of one chunk duration, every sample of both channels <paramref name="value"/>,
+    /// taking its bit depth from STREAMINFO. Constant subframes; the CRCs are zero because the
+    /// vendored decoder does not check them.
+    /// </summary>
+    private static byte[] Flac24BitFrame(int value)
+    {
+        var blockSize = ChunkSamples / Channels;
+        var sample = new[] { (byte)(value >> 16), (byte)(value >> 8), (byte)value };
+        return
+        [
+            0xFF, 0xF8, // sync, fixed block size
+            0x70, // block size follows as 16 bits, sample rate from STREAMINFO
+            0x10, // two independent channels, bit depth from STREAMINFO
+            0x00, // frame number
+            (byte)((blockSize - 1) >> 8), (byte)(blockSize - 1),
+            0x00, // header CRC-8
+            0x00, .. sample, // constant subframe, left
+            0x00, .. sample, // constant subframe, right
+            0x00, 0x00, // frame CRC-16
+        ];
     }
 
     private sealed class Harness : IAsyncDisposable
