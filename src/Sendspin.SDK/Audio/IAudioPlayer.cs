@@ -105,6 +105,42 @@ public interface IAudioPlayer : IAsyncDisposable
     long? GetAudioClockMicroseconds() => null;
 
     /// <summary>
+    /// Gets the delay, in microseconds, that a sample handed to the output at this instant will see
+    /// before it is heard: whatever is already queued in the device ahead of it, plus the device's
+    /// fixed latency after its queue.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Implement this on a push-mode output that keeps a fixed device buffer topped up (WASAPI
+    /// through NAudio's <c>WasapiOut</c>, ALSA <c>snd_pcm_writei</c> loops, and the like). On such an
+    /// output <see cref="OutputLatencyMs"/> is the depth of the device buffer, and a sample only
+    /// waits that long when the buffer is full ahead of it. On the first fill of an empty device
+    /// nothing is queued, so the first sample is heard at once; pre-rolling the schedule by the
+    /// whole buffer there starts playback early by that much, and it stays early. Reporting what
+    /// is actually queued lets the schedule use the real figure at the moment playback starts.
+    /// </para>
+    /// <para>
+    /// Count everything that will play before the sample, including frames already produced for
+    /// the device request in progress but not yet handed to the device: one request can reach the
+    /// SDK as several reads, and a later read's samples play behind the earlier ones.
+    /// </para>
+    /// <para>
+    /// Return <c>null</c> when the output's latency does not depend on how full it is - a
+    /// pull-model output whose callback is followed by a fixed hardware latency.
+    /// <see cref="OutputLatencyMs"/> is then used, as it is when this member is not implemented.
+    /// </para>
+    /// <para>
+    /// Called from the audio callback, with the buffer's lock held, on each read while playback is
+    /// waiting to start. It must be cheap, must not block, and must not call back into the buffer
+    /// or the pipeline.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// The current output latency in microseconds, or <c>null</c> to use <see cref="OutputLatencyMs"/>.
+    /// </returns>
+    long? GetCurrentOutputLatencyMicroseconds() => null;
+
+    /// <summary>
     /// Notifies the player that a WebSocket reconnect occurred.
     /// Implementations should forward this to their sync correction provider.
     /// </summary>

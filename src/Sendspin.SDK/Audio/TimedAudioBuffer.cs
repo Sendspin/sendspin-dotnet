@@ -125,6 +125,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     // on every pre-start poll (includes any output delay from IClockSynchronizer).
     // We wait until this time arrives before outputting audio.
     private long _scheduledStartLocalTime;      // Target local time when playback should start (μs)
+    private long _outputPreRollMicroseconds;    // Output latency the read in progress schedules against (μs)
     private long _outputDelayAtAnchorMicroseconds; // Output delay the current anchor was derived with (μs)
 
     // Sync error tracking (CLI-style: track samples READ, not samples OUTPUT)
@@ -241,6 +242,26 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// <inheritdoc/>
     public long OutputLatencyMicroseconds { get; set; }
 
+    /// <summary>
+    /// Gets or sets a measurement of the output's latency right now, in microseconds: what a
+    /// sample handed over at this instant waits before it is heard. Null, or a null result, means
+    /// <see cref="OutputLatencyMicroseconds"/> applies.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="AudioPipeline"/> binds this to <see cref="IAudioPlayer.GetCurrentOutputLatencyMicroseconds"/>.
+    /// A push-mode device that keeps a fixed buffer topped up delays a sample by whatever is
+    /// queued ahead of it, which is nothing on the first fill and nearly the whole buffer from
+    /// then on, so no single figure is right for both. The schedule is pre-rolled by the measured
+    /// value at the moment playback starts; after that the pace clock holds the alignment.
+    /// </para>
+    /// <para>
+    /// Invoked from the read path with the buffer's lock held, once per read while playback is
+    /// waiting to start. It must not block or call back into this buffer.
+    /// </para>
+    /// </remarks>
+    public Func<long?>? CurrentOutputLatency { get; set; }
+
     /// <inheritdoc/>
     public long CalibratedStartupLatencyMicroseconds { get; set; }
 
@@ -339,10 +360,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
     /// pre-rolled by <see cref="OutputLatencyMicroseconds"/> so the sample is handed to the output that
     /// much earlier and reaches the speaker at the server's intended time. This is what keeps outputs
     /// of different latencies (each reporting its own) aligned in a multi-room group without a manual
-    /// per-device offset.
+    /// per-device offset. When the output can say what a sample handed over now will actually wait
+    /// (<see cref="CurrentOutputLatency"/>), that is the pre-roll instead.
     /// </remarks>
     private long ScheduledLocalTimeFor(long serverTimestamp)
-        => _clockSync.ServerToClientTime(serverTimestamp) - OutputLatencyMicroseconds;
+        => _clockSync.ServerToClientTime(serverTimestamp) - _outputPreRollMicroseconds;
 
     /// <summary>
     /// Waits for the first segment's scheduled playback time, then anchors playback to it.
@@ -373,6 +395,10 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         {
             return true;
         }
+
+        // Asked once per read: every schedule this read derives, the stale-audio skip included,
+        // has to be measured against the same device state.
+        _outputPreRollMicroseconds = CurrentOutputLatency?.Invoke() ?? OutputLatencyMicroseconds;
 
         // Schedule from the read CURSOR, not from the head segment's start. After a mid-stream
         // ResetSyncTracking — every output-device switch takes that path — the head segment
@@ -423,9 +449,11 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
 
         _logger.LogInformation(
             "[Buffer] Playback starting ({Path}): timeUntilStart={TimeUntilStart:F1}ms, " +
-            "buffered={BufferedMs:F0}ms, segments={Segments}, scheduledStart={Scheduled}",
+            "buffered={BufferedMs:F0}ms, segments={Segments}, scheduledStart={Scheduled}, " +
+            "preRoll={PreRollMs:F1}ms (output latency {LatencyMs:F0}ms)",
             path, timeUntilStart / 1000.0, _count / (double)_samplesPerMs,
-            _segments.Count, _scheduledStartLocalTime);
+            _segments.Count, _scheduledStartLocalTime,
+            _outputPreRollMicroseconds / 1000.0, OutputLatencyMicroseconds / 1000.0);
 
         _playbackStarted = true;
 

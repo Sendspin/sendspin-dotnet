@@ -1,6 +1,4 @@
-using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Audio;
-using Sendspin.SDK.Models;
 using Xunit.Abstractions;
 
 namespace Sendspin.SDK.Tests.Audio;
@@ -13,20 +11,6 @@ namespace Sendspin.SDK.Tests.Audio;
 /// </summary>
 public class OutputDelayReanchorTrueAlignmentTests
 {
-    private const int SampleRate = 48_000;
-    private const int Channels = 2;
-    private const int SamplesPerMs = SampleRate * Channels / 1000;
-    private const int ChunkMs = 20;
-    private const long ServerT0 = 1_000_000;
-    private const long LocalT0 = 9_000_000_000_000;
-    private const int DeviceBufferFrames = 4_800;
-    private const double FrameUs = 1_000_000.0 / SampleRate;
-
-    private static readonly AudioFormat Format = new()
-    {
-        Codec = "pcm", SampleRate = SampleRate, Channels = Channels,
-    };
-
     private readonly ITestOutputHelper _output;
 
     public OutputDelayReanchorTrueAlignmentTests(ITestOutputHelper output)
@@ -50,7 +34,7 @@ public class OutputDelayReanchorTrueAlignmentTests
     public void OutputDelayChange_ThenReanchor_MovesPlaybackByExactlyTheDelay(
         int initialDelayMs, int delayMs, int wakeMs, int reportedLatencyMs, bool jitter)
     {
-        using var player = new Player(wakeMs, reportedLatencyMs, jitter, initialDelayMs);
+        using var player = new PushModeDevicePlayer(wakeMs, reportedLatencyMs, jitter, initialDelayMs);
 
         player.Run(5_000);
         var before = player.Measure(500);
@@ -110,7 +94,7 @@ public class OutputDelayReanchorTrueAlignmentTests
         // Cold start reads one device buffer ahead, plus the pre-roll: lead the server by that
         // much and 80 ms more.
         var lead = (180 + reportedLatencyMs) * 1000L;
-        using var player = new Player(wakeMs: 10, reportedLatencyMs, jitter: false, initialDelayMs: 0, lead);
+        using var player = new PushModeDevicePlayer(wakeMs: 10, reportedLatencyMs, jitter: false, initialDelayMs: 0, lead);
 
         player.Run(5_000);
         var before = player.Measure(500);
@@ -156,7 +140,7 @@ public class OutputDelayReanchorTrueAlignmentTests
     [InlineData(500)]
     public void DelayIncrease_WhenTheServerShiftsItsTimeline_LosesOnlyTheStaleAudio(int increaseMs)
     {
-        using var player = new Player(wakeMs: 10, reportedLatencyMs: 0, jitter: false, initialDelayMs: 0, 180_000);
+        using var player = new PushModeDevicePlayer(wakeMs: 10, reportedLatencyMs: 0, jitter: false, initialDelayMs: 0, 180_000);
 
         player.Run(3_000);
         var before = player.Measure(500);
@@ -202,7 +186,7 @@ public class OutputDelayReanchorTrueAlignmentTests
     [InlineData(200, 300, 1)]
     public void DelayDecreaseDuringTheStartupGrace_IsNotAbsorbedIntoTheBaseline(int initialDelayMs, int changeAtMs, int wakeMs)
     {
-        using var player = new Player(wakeMs, reportedLatencyMs: 0, jitter: false, initialDelayMs);
+        using var player = new PushModeDevicePlayer(wakeMs, reportedLatencyMs: 0, jitter: false, initialDelayMs);
 
         player.Run(changeAtMs);
         player.ClockSync.OutputDelayMs = 0;
@@ -221,197 +205,5 @@ public class OutputDelayReanchorTrueAlignmentTests
 
         Assert.Equal(0, stats.ReanchorCount);
         Assert.InRange(after.Median, -1_000, 1_000);
-    }
-
-    /// <summary>
-    /// The device is a FIFO of frame identities drained at exactly the nominal rate on the wall
-    /// clock. Each frame carries the index of the stream frame it came from (0 for silence), so a
-    /// frame's lateness at the moment it leaves is exit time minus ServerToClientTime(its
-    /// timestamp) — the conversion that already subtracts the output delay.
-    /// </summary>
-    private sealed class Player : IDisposable
-    {
-        private const int IdModulus = 1 << 16;
-
-        private readonly int _wakeMs;
-        private readonly bool _jitter;
-        private readonly SyncCorrectedSampleSource _source;
-        private readonly Queue<float> _device = new();
-        private readonly float[] _fill = new float[DeviceBufferFrames * Channels];
-        private readonly List<(long ExitAt, double LatenessUs)> _exits = new();
-        private double _headExitAt;
-        private long _nextFrameIndex;
-        private uint _rng = 0x9E3779B9;
-
-        public Player(int wakeMs, int reportedLatencyMs, bool jitter, int initialDelayMs, long leadMicroseconds = 1_500_000)
-        {
-            _wakeMs = wakeMs;
-            LeadMicroseconds = leadMicroseconds;
-            _jitter = jitter;
-            Buffer = new TimedAudioBuffer(Format, ClockSync, bufferCapacityMs: 5_000, logger: Log)
-            {
-                OutputLatencyMicroseconds = reportedLatencyMs * 1000L,
-                TimingSourceName = "monotonic",
-            };
-            _source = new SyncCorrectedSampleSource(Buffer, () => WallNow);
-
-            ClockSync.OutputDelayMs = initialDelayMs;
-            ClockSync.OffsetMicroseconds = ServerT0 - LocalT0;
-            ClockSync.IsConverged = true;
-            ClockSync.HasMinimalSync = true;
-            PumpProducer();
-
-            // NAudio push mode: fill the whole device buffer once, then start the device.
-            Refill(DeviceBufferFrames);
-        }
-
-        public FakeClockSynchronizer ClockSync { get; } = new();
-
-        public CapturingLogger<TimedAudioBuffer> Log { get; } = new();
-
-        public TimedAudioBuffer Buffer { get; }
-
-        public long WallNow { get; private set; } = LocalT0;
-
-        public int DeviceUnderruns { get; private set; }
-
-        /// <summary>How far ahead of its own clock the server has sent.</summary>
-        public long LeadMicroseconds { get; set; } = 1_500_000;
-
-        private long ServerNow => WallNow + ClockSync.OffsetMicroseconds;
-
-        /// <summary>Milliseconds of audio (not silence) that have left the device.</summary>
-        public double AudioExitedMs => _exits.Count * FrameUs / 1000.0;
-
-        private long _rebaseIndex = long.MaxValue;
-        private long _rebaseShiftUs;
-
-        /// <summary>
-        /// The server moves its timeline later by <paramref name="shiftUs"/> from the next chunk
-        /// on, and holds its lead that much further ahead: what a live stream does when a
-        /// player's send-ahead floor rises by a larger output delay. The audio itself keeps
-        /// arriving in real time; only its timestamps step.
-        /// </summary>
-        public void ServerShiftsTimelineLater(long shiftUs)
-        {
-            _rebaseIndex = _nextFrameIndex;
-            _rebaseShiftUs = shiftUs;
-            LeadMicroseconds += shiftUs;
-        }
-
-        private long TimestampOf(long frameIndex) =>
-            ServerT0 + (long)Math.Round(frameIndex * FrameUs) + (frameIndex >= _rebaseIndex ? _rebaseShiftUs : 0);
-
-        public void Run(int milliseconds)
-        {
-            var until = WallNow + (milliseconds * 1000L);
-            while (WallNow < until)
-            {
-                Advance((_wakeMs * 1000L) + (_jitter ? NextJitterUs() : 0));
-                PumpProducer();
-                var available = DeviceBufferFrames - _device.Count;
-                if (available > 10)
-                {
-                    Refill(available);
-                }
-            }
-        }
-
-        /// <summary>Lateness of the audio frames that left the device in the last window (µs, + = late).</summary>
-        public (double Median, double P1, double P99) Measure(int windowMs)
-        {
-            var since = WallNow - (windowMs * 1000L);
-            var window = _exits.Where(e => e.ExitAt >= since).Select(e => e.LatenessUs).ToList();
-            Assert.NotEmpty(window);
-            // Median and 1st/99th percentiles: a resampled frame that straddles an id wrap or a
-            // silence boundary decodes to garbage, one frame at a time.
-            window.Sort();
-            return (window[window.Count / 2], window[window.Count / 100], window[window.Count - 1 - (window.Count / 100)]);
-        }
-
-        /// <summary>What AudioPipeline.ReanchorTiming does to the buffer.</summary>
-        public void Reanchor() => Buffer.ApplyOutputDelayChange();
-
-        public void Dispose()
-        {
-            _source.Dispose();
-            Buffer.Dispose();
-        }
-
-        /// <summary>A live stream: the server stays its lead ahead, contiguous timestamps.</summary>
-        private void PumpProducer()
-        {
-            var chunk = new float[ChunkMs * SamplesPerMs];
-            while (TimestampOf(_nextFrameIndex) < ServerNow + LeadMicroseconds)
-            {
-                for (var f = 0; f < chunk.Length / Channels; f++)
-                {
-                    var id = (((_nextFrameIndex + f) % IdModulus) + 1) / (float)(IdModulus * 2);
-                    chunk[f * Channels] = id;
-                    chunk[(f * Channels) + 1] = id;
-                }
-
-                Buffer.Write(chunk, TimestampOf(_nextFrameIndex));
-                _nextFrameIndex += chunk.Length / Channels;
-            }
-        }
-
-        private void Advance(long microseconds)
-        {
-            WallNow += microseconds;
-            while (_device.Count > 0 && _headExitAt <= WallNow)
-            {
-                var value = _device.Dequeue();
-                if (value != 0f)
-                {
-                    _exits.Add(((long)_headExitAt, _headExitAt - ScheduledFor(value)));
-                }
-
-                _headExitAt += FrameUs;
-            }
-
-            if (_device.Count == 0 && _headExitAt <= WallNow)
-            {
-                DeviceUnderruns++;
-            }
-        }
-
-        /// <summary>Schedule of the stream frame a device sample came from, per the spec's conversion.</summary>
-        private double ScheduledFor(float value)
-        {
-            // Recover the frame index: the encoded id, unwrapped to the candidate nearest "now".
-            var residue = (long)Math.Round((value * IdModulus * 2) - 1);
-            var nowIndex = (long)((ServerNow - ServerT0 - (_rebaseIndex == long.MaxValue ? 0 : _rebaseShiftUs)) / FrameUs);
-            var d = (((nowIndex - residue) % IdModulus) + IdModulus) % IdModulus;
-            if (d > IdModulus / 2)
-            {
-                d -= IdModulus;
-            }
-
-            var index = nowIndex - d;
-            return ClockSync.ServerToClientTime(TimestampOf(index));
-        }
-
-        private void Refill(int frames)
-        {
-            _source.Read(_fill, 0, frames * Channels);
-            if (_device.Count == 0)
-            {
-                _headExitAt = Math.Max(_headExitAt, WallNow);
-            }
-
-            for (var f = 0; f < frames; f++)
-            {
-                _device.Enqueue(_fill[f * Channels]);
-            }
-        }
-
-        private long NextJitterUs()
-        {
-            _rng ^= _rng << 13;
-            _rng ^= _rng >> 17;
-            _rng ^= _rng << 5;
-            return (_rng % 16) * 1000L;
-        }
     }
 }

@@ -594,6 +594,32 @@ One-shot snaps taken at playback start now count in `AudioBufferStats.HardSyncCo
 to stay at 0 for them. They are the same splice the hard-sync tier performs, and the spec requires
 those to be rare — so if you alert on that counter, expect up to one more per stream start.
 
+### A push-mode output can report what is queued ahead of a sample
+
+`IAudioPlayer` gains an optional member, `long? GetCurrentOutputLatencyMicroseconds()`. It has a
+default implementation returning `null`, so existing players compile and behave as before.
+
+It is for outputs whose latency depends on how full they are. A push-mode output that keeps a
+fixed device buffer topped up (NAudio's `WasapiOut`, an ALSA write loop) reports that buffer's
+depth as `OutputLatencyMs`, but a sample only waits that long when the buffer is full ahead of it.
+On the first fill of an empty device nothing is queued and the first sample is heard at once, so a
+schedule pre-rolled by the whole buffer starts early by that much — and, because the startup
+baseline then treats the offset as constant, stays early for the stream. Such an output should
+implement the member and return what a sample handed over at that instant will wait: the frames
+queued in the device, any already produced for the request in progress, and the device's fixed
+latency after its queue. Return `null` from a pull-model output with a fixed hardware latency.
+
+`AudioPipeline` connects the player to `TimedAudioBuffer.CurrentOutputLatency` (new, a
+`Func<long?>`); set that yourself only when driving a buffer outside a pipeline. The buffer asks
+once per read while playback is waiting to start, on the audio thread with its lock held, so the
+answer must be cheap and must not block.
+
+**What changes when a player implements it:** a start that is already late no longer plays early
+by the device buffer. It begins when it is due, which is about one device buffer later than
+before, and the first fill of the device is silence. A start scheduled ahead moves later by about
+one wake of the device loop, for the same reason. If an output delay was tuned by ear to cancel
+the old early start, it will need re-tuning.
+
 ---
 
 ## 13. `buffer_capacity` is derived from the buffer you actually have
@@ -1038,6 +1064,8 @@ zero-size announce still clears the channel, since it carries no data to discard
 - [ ] `ClientCapabilities.AudioBufferCapacityMs` and `TimedAudioBuffer`'s `bufferCapacityMs` are the same number
 - [ ] `TimedAudioBuffer.MinBufferMilliseconds` matches `ClientCapabilities.MinBufferMs` — automatic behind `AudioPipeline`; check it only if you drive a buffer yourself
 - [ ] A custom `IAudioSampleSource` that keeps correction state implements `IPlaybackLifecycleAware`
+- [ ] A push-mode `IAudioPlayer` that keeps a fixed device buffer topped up implements
+      `GetCurrentOutputLatencyMicroseconds()` (§12)
 - [ ] A custom `IAudioPipeline` returns an `AudioPipelineStartOutcome` from `StartAsync`
 - [ ] A custom `ISyncCorrectionProvider` emits its correction as `TargetPlaybackRate` — the
       `DropEveryNFrames` / `InsertEveryNFrames` members are gone

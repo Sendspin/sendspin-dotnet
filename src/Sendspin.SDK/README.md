@@ -554,6 +554,32 @@ public class MyAudioPlayer : IAudioPlayer
 }
 ```
 
+`OutputLatencyMs` is the delay between handing a sample to the output and hearing it. The buffer
+pre-rolls the schedule by it, so report the real figure and do not also compensate for it with the
+output delay.
+
+On a **push-mode output that keeps a fixed device buffer topped up** — NAudio's `WasapiOut`, an
+ALSA `snd_pcm_writei` loop — that delay is not one number. A sample waits behind whatever is
+already queued in the device: nothing on the first fill of an empty device, nearly the whole buffer
+from then on. Implement the optional `GetCurrentOutputLatencyMicroseconds()` so the schedule uses
+what is actually queued at the moment playback starts:
+
+```csharp
+// Called on the audio thread while playback waits to start: cheap, non-blocking.
+public long? GetCurrentOutputLatencyMicroseconds()
+{
+    // Frames queued in the device, plus any already produced for the request in progress,
+    // plus the device's fixed latency after its queue.
+    var queuedFrames = _audioClient.CurrentPadding + _framesProducedThisRequest;
+    return (queuedFrames * 1_000_000L / _sampleRate) + _fixedLatencyMicroseconds;
+}
+```
+
+Leave it unimplemented (it returns `null` by default) on a pull-model output whose callback is
+followed by a fixed hardware latency; `OutputLatencyMs` is then used on its own. Without it, a
+push-mode output whose stream is already due when the device opens — every live stream — plays
+early by the device buffer for the life of the stream.
+
 **Platform suggestions:**
 - **Windows**: NAudio with WASAPI (`WasapiOut`)
 - **Linux**: OpenAL, PulseAudio, or PipeWire
