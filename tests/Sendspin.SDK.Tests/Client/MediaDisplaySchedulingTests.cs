@@ -491,9 +491,9 @@ public class MediaDisplaySchedulingTests
 
         connection.RaiseBinaryMessageReceived(LoudnessFrame(Now + 1_000, 100));
 
-        // stream/end is dispatched fire-and-forget, but its handler flushes the display roles
-        // before its first await — so the flush has already happened when this call returns,
-        // and no sleep is needed to separate it from the clock advance below.
+        // The display roles are flushed on the receive loop, so the flush has already happened
+        // when this call returns, and no sleep is needed to separate it from the clock advance
+        // below.
         connection.RaiseTextMessageReceived("""{"type":"stream/end","payload":{"reason":"eos"}}""");
 
         await DrainPastAsync(client, connection, timer, Now + 5_000);
@@ -612,8 +612,7 @@ public class MediaDisplaySchedulingTests
         connection.RaiseTextMessageReceived(
             """{"type":"stream/end","payload":{"server_transmitted":2,"roles":[]}}""");
 
-        // Both handlers reach their flush decision before returning — stream/clear is fully
-        // synchronous and stream/end flushes before its first await — so a flush either of them
+        // Both handlers flush the display roles before returning, so a flush either of them
         // wrongly performed has already happened here, ahead of the clock advance.
         timer.CurrentTime = Now + 1_000;
         await WaitUntilAsync(
