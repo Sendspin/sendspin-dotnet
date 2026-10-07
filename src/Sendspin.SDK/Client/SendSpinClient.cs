@@ -3543,6 +3543,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (msg is null || _pairingCodeState is not { Dynamic: true } state)
             return;
 
+        // "A round begins with server/pair-init and ends with the client's verification of
+        // server_kc": one that arrives inside a round is out of sequence, a protocol error.
+        // It is refused before it is counted, or a peer holding no credential could run the
+        // persisted count up to the hold-back with back-to-back messages (#320).
+        if (state.RoundBegun || state.CPace is not null)
+        {
+            throw new System.Text.Json.JsonException(
+                "server/pair-init arrived inside a round that has not ended");
+        }
+
         // nonce_A is "present in the first round only": that round derives the pairing code,
         // and the binding values, and so the code, are unchanged across the rounds after it.
         if (state.PairingCode is null)
@@ -3554,6 +3564,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             }
 
             state.NonceA = Base64UrlText.Decode(msg.Payload.NonceA);
+            if (state.NonceA.Length != 32)
+            {
+                throw new System.Text.Json.JsonException("nonce_A is not 32 bytes");
+            }
+
             var h = _session.HandshakeHash!.Value.ToArray();
             state.PairingCode = PairingCodes.DerivePairingCode(
                 h, state.NonceA, state.NonceB!, PairingCodes.DynamicPairingCodeLength);
@@ -3615,6 +3630,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             throw new System.Text.Json.JsonException(
                 "server/pair-auth arrived without the server/pair-init that begins its round");
+        }
+
+        // The static flow is a single round, so its one CPace run admits one server/pair-auth.
+        if (!state.Dynamic && state.CPace is not null)
+        {
+            throw new System.Text.Json.JsonException(
+                "a second server/pair-auth arrived in the static pairing code flow");
         }
 
         state.RoundBegun = false;
