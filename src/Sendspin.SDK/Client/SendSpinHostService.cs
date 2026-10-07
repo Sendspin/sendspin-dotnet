@@ -32,6 +32,15 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly HashSet<SendspinClientService> _openClients = new();
     private readonly object _connectionsLock = new();
 
+    // Held across one connection's arbitration: the decision, the loser's eviction and the
+    // winner's registration. Each accepted socket arbitrates on its own task, and without this
+    // two of them could both read the registry before either had written to it (#314). A
+    // semaphore because the eviction awaits the loser's farewell. ServerConnected is raised
+    // inside it too, so the next arbitration cannot report this connection displaced before it
+    // was reported connected. Nothing else takes it — not the disconnect handler, which runs
+    // inside it when the loser is dropped, nor StopAsync.
+    private readonly SemaphoreSlim _arbitrationGate = new(1, 1);
+
     // The client-initiated session the application asked this host to arbitrate on behalf of,
     // or null. Held here rather than in _connections deliberately: everything in that
     // dictionary is owned by this host — StopAsync disposes it, DisconnectAllAsync says
@@ -847,41 +856,49 @@ public sealed class SendspinHostService : IAsyncDisposable
             // Handshake complete - now arbitrate whether to accept this server
             var serverId = client.ServerId ?? connectionId;
 
-            // Perform multi-server arbitration: determine whether the new server
-            // should replace the existing one or be rejected
-            if (!await ArbitrateConnectionAsync(client, connection, serverId))
+            await _arbitrationGate.WaitAsync();
+            try
             {
-                // New server lost arbitration - it has already been disconnected
-                return;
+                // Perform multi-server arbitration: determine whether the new server
+                // should replace the existing one or be rejected
+                if (!await ArbitrateConnectionAsync(client, connection, serverId))
+                {
+                    // New server lost arbitration - it has already been disconnected
+                    return;
+                }
+
+                // Subscribe to connection state AFTER handshake so we use the correct serverId
+                client.ConnectionStateChanged += (s, e) => OnClientConnectionStateChanged(serverId, client, e);
+                var activeConnection = new ActiveServerConnection
+                {
+                    ServerId = serverId,
+                    Client = client,
+                    Connection = connection,
+                    ConnectedAt = DateTime.UtcNow
+                };
+
+                lock (_connectionsLock)
+                {
+                    _connections[serverId] = activeConnection;
+                }
+
+                registered = true;
+
+                _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
+                    serverId, client.ServerName);
+
+                ServerConnected?.Invoke(this, new ConnectedServerInfo
+                {
+                    ServerId = serverId,
+                    ServerName = client.ServerName ?? serverId,
+                    ConnectedAt = activeConnection.ConnectedAt,
+                    ClockSyncStatus = client.ClockSyncStatus
+                });
             }
-
-            // Subscribe to connection state AFTER handshake so we use the correct serverId
-            client.ConnectionStateChanged += (s, e) => OnClientConnectionStateChanged(serverId, client, e);
-            var activeConnection = new ActiveServerConnection
+            finally
             {
-                ServerId = serverId,
-                Client = client,
-                Connection = connection,
-                ConnectedAt = DateTime.UtcNow
-            };
-
-            lock (_connectionsLock)
-            {
-                _connections[serverId] = activeConnection;
+                _arbitrationGate.Release();
             }
-
-            registered = true;
-
-            _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
-                serverId, client.ServerName);
-
-            ServerConnected?.Invoke(this, new ConnectedServerInfo
-            {
-                ServerId = serverId,
-                ServerName = client.ServerName ?? serverId,
-                ConnectedAt = activeConnection.ConnectedAt,
-                ClockSyncStatus = client.ClockSyncStatus
-            });
         }
         catch (Exception ex)
         {
@@ -1135,7 +1152,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     }
 
     private void OnClientConnectionStateChanged(
-        string connectionId,
+        string serverId,
         SendspinClientService client,
         ConnectionStateChangedEventArgs e)
     {
@@ -1145,13 +1162,14 @@ public sealed class SendspinHostService : IAsyncDisposable
             lock (_connectionsLock)
             {
                 _openClients.Remove(client);
-                var entry = _connections.FirstOrDefault(c => c.Value.ServerId == connectionId);
-                // FirstOrDefault returns default(KeyValuePair) when not found, which has Key=null.
-                // This check works because dictionary keys are never null (serverId falls back to GUID).
-                if (entry.Key is not null)
+
+                // Matched on the instance, not just the id: a server that redials is registered
+                // under the id its stale connection had, and that connection's disconnect can
+                // arrive after the new one took the entry (#314).
+                if (_connections.TryGetValue(serverId, out var entry) && ReferenceEquals(entry.Client, client))
                 {
-                    _connections.Remove(entry.Key);
-                    disconnectedServerId = entry.Key;
+                    _connections.Remove(serverId);
+                    disconnectedServerId = serverId;
                 }
             }
 
