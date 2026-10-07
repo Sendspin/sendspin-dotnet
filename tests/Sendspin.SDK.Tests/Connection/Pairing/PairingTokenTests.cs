@@ -58,14 +58,15 @@ public class PairingTokenTests
     }
 
     [Fact]
-    public void Decode_VersionOneToken_DecodesToSamePayload()
+    public void Decode_VersionOneToken_Throws()
     {
+        // Version 1 is the dynamic pairing code in the qr_code format (24-byte payload), not a
+        // Pairing PSK: this decoder expects version 0 and rejects the others, whatever the length.
         string versionOneToken = "SP:1" + Kat2Token.Substring(4);
 
-        var (clientKey, pairingPsk) = PairingToken.Decode(versionOneToken);
+        var ex = Assert.Throws<FormatException>(() => PairingToken.Decode(versionOneToken));
 
-        Assert.Equal(ClientKey, clientKey);
-        Assert.Equal(Kat2Psk, pairingPsk);
+        Assert.Contains("version", ex.Message);
     }
 
     [Fact]
@@ -133,11 +134,17 @@ public class PairingTokenTests
     }
 
     [Fact]
-    public void Decode_BodyThatDecodesTo65Bytes_Throws()
+    public void Decode_PayloadLongerThan64Bytes_IgnoresTheExtraBytes()
     {
-        string token = "SP:0" + Base32.Encode(new byte[65]);
+        // Bytes beyond the 64 that version 0 defines are reserved for future extension: a
+        // decoder MUST ignore them.
+        byte[] extended = [.. ClientKey, .. Kat1Psk, 0xAA, 0xBB, 0xCC];
+        string token = "SP:0" + Base32.Encode(extended).Replace('2', '9');
 
-        Assert.Throws<FormatException>(() => PairingToken.Decode(token));
+        var (clientKey, pairingPsk) = PairingToken.Decode(token);
+
+        Assert.Equal(ClientKey, clientKey);
+        Assert.Equal(Kat1Psk, pairingPsk);
     }
 
     [Fact]
