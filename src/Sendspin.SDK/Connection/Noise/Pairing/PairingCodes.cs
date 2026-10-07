@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -149,6 +150,9 @@ internal static class PairingCodes
 /// Persists per-method pairing code failure counters (escalates to gesture-gating at 10,
 /// counters survive reboots, not partitioned by server). For 'dynamic_pairing_code' the counter
 /// holds rounds since the last verified one, counted from the moment a round's code is emitted.
+/// A host shares one store across all of its connections, each counting on its own receive
+/// thread, so an implementation must be safe for concurrent use. Both implementations shipped
+/// in this package are.
 /// </summary>
 public interface IPairingCodeLockoutStore
 {
@@ -159,14 +163,32 @@ public interface IPairingCodeLockoutStore
     void SetFailures(string method, int failures);
 }
 
+internal static class PairingCodeLockoutStoreSynchronization
+{
+    private static readonly ConditionalWeakTable<IPairingCodeLockoutStore, object> Gates = new();
+
+    /// <summary>The gate every client sharing <paramref name="store"/> counts a failure under.</summary>
+    internal static object For(IPairingCodeLockoutStore store) =>
+        Gates.GetValue(store, static _ => new object());
+}
+
 /// <summary>In-memory lockout store (counters do not survive restarts; supply a persistent implementation in production).</summary>
 public sealed class InMemoryPairingCodeLockoutStore : IPairingCodeLockoutStore
 {
     private readonly Dictionary<string, int> _failures = new();
+    private readonly object _lock = new();
 
     /// <inheritdoc/>
-    public int GetFailures(string method) => _failures.GetValueOrDefault(method);
+    public int GetFailures(string method)
+    {
+        lock (_lock)
+            return _failures.GetValueOrDefault(method);
+    }
 
     /// <inheritdoc/>
-    public void SetFailures(string method, int failures) => _failures[method] = failures;
+    public void SetFailures(string method, int failures)
+    {
+        lock (_lock)
+            _failures[method] = failures;
+    }
 }
