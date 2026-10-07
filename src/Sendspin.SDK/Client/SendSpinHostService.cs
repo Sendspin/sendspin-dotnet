@@ -424,8 +424,9 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     /// <summary>
     /// Stops mDNS advertising without stopping the listener.
-    /// Call this when manually connecting to a server to prevent
-    /// other servers from trying to connect to this client.
+    /// Call this before manually connecting to a server: connection.md forbids it while
+    /// advertising ("Clients MUST NOT manually connect to servers while advertising
+    /// <c>_sendspin._tcp</c>"), and it keeps other servers from trying to connect to this client.
     /// </summary>
     public async Task StopAdvertisingAsync()
     {
@@ -547,6 +548,16 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// connections keep running while every new one is refused on the adopted session's behalf,
     /// which is rarely what the caller meant. Call <see cref="DisconnectAllAsync"/> first.
     /// </para>
+    /// <para>
+    /// <b>Advertising is the caller's to stop.</b> connection.md: "Clients MUST use exactly one
+    /// of the two methods at a time, advertising or discovering accordingly", and "Clients MUST
+    /// NOT manually connect to servers while advertising <c>_sendspin._tcp</c>". That applies
+    /// from the dial, which happens before there is a session to adopt, so adopting cannot do it
+    /// for you: call <see cref="StopAdvertisingAsync"/> before dialling, and
+    /// <see cref="StartAdvertisingAsync"/> once the session has ended, whether you closed it or
+    /// it dropped. Adopting while still advertising is allowed but logs a warning: every server
+    /// the advertisement invites is refused with <c>concurrent_attempt</c> and may keep retrying.
+    /// </para>
     /// </remarks>
     /// <param name="client">
     /// The dialled client. Its <c>server/activate</c> activities supply the holder's arbitration
@@ -612,6 +623,14 @@ public sealed class SendspinHostService : IAsyncDisposable
                 + "active; they keep running while incoming servers are refused. Call DisconnectAllAsync first.",
                 serverId,
                 hostModeConnections);
+        }
+
+        if (_advertiser.IsAdvertising)
+        {
+            _logger.LogWarning(
+                "Adopted client-initiated {ServerId} while still advertising _sendspin._tcp; servers keep "
+                + "being invited and refused. Call StopAdvertisingAsync before dialling.",
+                serverId);
         }
 
         if (client.ConnectionState == ConnectionState.Disconnected)
