@@ -18,6 +18,13 @@ public sealed class IncomingConnection : ISendspinConnection
     private readonly IWireFraming _framing;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
 
+    // How long a farewell and close may take before the socket is aborted instead. A peer whose
+    // host is suspended keeps the TCP connection but stops reading; once the socket buffers
+    // fill, a send parks inside the socket holding _sendLock, and everything that closes this
+    // connection starts by sending — so eviction, the host's StopAsync and DisposeAsync all
+    // waited for the peer to come back (#354). A healthy close takes milliseconds.
+    private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(3);
+
     private ConnectionState _state = ConnectionState.Disconnected;
     private bool _disposed;
     private bool _isOpen;
@@ -204,9 +211,14 @@ public sealed class IncomingConnection : ISendspinConnection
             {
                 try
                 {
-                    await SendMessageAsync(farewell, cancellationToken);
+                    await WithinCloseTimeoutAsync(
+                        async token =>
+                        {
+                            await SendMessageAsync(farewell, token);
 
-                    await _socket.CloseAsync(cancellationToken);
+                            await _socket.CloseAsync(token);
+                        },
+                        cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -219,6 +231,23 @@ public sealed class IncomingConnection : ISendspinConnection
             _isOpen = false;
             SetState(ConnectionState.Disconnected, reason);
         }
+    }
+
+    /// <summary>
+    /// Runs a close under <see cref="CloseTimeout"/>, aborting the socket when it runs out.
+    /// </summary>
+    /// <remarks>
+    /// The abort is what ends a send parked on a peer that has stopped reading: no token
+    /// reaches it, and it holds the send lock until the socket fails underneath it. Without it
+    /// a timed-out close would return and leave that send, the lock and the socket behind.
+    /// </remarks>
+    private async Task WithinCloseTimeoutAsync(Func<CancellationToken, Task> close, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(CloseTimeout);
+        using var abortOnExpiry = timeout.Token.Register(_socket.Abort);
+
+        await close(timeout.Token).ConfigureAwait(false);
     }
 
     private async Task SendWireFramesAsync(IEnumerable<WireFrame> frames, CancellationToken cancellationToken)
@@ -347,7 +376,8 @@ public sealed class IncomingConnection : ISendspinConnection
     {
         try
         {
-            await _socket.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+            await WithinCloseTimeoutAsync(token => _socket.CloseAsync(token), CancellationToken.None)
+                .ConfigureAwait(false);
         }
         catch (Exception ex)
         {

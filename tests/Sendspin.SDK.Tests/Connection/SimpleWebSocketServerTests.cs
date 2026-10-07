@@ -264,6 +264,80 @@ public class SimpleWebSocketServerTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task IncomingConnection_DisconnectAndDispose_AreNotHeldByAPeerThatStoppedReading()
+    {
+        // #354: a server whose host is suspended keeps its TCP connection but stops reading.
+        // Once the socket buffers fill, a send parks inside the socket holding the send lock,
+        // and the goodbye every teardown path starts with waited on that lock with no bound —
+        // so eviction, StopAsync and DisposeAsync hung until the peer came back.
+        _server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        _server.ClientConnected += (s, c) => connected.TrySetResult(c);
+
+        using var peer = await ConnectSilentPeerAsync(_server.Port);
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var incoming = new IncomingConnection(
+            NullLogger<IncomingConnection>.Instance,
+            serverConn,
+            new StubFraming());
+        await incoming.StartAsync();
+
+        var stalled = await StalledPeer.SendUntilStalledAsync(chunk => incoming.SendBinaryAsync(chunk));
+
+        var disconnect = incoming.DisconnectAsync("another_server");
+        Assert.True(
+            await Task.WhenAny(disconnect, Task.Delay(TimeSpan.FromSeconds(10))) == disconnect,
+            "DisconnectAsync must not wait on a send the peer will never read");
+
+        // Awaited, not just seen to finish: the host awaits this inside the arbitration gate,
+        // so it has to return rather than throw.
+        await disconnect;
+        Assert.Equal(ConnectionState.Disconnected, incoming.State);
+
+        // The parked send has to end too, or it keeps the lock and the socket for good.
+        Assert.True(
+            await Task.WhenAny(stalled, Task.Delay(TimeSpan.FromSeconds(5))) == stalled,
+            "the stalled send must be released when the connection closes");
+
+        var dispose = incoming.DisposeAsync().AsTask();
+        Assert.True(
+            await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(10))) == dispose,
+            "DisposeAsync must complete after a stalled close");
+        await dispose;
+    }
+
+    [Fact]
+    public async Task IncomingConnection_Dispose_IsNotHeldByAPeerThatStoppedReading()
+    {
+        // The same stall, met by DisposeAsync directly — the host's StopAsync path (#354).
+        _server.Start(0);
+
+        var connected = new TaskCompletionSource<WebSocketClientConnection>();
+        _server.ClientConnected += (s, c) => connected.TrySetResult(c);
+
+        using var peer = await ConnectSilentPeerAsync(_server.Port);
+        var serverConn = await connected.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var incoming = new IncomingConnection(
+            NullLogger<IncomingConnection>.Instance,
+            serverConn,
+            new StubFraming());
+        await incoming.StartAsync();
+
+        _ = await StalledPeer.SendUntilStalledAsync(chunk => incoming.SendBinaryAsync(chunk));
+
+        var dispose = incoming.DisposeAsync().AsTask();
+        Assert.True(
+            await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(10))) == dispose,
+            "DisposeAsync must not wait on a send the peer will never read");
+
+        // Awaited, not just seen to finish: the host's StopAsync awaits this.
+        await dispose;
+    }
+
+    [Fact]
     public async Task Connection_Dispose_AfterClientClose_CleansUpSocket()
     {
         // Verify the full lifecycle: client closes gracefully, then server
