@@ -102,6 +102,44 @@ public class PairingGatingTests
         Assert.Empty(h.SentOfType<ClientPairFinalizeMessage>());
     }
 
+    [Theory]
+    [InlineData("dynamic_pairing_code")]
+    [InlineData("static_pairing_code")]
+    public async Task PairingCodeActivation_OnAPairingPskSession_AbortsAtTheActivation(string method)
+    {
+        // messaging.md: pairing.method MUST be 'pairing_psk' if and only if the matched PSK is
+        // the pairing PSK. The method is one this client offers; only the session forbids it.
+        bool dynamic = method == "dynamic_pairing_code";
+        await using var h = await PairingHarness.StartAsync(
+            dynamicPairingCode: dynamic,
+            staticPairingCode: dynamic ? null : "12345678",
+            pairingPsk: true);
+
+        h.SendPairingActivate(method: method);
+
+        var abort = await h.NextMessageAsync<PairAbortMessage>();
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+        Assert.Empty(h.SentOfType<ClientPairInitMessage>());
+        Assert.Empty(h.SentOfType<ClientPairPendingMessage>());
+        Assert.Null(h.LastDisconnectReason);
+    }
+
+    [Fact]
+    public async Task PairingPskActivation_OnASentinelSession_AbortsAtTheActivation()
+    {
+        // The other direction of the same rule (pairing.md, Pairing PSK Flow step 2).
+        var store = new InMemoryPairingRecordStore();
+        await using var h = await PairingHarness.StartAsync(pairingStore: store);
+
+        h.SendPairingActivate(method: "pairing_psk");
+
+        var abort = await h.NextMessageAsync<PairAbortMessage>();
+        Assert.Equal("method_not_supported", abort.Payload.Reason);
+        Assert.Empty(h.SentOfType<ClientPairInitMessage>());
+        Assert.Empty(store.List());
+        Assert.Null(h.LastDisconnectReason);
+    }
+
     [Fact]
     public async Task StaticPairingCodeActivation_WithNoWindowOpen_SendsPairPendingAndWithholdsInit()
     {

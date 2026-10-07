@@ -3233,8 +3233,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         PairMethods.PairingPsk => _pairingPskEnabled
                          && _session.MatchedPsk?.Category == PskCategory.Pairing
                          && _pairingStore is not null,
-        PairMethods.DynamicPairingCode => CanRun(PairMethods.DynamicPairingCode),
-        PairMethods.StaticPairingCode => CanRun(PairMethods.StaticPairingCode),
+
+        // The other direction of the same rule: the method is pairing_psk if and only if the
+        // matched PSK is the Pairing PSK, so a code method is refused on that session.
+        PairMethods.DynamicPairingCode => CanRun(PairMethods.DynamicPairingCode)
+                         && _session.MatchedPsk?.Category != PskCategory.Pairing,
+        PairMethods.StaticPairingCode => CanRun(PairMethods.StaticPairingCode)
+                         && _session.MatchedPsk?.Category != PskCategory.Pairing,
         _ => false,
     };
 
