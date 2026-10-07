@@ -194,10 +194,11 @@ no policy to win back; see [Sync Correction System](#sync-correction-system) for
 
 ### Handling handshake failures
 
-`ConnectAsync` **throws** `SendspinHandshakeException` when a handshake fails permanently, so
+`ConnectAsync` **throws** `SendspinHandshakeException` when a handshake does not complete, so
 an application that never subscribes to `ConnectionStateChanged` still finds out. Without
 handling it the call previously returned as though it had succeeded, and the problem surfaced
-when the first command threw *"WebSocket is not connected"*.
+when the first command threw *"WebSocket is not connected"*. It returns normally only when the
+client is connected.
 
 `Kind` classifies the failure; each calls for a different response:
 
@@ -205,6 +206,9 @@ when the first command threw *"WebSocket is not connected"*.
 - `ServerError` — the server answered `client/init` with a cleartext `server/error`; its (unauthenticated) reason is in `Message`.
 - `PairingStateDiverged` — a stored PSK is bound to a different server; the pairing record is stale, so pair again.
 - `HandshakeRejected` — the server refused the handshake for any other reason: an unsupported cipher suite, a version mismatch, or malformed input.
+- `PairingRequired` — the server activated playback, but this client is not paired with it and `UnpairedAccessEnabled` is off, so the client closed with `pairing_required`. This is the normal result of dialling a server for the first time: pair, then connect again.
+- `ActivationRefused` — the server's `server/activate` declared something the session's trust does not permit, so the client closed with `unauthorized`.
+- `ConnectionClosed` — the connection closed before the handshake completed for any other reason: lost with `AutoReconnect` off, disconnected by the application, or closed by the client on a malformed handshake message. The only kind that is not permanent — dialling again may succeed.
 
 ```csharp
 try
@@ -216,10 +220,15 @@ catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.Lega
     // The server predates the encrypted protocol. Upgrade it to aiosendspin 10.0.0 or
     // later, or pin this SDK to the 9.x line. Retrying cannot help, and the SDK does not retry.
 }
-catch (SendspinHandshakeException ex)   // ServerError, PairingStateDiverged, or HandshakeRejected
+catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.PairingRequired)
+{
+    // First contact with this server: start pairing, then connect again.
+}
+catch (SendspinHandshakeException ex)   // every other Kind
 {
     // See the list above. ex.Message carries the detail; re-pair for a diverged pairing
-    // record. Retrying cannot help for any of these, and the SDK does not retry.
+    // record. The SDK does not retry any of these, and only ConnectionClosed can be helped
+    // by dialling again.
 }
 catch (TimeoutException)
 {

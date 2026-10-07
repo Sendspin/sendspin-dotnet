@@ -39,17 +39,7 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
         store.Upsert(new PairingRecord(Psk, PskCategory.LongTerm));
         var keys = KeyPair.Generate();
 
-        var sessions = Channel.CreateUnbounded<ServerSession>();
-        _listener.Start();
-        int port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _ = Task.Run(async () =>
-        {
-            while (!_stop.IsCancellationRequested)
-            {
-                var tcp = await _listener.AcceptTcpClientAsync(_stop.Token);
-                sessions.Writer.TryWrite(await ServerSession.AcceptAsync(tcp, identity, keys, _stop.Token));
-            }
-        });
+        var (port, sessions) = StartServer(identity, keys, Psk);
 
         await using var client = SendspinClientService.CreateForDial(
             NullLoggerFactory.Instance,
@@ -112,11 +102,60 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
         Assert.DoesNotContain("dropped", groupNames);
     }
 
+    [Fact]
+    public async Task ActivationTheClientRefuses_FailsConnectAsync()
+    {
+        // First contact with a server, unpaired access off (the default): the session runs on
+        // the Sentinel PSK, the server activates playback, and the client refuses it (#325).
+        var identity = SendspinIdentity.Generate();
+        var (port, sessions) = StartServer(identity, KeyPair.Generate(), NoiseConstants.SentinelPsk.ToArray());
+
+        await using var client = SendspinClientService.CreateForDial(
+            NullLoggerFactory.Instance,
+            new SendspinClientOptions
+            {
+                Identity = identity,
+                Suite = NoiseCipherSuite.ChaChaPoly,
+                PairingRecordStore = new InMemoryPairingRecordStore(),
+                Capabilities = new ClientCapabilities { Roles = ["controller@v1", "metadata@v1"] },
+            },
+            new ConnectionOptions { AutoReconnect = false });
+
+        var connecting = client.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/sendspin"));
+        var session = await sessions.Reader.ReadAsync().AsTask().WaitAsync(Wait);
+        await session.WaitForAsync("client/hello").WaitAsync(Wait);
+        await session.SendAsync(Activate("metadata@v1"));
+
+        var ex = await Assert.ThrowsAsync<SendspinHandshakeException>(() => connecting.WaitAsync(Wait));
+        Assert.Equal(HandshakeFailureKind.PairingRequired, ex.Kind);
+        Assert.Equal(ConnectionState.Disconnected, client.ConnectionState);
+        await session.WaitForAsync("client/goodbye").WaitAsync(Wait);
+    }
+
     public ValueTask DisposeAsync()
     {
         _stop.Cancel();
         _listener.Stop();
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>Accepts dialled connections on a loopback port, one <see cref="ServerSession"/> each.</summary>
+    private (int Port, Channel<ServerSession> Sessions) StartServer(
+        SendspinIdentity clientIdentity, KeyPair keys, byte[] psk)
+    {
+        var sessions = Channel.CreateUnbounded<ServerSession>();
+        _listener.Start();
+        int port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                var tcp = await _listener.AcceptTcpClientAsync(_stop.Token);
+                sessions.Writer.TryWrite(await ServerSession.AcceptAsync(tcp, clientIdentity, keys, psk, _stop.Token));
+            }
+        });
+
+        return (port, sessions);
     }
 
     private static string Activate(params string[] roles)
@@ -143,18 +182,20 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
         private readonly WebSocket _socket;
         private readonly SendspinIdentity _clientIdentity;
         private readonly KeyPair _keys;
+        private readonly byte[] _psk;
         private readonly Channel<string> _received = Channel.CreateUnbounded<string>();
         private TestNoiseServer? _noise;
 
-        private ServerSession(WebSocket socket, SendspinIdentity clientIdentity, KeyPair keys)
+        private ServerSession(WebSocket socket, SendspinIdentity clientIdentity, KeyPair keys, byte[] psk)
         {
             _socket = socket;
             _clientIdentity = clientIdentity;
             _keys = keys;
+            _psk = psk;
         }
 
         public static async Task<ServerSession> AcceptAsync(
-            TcpClient tcp, SendspinIdentity clientIdentity, KeyPair keys, CancellationToken stop)
+            TcpClient tcp, SendspinIdentity clientIdentity, KeyPair keys, byte[] psk, CancellationToken stop)
         {
             var stream = tcp.GetStream();
 
@@ -181,7 +222,8 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
             var session = new ServerSession(
                 WebSocket.CreateFromStream(stream, isServer: true, subProtocol: null, Timeout.InfiniteTimeSpan),
                 clientIdentity,
-                keys);
+                keys,
+                psk);
             _ = Task.Run(() => session.ReceiveAsync(stop));
             return session;
         }
@@ -252,7 +294,7 @@ public class DialReconnectHandshakeTests : IAsyncDisposable
             string json = Encoding.UTF8.GetString(data);
             if (MessageSerializer.GetMessageType(json) == "client/init")
             {
-                _noise = new TestNoiseServer(_clientIdentity.PublicKey, Psk, _keys);
+                _noise = new TestNoiseServer(_clientIdentity.PublicKey, _psk, _keys);
                 var (serverInit, msg1) = _noise.Respond(json);
                 await SendAsync(Encoding.UTF8.GetBytes(serverInit), WebSocketMessageType.Text);
                 await SendAsync(Encoding.UTF8.GetBytes(msg1), WebSocketMessageType.Text);

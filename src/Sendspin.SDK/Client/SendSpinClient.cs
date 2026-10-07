@@ -110,13 +110,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // (where it was per-attempt) onto server/hello, so it is now connection-scoped.
     private List<string>? _serverLanguages;
 
-    // _handshakeTcs is published by the handshake waiter and completed by the connection's
-    // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
-    // both so a permanent failure that lands before the waiter publishes its TCS is still
-    // seen by it — see SendHandshakeAsync and CompleteHandshakeWait.
+    // _handshakeTcs is the outcome of the handshake a ConnectAsync is waiting on. It is
+    // published before the connection is started (BeginHandshakeWait), because the receive
+    // loop needs nothing from the caller: the whole exchange, or its failure, can be over
+    // before the caller's continuation runs. It is completed on the receive loop's thread, by
+    // the first admitted server/activate or by the Disconnected transition.
+    // _pendingRefusal is why this client is closing a connection it refused; that transition
+    // completes the outcome with it, so the caller cannot resume ahead of the goodbye.
     private readonly object _handshakeLock = new();
     private TaskCompletionSource<bool>? _handshakeTcs;
-    private SendspinHandshakeException? _handshakeFailure;
+    private SendspinHandshakeException? _pendingRefusal;
     private GroupState? _currentGroup;
     private PlayerState _playerState;
     private CancellationTokenSource? _timeSyncCts;
@@ -693,15 +696,51 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         _logger.LogInformation("Connecting to {Uri}", serverUri);
 
-        // Cleared here rather than in SendHandshakeAsync: a failure raised between the dial
-        // and the handshake wait belongs to this attempt and must survive to reach the caller.
-        lock (_handshakeLock)
+        // Before the dial, not after it: this await resumes on the caller's context — a UI
+        // thread, for an app that connects from one — while the handshake runs to its end on
+        // the receive loop. An outcome published afterwards misses whatever happened first.
+        var (handshake, previous) = BeginHandshakeWait();
+        try
         {
-            _handshakeFailure = null;
+            await _connection.ConnectAsync(serverUri, cancellationToken);
+        }
+        catch
+        {
+            // Nothing will await this outcome. Hand back the one it replaced: a call refused
+            // as "already connecting" must not strand the call that is.
+            lock (_handshakeLock)
+            {
+                if (ReferenceEquals(_handshakeTcs, handshake))
+                {
+                    _handshakeTcs = previous;
+                }
+            }
+
+            if (!handshake.TrySetCanceled())
+            {
+                _ = handshake.Task.Exception;
+            }
+
+            throw;
         }
 
-        await _connection.ConnectAsync(serverUri, cancellationToken);
-        await SendHandshakeAsync(cancellationToken);
+        await AwaitHandshakeAsync(handshake, cancellationToken);
+    }
+
+    /// <summary>
+    /// Publishes a fresh handshake outcome for the receive loop to complete, returning it and
+    /// the one it replaced.
+    /// </summary>
+    private (TaskCompletionSource<bool> Handshake, TaskCompletionSource<bool>? Previous) BeginHandshakeWait()
+    {
+        var handshake = new TaskCompletionSource<bool>();
+        lock (_handshakeLock)
+        {
+            var previous = _handshakeTcs;
+            _handshakeTcs = handshake;
+            _pendingRefusal = null;
+            return (handshake, previous);
+        }
     }
 
     /// <summary>
@@ -763,30 +802,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Sends the ClientHello message and waits for the ServerHello response.
-    /// Used for both initial connection and reconnection handshakes.
+    /// Waits for a handshake outcome published by <see cref="BeginHandshakeWait"/>: returns
+    /// once the first <c>server/activate</c> has been admitted, and throws if the connection
+    /// closed instead or the wait timed out. The outcome may already be complete.
     /// </summary>
-    private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
+    private async Task AwaitHandshakeAsync(
+        TaskCompletionSource<bool> handshakeTcs, CancellationToken cancellationToken = default)
     {
-        TaskCompletionSource<bool> handshakeTcs;
-        SendspinHandshakeException? alreadyFailed;
-        lock (_handshakeLock)
-        {
-            handshakeTcs = _handshakeTcs = new TaskCompletionSource<bool>();
-            alreadyFailed = _handshakeFailure;
-        }
-
-        // The connection's receive loop is already running when we get here, so a permanent
-        // failure can be raised before there is a TCS to fail — the continuation that resumes
-        // ConnectAsync may sit queued behind a busy UI thread while the peer is already
-        // closing. Publishing the TCS and reading the failure under the same lock the handler
-        // takes makes both interleavings equivalent: whichever side runs first, the caller
-        // still gets the diagnostic rather than a 30 s wait ending in TimeoutException.
-        if (alreadyFailed is not null)
-        {
-            throw alreadyFailed;
-        }
-
         // 30 s per the spec's recommended handshake-phase timeout.
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
@@ -796,10 +818,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             await using var registration = linkedCts.Token.Register(() => handshakeTcs.TrySetCanceled());
             var success = await handshakeTcs.Task;
 
-            if (success)
+            if (!success)
             {
-                _logger.LogInformation("Handshake complete with server {ServerId} ({ServerName})", ServerId, ServerName);
+                // Disconnected before the first server/activate was admitted, with no cause
+                // recorded (see CompleteHandshakeWait). Returning here would tell the caller
+                // it is connected.
+                throw new SendspinHandshakeException(HandshakeFailureKind.ConnectionClosed);
             }
+
+            _logger.LogInformation("Handshake complete with server {ServerId} ({ServerName})", ServerId, ServerName);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
@@ -1441,7 +1468,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         try
         {
-            await SendHandshakeAsync(cancellationToken);
+            await AwaitHandshakeAsync(BeginHandshakeWait().Handshake, cancellationToken);
         }
         catch (TimeoutException)
         {
@@ -2369,7 +2396,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Reads the handshake waiter's TaskCompletionSource under <see cref="_handshakeLock"/>.
     /// </summary>
     /// <remarks>
-    /// The four completion sites on the message-handling path read the field unlocked, against
+    /// The completion site on the message-handling path reads the field unlocked, against
     /// a waiter that publishes it under the lock — the asymmetry #98 item 3 flags, and a
     /// contradiction of what the field's own comment says the lock is for. Only the read is
     /// guarded: completing outside the lock is deliberate, because the TCS runs its
@@ -2390,18 +2417,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <see cref="ConnectionStateChanged"/> would otherwise see the connect succeed and
     /// only find out when its first command threw "WebSocket is not connected".
     /// </summary>
+    /// <param name="failure">
+    /// The connection layer's verdict, or null when it has none — in which case a refusal
+    /// this client recorded before closing (<see cref="RefuseActivation"/>) is the cause.
+    /// </param>
     private void CompleteHandshakeWait(SendspinHandshakeException? failure)
     {
         TaskCompletionSource<bool>? tcs;
         lock (_handshakeLock)
         {
-            // Recorded before the TCS is read, and read by the waiter after it publishes one,
-            // so the failure cannot fall between the two.
-            if (failure is not null)
-            {
-                _handshakeFailure = failure;
-            }
-
+            failure ??= _pendingRefusal;
+            _pendingRefusal = null;
             tcs = _handshakeTcs;
         }
 
@@ -2414,6 +2440,34 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             tcs?.TrySetResult(false);
         }
+    }
+
+    /// <summary>
+    /// Closes the connection over a <c>server/activate</c> this client will not accept, and
+    /// records why for a <see cref="ConnectAsync"/> still waiting on the handshake.
+    /// </summary>
+    /// <remarks>
+    /// Recorded rather than thrown to the waiter here: the disconnect completes the wait (see
+    /// <see cref="CompleteHandshakeWait"/>), so the caller resumes once the goodbye carrying
+    /// <paramref name="goodbyeReason"/> has gone out, not ahead of it. Nothing else reads the
+    /// record, so a caller that starts waiting mid-close waits for the close as well. On the
+    /// listen path, and for an activation after the first, nothing is waiting and the
+    /// disconnect discards it.
+    /// </remarks>
+    private void RefuseActivation(string goodbyeReason, string detail)
+    {
+        var failure = new SendspinHandshakeException(
+            goodbyeReason == GoodbyeReasons.PairingRequired
+                ? HandshakeFailureKind.PairingRequired
+                : HandshakeFailureKind.ActivationRefused,
+            detail);
+
+        lock (_handshakeLock)
+        {
+            _pendingRefusal = failure;
+        }
+
+        DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
     }
 
     /// <summary>
@@ -2729,7 +2783,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (message is null)
         {
             _logger.LogWarning("Failed to deserialize server/hello");
-            CurrentHandshakeWaiter()?.TrySetResult(false);
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
             return;
         }
 
@@ -2835,8 +2889,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _logger.LogWarning("Inadmissible server/activate (activities: {Activities}); closing with {Reason}",
                 string.Join(", ", payload.ActivitiesList), goodbyeReason);
-            CurrentHandshakeWaiter()?.TrySetResult(false);
-            DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
+            RefuseActivation(goodbyeReason, $"activities [{string.Join(", ", payload.ActivitiesList)}]");
             return;
         }
 
@@ -2857,8 +2910,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
             _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
-            CurrentHandshakeWaiter()?.TrySetResult(false);
-            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+            RefuseActivation("unauthorized", "source role without a pairing");
             return;
         }
 

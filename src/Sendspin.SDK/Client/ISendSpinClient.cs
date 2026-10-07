@@ -86,7 +86,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// an application that only subscribes to <see cref="ConnectionStateChanged"/> — or to
     /// nothing, as the Quick Start once showed — would otherwise see this call return
     /// normally against a server it had just permanently rejected, and discover the problem
-    /// when its first command threw "WebSocket is not connected".
+    /// when its first command threw "WebSocket is not connected". The same holds when it is
+    /// this client that refuses the server, or when the connection closes for any other
+    /// reason before the first <c>server/activate</c> is admitted: the call returns normally
+    /// only if the client is connected.
     /// </para>
     /// <para>
     /// A transport-level failure to reach the server (for example
@@ -96,7 +99,9 @@ public interface ISendspinClient : IAsyncDisposable
     /// </para>
     /// </remarks>
     /// <exception cref="Connection.SendspinHandshakeException">
-    /// The handshake failed permanently, so retrying cannot help.
+    /// The handshake did not complete. Except for
+    /// <see cref="Connection.HandshakeFailureKind.ConnectionClosed"/> the failure is permanent,
+    /// so retrying cannot help.
     /// <see cref="Connection.SendspinHandshakeException.Kind"/> distinguishes the cases:
     /// <see cref="Connection.HandshakeFailureKind.LegacyServer"/> — the server predates the
     /// encrypted protocol (aiosendspin &lt; 7.0.0); upgrade it, or use the 9.x SDK line.
@@ -108,6 +113,17 @@ public interface ISendspinClient : IAsyncDisposable
     /// <see cref="Connection.HandshakeFailureKind.HandshakeRejected"/> — the server speaks the
     /// encrypted protocol but refused this handshake for any other reason: an unsupported cipher
     /// suite, a version mismatch, or malformed input. Check the suite and the server logs.
+    /// <see cref="Connection.HandshakeFailureKind.PairingRequired"/> — the server activated
+    /// playback, but this client is not paired with it and unpaired access is off, so the client
+    /// closed with <c>pairing_required</c>. The normal result of dialling a server for the first
+    /// time: pair with it, or enable unpaired access.
+    /// <see cref="Connection.HandshakeFailureKind.ActivationRefused"/> — the server's activation
+    /// declared something the session's trust does not permit, so the client closed with
+    /// <c>unauthorized</c>.
+    /// <see cref="Connection.HandshakeFailureKind.ConnectionClosed"/> — the connection closed
+    /// before the handshake completed for any other reason: lost with
+    /// <c>ConnectionOptions.AutoReconnect</c> off, disconnected by the application, or closed by
+    /// this client on a malformed handshake message. Dialling again may succeed.
     /// </exception>
     /// <exception cref="TimeoutException">
     /// The server accepted the socket but did not complete the hello exchange within the
