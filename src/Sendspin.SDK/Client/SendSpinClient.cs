@@ -2549,6 +2549,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 return;
             }
 
+            // server/hello is "Sent once per connection", and a re-handshake re-sends neither
+            // hello (connection.md, Re-handshake), so any later one is a repeat. It is dropped
+            // like the other out-of-sequence messages here: handled, it would be answered with a
+            // second client/hello and would replace the payload the active roles are recorded on.
+            if (messageType is MessageTypes.ServerHello && _serverHelloReceived)
+            {
+                _logger.LogDebug("Dropping repeated server/hello");
+                return;
+            }
+
             if (AwaitingActivate
                 && messageType is not (MessageTypes.ServerHello or MessageTypes.ServerActivate
                     or MessageTypes.ServerTime))
@@ -2717,8 +2727,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// A shared-PSK record carries no server id by design, so it is not evidence of a mismatch
     /// — treating one as evidence would warn on every connection to an unrelated server.
     /// Raised from server/hello rather than the handshake because that is where the client
-    /// learns the session's PSK category, and it runs once per Noise session, including after
-    /// an in-band re-handshake.
+    /// learns the session's PSK category, and it runs once per connection.
     /// </para>
     /// </remarks>
     private void WarnOnCredentialMismatch()
