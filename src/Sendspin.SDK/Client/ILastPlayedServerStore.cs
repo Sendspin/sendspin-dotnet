@@ -1,8 +1,9 @@
 namespace Sendspin.SDK.Client;
 
 /// <summary>
-/// Optional persistence seam for the "last played server" — the server_id of the server that most
-/// recently had playback_state 'playing'. Mirrors <see cref="IOutputDelayStore"/>.
+/// Optional persistence seam for the "last-playback server" — the server_id of the server that most
+/// recently held the admitted connection while 'playback' was among its activities. Mirrors
+/// <see cref="IOutputDelayStore"/>.
 /// </summary>
 /// <remarks>
 /// The Sendspin spec requires clients to persist this across restarts so multi-server arbitration can
@@ -22,8 +23,8 @@ public interface ILastPlayedServerStore
     string? Load();
 
     /// <summary>
-    /// Persists the last-played server_id. Called whenever the last-played server changes — when a
-    /// server transitions to playback_state 'playing', or when the embedder calls
+    /// Persists the last-played server_id. Called whenever the last-played server changes — when an
+    /// admitted connection declares the 'playback' activity, or when the embedder calls
     /// <see cref="SendspinHostService.SetLastPlayedServerId"/> directly.
     /// </summary>
     /// <param name="serverId">The server_id to persist as the last-played server.</param>
