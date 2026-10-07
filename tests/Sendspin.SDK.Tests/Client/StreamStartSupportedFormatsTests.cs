@@ -1,6 +1,8 @@
+using System.Buffers.Binary;
 using Sendspin.SDK.Client;
 using Sendspin.SDK.Connection;
 using Sendspin.SDK.Models;
+using Sendspin.SDK.Protocol.Messages;
 
 namespace Sendspin.SDK.Tests.Client;
 
@@ -104,5 +106,52 @@ public class StreamStartSupportedFormatsTests
             """{"codec":"flac","channels":2,"sample_rate":96000,"bit_depth":24,"codec_header":"ZkxhQw=="}"""));
 
         Assert.Single(pipe.StartCalls);
+    }
+
+    /// <summary>
+    /// The server goes on to send the format it announced, so a stream left running would put
+    /// those chunks through the previous format's decoder — for PCM, as full-scale noise.
+    /// </summary>
+    [Fact]
+    public void StreamStart_WithAnUnlistedFormatMidStream_EndsThePlayerStreamAndDropsItsChunks()
+    {
+        const string Listed = """{"codec":"pcm","channels":2,"sample_rate":48000,"bit_depth":16}""";
+        var (client, connection, pipe) = PlayerListing(
+            new AudioFormat { Codec = "pcm", SampleRate = 48000, Channels = 2, BitDepth = 16 });
+        using var _c = client;
+
+        connection.RaiseTextMessageReceived(StreamStart(Listed));
+        connection.RaiseBinaryMessageReceived(AudioFrame(1_000));
+
+        connection.RaiseTextMessageReceived(StreamStart(
+            """{"codec":"flac","channels":2,"sample_rate":48000,"bit_depth":16,"codec_header":"ZkxhQw=="}"""));
+
+        Assert.Equal(1, pipe.StopCount);
+        Assert.Equal(PlaybackState.Idle, client.CurrentGroup?.PlaybackState);
+        Assert.Equal(ConnectionState.Connected, client.ConnectionState);
+
+        // A stopped pipeline has no decoder, which is what the real one reports here.
+        pipe.IsReady = false;
+        connection.RaiseBinaryMessageReceived(AudioFrame(2_000));
+        connection.RaiseBinaryMessageReceived(AudioFrame(3_000));
+
+        Assert.Equal(1_000, Assert.Single(pipe.Chunks).ServerTimestamp);
+
+        connection.RaiseTextMessageReceived(StreamStart(Listed));
+        pipe.IsReady = true;
+        connection.RaiseBinaryMessageReceived(AudioFrame(4_000));
+
+        Assert.Equal(2, pipe.StartCalls.Count);
+        Assert.Equal(new long[] { 1_000, 4_000 }, pipe.Chunks.Select(c => c.ServerTimestamp));
+        Assert.Equal(PlaybackState.Playing, client.CurrentGroup?.PlaybackState);
+    }
+
+    private static byte[] AudioFrame(long timestamp)
+    {
+        // Player audio chunk header: type + timestamp + send_ahead (13 bytes), audio from byte 13.
+        var frame = new byte[13 + 4];
+        frame[0] = BinaryMessageTypes.PlayerAudio0;
+        BinaryPrimitives.WriteInt64BigEndian(frame.AsSpan(1, 8), timestamp);
+        return frame;
     }
 }

@@ -5241,12 +5241,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // "The format MUST be one the client listed in its supported_formats." The decoder, the
         // ring and the output device are all sized from this object, and an unpaired session's
         // peer is unauthenticated, so one this client never offered opens nothing. The spec
-        // names no close for it; the object is ignored, like the inactive one above.
+        // names no close for it, so the connection stays up — but the server now sends that
+        // format, and a stream left running would put those chunks through the previous
+        // format's decoder. The player stream ends as on a stream/end; chunks arriving after it
+        // queue up to MaxEarlyChunks and are dropped by the next start as the previous stream's.
         if (!IsListedPlayerFormat(payload.Format))
         {
             _logger.LogWarning(
-                "Stream start: ignoring player format {Format}, not one of this client's supported_formats",
+                "Stream start: player format {Format} is not one of this client's supported_formats; stopping the player stream",
                 payload.Format);
+            await StopStreamRolesAsync(new List<string> { "player" }, stopPlayer: true);
             return;
         }
 
