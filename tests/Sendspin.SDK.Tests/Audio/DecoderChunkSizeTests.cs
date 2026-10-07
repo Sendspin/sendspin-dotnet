@@ -97,6 +97,29 @@ public class DecoderChunkSizeTests
     }
 
     [Theory]
+    [InlineData(2)] // half a frame: one stray sample
+    [InlineData(3)] // and a stray byte on top of it
+    public void Pcm_ChunkEndingPartWayThroughAFrame_DecodesWholeFramesOnly(int strayBytes)
+    {
+        // Issue #353: the count was bytes / bytes-per-sample, so a stereo chunk two bytes long
+        // handed back an odd number of samples. The ring is interleaved with nothing marking
+        // where a frame starts, so everything written after it played with left and right
+        // exchanged until the next clear.
+        var logger = new CapturingLogger<PcmDecoder>();
+        using var decoder = new PcmDecoder(PcmFormat(48000, 2), logger);
+
+        var samples = BuildPcmSamples(48000 * 20 / 1000 * 2);
+        var chunk = ToPcm16(samples).Concat(new byte[strayBytes]).ToArray();
+        var decoded = new float[decoder.MaxSamplesPerFrame];
+
+        var written = decoder.Decode(chunk, decoded);
+
+        Assert.Equal(samples.Length, written);
+        Assert.Equal(ToFloats(samples), decoded.AsSpan(0, written).ToArray());
+        Assert.Single(logger.MessagesAt(LogLevel.Warning));
+    }
+
+    [Theory]
     [InlineData(96000, 14400)]
     [InlineData(192000, 28800)]
     public void Flac_MaxSamplesPerFrame_HoldsAFullLengthChunkAtHiRes(int sampleRate, int expectedPerChannel)

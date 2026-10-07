@@ -60,8 +60,21 @@ public sealed class PcmDecoder : IAudioDecoder
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var sampleCount = encodedData.Length / _bytesPerSample;
+        // Whole frames only. The ring holds interleaved frames with nothing marking where one
+        // starts, so a stray sample at the end of one chunk puts every sample after it in the
+        // wrong channel until the next clear.
+        var bytesPerFrame = _bytesPerSample * Format.Channels;
+        var sampleCount = encodedData.Length / bytesPerFrame * Format.Channels;
         var outputCount = Math.Min(sampleCount, decodedSamples.Length);
+
+        if (encodedData.Length % bytesPerFrame != 0)
+        {
+            _logger.LogWarning(
+                "PCM chunk of {Bytes} bytes is not a whole number of {BytesPerFrame}-byte frames: dropping the trailing {Dropped} bytes.",
+                encodedData.Length,
+                bytesPerFrame,
+                encodedData.Length % bytesPerFrame);
+        }
 
         if (outputCount < sampleCount)
         {

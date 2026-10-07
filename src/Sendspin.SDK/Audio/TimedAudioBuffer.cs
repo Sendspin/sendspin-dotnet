@@ -334,7 +334,7 @@ public sealed class TimedAudioBuffer : ITimedAudioBuffer
         _clockSync = clockSync;
         _syncOptions = syncOptions?.Clone() ?? SyncCorrectionOptions.Default;
         _syncOptions.Validate();
-        SyncCorrectionPolicy.WarnIfSpeedCapExceeded(_syncOptions, _logger);
+        SyncCorrectionPolicy.WarnIfOutsideSpec(_syncOptions, _logger);
         _sampleRate = format.SampleRate;
         _channels = format.Channels;
         _samplesPerMs = (_sampleRate * _channels) / 1000;
