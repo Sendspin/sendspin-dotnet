@@ -176,7 +176,11 @@ public class RoleConfigOwnershipTests
 
         using var start = new Barrier(8);
 
-        var workers = Enumerable.Range(0, 8).Select(i => Task.Run(async () =>
+        // Each worker gets its own thread for the rendezvous. On pool threads the barrier parks
+        // every worker the pool has until it has grown to eight, which on a two-core runner
+        // takes about five seconds, and for that long no other test in the run gets a
+        // continuation or a timer callback: whichever of them had a five-second wait timed out.
+        var workers = Enumerable.Range(0, 8).Select(i => Task.Factory.StartNew(async () =>
         {
             start.SignalAndWait();
             for (int n = 0; n < 40; n++)
@@ -192,7 +196,7 @@ public class RoleConfigOwnershipTests
                         types: new List<string> { VisualizerTypes.Loudness }, rateMax: 30 + n);
                 }
             }
-        })).ToArray();
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap()).ToArray();
 
         await Task.WhenAll(workers);
 
