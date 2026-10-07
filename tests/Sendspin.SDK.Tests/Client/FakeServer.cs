@@ -35,6 +35,7 @@ internal class FakeServer : IAsyncDisposable
     private readonly Channel<string> _pairAborts = Channel.CreateUnbounded<string>();
     private TestNoiseServer? _noise;
     private Task? _receiveLoop;
+    private TaskCompletionSource? _rehandshake;
 
     /// <param name="psk">Must match a PSK the host's pairing record store resolves.</param>
     /// <param name="activities">server/activate activities: ["playback"], or empty for discovery.</param>
@@ -63,6 +64,18 @@ internal class FakeServer : IAsyncDisposable
 
     /// <summary>Sends an encrypted application JSON message. Valid once the handshake completed.</summary>
     internal Task SendJsonAsync(string json) => SendEncryptedAsync(json);
+
+    /// <summary>
+    /// Runs an in-band re-handshake onto <paramref name="psk"/> and returns once the new keys
+    /// are in place. Sends no server/activate: what follows the re-key is the test's to send.
+    /// </summary>
+    internal async Task RehandshakeAsync(byte[] psk, string pskCategory = "lt")
+    {
+        Assert.NotNull(_noise);
+        _rehandshake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await SendRawBinaryAsync(_noise.StartRehandshake(psk, pskCategory));
+        await _rehandshake.Task;
+    }
 
     /// <summary>Sends a binary frame as given, bypassing the Noise transport — what a desynchronised peer puts on the wire.</summary>
     internal Task SendRawBinaryAsync(byte[] frame) =>
@@ -252,6 +265,14 @@ internal class FakeServer : IAsyncDisposable
             {
                 var goodbye = MessageSerializer.Deserialize<ClientGoodbyeMessage>(json);
                 _goodbye.TrySetResult(goodbye?.Payload.Reason ?? string.Empty);
+                break;
+            }
+
+            case "noise/handshake":
+            {
+                // The reply to RehandshakeAsync's message 1, still under the old keys.
+                _noise.CompleteHandshake(json);
+                _rehandshake?.TrySetResult();
                 break;
             }
 
