@@ -2778,6 +2778,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // "A server MUST NOT activate a role or version the client did not list in
+        // supported_roles." The spec names no rejection for one that does, so the activation
+        // stands and the unlisted roles are simply not part of the grant: nothing behind them
+        // exists here to act on what the server would send.
+        if (activeRoles.Any(r => !_capabilities.Roles.Contains(r)))
+        {
+            _logger.LogWarning("server/activate activated roles this client did not list; ignoring them: [{Roles}]",
+                string.Join(", ", activeRoles.Where(r => !_capabilities.Roles.Contains(r))));
+            activeRoles = [.. activeRoles.Where(_capabilities.Roles.Contains)];
+        }
+
         // Recorded only once the activation is admitted: this property is what the
         // host's arbitration reads, so a refused activate must
         // not leave its activities behind. 'Last accepted activation' is the only
@@ -4682,10 +4693,23 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // that announcement carries is the state as it stands: a scheduled metadata or color
         // update has not been applied yet and announces itself when it is (spec #135, pending merge).
 
+        // Each object counts "only if the ... role is active" (messaging.md). One for a role that
+        // is not is ignored, a null one included: the activate that removed the role already
+        // cleared its state, and applying a late object would bring it back.
+        bool metadataPresent = payload.Metadata.IsPresent && IsRoleActive("metadata");
+        bool controllerPresent = payload.Controller.IsPresent && IsRoleActive("controller");
+        bool colorPresent = payload.Color.IsPresent && IsRoleActive("color");
+        if (!metadataPresent && !controllerPresent && !colorPresent)
+        {
+            _logger.LogDebug("server/state [{Player}]: no object for an active role; ignored",
+                _capabilities.ClientName);
+            return;
+        }
+
         // Apply the metadata role. Full state per spec #175: the object is the role's complete
         // metadata, so a leaf it omits is unset — ApplyMetadata builds from it alone rather than
         // merging against what is held.
-        if (payload.Metadata.IsPresent)
+        if (metadataPresent)
         {
             var meta = payload.Metadata.Value;
 
@@ -4708,7 +4732,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // The server sends server/command with player-specific volume when it wants
         // to change THIS player's output.
         // Per the Sendspin spec, repeat/shuffle live in the controller object (not metadata).
-        if (payload.Controller.IsPresent)
+        if (controllerPresent)
         {
             if (payload.Controller.Value is not { } controller)
             {
@@ -4741,7 +4765,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Apply the color role. Full state per spec #175: the object is the complete palette, so a
         // color it omits is unset — ApplyColor takes each from it alone. Scheduled as metadata is.
         var colorChanged = false;
-        if (payload.Color.IsPresent)
+        if (colorPresent)
         {
             var color = payload.Color.Value;
 

@@ -70,7 +70,7 @@ public class MediaDisplaySchedulingTests
                 AudioPipeline = audioPipeline,
                 Capabilities = new ClientCapabilities
                 {
-                    Roles = new List<string> { "visualizer@v1", "artwork@v1" },
+                    Roles = new List<string> { "visualizer@v1", "artwork@v1", "metadata@v1", "color@v1" },
                     VisualizerRoleSupport = new VisualizerRoleSupport
                     {
                         BufferCapacity = bufferCapacity,
