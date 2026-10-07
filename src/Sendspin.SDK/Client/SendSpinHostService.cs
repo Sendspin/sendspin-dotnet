@@ -1123,7 +1123,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// A connection's arbitration priority, from its declared server/activate activities.
     /// </summary>
     private static ConnectionPriority PriorityOf(SendspinClientService client)
-        => client.LastServerActivate is { } activate
+        => client.ArbitrationActivate is { } activate
             ? ServerArbitration.FromActivities(activate.ActivitiesList)
             : ConnectionPriority.Empty;
 

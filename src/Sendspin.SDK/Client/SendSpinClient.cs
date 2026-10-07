@@ -449,6 +449,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public ServerActivatePayload? LastServerActivate { get; private set; }
 
+    // Volatile: written on the receive loop, read by the host's arbitration on another thread.
+    private volatile ServerActivatePayload? _arbitrationActivate;
+
+    /// <summary>
+    /// The activate that classifies this connection for multi-server arbitration: the last one
+    /// accepted on it. Unlike <see cref="LastServerActivate"/> it is not cleared by an in-band
+    /// re-handshake — the window before the next activate grants nothing, but the connection
+    /// is still the one it was (#340).
+    /// </summary>
+    internal ServerActivatePayload? ArbitrationActivate => _arbitrationActivate;
+
     /// <inheritdoc />
     public StreamStartPayload? LastStreamStart { get; private set; }
 
@@ -777,12 +788,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // disconnect because this runs on the dial path only (a listen-path connection never
         // passes through Connecting): this particular clear does not reach the listen path's
         // arbitration, SendspinHostService.PriorityOf, which also reads LastServerActivate.
-        // That is no longer the whole story, though — DetectSessionRekey clears the same
-        // field for the in-band re-key case, and it runs from OnTextMessageReceived, which
-        // both paths share, so THAT clear does reach PriorityOf. In the window between a
-        // re-key and the new session's next activate, PriorityOf reads Empty, which changes
-        // two ServerArbitration.Decide rules — see DetectSessionRekey's own comment.
+        // DetectSessionRekey clears the same field for the in-band re-key case on both
+        // paths, but leaves what arbitration reads; a new connection keeps neither.
         LastServerActivate = null;
+        _arbitrationActivate = null;
 
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles so
         // IsSourceStreamingPermitted has a single field to read the source-role grant from.
@@ -2556,13 +2565,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Unlike ResetHandshakeStateForNewConnection's clear of the same field, this one reaches
         // both the dial
         // and listen paths — DetectSessionRekey runs from OnTextMessageReceived, which both
-        // share — so it also reaches SendspinHostService.PriorityOf's read of this field. In
-        // the window between a re-key and this session's next activate, PriorityOf reports
-        // ConnectionPriority.Empty, which stops Exception
-        // 1 ("a pairing attempt is not displaced") applying — during a pairing.md:63
-        // re-handshake, which is exactly when a pairing attempt is in flight. Whether
-        // PriorityOf should tolerate this transient is filed separately; this comment records
-        // that the gap exists, not that it is fine.
+        // share. The host's arbitration must not read the cleared grant as a holder with no
+        // activities, though: what a connection is doing "persists across a re-handshake"
+        // (connection.md), and a pairing attempt being promoted onto its new record is
+        // exactly the holder that "is not displaced". So arbitration reads ArbitrationActivate,
+        // which this does not touch (#340).
         LastServerActivate = null;
 
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles (see
@@ -3004,6 +3011,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // not leave its activities behind. 'Last accepted activation' is the only
         // defensible meaning for a value other code grants permission from.
         LastServerActivate = payload;
+        _arbitrationActivate = payload;
 
         // Mirror roles where legacy consumers look.
         bool activeRolesChanged = false;
