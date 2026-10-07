@@ -5956,6 +5956,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     private void OnBinaryMessageReceived(object? sender, ReadOnlyMemory<byte> data)
     {
+        // The same rule, for the same reason, as the check at the top of
+        // OnTextMessageReceived: frames keep arriving while a close is in flight. Here they
+        // would be audio still fed to the pipeline, and an artwork sequence error would start
+        // a second close whose 'unauthorized' goodbye competes with the first one's reason.
+        if (_connection.State is ConnectionState.Disconnected or ConnectionState.Disconnecting)
+        {
+            return;
+        }
+
         if (AwaitingActivate)
         {
             _logger.LogDebug("Dropping binary message received before server/activate");
