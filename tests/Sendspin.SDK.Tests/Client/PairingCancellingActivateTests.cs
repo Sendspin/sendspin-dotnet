@@ -77,8 +77,17 @@ public class PairingCancellingActivateTests
         await using var h = await PairingHarness.StartAsync(
             presentPairingCode: async (_, ct) =>
             {
-                using var registration = ct.Register(() => cancelled.TrySetResult());
-                await Task.Delay(Timeout.Infinite, ct);
+                // Observed here rather than through a registration on the token: one disposed
+                // as this presenter unwinds can be removed before the cancellation reaches it.
+                try
+                {
+                    await Task.Delay(Timeout.Infinite, ct);
+                }
+                catch (OperationCanceledException)
+                {
+                    cancelled.TrySetResult();
+                    throw;
+                }
             });
 
         h.SendPairingActivate(method: "dynamic_pairing_code");
