@@ -4,8 +4,8 @@ namespace Sendspin.SDK.Protocol.Messages;
 
 /// <summary>
 /// Delivers the long-term PSK for this (client, server) pair. In the Pairing PSK flow
-/// it starts the pairing attempt, sent immediately after the pairing
-/// <c>server/activate</c>, carrying the PSK directly.
+/// it follows the <c>client/pair-init</c> that starts the attempt and carries the PSK
+/// directly; in the pairing code flows it carries the PSK wrapped under the PAKE key.
 /// </summary>
 public sealed class ClientPairFinalizeMessage : IMessageWithPayload<ClientPairFinalizePayload>
 {
@@ -24,7 +24,7 @@ public sealed class ClientPairFinalizePayload
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? LongTermPsk { get; set; }
 
-    /// <summary>64-char base64url wrapped PSK (pairing code flows only; not yet implemented).</summary>
+    /// <summary>64-char base64url wrapped PSK (pairing code flows only).</summary>
     [JsonPropertyName("wrapped_psk")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? WrappedPsk { get; set; }
@@ -146,10 +146,8 @@ public sealed class ClientPairPendingPayload
 /// <para>
 /// Which members apply depends on the key: <c>pairing_psk</c> and <c>static_pairing_code</c>
 /// carry <see cref="Locations"/> only; <c>dynamic_pairing_code</c> carries
-/// <see cref="OutChannels"/> and <see cref="Formats"/>. The spec's <c>digit_audio</c> object
-/// is not modelled — it is required only for a client that emits the code over a speaker from
-/// a server-supplied digit audio pack, which this SDK does not implement, so it never
-/// advertises the <c>'speaker'</c> out-channel.
+/// <see cref="OutChannels"/> and <see cref="Formats"/>. The SDK never advertises the
+/// <c>'speaker'</c> out-channel; docs/SPEC-VERSION.md, "Known deviations", says why.
 /// </para>
 /// </remarks>
 public sealed class PairMethodDescriptor

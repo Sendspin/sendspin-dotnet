@@ -1,13 +1,14 @@
-# EditorConfig for SendSpin Windows Client
+# EditorConfig for the Sendspin .NET SDK
 # https://editorconfig.org
 
 root = true
 
 # All files
+# No end_of_line here: .gitattributes keeps the repository LF and leaves the working tree
+# to the platform, so any value would be wrong for someone's checkout.
 [*]
 indent_style = space
 indent_size = 4
-end_of_line = crlf
 charset = utf-8
 trim_trailing_whitespace = true
 insert_final_newline = true

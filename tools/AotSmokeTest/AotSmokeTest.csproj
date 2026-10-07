@@ -20,7 +20,7 @@
 
     <!-- The point of the exercise: any trim/AOT complaint fails the build. -->
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-    <WarningsAsErrors>IL2026;IL2027;IL2046;IL2072;IL2075;IL3050;IL3051;IL3053</WarningsAsErrors>
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2027;IL2046;IL2072;IL2075;IL3050;IL3051;IL3053</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>

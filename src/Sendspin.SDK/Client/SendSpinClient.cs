@@ -101,6 +101,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // it to persist or remove. Null outside that window.
     private List<string>? _activeRolesBeforeRekey;
 
+    // A client/state was dropped while a re-handshake awaited its server/activate (see
+    // AwaitingActivateAfterRekey); that activate sends the full state in its place.
+    private bool _clientStateWithheldForRekey;
+
     // format from the current pairing activation, validated on receipt. Null when the
     // activation is not dynamic_pairing_code.
     private string? _activationPairingCodeFormat;
@@ -110,13 +114,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     // (where it was per-attempt) onto server/hello, so it is now connection-scoped.
     private List<string>? _serverLanguages;
 
-    // _handshakeTcs is published by the handshake waiter and completed by the connection's
-    // state-changed handler, which runs on the receive loop's thread. _handshakeLock covers
-    // both so a permanent failure that lands before the waiter publishes its TCS is still
-    // seen by it — see SendHandshakeAsync and CompleteHandshakeWait.
+    // _handshakeTcs is the outcome of the handshake a ConnectAsync is waiting on. It is
+    // published before the connection is started (BeginHandshakeWait), because the receive
+    // loop needs nothing from the caller: the whole exchange, or its failure, can be over
+    // before the caller's continuation runs. It is completed on the receive loop's thread, by
+    // the first admitted server/activate or by the Disconnected transition.
+    // _pendingRefusal is why this client is closing a connection it refused; that transition
+    // completes the outcome with it, so the caller cannot resume ahead of the goodbye.
     private readonly object _handshakeLock = new();
     private TaskCompletionSource<bool>? _handshakeTcs;
-    private SendspinHandshakeException? _handshakeFailure;
+    private SendspinHandshakeException? _pendingRefusal;
     private GroupState? _currentGroup;
     private PlayerState _playerState;
     private CancellationTokenSource? _timeSyncCts;
@@ -442,6 +449,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     public ServerActivatePayload? LastServerActivate { get; private set; }
 
+    // Volatile: written on the receive loop, read by the host's arbitration on another thread.
+    private volatile ServerActivatePayload? _arbitrationActivate;
+
+    /// <summary>
+    /// The activate that classifies this connection for multi-server arbitration: the last one
+    /// accepted on it. Unlike <see cref="LastServerActivate"/> it is not cleared by an in-band
+    /// re-handshake — the window before the next activate grants nothing, but the connection
+    /// is still the one it was (#340).
+    /// </summary>
+    internal ServerActivatePayload? ArbitrationActivate => _arbitrationActivate;
+
     /// <inheritdoc />
     public StreamStartPayload? LastStreamStart { get; private set; }
 
@@ -670,8 +688,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             : [.. channels];
 
     /// <summary>
-    /// The spec's precondition for streaming captured audio: a paired ('user'-trust)
-    /// connection with the source role currently active, on a client that is available ("A
+    /// The spec's precondition for streaming captured audio: a paired
+    /// (<see cref="SendspinTrustLevel.Paired"/>) connection with the source role currently active, on a client that is available ("A
     /// client MUST ignore <c>start</c> received while it is unavailable"). Evaluated per start
     /// attempt, because trust, the active-role set and availability can all change over a
     /// connection's life.
@@ -693,15 +711,51 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         _logger.LogInformation("Connecting to {Uri}", serverUri);
 
-        // Cleared here rather than in SendHandshakeAsync: a failure raised between the dial
-        // and the handshake wait belongs to this attempt and must survive to reach the caller.
-        lock (_handshakeLock)
+        // Before the dial, not after it: this await resumes on the caller's context — a UI
+        // thread, for an app that connects from one — while the handshake runs to its end on
+        // the receive loop. An outcome published afterwards misses whatever happened first.
+        var (handshake, previous) = BeginHandshakeWait();
+        try
         {
-            _handshakeFailure = null;
+            await _connection.ConnectAsync(serverUri, cancellationToken);
+        }
+        catch
+        {
+            // Nothing will await this outcome. Hand back the one it replaced: a call refused
+            // as "already connecting" must not strand the call that is.
+            lock (_handshakeLock)
+            {
+                if (ReferenceEquals(_handshakeTcs, handshake))
+                {
+                    _handshakeTcs = previous;
+                }
+            }
+
+            if (!handshake.TrySetCanceled())
+            {
+                _ = handshake.Task.Exception;
+            }
+
+            throw;
         }
 
-        await _connection.ConnectAsync(serverUri, cancellationToken);
-        await SendHandshakeAsync(cancellationToken);
+        await AwaitHandshakeAsync(handshake, cancellationToken);
+    }
+
+    /// <summary>
+    /// Publishes a fresh handshake outcome for the receive loop to complete, returning it and
+    /// the one it replaced.
+    /// </summary>
+    private (TaskCompletionSource<bool> Handshake, TaskCompletionSource<bool>? Previous) BeginHandshakeWait()
+    {
+        var handshake = new TaskCompletionSource<bool>();
+        lock (_handshakeLock)
+        {
+            var previous = _handshakeTcs;
+            _handshakeTcs = handshake;
+            _pendingRefusal = null;
+            return (handshake, previous);
+        }
     }
 
     /// <summary>
@@ -734,12 +788,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // disconnect because this runs on the dial path only (a listen-path connection never
         // passes through Connecting): this particular clear does not reach the listen path's
         // arbitration, SendspinHostService.PriorityOf, which also reads LastServerActivate.
-        // That is no longer the whole story, though — DetectSessionRekey clears the same
-        // field for the in-band re-key case, and it runs from OnTextMessageReceived, which
-        // both paths share, so THAT clear does reach PriorityOf. In the window between a
-        // re-key and the new session's next activate, PriorityOf reads Empty, which changes
-        // two ServerArbitration.Decide rules — see DetectSessionRekey's own comment.
+        // DetectSessionRekey clears the same field for the in-band re-key case on both
+        // paths, but leaves what arbitration reads; a new connection keeps neither.
         LastServerActivate = null;
+        _arbitrationActivate = null;
 
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles so
         // IsSourceStreamingPermitted has a single field to read the source-role grant from.
@@ -763,30 +815,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Sends the ClientHello message and waits for the ServerHello response.
-    /// Used for both initial connection and reconnection handshakes.
+    /// Waits for a handshake outcome published by <see cref="BeginHandshakeWait"/>: returns
+    /// once the first <c>server/activate</c> has been admitted, and throws if the connection
+    /// closed instead or the wait timed out. The outcome may already be complete.
     /// </summary>
-    private async Task SendHandshakeAsync(CancellationToken cancellationToken = default)
+    private async Task AwaitHandshakeAsync(
+        TaskCompletionSource<bool> handshakeTcs, CancellationToken cancellationToken = default)
     {
-        TaskCompletionSource<bool> handshakeTcs;
-        SendspinHandshakeException? alreadyFailed;
-        lock (_handshakeLock)
-        {
-            handshakeTcs = _handshakeTcs = new TaskCompletionSource<bool>();
-            alreadyFailed = _handshakeFailure;
-        }
-
-        // The connection's receive loop is already running when we get here, so a permanent
-        // failure can be raised before there is a TCS to fail — the continuation that resumes
-        // ConnectAsync may sit queued behind a busy UI thread while the peer is already
-        // closing. Publishing the TCS and reading the failure under the same lock the handler
-        // takes makes both interleavings equivalent: whichever side runs first, the caller
-        // still gets the diagnostic rather than a 30 s wait ending in TimeoutException.
-        if (alreadyFailed is not null)
-        {
-            throw alreadyFailed;
-        }
-
         // 30 s per the spec's recommended handshake-phase timeout.
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
@@ -796,10 +831,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             await using var registration = linkedCts.Token.Register(() => handshakeTcs.TrySetCanceled());
             var success = await handshakeTcs.Task;
 
-            if (success)
+            if (!success)
             {
-                _logger.LogInformation("Handshake complete with server {ServerId} ({ServerName})", ServerId, ServerName);
+                // Disconnected before the first server/activate was admitted, with no cause
+                // recorded (see CompleteHandshakeWait). Returning here would tell the caller
+                // it is connected.
+                throw new SendspinHandshakeException(HandshakeFailureKind.ConnectionClosed);
             }
+
+            _logger.LogInformation("Handshake complete with server {ServerId} ({ServerName})", ServerId, ServerName);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
@@ -842,6 +882,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     private Task SendAsync<T>(T message, CancellationToken cancellationToken = default)
         where T : IMessage
     {
+        if (AwaitingActivateAfterRekey)
+        {
+            // Dropped like the pairing window's, and for the same reasons. Nothing is exempt:
+            // the handshake reply is the connection's, and neither hello is re-sent.
+            if (message is ClientStateMessage)
+            {
+                _clientStateWithheldForRekey = true;
+            }
+
+            _logger.LogDebug(
+                "Re-handshake awaiting server/activate; dropping {Type}", message.GetType().Name);
+            return Task.CompletedTask;
+        }
+
         if (_pairingActivationActive && !IsAdmissibleDuringPairing(message))
         {
             _logger.LogDebug(
@@ -855,6 +909,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>Binary counterpart of <see cref="SendAsync{T}"/>: source audio, never a pairing message.</summary>
     private Task SendBinaryAsync(ReadOnlyMemory<byte> data)
     {
+        if (AwaitingActivateAfterRekey)
+        {
+            _logger.LogDebug("Re-handshake awaiting server/activate; dropping a binary frame");
+            return Task.CompletedTask;
+        }
+
         if (_pairingActivationActive)
         {
             // A pairing activate that omits active_roles leaves the prior roles standing, so a
@@ -1441,7 +1501,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         try
         {
-            await SendHandshakeAsync(cancellationToken);
+            await AwaitHandshakeAsync(BeginHandshakeWait().Handshake, cancellationToken);
         }
         catch (TimeoutException)
         {
@@ -2211,7 +2271,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Builds the player <c>supported_commands</c> list reported in client/state:
-    /// <c>volume</c> and <c>mute</c> always — the client applies both unconditionally — plus
+    /// <c>volume</c> and <c>mute</c> always — the client accepts both whenever the player role
+    /// is active — plus
     /// <c>set_output_delay</c> when the client accepts that command. The reference server derives
     /// controller group volume/mute from this list, so omitting them reads as volume-incapable.
     /// </summary>
@@ -2340,12 +2401,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _artworkTransfer.Reset();
         }
 
+        // What the controller state authorised, and that the group was playing, were the lost
+        // connection's to say: a command on the next one must be in the list that connection
+        // reports, and its activate re-grants the role before any server/state arrives. What is
+        // only displayed (the track, the colors, the group's name and volume) stays for the
+        // reconnect to replace, so a brief drop does not blank the application's UI.
+        if (e.NewState == ConnectionState.Reconnecting
+            && _currentGroup is { } group
+            && (group.SupportedCommands is not null || group.SeekMaxMs is not null
+                || group.PlaybackState != PlaybackState.Idle))
+        {
+            group.SupportedCommands = null;
+            group.SeekMaxMs = null;
+            group.PlaybackState = PlaybackState.Idle;
+            GroupStateChanged?.Invoke(this, group);
+        }
+
         // Clean up client state on full disconnection
         if (e.NewState == ConnectionState.Disconnected)
         {
             CompleteHandshakeWait(e.Exception as SendspinHandshakeException);
             ServerId = null;
             ServerName = null;
+
+            // As DisconnectAsync does: no connection is coming to replace any of it.
+            _currentGroup = null;
         }
 
         // Every dial starts here, the application's and each automatic reconnect attempt alike,
@@ -2369,7 +2449,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Reads the handshake waiter's TaskCompletionSource under <see cref="_handshakeLock"/>.
     /// </summary>
     /// <remarks>
-    /// The four completion sites on the message-handling path read the field unlocked, against
+    /// The completion site on the message-handling path reads the field unlocked, against
     /// a waiter that publishes it under the lock — the asymmetry #98 item 3 flags, and a
     /// contradiction of what the field's own comment says the lock is for. Only the read is
     /// guarded: completing outside the lock is deliberate, because the TCS runs its
@@ -2390,18 +2470,17 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <see cref="ConnectionStateChanged"/> would otherwise see the connect succeed and
     /// only find out when its first command threw "WebSocket is not connected".
     /// </summary>
+    /// <param name="failure">
+    /// The connection layer's verdict, or null when it has none — in which case a refusal
+    /// this client recorded before closing (<see cref="RefuseActivation"/>) is the cause.
+    /// </param>
     private void CompleteHandshakeWait(SendspinHandshakeException? failure)
     {
         TaskCompletionSource<bool>? tcs;
         lock (_handshakeLock)
         {
-            // Recorded before the TCS is read, and read by the waiter after it publishes one,
-            // so the failure cannot fall between the two.
-            if (failure is not null)
-            {
-                _handshakeFailure = failure;
-            }
-
+            failure ??= _pendingRefusal;
+            _pendingRefusal = null;
             tcs = _handshakeTcs;
         }
 
@@ -2414,6 +2493,34 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             tcs?.TrySetResult(false);
         }
+    }
+
+    /// <summary>
+    /// Closes the connection over a <c>server/activate</c> this client will not accept, and
+    /// records why for a <see cref="ConnectAsync"/> still waiting on the handshake.
+    /// </summary>
+    /// <remarks>
+    /// Recorded rather than thrown to the waiter here: the disconnect completes the wait (see
+    /// <see cref="CompleteHandshakeWait"/>), so the caller resumes once the goodbye carrying
+    /// <paramref name="goodbyeReason"/> has gone out, not ahead of it. Nothing else reads the
+    /// record, so a caller that starts waiting mid-close waits for the close as well. On the
+    /// listen path, and for an activation after the first, nothing is waiting and the
+    /// disconnect discards it.
+    /// </remarks>
+    private void RefuseActivation(string goodbyeReason, string detail)
+    {
+        var failure = new SendspinHandshakeException(
+            goodbyeReason == GoodbyeReasons.PairingRequired
+                ? HandshakeFailureKind.PairingRequired
+                : HandshakeFailureKind.ActivationRefused,
+            detail);
+
+        lock (_handshakeLock)
+        {
+            _pendingRefusal = failure;
+        }
+
+        DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
     }
 
     /// <summary>
@@ -2459,13 +2566,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // Unlike ResetHandshakeStateForNewConnection's clear of the same field, this one reaches
         // both the dial
         // and listen paths — DetectSessionRekey runs from OnTextMessageReceived, which both
-        // share — so it also reaches SendspinHostService.PriorityOf's read of this field. In
-        // the window between a re-key and this session's next activate, PriorityOf reports
-        // ConnectionPriority.Empty, which stops Exception
-        // 1 ("a pairing attempt is not displaced") applying — during a pairing.md:63
-        // re-handshake, which is exactly when a pairing attempt is in flight. Whether
-        // PriorityOf should tolerate this transient is filed separately; this comment records
-        // that the gap exists, not that it is fine.
+        // share. The host's arbitration must not read the cleared grant as a holder with no
+        // activities, though: what a connection is doing "persists across a re-handshake"
+        // (connection.md), and a pairing attempt being promoted onto its new record is
+        // exactly the holder that "is not displaced". So arbitration reads ArbitrationActivate,
+        // which this does not touch (#340).
         LastServerActivate = null;
 
         // HandleServerActivate mirrors active_roles into LastServerHello.ActiveRoles (see
@@ -2562,6 +2667,37 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </para>
     /// </remarks>
     private bool AwaitingActivate => LastServerActivate is null;
+
+    /// <summary>
+    /// The outbound counterpart of <see cref="AwaitingActivate"/> for an in-band re-handshake:
+    /// the session has been re-keyed and its <c>server/activate</c> has not been admitted yet,
+    /// so nothing may be sent.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// connection.md, Re-handshake: "The server MUST NOT start new application messages after
+    /// sending Noise message 1, nor the client after receiving it, except for the handshake and
+    /// <c>server/activate</c>. This restriction ends when the server sends, or the client
+    /// receives, the new <c>server/activate</c>." The framing swaps keys as it writes the reply,
+    /// so without this a time probe or a state update sent in the gap travels under the new keys
+    /// ahead of that activate.
+    /// </para>
+    /// <para>
+    /// The gap has two halves. Until the next message arrives the swap shows only as a
+    /// handshake hash <see cref="DetectSessionRekey"/> has not seen; from that message on, as
+    /// the grant it cleared. A connection's own handshake is not this window, and its
+    /// <c>client/hello</c> has to go out.
+    /// </para>
+    /// <para>
+    /// A send already past this check when the reply is written still follows it under the new
+    /// keys. Closing that would mean deciding under the connection's send lock; it is a few
+    /// instructions wide against a window the server keeps open for milliseconds.
+    /// </para>
+    /// </remarks>
+    private bool AwaitingActivateAfterRekey =>
+        _activateReceived
+        && (LastServerActivate is null
+            || (_session.HandshakeHash is { } hash && !hash.Span.SequenceEqual(_lastHandshakeHash)));
 
     private void OnTextMessageReceived(object? sender, TextMessageReceivedEventArgs e)
     {
@@ -2729,7 +2865,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (message is null)
         {
             _logger.LogWarning("Failed to deserialize server/hello");
-            CurrentHandshakeWaiter()?.TrySetResult(false);
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
             return;
         }
 
@@ -2766,8 +2902,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Surfaces the spec's credential-mismatch signal to the operator: a Sentinel-keyed session
     /// with a stored long-term record for this very server means the server referenced a
     /// credential this client could not use, and the client answered with the published Sentinel
-    /// PSK (connection.md § Sentinel Fallback). The connection works, but at trust level 'none'
-    /// — no playback until someone re-pairs.
+    /// PSK (connection.md § Sentinel Fallback). The connection works, but unpaired
+    /// (<see cref="SendspinTrustLevel.Unpaired"/>) — no playback until someone re-pairs.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -2835,8 +2971,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _logger.LogWarning("Inadmissible server/activate (activities: {Activities}); closing with {Reason}",
                 string.Join(", ", payload.ActivitiesList), goodbyeReason);
-            CurrentHandshakeWaiter()?.TrySetResult(false);
-            DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
+            RefuseActivation(goodbyeReason, $"activities [{string.Join(", ", payload.ActivitiesList)}]");
             return;
         }
 
@@ -2851,14 +2986,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         var activeRoles = payload.ActiveRoles ?? (playbackCapable ? previousActiveRoles : []);
 
         // Source role is trust-gated: it streams potentially sensitive captured audio,
-        // so it MUST only run on a paired ('user'-trust) connection. If a server
-        // activates source@v1 without user trust, refuse and close (spec).
+        // so it MUST only run on a paired connection (SendspinTrustLevel.Paired). If a server
+        // activates source@v1 on any other, refuse and close (spec).
         if (activeRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
             && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
-            _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
-            CurrentHandshakeWaiter()?.TrySetResult(false);
-            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+            _logger.LogWarning("server/activate activated source@v1 on a connection that is not paired; closing");
+            RefuseActivation("unauthorized", "source role without a pairing");
             return;
         }
 
@@ -2878,6 +3012,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // not leave its activities behind. 'Last accepted activation' is the only
         // defensible meaning for a value other code grants permission from.
         LastServerActivate = payload;
+        _arbitrationActivate = payload;
 
         // Mirror roles where legacy consumers look.
         bool activeRolesChanged = false;
@@ -3018,6 +3153,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             // clock has yet to converge — the first-convergence branch in ApplyBestSample,
             // and the latch set inside SendInitialClientStateAsync before its first await
             // keeps any race between them from double-sending.
+            bool stateWithheldForRekey = _clientStateWithheldForRekey;
+            _clientStateWithheldForRekey = false;
+
             if (_initialClientStateHeldForPairing)
             {
                 _initialClientStateHeldForPairing = false;
@@ -3026,11 +3164,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     SendOrDeferInitialClientState();
                 }
             }
-            else if (leavingPairing && _initialClientStateSent)
+            else if ((leavingPairing || stateWithheldForRekey) && _initialClientStateSent)
             {
                 // Recovers everything the window dropped. State is last-write-wins, so one full
                 // report of the current values restores the server's view — a volume the app
                 // changed mid-window, an output delay, an availability flip — without a queue.
+                // The window is a pairing activation, or a re-handshake that dropped a
+                // client/state while it awaited this activate.
                 // Skipped when the initial state has yet to go out: the branch above owns that
                 // case, and a state message before it would become the connection's "initial".
                 ResendClientStateAfterPairingAsync().SafeFireAndForget(_logger);
@@ -3182,19 +3322,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         if (CanRun(PairMethods.DynamicPairingCode))
         {
-            // 'speaker' is filtered out rather than passed through: a client advertising it
-            // must also advertise a digit_audio object and be able to play the server's digit
-            // audio pack, neither of which this SDK implements. Advertising it would invite a
-            // server to pick a flow that reaches nobody. If that leaves no channel at all, the
-            // method is withheld entirely — an empty out_channels is not a usable offer.
+            // 'speaker' is filtered out rather than passed through: the SDK does not speak a
+            // pairing code (docs/SPEC-VERSION.md, "Known deviations"). If that leaves no channel
+            // at all, the method is withheld entirely — an empty out_channels is not a usable
+            // offer.
             var outChannels = _capabilities.PairingCodeOutChannels
                 .Where(c => !string.Equals(c, "speaker", StringComparison.Ordinal))
                 .ToList();
             if (outChannels.Count != _capabilities.PairingCodeOutChannels.Count)
             {
                 _logger.LogWarning(
-                    "ClientCapabilities.PairingCodeOutChannels lists 'speaker', which requires the "
-                    + "digit-audio flow this SDK does not implement; it is omitted from the "
+                    "ClientCapabilities.PairingCodeOutChannels lists 'speaker', but this SDK does "
+                    + "not speak a pairing code; it is omitted from the "
                     + "{Method} descriptor",
                     PairMethods.DynamicPairingCode);
             }
@@ -3567,8 +3706,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Starts the attempt timeout. Called from the attempt's first message — client/pair-init
-    /// for the pairing code flows, client/pair-finalize for Pairing PSK.
+    /// Starts the attempt timeout. Called from the attempt's first message, which is
+    /// client/pair-init in every flow.
     /// </summary>
     private void ArmAttemptTimeout()
     {
@@ -4201,6 +4340,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // clock that reports unconverged after reset the two now agree).
         _hasConvergedOnce = false;
         _initialClientStateHeldForPairing = pairing;
+        _clientStateWithheldForRekey = false;
         _loggedDisplayDropWhileUnavailable = false;
 
         // Role-state readiness is per connection too (spec PR #204): the new server has received
@@ -4600,10 +4740,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // the transport builds them, so the rule is restated rather than inherited: the
         // reference server stops reading the socket during a pairing attempt and treats the
         // first frame it reads afterwards as the next pairing message, so a probe sent into
-        // that window aborts the attempt as a protocol error.
-        if (_pairingActivationActive)
+        // that window aborts the attempt as a protocol error. A re-handshake awaiting its
+        // activate holds probes too (see AwaitingActivateAfterRekey). Returning before the
+        // reply slot is filled is what keeps a probe that never went out from being matched
+        // to a later server/time.
+        if (_pairingActivationActive || AwaitingActivateAfterRekey)
         {
-            _logger.LogDebug("Pairing activation in effect; dropping ClientTimeMessage");
+            _logger.LogDebug("Pairing activation or re-handshake in effect; dropping ClientTimeMessage");
             return null;
         }
 
@@ -4801,12 +4944,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (message.PlaybackState.HasValue)
             _currentGroup.PlaybackState = message.PlaybackState.Value;
 
-        // Log group ID changes (helps diagnose grouping issues)
+        // Log group ID changes (helps diagnose grouping issues). The controller state is left
+        // alone: a server reports the new group's in a server/state of its own, and aiosendspin
+        // sends that one ahead of this message, so clearing here would discard it (#338).
         if (previousGroupId != _currentGroup.GroupId && !string.IsNullOrEmpty(previousGroupId))
         {
-            // supported_commands belongs to the previous group; drop it until the new group's server/state.
-            _currentGroup.SupportedCommands = null;
-
             _logger.LogInformation("group/update [{Player}]: Group ID changed {OldId} -> {NewId}",
                 _capabilities.ClientName, previousGroupId, _currentGroup.GroupId);
         }
@@ -4841,7 +4983,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // others alone. Every branch below is announced by the GroupStateChanged at the end of
         // this method, which is how a UI learns to drop the deactivated role's data (#196). What
         // that announcement carries is the state as it stands: a scheduled metadata or color
-        // update has not been applied yet and announces itself when it is (spec #135, pending merge).
+        // update has not been applied yet and announces itself when it is (spec #135).
 
         // Each object counts "only if the ... role is active" (messaging.md). One for a role that
         // is not is ignored, a null one included: the activate that removed the role already
@@ -5652,7 +5794,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     /// <summary>
     /// Drops the image a channel is still holding when a <c>stream/start</c> changes that
-    /// channel's configuration, per spec #135 (pending merge): the held image was encoded for a
+    /// channel's configuration, per spec #135: the held image was encoded for a
     /// configuration that no longer applies, and the server re-sends it if it still does.
     /// </summary>
     /// <param name="previous">The artwork stream's configuration so far, if it has one.</param>
@@ -5852,8 +5994,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// that names <c>artwork</c> outright is honoured anyway, as the C++ reference client
     /// switches on the same three names for either message.
     /// A present-but-empty array names no role and so ends nothing, as everywhere else.
-    /// Dropping the artwork still held is what spec #135 (pending merge) means by "on
-    /// <c>stream/end</c>, clearing buffers includes discarding pending images".
+    /// Dropping the artwork still held is the artwork role's "On <c>stream/end</c> for the
+    /// artwork role, clients MUST clear the current image and discard any pending image".
     /// <para>
     /// <paramref name="endingStream"/> separates the two messages for the artwork already on
     /// display: a <c>stream/end</c> is playback termination and additionally clears it (spec #266),
@@ -5867,8 +6009,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // Every stream the message reaches: both media roles for a stream/end, the
             // visualizer alone for a stream/clear. The state roles hold no stream, and spec
-            // #135 (pending merge) ties a pending metadata or color update to nothing a stream
-            // teardown says.
+            // #135 ties a pending metadata or color update to nothing a stream teardown says.
             FlushVisualizer(endingStream);
             if (endingStream)
             {
@@ -5964,9 +6105,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // No catch here, deliberately: every binary parser is Try-style (a malformed frame
         // parses to null and is dropped above or inside DispatchBinaryMessage, or for artwork
         // closes the connection there), so nothing a hostile payload produces can throw.
-        // Anything that does throw — a buggy event subscriber or pipeline — is a bug in our own
-        // handling and must propagate so the receive loop surfaces it as a lost connection, not
-        // be collapsed into a log line (#88 item 2).
+        // Anything that does throw is a bug in our own handling or the pipeline's and must
+        // propagate so the receive loop surfaces it as a lost connection, not be collapsed into
+        // a log line (#88 item 2). The subscribers to the display events are not ours: the
+        // scheduler guards those raises, and only those (#337).
         DispatchBinaryMessage(category, type, timestamp, payload, data);
     }
 

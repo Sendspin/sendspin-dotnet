@@ -255,10 +255,8 @@ public sealed class ClientCapabilities
     /// entry does not break pairing — but it is no longer a value the spec defines.
     /// </para>
     /// <para>
-    /// <c>"speaker"</c> is dropped from the advertised descriptor: the spec requires a speaker
-    /// client to also advertise a <c>digit_audio</c> object and to consume the server's digit
-    /// audio pack, which this SDK does not implement. Advertising it would invite a server to
-    /// pick a flow the client cannot run.
+    /// <c>"speaker"</c> is dropped from the advertised descriptor, because the SDK does not
+    /// speak a pairing code; docs/SPEC-VERSION.md, "Known deviations", has the reasoning.
     /// </para>
     /// </remarks>
     public List<string> PairingCodeOutChannels { get; set; } = new() { "display" };

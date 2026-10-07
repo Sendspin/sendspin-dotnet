@@ -66,8 +66,10 @@ exercises:
 - **The `speaker` out-channel.** A `"speaker"` entry in
   `ClientCapabilities.PairingCodeOutChannels` is dropped from the advertised `out_channels`,
   with a warning, and `dynamic_pairing_code` is withheld if that leaves no channel. The spec
-  allows `'display' | 'speaker'`. The value is an informational hint, so nothing about pairing
-  depends on it.
+  allows `'display' | 'speaker'`, and has a speaking client supply the audio: "A client that
+  speaks it does so from audio it bundles itself - recordings or a synthesizer - and the server
+  supplies none." The SDK bundles neither. The value is an informational hint, so nothing else
+  about pairing depends on it.
 
 ### Stricter than the spec
 
@@ -78,6 +80,9 @@ exercises:
   action that releases a held-back attempt also reset the count. In the SDK only a verified
   `server_kc` resets it, so once the method is held back every attempt needs an open
   `PairingWindow`, and a failed round aborts rather than retries, until one pairing succeeds.
+- **An artwork image over 16 MiB is not displayed.** The spec sets no limit on an image's
+  `total_size`. The SDK counts and discards the parts of a larger one, as it does for image
+  data while unavailable, and logs a warning; the transfer is not treated as a protocol error.
 
 ### Differs from the spec
 
@@ -109,6 +114,11 @@ exercises:
 - **A `stream/clear` that names `artwork` discards that role's pending images.** The spec's
   `roles` for `stream/clear` are `player` and `visualizer`, so a conformant server does not send
   it. With `roles` omitted, artwork is left alone as the spec says.
+- **A visualizer frame up to 20 ms late is still rendered.** The spec says "Data whose
+  timestamp is already in the past on arrival is dropped; stale visualization frames are never
+  rendered." The SDK drops a frame only once it is more than 20 ms past its timestamp
+  (`MediaDisplayScheduler.StaleThresholdMicroseconds`), as the C++ reference client does, so
+  that one missing its moment by a scheduling quantum is not lost.
 - **A role version replacement is not treated as a removal.** Active roles are compared by
   family (`player`, not `player@v1`). Every role has only a `v1`, so no replacement can occur on
   the rc1 wire.

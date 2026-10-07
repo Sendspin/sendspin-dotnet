@@ -1,0 +1,7 @@
+# Text is stored with LF in the repository; the working tree follows the platform's git
+# settings. Every file already committed is LF, so this rewrites nothing.
+* text=auto
+
+# Shell scripts must stay LF even in a Windows checkout, or bash outside Git for Windows
+# (WSL, a container mounting the checkout) fails on the carriage returns.
+*.sh text eol=lf

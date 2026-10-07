@@ -30,9 +30,13 @@ public interface ISendspinClient : IAsyncDisposable
     /// or <c>null</c> if the handshake has not yet completed.
     /// </summary>
     /// <remarks>
-    /// Exposes fields that the scalar <see cref="ServerId"/>/<see cref="ServerName"/> properties
-    /// don't surface, notably <see cref="ServerHelloPayload.ActiveRoles"/> and
-    /// <see cref="ServerHelloPayload.Version"/>. Re-set on every reconnect handshake.
+    /// Exposes what the scalar <see cref="ServerName"/> property doesn't surface:
+    /// <see cref="ServerHelloPayload.Languages"/> and
+    /// <see cref="ServerHelloPayload.SourceV1Support"/>. The role grant comes from
+    /// <c>server/activate</c>, not from this message, and the payload's
+    /// <see cref="ServerHelloPayload.ServerId"/> and <see cref="ServerHelloPayload.Version"/> are
+    /// pre-encryption residue an encrypted server does not send — see the remarks on
+    /// <see cref="ServerHelloPayload"/>. Re-set on every reconnect handshake.
     /// </remarks>
     ServerHelloPayload? LastServerHello { get; }
 
@@ -50,6 +54,13 @@ public interface ISendspinClient : IAsyncDisposable
     /// <summary>
     /// Current group state (volume/mute represent group averages for display).
     /// </summary>
+    /// <remarks>
+    /// Null until the server reports a group, and again once the connection is
+    /// <see cref="ConnectionState.Disconnected"/>. While a lost connection is being re-established
+    /// the group is kept for display, with <see cref="GroupState.SupportedCommands"/> and
+    /// <see cref="GroupState.SeekMaxMs"/> unset and <see cref="GroupState.PlaybackState"/> idle
+    /// until the new connection reports them; <see cref="GroupStateChanged"/> announces that.
+    /// </remarks>
     GroupState? CurrentGroup { get; }
 
     /// <summary>
@@ -86,7 +97,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// an application that only subscribes to <see cref="ConnectionStateChanged"/> — or to
     /// nothing, as the Quick Start once showed — would otherwise see this call return
     /// normally against a server it had just permanently rejected, and discover the problem
-    /// when its first command threw "WebSocket is not connected".
+    /// when its first command threw "WebSocket is not connected". The same holds when it is
+    /// this client that refuses the server, or when the connection closes for any other
+    /// reason before the first <c>server/activate</c> is admitted: the call returns normally
+    /// only if the client is connected.
     /// </para>
     /// <para>
     /// A transport-level failure to reach the server (for example
@@ -96,7 +110,9 @@ public interface ISendspinClient : IAsyncDisposable
     /// </para>
     /// </remarks>
     /// <exception cref="Connection.SendspinHandshakeException">
-    /// The handshake failed permanently, so retrying cannot help.
+    /// The handshake did not complete. Except for
+    /// <see cref="Connection.HandshakeFailureKind.ConnectionClosed"/> the failure is permanent,
+    /// so retrying cannot help.
     /// <see cref="Connection.SendspinHandshakeException.Kind"/> distinguishes the cases:
     /// <see cref="Connection.HandshakeFailureKind.LegacyServer"/> — the server predates the
     /// encrypted protocol (aiosendspin &lt; 7.0.0); upgrade it, or use the 9.x SDK line.
@@ -108,6 +124,17 @@ public interface ISendspinClient : IAsyncDisposable
     /// <see cref="Connection.HandshakeFailureKind.HandshakeRejected"/> — the server speaks the
     /// encrypted protocol but refused this handshake for any other reason: an unsupported cipher
     /// suite, a version mismatch, or malformed input. Check the suite and the server logs.
+    /// <see cref="Connection.HandshakeFailureKind.PairingRequired"/> — the server activated
+    /// playback, but this client is not paired with it and unpaired access is off, so the client
+    /// closed with <c>pairing_required</c>. The normal result of dialling a server for the first
+    /// time: pair with it, or enable unpaired access.
+    /// <see cref="Connection.HandshakeFailureKind.ActivationRefused"/> — the server's activation
+    /// declared something the session's trust does not permit, so the client closed with
+    /// <c>unauthorized</c>.
+    /// <see cref="Connection.HandshakeFailureKind.ConnectionClosed"/> — the connection closed
+    /// before the handshake completed for any other reason: lost with
+    /// <c>ConnectionOptions.AutoReconnect</c> off, disconnected by the application, or closed by
+    /// this client on a malformed handshake message. Dialling again may succeed.
     /// </exception>
     /// <exception cref="TimeoutException">
     /// The server accepted the socket but did not complete the hello exchange within the
@@ -265,7 +292,7 @@ public interface ISendspinClient : IAsyncDisposable
     /// connection's initial client/state is still deferred pending clock sync, the call sends
     /// nothing yet — the deferred initial reports the persisted values once sync converges —
     /// unless something genuinely holds availability false, in which case it sends the full
-    /// initial message instead of a player-only delta.
+    /// initial message at once.
     /// </remarks>
     /// <param name="volume">Current volume level (0-100).</param>
     /// <param name="muted">Current mute state.</param>
@@ -283,9 +310,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// </para>
     /// <para>
     /// Omit it for an ordinary volume or mute change. The reported delay is always the one
-    /// actually applied: the server MUST merge each client/state into existing state, so a
-    /// value present on the wire overwrites, and reporting a delay you are not applying leaves
-    /// the server's group calibration working from a different number than your playback.
+    /// actually applied: every client/state carries the player object's full state, so the
+    /// delay is on the wire each time and replaces what the server held, and reporting a delay
+    /// you are not applying leaves the server's group calibration working from a different
+    /// number than your playback.
     /// </para>
     /// </remarks>
     Task SendPlayerStateAsync(int volume, bool muted, double? outputDelayMs = null);
@@ -433,7 +461,8 @@ public interface ISendspinClient : IAsyncDisposable
     /// image pre-sent for the next track is raised when that track starts. A timestamp already
     /// past on arrival raises immediately; artwork is never dropped for lateness, and a newer
     /// image for a channel supersedes one still held for it. See
-    /// <see cref="VisualizationReceived"/> for which thread raises the event.
+    /// <see cref="VisualizationReceived"/> for which thread raises the event, and for what
+    /// happens to an exception a subscriber throws.
     /// </remarks>
     event EventHandler<ArtworkReceivedEventArgs>? ArtworkReceived;
 
@@ -480,9 +509,11 @@ public interface ISendspinClient : IAsyncDisposable
     /// <b>Threading:</b> a frame already due on arrival is raised on the receive loop, as before;
     /// a frame held for a future display time is raised on an SDK background thread instead. Both
     /// orderings are preserved, but a subscriber must be safe to call from either thread, and
-    /// must marshal to a UI thread itself. An exception from a subscriber still faults the
-    /// connection when the event was raised inline; on the scheduled path it is logged and the
-    /// remaining frames continue.
+    /// must marshal to a UI thread itself. An exception from a subscriber is logged and the
+    /// remaining frames continue, on either thread: a fault in a renderer does not cost the
+    /// connection, and with it the audio. The same holds for <see cref="ArtworkReceived"/> and
+    /// <see cref="ArtworkCleared"/>, and for those three events only — a subscriber to any other
+    /// event that throws on the receive loop drops the connection.
     /// </para>
     /// </remarks>
     event EventHandler<VisualizerFrame>? VisualizationReceived;
@@ -507,8 +538,10 @@ public interface ISendspinClient : IAsyncDisposable
     /// the time it fires the role grant has been applied and the client may already send.
     /// </para>
     /// <para>
-    /// The payload's <see cref="ServerHelloPayload.Name"/> is the only field an encrypted
-    /// server populates. In particular <see cref="ServerHelloPayload.ServerId"/> is empty:
+    /// An encrypted server populates only the payload's <see cref="ServerHelloPayload.Name"/>,
+    /// <see cref="ServerHelloPayload.Languages"/> and
+    /// <see cref="ServerHelloPayload.SourceV1Support"/>. In particular
+    /// <see cref="ServerHelloPayload.ServerId"/> is empty:
     /// the server's identity is its authenticated Noise static key, exposed as
     /// <see cref="ISendspinClient.ServerId"/>. Key per-server state off that, never off the
     /// payload's copy. See the remarks on <see cref="ServerHelloPayload"/>.

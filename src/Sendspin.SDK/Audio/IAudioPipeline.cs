@@ -118,7 +118,10 @@ public interface IAudioPipeline : IAsyncDisposable
     /// <see cref="IPlaybackLifecycleAware"/> along with the buffer: everything holding audio or
     /// correction state from the discarded stream, so none of it is spliced into the new one.
     /// </remarks>
-    /// <param name="newTargetTimestamp">Optional new target timestamp.</param>
+    /// <param name="newTargetTimestamp">
+    /// Not used by the built-in pipeline, which discards what it holds and buffers afresh
+    /// from the next chunk it receives.
+    /// </param>
     void Clear(long? newTargetTimestamp = null);
 
     /// <summary>

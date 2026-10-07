@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<RuleSet Name="Sendspin Windows Client Rules" Description="Code analysis rules for the Sendspin Windows Client project." ToolsVersion="17.0">
+<RuleSet Name="Sendspin SDK Rules" Description="Code analysis rules for the Sendspin .NET SDK." ToolsVersion="17.0">
   <!-- Include all Microsoft rules -->
   <Include Path="AllRules.ruleset" Action="Default" />
 
@@ -55,7 +55,7 @@
     <!-- RCS1194: Implement exception constructors - not always needed -->
     <Rule Id="RCS1194" Action="Info" />
 
-    <!-- RCS1090: Add call to ConfigureAwait - not needed in WPF apps -->
+    <!-- RCS1090: Add call to ConfigureAwait - duplicates CA2007, see below -->
     <Rule Id="RCS1090" Action="None" />
   </Rules>
 
@@ -85,7 +85,13 @@
     <!-- CA1848: Use LoggerMessage delegates - suggestion for performance -->
     <Rule Id="CA1848" Action="Info" />
 
-    <!-- CA2007: Do not directly await a Task - not needed in WPF -->
+    <!--
+      CA2007: Do not directly await a Task. Off because of the baseline, not because it does
+      not apply: this library is awaited from UI threads, where a continuation that resumes on
+      the caller's context is a real hazard (see PR #390). Most awaits in src do not pass it yet, and
+      a ruleset cannot exempt the tests, where the advice is wrong, so today it would only be
+      noise. Turn it on for src/ as an error once those awaits are fixed.
+    -->
     <Rule Id="CA2007" Action="None" />
   </Rules>
 </RuleSet>

@@ -112,7 +112,21 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
     public event EventHandler<TextMessageReceivedEventArgs>? TextMessageReceived;
     public event EventHandler<ReadOnlyMemory<byte>>? BinaryMessageReceived;
 
-    public Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// When set, <see cref="ConnectAsync"/> brings the connection up but does not return to
+    /// its caller until the source is resolved. A real dial returns on the caller's context
+    /// while the receive loop is already delivering, so this is how a test delivers messages
+    /// — or a close — before the caller resumes.
+    /// </summary>
+    public TaskCompletionSource? HoldConnectReturn { get; set; }
+
+    /// <summary>
+    /// When set, <see cref="DisconnectAsync"/> stops in <see cref="ConnectionState.Disconnecting"/>
+    /// until the source is resolved: the goodbye is still being written.
+    /// </summary>
+    public TaskCompletionSource? HoldDisconnect { get; set; }
+
+    public async Task ConnectAsync(Uri serverUri, CancellationToken cancellationToken = default)
     {
         ServerUri = serverUri;
 
@@ -125,17 +139,27 @@ internal sealed class FakeSendspinConnection : ISendspinConnection
         }
 
         SetState(ConnectionState.Connected);
-        return Task.CompletedTask;
+
+        if (HoldConnectReturn is { } hold)
+        {
+            await hold.Task;
+        }
     }
 
     /// <summary>The reason passed to the most recent <see cref="DisconnectAsync"/> call.</summary>
     public string? LastDisconnectReason { get; private set; }
 
-    public Task DisconnectAsync(string reason = "user_request", CancellationToken cancellationToken = default)
+    public async Task DisconnectAsync(string reason = "user_request", CancellationToken cancellationToken = default)
     {
         LastDisconnectReason = reason;
+
+        if (HoldDisconnect is { } hold)
+        {
+            SetState(ConnectionState.Disconnecting);
+            await hold.Task;
+        }
+
         SetState(ConnectionState.Disconnected);
-        return Task.CompletedTask;
     }
 
     /// <summary>Closes like <see cref="DisconnectAsync"/>, leaving <see cref="LastDisconnectReason"/> alone.</summary>

@@ -1,6 +1,6 @@
 namespace Sendspin.SDK.Connection;
 
-/// <summary>Why a Sendspin handshake failed permanently.</summary>
+/// <summary>Why a Sendspin handshake failed.</summary>
 public enum HandshakeFailureKind
 {
     /// <summary>
@@ -32,11 +32,38 @@ public enum HandshakeFailureKind
     /// <c>psk_id</c> miss is not this: it reconnects and self-heals via the Sentinel fallback.)
     /// </summary>
     PairingStateDiverged,
+
+    /// <summary>
+    /// The server activated playback, but this client is not paired with it and does not allow
+    /// unpaired access, so it closed the connection with <c>client/goodbye</c> reason
+    /// <c>pairing_required</c>. This is the expected outcome of dialling a server for the first
+    /// time with <c>UnpairedAccessEnabled</c> left off: pair the client with the server, or
+    /// enable unpaired access.
+    /// </summary>
+    PairingRequired,
+
+    /// <summary>
+    /// The server's <c>server/activate</c> declared something the session's trust does not
+    /// permit — a pairing activity on a paired session, or the source role without a pairing —
+    /// so this client closed the connection with <c>client/goodbye</c> reason
+    /// <c>unauthorized</c>.
+    /// </summary>
+    ActivationRefused,
+
+    /// <summary>
+    /// The connection closed before the first <c>server/activate</c> was admitted, for a reason
+    /// no other kind names: it was lost with <c>ConnectionOptions.AutoReconnect</c> off, the
+    /// application disconnected or disposed the client while connecting, or this client closed
+    /// it on a malformed handshake message. Unlike the other kinds this is not necessarily
+    /// permanent; the SDK does not retry, but dialling again may succeed.
+    /// </summary>
+    ConnectionClosed,
 }
 
 /// <summary>
-/// A permanent handshake failure. Retrying cannot succeed, so the connection does not
-/// re-enter the reconnect loop when this is raised.
+/// A handshake that ended without the connection becoming usable. Except for
+/// <see cref="HandshakeFailureKind.ConnectionClosed"/> the failure is permanent: retrying
+/// cannot succeed, so the connection does not re-enter the reconnect loop when this is raised.
 /// </summary>
 public sealed class SendspinHandshakeException : Exception
 {
@@ -60,6 +87,13 @@ public sealed class SendspinHandshakeException : Exception
             $"Server rejected client/init with reason '{detail ?? "unknown"}'.",
         HandshakeFailureKind.PairingStateDiverged =>
             $"Sendspin pairing state has diverged; re-pair (retrying cannot help): {detail ?? "no detail"}.",
+        HandshakeFailureKind.PairingRequired =>
+            "The server activated playback, but this client is not paired with it and unpaired "
+            + "access is disabled. Pair the client with the server, or enable unpaired access.",
+        HandshakeFailureKind.ActivationRefused =>
+            $"Refused the server's activation as unauthorized: {detail ?? "no detail"}.",
+        HandshakeFailureKind.ConnectionClosed =>
+            "The connection closed before the Sendspin handshake completed.",
         _ => $"Sendspin handshake failed: {kind}.",
     };
 }

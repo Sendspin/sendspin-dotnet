@@ -206,11 +206,11 @@ public class PairingConfigSeedingTests
     }
 
     [Fact]
-    public void SpeakerOutChannel_IsWithheld_BecauseDigitAudioIsNotImplemented()
+    public void SpeakerOutChannel_IsWithheld_BecauseSpokenEmissionIsNotImplemented()
     {
-        // Advertising 'speaker' obliges the client to advertise a digit_audio object and play
-        // the server's digit audio pack. This SDK does neither, so the channel is dropped
-        // rather than inviting a server to pick a flow that reaches nobody.
+        // A client that speaks the code does so from audio it bundles itself, and this SDK
+        // bundles none (docs/SPEC-VERSION.md, "Known deviations"), so the channel is dropped
+        // rather than advertised.
         var capabilities = new ClientCapabilities
         {
             PairingCodeMethods = { "dynamic_pairing_code" },

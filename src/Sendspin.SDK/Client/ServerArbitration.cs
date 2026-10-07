@@ -47,10 +47,6 @@ internal enum ArbitrationFarewell
 /// </summary>
 internal static class ServerArbitration
 {
-    private const string AnotherServer = "another_server";
-    private const string UserRequest = "user_request";
-    private const string ConcurrentAttempt = "concurrent_attempt";
-
     /// <summary>
     /// Maps a server/activate activities set to its priority class: the highest-ranked
     /// declared activity, or empty for an empty set.
@@ -113,7 +109,7 @@ internal static class ServerArbitration
             && (result.AcceptNew ? existingPriority : newPriority) == ConnectionPriority.Pairing;
 
         return loserIsPairing
-            ? result with { LoserReason = ConcurrentAttempt, LoserFarewell = ArbitrationFarewell.PairAbort }
+            ? result with { LoserReason = PairAbortReasons.ConcurrentAttempt, LoserFarewell = ArbitrationFarewell.PairAbort }
             : result;
     }
 
@@ -144,7 +140,7 @@ internal static class ServerArbitration
         // not a stale socket for its own server to reclaim by dialling in.
         if (existingIsClientInitiated)
         {
-            return new ArbitrationResult(false, ConcurrentAttempt, "client-initiated holder is not displaced");
+            return new ArbitrationResult(false, GoodbyeReasons.ConcurrentAttempt, "client-initiated holder is not displaced");
         }
 
         // Same server reconnecting — accept and drop the stale socket. user_request is the
@@ -152,14 +148,14 @@ internal static class ServerArbitration
         // another_server) and the client is alive (not shutdown).
         if (string.Equals(newServerId, existingServerId, StringComparison.Ordinal))
         {
-            return new ArbitrationResult(true, UserRequest, "same server reconnecting");
+            return new ArbitrationResult(true, GoodbyeReasons.UserRequest, "same server reconnecting");
         }
 
         // Exception 1: a pairing attempt is not displaced by incoming playback or pairing.
         if (existingPriority == ConnectionPriority.Pairing
             && newPriority is ConnectionPriority.Playback or ConnectionPriority.Pairing)
         {
-            return new ArbitrationResult(false, ConcurrentAttempt, "pairing attempt is not displaced");
+            return new ArbitrationResult(false, GoodbyeReasons.ConcurrentAttempt, "pairing attempt is not displaced");
         }
 
         // Exception 2: empty-vs-empty tie admits the incoming connection only when it is
@@ -169,20 +165,20 @@ internal static class ServerArbitration
             if (lastPlayedServerId is not null
                 && string.Equals(newServerId, lastPlayedServerId, StringComparison.Ordinal))
             {
-                return new ArbitrationResult(true, AnotherServer, "new server matches last-playback (empty tie)");
+                return new ArbitrationResult(true, GoodbyeReasons.AnotherServer, "new server matches last-playback (empty tie)");
             }
 
-            return new ArbitrationResult(false, ConcurrentAttempt, "existing holder kept (empty tie)");
+            return new ArbitrationResult(false, GoodbyeReasons.ConcurrentAttempt, "existing holder kept (empty tie)");
         }
 
         // General rule: higher or equal priority is accepted, lower is rejected.
         if (newPriority >= existingPriority)
         {
-            return new ArbitrationResult(true, AnotherServer,
+            return new ArbitrationResult(true, GoodbyeReasons.AnotherServer,
                 $"incoming priority {newPriority} >= holder {existingPriority}");
         }
 
-        return new ArbitrationResult(false, ConcurrentAttempt,
+        return new ArbitrationResult(false, GoodbyeReasons.ConcurrentAttempt,
             $"incoming priority {newPriority} < holder {existingPriority}");
     }
 }
