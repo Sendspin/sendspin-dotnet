@@ -23,6 +23,7 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly ILogger<SendspinHostService> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly SendspinListener _listener;
+    private readonly ListenerOptions _listenerOptions;
     private readonly MdnsServiceAdvertiser _advertiser;
     private readonly AdvertiserOptions _advertiserOptions;
     private readonly SendspinClientOptions _options;
@@ -301,6 +302,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         LastPlayedServerId = lastPlayedServerId ?? TryLoadLastPlayed();
 
         var listenOpts = listenerOptions ?? new ListenerOptions();
+        _listenerOptions = listenOpts;
         var advertiseOpts = advertiserOptions ?? new AdvertiserOptions
         {
             InstanceName = _options.Capabilities.ClientName,
@@ -332,7 +334,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         await _listener.StartAsync(cancellationToken);
         if (_advertiserOptions.Enabled)
         {
-            await _advertiser.StartAsync(cancellationToken);
+            await StartAdvertiserAsync(cancellationToken);
         }
         else
         {
@@ -341,6 +343,13 @@ public sealed class SendspinHostService : IAsyncDisposable
 
         _logger.LogInformation("Sendspin host service started - waiting for server connections");
     }
+
+    // Advertises what the listener is serving, read once it has started, rather than the port
+    // and path in the advertiser options: "Port: The port the Sendspin client is listening on"
+    // (connection.md). The configured port is not that when it is 0 and the OS assigned one,
+    // and a caller's own AdvertiserOptions need not agree with its ListenerOptions at all.
+    private Task StartAdvertiserAsync(CancellationToken cancellationToken)
+        => _advertiser.StartAsync(_listener.BoundPort, _listenerOptions.Path, cancellationToken);
 
     /// <summary>
     /// Stops the host service.
@@ -446,7 +455,7 @@ public sealed class SendspinHostService : IAsyncDisposable
         _logger.LogInformation("Resuming mDNS advertisement");
         if (_advertiserOptions.Enabled)
         {
-            await _advertiser.StartAsync(cancellationToken);
+            await StartAdvertiserAsync(cancellationToken);
         }
         else
         {
