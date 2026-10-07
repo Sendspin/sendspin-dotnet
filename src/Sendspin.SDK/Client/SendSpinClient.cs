@@ -2660,27 +2660,20 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                     HandleGroupUpdate(json);
                     break;
 
-                // The player grant is read here, on the receive loop, for all three: that is
-                // the grant the server had declared when it sent the message. Their handlers run
-                // later, behind whatever the pipeline is still doing, and a server/activate
-                // handled in between must not decide for a message that preceded it.
+                // All three are parsed here, on the receive loop, and applied to the display
+                // roles here: artwork and visualizer data is handled on this loop too, so this
+                // is what keeps a role's configuration and flushes in delivery order with it.
+                // Only what reaches the audio pipeline waits its turn on the lifecycle chain.
+                // The player grant is read here as well: that is the grant the server had
+                // declared when it sent the message, and a server/activate handled before the
+                // chain gets to it must not decide for a message that preceded it.
                 case MessageTypes.StreamStart:
-                {
-                    bool playerActive = IsRoleActive("player");
-                    DispatchStreamLifecycle(
-                        config => HandleStreamStartAsync(json, playerActive, config),
-                        changesPlayer: playerActive && HasPlayerObject(json));
+                    HandleStreamStart(json);
                     break;
-                }
 
                 case MessageTypes.StreamEnd:
-                {
-                    bool playerActive = IsRoleActive("player");
-                    DispatchStreamLifecycle(
-                        config => HandleStreamEndAsync(json, playerActive, config),
-                        changesPlayer: playerActive && EndNamesPlayer(json));
+                    HandleStreamEnd(json);
                     break;
-                }
 
                 case MessageTypes.StreamClear:
                     HandleStreamClear(json);
@@ -4506,7 +4499,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <para>
     /// Marked <c>internal</c> for direct invocation from concurrent-burst regression tests;
     /// production callers reach this via <see cref="StartTimeSyncLoop"/> or
-    /// <see cref="HandleStreamStartAsync"/>'s smart-sync trigger.
+    /// <see cref="StartPlayerStreamAsync"/>'s smart-sync trigger.
     /// </para>
     /// </remarks>
     internal async Task SendTimeSyncBurstAsync(CancellationToken cancellationToken)
@@ -5304,9 +5297,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <remarks>
     /// <para>
     /// <c>stream/start</c>, <c>stream/end</c> and <c>stream/clear</c> all reach into the audio
-    /// pipeline, whose start and stop open and close an output device — which is why they are
-    /// handled off the receive loop in the first place. Dispatched independently they can also
-    /// <i>land</i> independently: a track boundary sends <c>stream/end</c> then
+    /// pipeline, whose start and stop open and close an output device — which is why that part
+    /// of each is handled off the receive loop in the first place. Dispatched independently those
+    /// parts can also <i>land</i> independently: a track boundary sends <c>stream/end</c> then
     /// <c>stream/start</c> back to back, and the end's teardown finishing after the start's build
     /// leaves the pipeline stopped for a stream the server has started — silence until the next
     /// track. Chaining each handler onto the one before restores the wire order at the point the
@@ -5396,51 +5389,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     }
 
     /// <summary>
-    /// Whether a <c>stream/start</c> carries a <c>player</c> object. Asked on the receive loop,
-    /// where the message is otherwise only dispatched: the display roles' streams are started by
-    /// messages of the same type, and one of those waiting behind the player's device open must
-    /// not hold the opening burst back.
-    /// </summary>
-    private static bool HasPlayerObject(string json)
-    {
-        using var doc = System.Text.Json.JsonDocument.Parse(json);
-
-        return doc.RootElement.TryGetProperty("payload", out var payload)
-            && payload.ValueKind == System.Text.Json.JsonValueKind.Object
-            && payload.TryGetProperty("player", out var player)
-            && player.ValueKind != System.Text.Json.JsonValueKind.Null;
-    }
-
-    /// <summary>
-    /// Whether a <c>stream/end</c> names the <c>player</c> role, or names none and so ends every
-    /// stream. Asked on the receive loop for the same reason as <see cref="HasPlayerObject"/>: a
-    /// server ends the visualizer's stream in the same breath as the player's, and that end
-    /// waiting behind the player's device close must not hold audio back.
-    /// </summary>
-    private static bool EndNamesPlayer(string json)
-    {
-        using var doc = System.Text.Json.JsonDocument.Parse(json);
-
-        if (!doc.RootElement.TryGetProperty("payload", out var payload)
-            || payload.ValueKind != System.Text.Json.JsonValueKind.Object
-            || !payload.TryGetProperty("roles", out var roles)
-            || roles.ValueKind != System.Text.Json.JsonValueKind.Array)
-        {
-            return true;
-        }
-
-        foreach (var role in roles.EnumerateArray())
-        {
-            if (role.ValueKind == System.Text.Json.JsonValueKind.String && role.ValueEquals("player"))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
     /// Marks the player configuration numbered <paramref name="config"/> as in effect and hands
     /// the pipeline the chunks that were held back for it, stopping at the first one received
     /// under a later configuration.
@@ -5481,34 +5429,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
     }
 
-    private async Task HandleStreamStartAsync(string json, bool playerActive, int config)
-    {
-        try
-        {
-            await HandleStreamStartCoreAsync(json, playerActive, config);
-        }
-        catch (System.Text.Json.JsonException ex)
-        {
-            // An authenticated stream/start whose payload does not parse is a protocol
-            // error: close, mirroring OnTextMessageReceived's malformed-payload handling.
-            // This handler runs on the fire-and-forget path, so the dispatch catch never
-            // sees its failures — the close must happen here. Anything else (pipeline
-            // start, event subscribers) is a local fault, not peer input, and propagates
-            // to the fire-and-forget boundary instead of being swallowed.
-            //
-            // That leaves a deliberate asymmetry, reviewed under #106 and kept: a throwing
-            // subscriber on this path is logged by SafeFireAndForget and the connection lives,
-            // while one on a synchronous handler escapes into the receive loop and drops the
-            // connection. Containing faults everywhere was considered and rejected — an
-            // operator notices a player that stopped, and can miss a log line, so an
-            // application bug staying loud is worth the inconsistency. Peer input is
-            // unaffected either way: it closes the connection on both paths.
-            _logger.LogError(ex, "Malformed stream/start from authenticated peer; closing connection");
-            await DisconnectAsync("unauthorized");
-        }
-    }
-
-    private async Task HandleStreamStartCoreAsync(string json, bool playerActive, int config)
+    private void HandleStreamStart(string json)
     {
         var message = MessageSerializer.Deserialize<StreamStartMessage>(json);
         if (message is null)
@@ -5520,9 +5441,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // authenticated peer can send "payload": null — or a "player" whose required
         // "codec" is null — and typed deserialization still succeeds with a null where
         // the model promises a value. Detect the hole before the first dereference and
-        // signal it as the JsonException the caller's catch already routes to the
-        // close; the NullReferenceException a dereference would produce instead is not
-        // named there and would die in the fire-and-forget swallow.
+        // signal it as the JsonException OnTextMessageReceived's malformed-payload close
+        // names; the NullReferenceException a dereference would produce instead is not
+        // named there.
         if (message.Payload is null || message.Payload.Format is { Codec: null })
         {
             throw new System.Text.Json.JsonException(
@@ -5545,7 +5466,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         StreamStartReceived?.Invoke(this, payload);
 
         // stream/start with no "player" key is artwork-only — skip pipeline start
-        if (payload.Format is null)
+        if (payload.Format is not { } format)
         {
             _logger.LogDebug("Stream start is artwork-only (no player key), skipping pipeline start");
             return;
@@ -5556,12 +5477,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // not on IsRoleBinaryPermitted — the reference server starts a held player without its
         // state object once its wait for one times out, and a start dropped then is never sent
         // again, so the stream would stay closed after the object did go out.
-        if (!playerActive)
+        if (!IsRoleActive("player"))
         {
             _logger.LogDebug("Stream start: ignoring player object, player is not an active role");
             return;
         }
 
+        DispatchStreamLifecycle(config => StartPlayerStreamAsync(format, config), changesPlayer: true);
+    }
+
+    /// <summary>
+    /// The player half of a <c>stream/start</c>: starts the pipeline for <paramref name="format"/>
+    /// and hands it the chunks received since.
+    /// </summary>
+    /// <remarks>
+    /// Runs on the lifecycle chain, and nothing here is peer input any more: a pipeline-start
+    /// failure or a throwing <see cref="GroupStateChanged"/> subscriber is a local fault, and
+    /// propagates to the fire-and-forget boundary instead of being swallowed. That leaves a
+    /// deliberate asymmetry, reviewed under #106 and kept: such a fault on this path is logged
+    /// by SafeFireAndForget and the connection lives, while one on a synchronous handler escapes
+    /// into the receive loop and drops the connection. Containing faults everywhere was
+    /// considered and rejected — an operator notices a player that stopped, and can miss a log
+    /// line, so an application bug staying loud is worth the inconsistency.
+    /// </remarks>
+    private async Task StartPlayerStreamAsync(AudioFormat format, int config)
+    {
         // "The format MUST be one the client listed in its supported_formats." The decoder, the
         // ring and the output device are all sized from this object, and an unpaired session's
         // peer is unauthenticated, so one this client never offered opens nothing. The spec
@@ -5569,16 +5509,16 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // format, and a stream left running would put those chunks through the previous
         // format's decoder. The player stream ends as on a stream/end; chunks arriving after it
         // queue up to MaxEarlyChunks and are dropped by the next start as the previous stream's.
-        if (!IsListedPlayerFormat(payload.Format))
+        if (!IsListedPlayerFormat(format))
         {
             _logger.LogWarning(
                 "Stream start: player format {Format} is not one of this client's supported_formats; stopping the player stream",
-                payload.Format);
-            await StopStreamRolesAsync(new List<string> { "player" }, stopPlayer: true, config);
+                format);
+            await StopPlayerStreamAsync(config);
             return;
         }
 
-        _logger.LogInformation("Stream starting: {Format}", payload.Format);
+        _logger.LogInformation("Stream starting: {Format}", format);
 
         // Smart sync burst: only trigger if clock isn't already synced
         // If we've been connected for a while, the continuous sync loop has already converged
@@ -5633,7 +5573,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // reports it to the server itself (ErrorOccurred -> client/state: 'error'),
         // and it propagates from here so a real bug surfaces instead of being
         // collapsed into a log line (#88 item 2).
-        var outcome = await _audioPipeline.StartAsync(payload.Format);
+        var outcome = await _audioPipeline.StartAsync(format);
 
         // Held across the drop and the drain, and taken by the receive loop's hand-off, so a
         // chunk arriving mid-start cannot overtake the queue or decode through the pipeline's
@@ -5757,70 +5697,69 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                && left.Height == right.Height;
     }
 
-    private async Task HandleStreamEndAsync(string json, bool playerActive, int config)
+    private void HandleStreamEnd(string json)
     {
-        try
-        {
-            var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
-            if (message is null)
-            {
-                return;
-            }
-
-            // As in HandleStreamStartCoreAsync: the serializer does not enforce the
-            // model's non-nullable Payload, and the role gate below dereferences it, so
-            // a null payload must be reported as the JsonException this catch handles
-            // before that dereference throws NullReferenceException past it.
-            if (message.Payload is null)
-            {
-                throw new System.Text.Json.JsonException("stream/end payload is null");
-            }
-
-            var payload = message.Payload;
-            _logger.LogInformation(
-                "Stream ended for roles: {Roles}",
-                payload.Roles is null ? "all" : string.Join(", ", payload.Roles));
-
-            StreamEndReceived?.Invoke(this, payload);
-
-            await StopStreamRolesAsync(payload.Roles, ReachesPlayerRole(payload.Roles, playerActive), config);
-        }
-        catch (System.Text.Json.JsonException ex)
-        {
-            // An authenticated stream/end whose payload does not parse is a protocol
-            // error: close, mirroring OnTextMessageReceived's malformed-payload handling.
-            // This handler runs on the fire-and-forget path, so the dispatch catch never
-            // sees its failures — the close must happen here.
-            _logger.LogError(ex, "Malformed stream/end from authenticated peer; closing connection");
-            await DisconnectAsync("unauthorized");
-        }
-    }
-
-    /// <summary>
-    /// Stops the output and clears the buffers of the stream roles a <c>stream/end</c> names —
-    /// every one when it names none — or that a <c>server/activate</c> removed.
-    /// </summary>
-    /// <param name="roles">The roles named, or null for every stream role.</param>
-    /// <param name="stopPlayer">
-    /// Whether the player is among them. The caller's to say: a <c>stream/end</c> reaches the
-    /// player only while the role is active, a removal exactly when it no longer is.
-    /// </param>
-    /// <param name="config">
-    /// The number of the player configuration the message was received under. Chunks queued
-    /// before it are the ended stream's.
-    /// </param>
-    private async Task StopStreamRolesAsync(List<string>? roles, bool stopPlayer, int config)
-    {
-        // Media held for a display time that belongs to the stream just ended must not
-        // surface after it, and the artwork on display is cleared: both a stream/end and a
-        // role's removal are playback termination (spec #266), unlike a stream/clear seek.
-        FlushDisplayRoles(roles, endingStream: true);
-
-        if (!stopPlayer)
+        var message = MessageSerializer.Deserialize<StreamEndMessage>(json);
+        if (message is null)
         {
             return;
         }
 
+        // As in HandleStreamStart: the serializer does not enforce the model's non-nullable
+        // Payload, and the role gate below dereferences it, so a null payload must be
+        // reported as the JsonException the malformed-payload close names before that
+        // dereference throws NullReferenceException past it.
+        if (message.Payload is null)
+        {
+            throw new System.Text.Json.JsonException("stream/end payload is null");
+        }
+
+        var payload = message.Payload;
+        _logger.LogInformation(
+            "Stream ended for roles: {Roles}",
+            payload.Roles is null ? "all" : string.Join(", ", payload.Roles));
+
+        StreamEndReceived?.Invoke(this, payload);
+
+        // Media held for a display time that belongs to the stream just ended must not
+        // surface after it, and the artwork on display is cleared: a stream/end is playback
+        // termination (spec #266), unlike a stream/clear seek.
+        FlushDisplayRoles(payload.Roles, endingStream: true);
+
+        if (ReachesPlayerRole(payload.Roles, IsRoleActive("player")))
+        {
+            DispatchStreamLifecycle(StopPlayerStreamAsync, changesPlayer: true);
+        }
+    }
+
+    /// <summary>
+    /// Stops the output and clears the buffers of the stream roles a <c>server/activate</c>
+    /// removed.
+    /// </summary>
+    /// <param name="roles">The roles removed.</param>
+    /// <param name="stopPlayer">Whether the player is among them.</param>
+    /// <param name="config">The number of the player configuration the message was received under.</param>
+    private async Task StopStreamRolesAsync(List<string> roles, bool stopPlayer, int config)
+    {
+        // As on a stream/end: a role's removal is playback termination (spec #266).
+        FlushDisplayRoles(roles, endingStream: true);
+
+        if (stopPlayer)
+        {
+            await StopPlayerStreamAsync(config);
+        }
+    }
+
+    /// <summary>
+    /// The player half of a <c>stream/end</c>, and of the player role's removal: stops the
+    /// pipeline.
+    /// </summary>
+    /// <param name="config">
+    /// The number of the player configuration the message was received under. Chunks queued
+    /// before it are the ended stream's.
+    /// </param>
+    private async Task StopPlayerStreamAsync(int config)
+    {
         DropEarlyChunksReceivedBefore(config);
 
         if (_audioPipeline != null)

@@ -163,8 +163,8 @@ public class StreamLifecycleAudioChunkTests
     public async Task AQueuedStartWithNoPlayerObject_DoesNotHoldAudioBack()
     {
         // A server starts the display roles' streams alongside the player's. Their stream/start
-        // queues behind the player's device open like any other, but it changes nothing about
-        // the audio, and the opening burst held behind it would overflow the early-chunk queue.
+        // arrives while the player's device is opening, but it changes nothing about the audio,
+        // and the opening burst held behind it would overflow the early-chunk queue.
         var pipe = new FakeAudioPipeline { HoldNextStart = Hold() };
         var (client, connection) = PlayerClient(pipe);
         using var _c = client;

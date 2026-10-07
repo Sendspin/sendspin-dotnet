@@ -767,11 +767,18 @@ either way.
 
 ## 15. Stream-lifecycle messages reach the pipeline one at a time
 
-`stream/start`, `stream/end` and `stream/clear` are handled off the receive loop — the pipeline
-calls they make open and close an output device, and the receive loop must not wait for that.
-They are now dispatched on a per-client chain, so each handler runs only after the one dispatched
+The pipeline calls `stream/start`, `stream/end` and `stream/clear` make are handled off the
+receive loop — they open and close an output device, and the receive loop must not wait for that.
+They are now dispatched on a per-client chain, so each runs only after the one dispatched
 before it has finished. A track boundary's `stream/end` + `stream/start` can no longer take effect
 in the reverse order and leave the pipeline stopped for a stream the server has started.
+
+Only the pipeline half waits. Each message is parsed, applied to the artwork and visualizer
+roles, and raised (`StreamStartReceived`, `StreamEndReceived`, `StreamClearReceived`) as it is
+received, in delivery order — artwork and visualizer data is handled on the receive loop, and a
+role's configuration and flushes have to keep their place in it. So `StreamStartReceived` for a
+new track can fire while the output device is still closing for the previous one. A subscriber to
+any of the three runs on the receive loop, where an exception it throws drops the connection.
 
 Nothing to do for a caller. For a **custom `IAudioPipeline`** it means the SDK's client no longer
 issues an overlapping `StartAsync` / `StopAsync` / `Clear`, so an implementation needs no
