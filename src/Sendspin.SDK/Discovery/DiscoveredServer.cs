@@ -6,8 +6,17 @@ namespace Sendspin.SDK.Discovery;
 public sealed class DiscoveredServer
 {
     /// <summary>
-    /// Unique server identifier from mDNS TXT record.
+    /// A key for this advertisement, for telling discovered servers apart and remembering a
+    /// choice between runs: the mDNS instance name and first IP address, joined by a hyphen
+    /// (or the value of a non-spec <c>id</c> or <c>server_id</c> TXT key, if a server
+    /// publishes one).
     /// </summary>
+    /// <remarks>
+    /// Not the server's identity. Nothing authenticates an mDNS response, so any device on the
+    /// network can advertise any value here. The authenticated identity is the server's Noise
+    /// static key, known only once connected (<c>SendspinClientService.ServerId</c>), and that
+    /// is the id the host arbitrates and records the last-played server under.
+    /// </remarks>
     required public string ServerId { get; init; }
 
     /// <summary>
@@ -31,7 +40,8 @@ public sealed class DiscoveredServer
     required public IReadOnlyList<string> IpAddresses { get; init; }
 
     /// <summary>
-    /// Protocol version advertised by the server.
+    /// The value of a <c>version</c> TXT key, which the spec does not define; null from a
+    /// server that publishes only the spec's keys.
     /// </summary>
     public string? ProtocolVersion { get; init; }
 

@@ -162,8 +162,13 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
         }
     }
 
-    private DiscoveredServer? ParseHost(IZeroconfHost host)
+    internal DiscoveredServer? ParseHost(IZeroconfHost host)
     {
+        // Everything a responder supplies is cleaned before it is logged, stored or handed to
+        // the application: any device on the LAN can answer, and what it says ends up in log
+        // lines and in the server list the user picks from.
+        var hostName = SanitizeServerId(host.DisplayName);
+
         try
         {
             var service = host.Services.Values.FirstOrDefault();
@@ -173,7 +178,7 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
             }
 
             _logger.LogInformation("mDNS Host: {DisplayName}, IPs: [{IPs}], Port: {Port}",
-                host.DisplayName,
+                hostName,
                 string.Join(", ", host.IPAddresses),
                 service.Port);
 
@@ -182,37 +187,41 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
             {
                 foreach (var kvp in prop)
                 {
-                    properties[kvp.Key] = kvp.Value;
-                    _logger.LogInformation("mDNS TXT: {Key} = {Value}", kvp.Key, kvp.Value);
+                    var key = SanitizeServerId(kvp.Key);
+                    var value = SanitizeServerId(kvp.Value);
+                    properties[key] = value;
+                    _logger.LogInformation("mDNS TXT: {Key} = {Value}", key, value);
                 }
             }
 
             if (properties.Count == 0)
             {
-                _logger.LogWarning("No TXT records found for host {Host}", host.DisplayName);
+                _logger.LogWarning("No TXT records found for host {Host}", hostName);
             }
 
-            // Server ID from TXT records ("id" or "server_id"), falling back to host+IP.
+            // A discovery key, not the server's identity: "id" and "server_id" are not TXT keys
+            // the spec defines, and no reference server publishes them, so in practice this is
+            // host+IP. See DiscoveredServer.ServerId.
             var rawServerId = properties.TryGetValue("id", out var id)
                 ? id
                 : properties.TryGetValue("server_id", out var sid)
                     ? sid
-                    : $"{host.DisplayName}-{host.IPAddresses.FirstOrDefault()}";
+                    : $"{hostName}-{host.IPAddresses.FirstOrDefault()}";
             var serverId = SanitizeServerId(rawServerId);
 
             if (string.IsNullOrEmpty(serverId))
             {
-                _logger.LogWarning("Server ID was empty after sanitization for host {Host}", host.DisplayName);
+                _logger.LogWarning("Server ID was empty after sanitization for host {Host}", hostName);
                 return null;
             }
 
-            var friendlyName = GetFriendlyName(properties, host.DisplayName);
+            var friendlyName = GetFriendlyName(properties, hostName);
 
             var server = new DiscoveredServer
             {
                 ServerId = serverId,
                 Name = friendlyName,
-                Host = host.DisplayName,
+                Host = hostName,
                 Port = service.Port,
                 IpAddresses = host.IPAddresses.ToList(),
                 ProtocolVersion = properties.TryGetValue("version", out var version) ? version : null,
@@ -223,14 +232,14 @@ public sealed class MdnsServerDiscovery : IServerDiscovery
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to parse host {Host}", host.DisplayName);
+            _logger.LogWarning(ex, "Failed to parse host {Host}", hostName);
             return null;
         }
     }
 
     /// <summary>
-    /// Sanitizes a server ID from mDNS TXT records by removing control characters
-    /// and enforcing a maximum length.
+    /// Sanitizes a string taken from an mDNS response (an instance name, a TXT key or value)
+    /// by removing control characters and enforcing a maximum length.
     /// </summary>
     internal static string SanitizeServerId(string raw)
     {

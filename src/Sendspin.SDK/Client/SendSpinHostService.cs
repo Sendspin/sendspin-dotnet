@@ -569,7 +569,8 @@ public sealed class SendspinHostService : IAsyncDisposable
     /// priority, exactly as an accepted connection's do.
     /// </param>
     /// <param name="serverId">
-    /// The server id to arbitrate under — normally <see cref="SendspinClientService.ServerId"/>.
+    /// The server id to arbitrate under — normally <see cref="SendspinClientService.ServerId"/>,
+    /// not <see cref="DiscoveredServer.ServerId"/>, which is an unauthenticated discovery key.
     /// </param>
     public void AdoptClientInitiated(SendspinClientService client, string serverId)
     {
