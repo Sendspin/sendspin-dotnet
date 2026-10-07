@@ -700,6 +700,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         _activateReceived = false;
         _serverHelloReceived = false;
+        _pairingActivationActive = false;
 
         // A new handshake means a new session, so the record this client marked used belongs
         // to the previous one. DetectSessionRekey covers the in-band case; this covers the
@@ -2947,9 +2948,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             // A pairing-first connection reaches its first non-pairing activate here:
             // release the withheld initial client/state by running the send-or-defer
-            // decision FinishHandshake skipped. Guarded by _initialClientStateSent because
-            // a genuine availability flip during the pairing window (pipeline error,
-            // external source) may already have promoted the full initial onto the wire.
+            // decision FinishHandshake skipped. Nothing promotes the initial while it is
+            // withheld (see SendInitialClientStateAsync), so the _initialClientStateSent guard
+            // only covers a sender racing the line above it.
             // Exactly one release can fire: this one, or — for a sync-requiring role whose
             // clock has yet to converge — the first-convergence branch in ApplyBestSample,
             // and the latch set inside SendInitialClientStateAsync before its first await
@@ -4193,6 +4194,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private async Task SendInitialClientStateAsync()
     {
+        // Not while the connection's first activation is still the pairing-only one. SendAsync
+        // would drop the message without an error, and latching for a message that never went
+        // out leaves the activate after pairing believing there is nothing to send. That
+        // activate sends it instead, reading every value live.
+        if (_initialClientStateHeldForPairing)
+        {
+            return;
+        }
+
         // Latched before the send: once per connection, even if a re-convergence races a
         // send still in flight. A send that fails here is corrected by the next reconnect,
         // which resets the latch with the rest of the per-connection state.
