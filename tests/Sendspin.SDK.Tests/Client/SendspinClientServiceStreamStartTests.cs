@@ -74,6 +74,12 @@ public class SendspinClientServiceStreamStartTests
         {
             AudioPipeline = pipeline,
             ClockSynchronizer = new ConvergedClockSynchronizer(),
+
+            // The defaults are all 48 kHz; the rate-change test needs a second listed rate.
+            Capabilities = new ClientCapabilities
+            {
+                AudioFormats = { new AudioFormat { Codec = RunningCodec, SampleRate = 44_100, Channels = 2, BitDepth = 16 } },
+            },
         });
         pipeline.SetState(AudioPipelineState.Playing);
         return (client, connection, pipeline);

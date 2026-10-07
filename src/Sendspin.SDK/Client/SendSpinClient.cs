@@ -5238,6 +5238,18 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             return;
         }
 
+        // "The format MUST be one the client listed in its supported_formats." The decoder, the
+        // ring and the output device are all sized from this object, and an unpaired session's
+        // peer is unauthenticated, so one this client never offered opens nothing. The spec
+        // names no close for it; the object is ignored, like the inactive one above.
+        if (!IsListedPlayerFormat(payload.Format))
+        {
+            _logger.LogWarning(
+                "Stream start: ignoring player format {Format}, not one of this client's supported_formats",
+                payload.Format);
+            return;
+        }
+
         _logger.LogInformation("Stream starting: {Format}", payload.Format);
 
         // Smart sync burst: only trigger if clock isn't already synced
@@ -5344,6 +5356,28 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
         group.PlaybackState = PlaybackState.Playing;
         GroupStateChanged?.Invoke(this, group);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="format"/> is an entry of the <c>supported_formats</c> this client
+    /// sends in <c>client/hello</c>.
+    /// </summary>
+    /// <remarks>
+    /// Compared the way the reference server compares a format against the same list: codec,
+    /// channels and sample rate always, and bit depth except for <c>opus</c>, where the spec has
+    /// it "ignored". An absent bit depth is 16 on both sides — what <c>client/hello</c> sends for
+    /// an entry listed without one, and what the decoders assume. <c>codec_header</c> is not part
+    /// of an entry.
+    /// </remarks>
+    private bool IsListedPlayerFormat(AudioFormat format)
+    {
+        bool opus = string.Equals(format.Codec, AudioCodecs.Opus, StringComparison.OrdinalIgnoreCase);
+
+        return _capabilities.AudioFormats.Any(f =>
+            string.Equals(f.Codec, format.Codec, StringComparison.OrdinalIgnoreCase)
+            && f.Channels == format.Channels
+            && f.SampleRate == format.SampleRate
+            && (opus || (f.BitDepth ?? 16) == (format.BitDepth ?? 16)));
     }
 
     /// <summary>

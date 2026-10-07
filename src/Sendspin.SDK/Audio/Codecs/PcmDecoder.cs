@@ -30,7 +30,7 @@ public sealed class PcmDecoder : IAudioDecoder
     /// </summary>
     /// <param name="format">Audio format configuration.</param>
     /// <param name="logger">Optional logger for diagnostic output.</param>
-    /// <exception cref="ArgumentException">Thrown when format is not PCM.</exception>
+    /// <exception cref="ArgumentException">Thrown when format is not PCM, or its bit depth is not 16, 24 or 32.</exception>
     public PcmDecoder(AudioFormat format, ILogger<PcmDecoder>? logger = null)
     {
         if (!string.Equals(format.Codec, AudioCodecs.Pcm, StringComparison.OrdinalIgnoreCase))
@@ -38,9 +38,17 @@ public sealed class PcmDecoder : IAudioDecoder
             throw new ArgumentException($"Expected PCM format, got {format.Codec}", nameof(format));
         }
 
+        // Decode divides by the sample width, so a depth it cannot read fails here, once, and
+        // not as an exception on every chunk.
+        var bitDepth = format.BitDepth ?? 16;
+        if (bitDepth is not (16 or 24 or 32))
+        {
+            throw new ArgumentException($"Unsupported PCM bit depth: {bitDepth}", nameof(format));
+        }
+
         _logger = logger ?? NullLogger<PcmDecoder>.Instance;
         Format = format;
-        _bytesPerSample = (format.BitDepth ?? 16) / 8;
+        _bytesPerSample = bitDepth / 8;
 
         // Size for the longest chunk the spec permits, not for the length servers usually
         // send: anything up to 150 ms is legal input that has to survive intact.
