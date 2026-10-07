@@ -4460,8 +4460,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         _convergingBudgetExhausted = false;
 
         var cts = new CancellationTokenSource();
+        var token = cts.Token;
         _timeSyncCts = cts;
-        TimeSyncLoopAsync(cts.Token).SafeFireAndForget(_logger);
+        TimeSyncLoopAsync(token).SafeFireAndForget(_logger);
         _logger.LogDebug("Time sync loop started (adaptive intervals)");
     }
 
