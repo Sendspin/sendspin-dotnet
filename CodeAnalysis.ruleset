@@ -88,7 +88,7 @@
     <!--
       CA2007: Do not directly await a Task. Off because of the baseline, not because it does
       not apply: this library is awaited from UI threads, where a continuation that resumes on
-      the caller's context is a real hazard (#325). Most awaits in src do not pass it yet, and
+      the caller's context is a real hazard (see PR #390). Most awaits in src do not pass it yet, and
       a ruleset cannot exempt the tests, where the advice is wrong, so today it would only be
       noise. Turn it on for src/ as an error once those awaits are fixed.
     -->
