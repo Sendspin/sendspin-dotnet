@@ -46,7 +46,8 @@ public static class NoiseCipherSuiteExtensions
     /// <remarks>
     /// This deliberately does not consult <see cref="System.Security.Cryptography.ChaCha20Poly1305"/>
     /// or <see cref="System.Security.Cryptography.AesGcm"/>. Those report on the BCL, and the
-    /// handshake never uses the BCL AEADs — Noise.NET P/Invokes libsodium for every primitive. Asking the BCL
+    /// handshake never uses the BCL AEADs — Noise.NET P/Invokes libsodium for every primitive, and
+    /// the pairing wrap seals with libsodium too (#315). Asking the BCL
     /// gave the wrong answer in both directions: it passed on platforms with no libsodium binary
     /// for the RID (every ARM target before libsodium was floated to 1.0.22), so the guard let
     /// the handshake through and it died on a bare <see cref="DllNotFoundException"/> — exactly

@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -78,21 +79,7 @@ internal static class PairingCodes
     {
         byte[] kWrap = SHA256.HashData(
             [.. "sendspin-pair-psk-wrap-v1"u8.ToArray(), .. sid, .. isk]);
-        byte[] nonce = new byte[12];
-        byte[] ciphertext = new byte[psk.Length];
-        byte[] tag = new byte[16];
-        if (suite == NoiseCipherSuite.AesGcm)
-        {
-            using var aes = new AesGcm(kWrap, 16);
-            aes.Encrypt(nonce, psk, ciphertext, tag);
-        }
-        else
-        {
-            using var chacha = new ChaCha20Poly1305(kWrap);
-            chacha.Encrypt(nonce, psk, ciphertext, tag);
-        }
-
-        return [.. ciphertext, .. tag];
+        return Seal(kWrap, psk, suite);
     }
 
     /// <summary>
@@ -105,21 +92,56 @@ internal static class PairingCodes
     {
         byte[] kWrap = SHA256.HashData(
             [.. "sendspin-pair-nonce-wrap-v1"u8.ToArray(), .. sid, .. isk]);
-        byte[] nonce = new byte[12];
-        byte[] ciphertext = new byte[nonceB.Length];
-        byte[] tag = new byte[16];
-        if (suite == NoiseCipherSuite.AesGcm)
-        {
-            using var aes = new AesGcm(kWrap, 16);
-            aes.Encrypt(nonce, nonceB, ciphertext, tag);
-        }
-        else
-        {
-            using var chacha = new ChaCha20Poly1305(kWrap);
-            chacha.Encrypt(nonce, nonceB, ciphertext, tag);
-        }
+        return Seal(kWrap, nonceB, suite);
+    }
 
-        return [.. ciphertext, .. tag];
+    /// <summary>
+    /// The suite's AEAD over <paramref name="plaintext"/> with a 12-byte zero nonce and empty
+    /// associated data, returning ciphertext-plus-tag.
+    /// </summary>
+    /// <remarks>
+    /// Sealed with libsodium, the backend the session itself runs on and the one
+    /// <see cref="NoiseCipherSuiteExtensions.IsSupported"/> probes, so a suite that got as far as
+    /// a session can always wrap. The BCL AEADs cannot promise that:
+    /// <c>System.Security.Cryptography.ChaCha20Poly1305</c> does not exist on Windows before
+    /// build 20142, which is every Windows 10, where libsodium selects ChaChaPoly happily (#315).
+    /// </remarks>
+    private static byte[] Seal(byte[] key, byte[] plaintext, NoiseCipherSuite suite)
+    {
+        // Idempotent. A session will already have run it through Noise.NET, but nothing here
+        // should depend on that ordering: AES-GCM is unusable until it has run.
+        if (Sodium.sodium_init() < 0)
+            throw new CryptographicException("Failed to initialize libsodium.");
+
+        byte[] nonce = new byte[12];
+        byte[] sealedBytes = new byte[plaintext.Length + 16];
+        int rc = suite == NoiseCipherSuite.AesGcm
+            ? Sodium.crypto_aead_aes256gcm_encrypt(
+                sealedBytes, out _, plaintext, (ulong)plaintext.Length, null, 0, IntPtr.Zero, nonce, key)
+            : Sodium.crypto_aead_chacha20poly1305_ietf_encrypt(
+                sealedBytes, out _, plaintext, (ulong)plaintext.Length, null, 0, IntPtr.Zero, nonce, key);
+        if (rc != 0)
+            throw new CryptographicException("Pairing wrap failed.");
+
+        return sealedBytes;
+    }
+
+    /// <summary>
+    /// The libsodium entry points the wrap needs. Noise.NET binds the same functions but
+    /// keeps them internal; the native library is the one the SDK already ships for it.
+    /// </summary>
+    private static class Sodium
+    {
+        [DllImport("libsodium", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int sodium_init();
+
+        [DllImport("libsodium", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int crypto_aead_chacha20poly1305_ietf_encrypt(
+            byte[] c, out ulong clen, byte[] m, ulong mlen, byte[]? ad, ulong adlen, IntPtr nsec, byte[] npub, byte[] k);
+
+        [DllImport("libsodium", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int crypto_aead_aes256gcm_encrypt(
+            byte[] c, out ulong clen, byte[] m, ulong mlen, byte[]? ad, ulong adlen, IntPtr nsec, byte[] npub, byte[] k);
     }
 }
 

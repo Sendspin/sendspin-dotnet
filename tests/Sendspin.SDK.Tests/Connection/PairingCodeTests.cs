@@ -91,6 +91,72 @@ public class PairingCodeTests
     }
 
     [Fact]
+    public void Sdk_DoesNotReferenceTheBclAeads()
+    {
+        // The suite is chosen by probing libsodium (NoiseCipherSuite.IsSupported), so everything
+        // sealed with "the suite's AEAD" has to run on libsodium too. The BCL AEADs are a
+        // different backend with different gaps: ChaCha20Poly1305 throws
+        // PlatformNotSupportedException on every Windows build before 20142, i.e. all of
+        // Windows 10, where libsodium and therefore the probe are fine (#315). That cannot be
+        // reproduced on a machine that has both, so pin the dependency itself.
+        using var pe = new System.Reflection.PortableExecutable.PEReader(
+            File.OpenRead(typeof(PairingCodes).Assembly.Location));
+        var md = System.Reflection.Metadata.PEReaderExtensions.GetMetadataReader(pe);
+
+        var aeads = md.TypeReferences
+            .Select(md.GetTypeReference)
+            .Where(t => md.GetString(t.Namespace) == "System.Security.Cryptography")
+            .Select(t => md.GetString(t.Name))
+            .Where(n => n is "ChaCha20Poly1305" or "AesGcm");
+
+        Assert.Empty(aeads);
+    }
+
+    [Theory]
+    [InlineData(NoiseCipherSuite.ChaChaPoly)]
+    [InlineData(NoiseCipherSuite.AesGcm)]
+    public void Wrap_IsByteIdenticalToTheBclAead(NoiseCipherSuite suite)
+    {
+        // Where both backends exist they must agree in both directions: the BCL seal of the same
+        // input is the same 48 bytes, and the BCL opens what the SDK sealed.
+        bool bcl = suite == NoiseCipherSuite.AesGcm
+            ? System.Security.Cryptography.AesGcm.IsSupported
+            : System.Security.Cryptography.ChaCha20Poly1305.IsSupported;
+        if (!suite.IsSupported() || !bcl)
+            return;
+
+        byte[] sid = System.Security.Cryptography.RandomNumberGenerator.GetBytes(61);
+        byte[] isk = System.Security.Cryptography.RandomNumberGenerator.GetBytes(64);
+        byte[] value = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+
+        foreach (var (label, wrapped) in new[]
+        {
+            ("sendspin-pair-psk-wrap-v1", PairingCodes.WrapPsk(sid, isk, value, suite)),
+            ("sendspin-pair-nonce-wrap-v1", PairingCodes.WrapNonceB(sid, isk, value, suite)),
+        })
+        {
+            byte[] kWrap = System.Security.Cryptography.SHA256.HashData(
+                [.. Encoding.ASCII.GetBytes(label), .. sid, .. isk]);
+            byte[] ct = new byte[32]; byte[] tag = new byte[16]; byte[] opened = new byte[32];
+            if (suite == NoiseCipherSuite.AesGcm)
+            {
+                using var aes = new System.Security.Cryptography.AesGcm(kWrap, 16);
+                aes.Encrypt(new byte[12], value, ct, tag);
+                aes.Decrypt(new byte[12], wrapped.AsSpan(..32), wrapped.AsSpan(32..), opened);
+            }
+            else
+            {
+                using var chacha = new System.Security.Cryptography.ChaCha20Poly1305(kWrap);
+                chacha.Encrypt(new byte[12], value, ct, tag);
+                chacha.Decrypt(new byte[12], wrapped.AsSpan(..32), wrapped.AsSpan(32..), opened);
+            }
+
+            Assert.Equal([.. ct, .. tag], wrapped);
+            Assert.Equal(value, opened);
+        }
+    }
+
+    [Fact]
     public void FullPakeRound_ServerUnwrapsClientPsk()
     {
         // Both sides derive the same pairing code from shared handshake material, run CPace, and
