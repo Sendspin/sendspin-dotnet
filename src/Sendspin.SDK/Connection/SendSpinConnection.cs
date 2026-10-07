@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Net.WebSockets;
 using Microsoft.Extensions.Logging;
 using Sendspin.SDK.Connection.Framing;
+using Sendspin.SDK.Connection.Noise;
 using Sendspin.SDK.Protocol;
 using Sendspin.SDK.Protocol.Messages;
 using Sendspin.SDK.Synchronization;
@@ -402,6 +403,42 @@ public sealed class SendspinConnection : ISendspinConnection
                         // no-ops when State is Disconnecting or the object is disposed, so an
                         // intentional local disconnect still won't trigger a reconnect.
                         await HandleConnectionLostAsync();
+                        return;
+                    }
+
+                    if (messageBuffer.Length + result.Count > NoiseConstants.MaxWireMessageBytes)
+                    {
+                        // Checked per read, before the copy, so continuation frames cannot
+                        // grow the buffer past the bound either. The framing only sees a
+                        // completed message, so nothing else limits what the peer makes us
+                        // hold while one is arriving (#313).
+                        _logger.LogWarning(
+                            "Inbound WebSocket message exceeds {Max} bytes; closing connection",
+                            NoiseConstants.MaxWireMessageBytes);
+
+                        try
+                        {
+                            await _webSocket.CloseOutputAsync(
+                                WebSocketCloseStatus.MessageTooBig,
+                                "message too big",
+                                cancellationToken);
+                        }
+                        catch (Exception ex) when (ex is not OperationCanceledException)
+                        {
+                            _logger.LogDebug(ex, "Error closing after an oversized message");
+                        }
+
+                        // Classified exactly as a framing fatal is below: a peer that is not
+                        // speaking the protocol before transport mode, a desync after it.
+                        if (_framing.IsTransportReady)
+                        {
+                            await HandleConnectionLostAsync(lossDuringHandshake: false);
+                            return;
+                        }
+
+                        await FailPermanentlyAsync(new SendspinHandshakeException(
+                            HandshakeFailureKind.HandshakeRejected,
+                            $"inbound WebSocket message exceeds {NoiseConstants.MaxWireMessageBytes} bytes"));
                         return;
                     }
 
