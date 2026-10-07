@@ -362,6 +362,51 @@ public class InitialClientStateGatingTests
         Assert.Equal(true, initial.Payload.Player.Muted);
     }
 
+    [Theory]
+    [InlineData("artwork@v1")]
+    [InlineData("player@v1")]
+    public async Task PlayerStateBeforeTheInitialActivate_SendsNothing_InitialCarriesTheValues(string role)
+    {
+        // messaging.md: "The client MUST NOT send other Sendspin messages until it receives that
+        // activation". Neither client is waiting on clock sync — one has no clock-synced role,
+        // the other's synchronizer is already converged — so only the missing activate holds
+        // the initial client/state back (#326).
+        var (client, connection, _) = TestClient.Create(connected: false, configure: options => options with
+        {
+            ClockSynchronizer = new ConvergedClockSynchronizer(),
+            Capabilities = new ClientCapabilities { Roles = [role] },
+        });
+        using var _c = client;
+
+        // The socket is open and server/hello is in, but no server/activate yet.
+        connection.SimulateConnectionLoss();
+        connection.SimulateReconnected();
+        connection.RaiseTextMessageReceived("""
+            {"type":"server/hello","payload":{"name":"srv"}}
+            """);
+
+        await client.SendPlayerStateAsync(volume: 30, muted: true);
+        Assert.Empty(ClientStates(connection));
+
+        // The fake has no MarkConnected, so connecting it stands in for the promotion the
+        // activate performs.
+        await connection.ConnectAsync(ServerUri);
+        connection.RaiseTextMessageReceived(
+            $$$"""
+            {"type":"server/activate","payload":{"activities":["playback"],"active_roles":["{{{role}}}"]}}
+            """);
+        await WaitForAsync(() => ClientStates(connection).Count > 0, TimeSpan.FromSeconds(5));
+        await Task.Delay(100);
+
+        // Exactly one, and nothing is lost: it reads the values the early call persisted.
+        var initial = Assert.Single(ClientStates(connection));
+        if (role == "player@v1")
+        {
+            Assert.Equal(30, initial.Payload.Player!.Volume);
+            Assert.Equal(true, initial.Payload.Player.Muted);
+        }
+    }
+
     [Fact]
     public async Task ReconnectAfterError_RecoveryInsideConvergingWindow_FirstClientStateIsTheFullInitial()
     {
