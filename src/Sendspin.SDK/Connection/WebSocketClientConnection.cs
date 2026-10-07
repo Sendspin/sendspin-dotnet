@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using Sendspin.SDK.Connection.Noise;
 
 namespace Sendspin.SDK.Connection;
 
@@ -201,6 +202,34 @@ public sealed class WebSocketClientConnection : IAsyncDisposable
                         // The only site with a status to report: the peer sent a Close frame.
                         reported = true;
                         OnClose?.Invoke(result.CloseStatus);
+                        return;
+                    }
+
+                    if (ms.Length + result.Count > NoiseConstants.MaxWireMessageBytes)
+                    {
+                        // Checked per read, before the copy, so continuation frames cannot
+                        // grow the buffer past the bound either: nothing downstream sees a
+                        // message until it is complete, and the upgrade is unauthenticated, so
+                        // this is the only limit on what any peer can make us hold (#313).
+                        _logger?.LogWarning(
+                            "Inbound WebSocket message exceeds {Max} bytes; closing connection",
+                            NoiseConstants.MaxWireMessageBytes);
+
+                        try
+                        {
+                            await _webSocket.CloseOutputAsync(
+                                WebSocketCloseStatus.MessageTooBig,
+                                "message too big",
+                                cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException)
+                        {
+                            _logger?.LogDebug(ex, "Error closing after an oversized message");
+                        }
+
+                        reported = true;
+                        OnError?.Invoke(new InvalidDataException(
+                            $"Inbound WebSocket message exceeds {NoiseConstants.MaxWireMessageBytes} bytes"));
                         return;
                     }
 

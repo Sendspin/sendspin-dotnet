@@ -45,6 +45,16 @@ internal static class NoiseConstants
     public const byte FragmentFlagsReserved = 0b1111_1100;
 
     /// <summary>
+    /// Bound on a single inbound WebSocket message, enforced by the receive loops while the
+    /// message is still arriving — the checks below only ever see a completed one. Above
+    /// anything a conformant peer sends: a transport message is at most 65535 bytes, and the
+    /// largest cleartext message is a <c>noise/handshake</c> whose base64url Noise message is
+    /// at most 87380 characters plus a few dozen bytes of JSON around it.
+    /// The spec sets no maximum; this is local hardening.
+    /// </summary>
+    public const int MaxWireMessageBytes = 128 * 1024;
+
+    /// <summary>
     /// Bound on a reassembled fragmented message, protecting against a peer
     /// streaming endless fragments.
     /// </summary>
