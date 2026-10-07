@@ -64,6 +64,12 @@ public sealed class ClientCapabilities
     /// discarded before it played.
     /// </para>
     /// <para>
+    /// The derived figure is a bound for PCM, and for Opus at or above 64 kbps. For FLAC it is
+    /// an estimate at an assumed compression ratio, so a stream that compresses better can
+    /// exceed a short buffer; the chunk that does not fit is dropped and heard as a gap. See
+    /// <see cref="PlayerBufferCapacity"/>.
+    /// </para>
+    /// <para>
     /// Setting this explicitly overrides the derivation, and hands you responsibility for the
     /// promise: the value must be one the audio buffer can actually hold for every format in
     /// <see cref="AudioFormats"/>. <see cref="PlayerBufferCapacity.HoldableMilliseconds"/>
