@@ -2835,7 +2835,13 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         }
         else
         {
-            DiscardPendingGatedAttempt();
+            // An activation without 'pairing' ends any attempt in progress: the client "abandons
+            // the attempt, discarding all pairing state", and "persists nothing". Nothing is sent
+            // — the server ended it — and the pairing window is left alone: an abandoned
+            // attempt "does not count against a pairing window". A gated attempt still waiting on
+            // a gesture goes with it, or the next opening would send client/pair-init outside
+            // any pairing activation and bind the shared window to this connection.
+            ClearPairingCodeState();
         }
 
         bool first = !_activateReceived;
@@ -3409,35 +3415,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
                 ex,
                 "Pairing window state-changed handler failed; a gated attempt may not have resumed");
         }
-    }
-
-    /// <summary>
-    /// Drops a gated attempt still waiting on a gesture, without claiming the window.
-    /// </summary>
-    /// <remarks>
-    /// A pending attempt belongs to the activation that deferred it. An activation that does
-    /// not declare the pairing activity ends that one, so the wait ends with it: left standing,
-    /// the next opening would make this connection send client/pair-init outside any pairing
-    /// activation — and bind the shared window to itself while doing it, so the gesture the
-    /// operator made for whichever connection is still legitimately pending would silently do
-    /// nothing for them. Not claiming the window is the other half: the opening stays available.
-    /// The superseded-by-a-newer-pairing-activation case is <see cref="HandlePairingActivate"/>'s
-    /// own ClearPairingCodeState.
-    /// </remarks>
-    private void DiscardPendingGatedAttempt()
-    {
-        lock (_attemptLock)
-        {
-            if (_pendingGatedMethod is null)
-            {
-                return;
-            }
-
-            _pendingGatedMethod = null;
-        }
-
-        _logger.LogInformation(
-            "Activation no longer declares the pairing activity; discarding the pending gated attempt");
     }
 
     /// <summary>
