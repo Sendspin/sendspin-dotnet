@@ -99,6 +99,72 @@ public class ConnectAsyncHandshakeFailureTests
         Assert.Equal(HandshakeFailureKind.ConnectionClosed, ex.Kind);
     }
 
+    // The three below hold the dial's return: a real one resumes on the caller's context,
+    // which for an app connecting from a busy UI thread is after the receive loop has already
+    // run the whole exchange. Whatever happened by then must still be the call's outcome.
+
+    [Fact]
+    public async Task ActivateAdmittedBeforeTheCallerResumes_CompletesTheConnect()
+    {
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        using var _c = client;
+        connection.HoldConnectReturn = new TaskCompletionSource();
+
+        var connecting = client.ConnectAsync(ServerUri);
+        connection.RaiseTextMessageReceived(ServerHello);
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""");
+        Assert.False(connecting.IsCompleted);
+
+        connection.HoldConnectReturn.SetResult();
+
+        await connecting.WaitAsync(Wait);
+        Assert.Equal(ConnectionState.Connected, connection.State);
+    }
+
+    [Fact]
+    public async Task ConnectionLostBeforeTheCallerResumes_ThrowsConnectionClosed()
+    {
+        var (client, connection, _) = TestClient.Create(PskCategory.LongTerm);
+        using var _c = client;
+        connection.HoldConnectReturn = new TaskCompletionSource();
+
+        var connecting = client.ConnectAsync(ServerUri);
+        connection.RaiseTextMessageReceived(ServerHello);
+        await connection.CloseWithoutGoodbyeAsync("Connection lost");
+
+        connection.HoldConnectReturn.SetResult();
+
+        var ex = await Assert.ThrowsAsync<SendspinHandshakeException>(() => connecting.WaitAsync(Wait));
+        Assert.Equal(HandshakeFailureKind.ConnectionClosed, ex.Kind);
+    }
+
+    [Fact]
+    public async Task RefusalBeforeTheCallerResumes_IsNotThrownUntilTheGoodbyeHasGoneOut()
+    {
+        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: false);
+        using var _c = client;
+        connection.HoldConnectReturn = new TaskCompletionSource();
+        connection.HoldDisconnect = new TaskCompletionSource();
+
+        var connecting = client.ConnectAsync(ServerUri);
+        connection.RaiseTextMessageReceived(ServerHello);
+        connection.RaiseTextMessageReceived(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["player@v1"]}}""");
+        Assert.Equal(ConnectionState.Disconnecting, connection.State);
+
+        // The caller resumes while the goodbye is still being written. Thrown now, its catch
+        // could dispose the client ahead of that goodbye.
+        connection.HoldConnectReturn.SetResult();
+        Assert.False(connecting.IsCompleted);
+
+        connection.HoldDisconnect.SetResult();
+
+        var ex = await Assert.ThrowsAsync<SendspinHandshakeException>(() => connecting.WaitAsync(Wait));
+        Assert.Equal(HandshakeFailureKind.PairingRequired, ex.Kind);
+        Assert.Equal(ConnectionState.Disconnected, connection.State);
+    }
+
     [Fact]
     public void ActivationRefusedWithNoConnectInFlight_ClosesWithoutThrowing()
     {
