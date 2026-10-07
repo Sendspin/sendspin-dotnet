@@ -2333,12 +2333,31 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             _artworkTransfer.Reset();
         }
 
+        // What the controller state authorised, and that the group was playing, were the lost
+        // connection's to say: a command on the next one must be in the list that connection
+        // reports, and its activate re-grants the role before any server/state arrives. What is
+        // only displayed (the track, the colors, the group's name and volume) stays for the
+        // reconnect to replace, so a brief drop does not blank the application's UI.
+        if (e.NewState == ConnectionState.Reconnecting
+            && _currentGroup is { } group
+            && (group.SupportedCommands is not null || group.SeekMaxMs is not null
+                || group.PlaybackState != PlaybackState.Idle))
+        {
+            group.SupportedCommands = null;
+            group.SeekMaxMs = null;
+            group.PlaybackState = PlaybackState.Idle;
+            GroupStateChanged?.Invoke(this, group);
+        }
+
         // Clean up client state on full disconnection
         if (e.NewState == ConnectionState.Disconnected)
         {
             CompleteHandshakeWait(e.Exception as SendspinHandshakeException);
             ServerId = null;
             ServerName = null;
+
+            // As DisconnectAsync does: no connection is coming to replace any of it.
+            _currentGroup = null;
         }
 
         // Every dial starts here, the application's and each automatic reconnect attempt alike,
@@ -4801,12 +4820,11 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (message.PlaybackState.HasValue)
             _currentGroup.PlaybackState = message.PlaybackState.Value;
 
-        // Log group ID changes (helps diagnose grouping issues)
+        // Log group ID changes (helps diagnose grouping issues). The controller state is left
+        // alone: a server reports the new group's in a server/state of its own, and aiosendspin
+        // sends that one ahead of this message, so clearing here would discard it (#338).
         if (previousGroupId != _currentGroup.GroupId && !string.IsNullOrEmpty(previousGroupId))
         {
-            // supported_commands belongs to the previous group; drop it until the new group's server/state.
-            _currentGroup.SupportedCommands = null;
-
             _logger.LogInformation("group/update [{Player}]: Group ID changed {OldId} -> {NewId}",
                 _capabilities.ClientName, previousGroupId, _currentGroup.GroupId);
         }

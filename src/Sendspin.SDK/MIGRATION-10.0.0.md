@@ -919,6 +919,11 @@ Two things follow that are easy to trip over:
 - **Nothing is permitted until the server says so.** `supported_commands` arrives in the
   controller object of `server/state`. Until one has arrived the list is treated as empty, so a
   command issued straight after `ConnectAsync` returns is dropped.
+- **The list does not outlive its connection.** When the connection is lost and a reconnect
+  begins, the SDK unsets `SupportedCommands` and `SeekMaxMs`, sets `PlaybackState` to `Idle` and
+  raises `GroupStateChanged`, so controls disable until the new connection reports its own. The
+  rest of `CurrentGroup` (track, colors, name, volume) is kept for display until the server
+  replaces it. Once the connection is `Disconnected`, `CurrentGroup` is null.
 - **The gate comes before the transport.** The typed senders used to send unconditionally and
   rely on the transport to reject a send with no live socket. With no active controller role the
   call now returns having sent nothing, rather than throwing.
