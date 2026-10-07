@@ -33,6 +33,11 @@ public sealed class SendspinHostService : IAsyncDisposable
     private readonly HashSet<SendspinClientService> _openClients = new();
     private readonly object _connectionsLock = new();
 
+    // Connections between their upgrade and their admission or rejection. Far above what a
+    // household of servers dialling at once needs; see HandleWithinProvisionalCapAsync.
+    internal const int MaxProvisionalConnections = 8;
+    private int _provisionalConnections;
+
     // Held across one connection's arbitration: the decision, the loser's eviction and the
     // winner's registration. Each accepted socket arbitrates on its own task, and without this
     // two of them could both read the registry before either had written to it (#314). A
@@ -825,7 +830,35 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     private void OnServerConnected(object? sender, WebSocketClientConnection webSocket)
     {
-        HandleServerConnectedAsync(webSocket).SafeFireAndForget(_logger);
+        HandleWithinProvisionalCapAsync(webSocket).SafeFireAndForget(_logger);
+    }
+
+    // connection.md: "Clients MAY cap how many provisional connections they hold at once,
+    // rejecting further incoming connections as if they were lower priority." Each one is a
+    // whole client — framing, clock filter, role state — held for up to the 30 s provisional
+    // window on the strength of nothing but a WebSocket upgrade. Refused before any of that is
+    // built, and so before there is a session to say goodbye over: the socket is just closed.
+    private async Task HandleWithinProvisionalCapAsync(WebSocketClientConnection webSocket)
+    {
+        if (Interlocked.Increment(ref _provisionalConnections) > MaxProvisionalConnections)
+        {
+            Interlocked.Decrement(ref _provisionalConnections);
+            _logger.LogWarning(
+                "Refusing connection from {ClientIp}: {Max} connections are already awaiting admission",
+                webSocket.ClientIpAddress,
+                MaxProvisionalConnections);
+            await webSocket.DisposeAsync();
+            return;
+        }
+
+        try
+        {
+            await HandleServerConnectedAsync(webSocket);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _provisionalConnections);
+        }
     }
 
     private async Task HandleServerConnectedAsync(WebSocketClientConnection webSocket)

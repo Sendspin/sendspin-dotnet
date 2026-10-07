@@ -59,7 +59,8 @@ public sealed class ConnectionOptions
     public int KeepAliveTimeoutMs { get; set; } = 15000;
 
     /// <summary>
-    /// Buffer size for receiving WebSocket messages.
+    /// Buffer size for receiving WebSocket messages. Applies to connections this client dials;
+    /// an accepted connection reads in fixed 8 KiB chunks.
     /// </summary>
     public int ReceiveBufferSize { get; set; } = 64 * 1024; // 64KB
 

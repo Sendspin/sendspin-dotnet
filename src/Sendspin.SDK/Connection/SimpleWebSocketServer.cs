@@ -21,6 +21,7 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
     /// </summary>
     private const string WebSocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     private const int MaxHttpHeaderSize = 8192;
+    private static readonly TimeSpan AcceptFailureBackoff = TimeSpan.FromMilliseconds(250);
 
     private readonly ILogger? _logger;
     private readonly ConnectionOptions _connectionOptions;
@@ -33,6 +34,20 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
     /// Port the server is listening on.
     /// </summary>
     public int Port { get; private set; }
+
+    /// <summary>
+    /// How long a peer has to complete the HTTP upgrade once its TCP connection is accepted.
+    /// Nothing else bounds it: the host's provisional timeout starts only after the upgrade, so
+    /// without this a peer that connects and never finishes its headers (a port scanner) holds
+    /// a socket, a buffer and a task until the server stops (#343).
+    /// </summary>
+    internal TimeSpan UpgradeTimeout { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// When set, the only request path that is upgraded; any other gets a 404 before a
+    /// WebSocket exists. Compared without the query string, ignoring case and one trailing slash.
+    /// </summary>
+    internal string? RequiredPath { get; set; }
 
     /// <summary>
     /// Raised when a new WebSocket client connects. The handler receives a
@@ -128,13 +143,31 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Error accepting TCP connection");
+
+                // A failure that is not a stop tends to persist — descriptor exhaustion fails
+                // every accept until something closes — so retrying at once spins a core and
+                // floods the log for as long as it lasts (#343).
+                try
+                {
+                    await Task.Delay(AcceptFailureBackoff, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
             }
         }
     }
 
-    private async Task HandleConnectionAsync(TcpClient tcpClient, CancellationToken cancellationToken)
+    private async Task HandleConnectionAsync(TcpClient tcpClient, CancellationToken serverToken)
     {
         var remoteEndPoint = tcpClient.Client.RemoteEndPoint as IPEndPoint;
+
+        // Bounds the upgrade only; the accepted WebSocket has its own lifetime.
+        using var upgradeCts = CancellationTokenSource.CreateLinkedTokenSource(serverToken);
+        upgradeCts.CancelAfter(UpgradeTimeout);
+        var cancellationToken = upgradeCts.Token;
+
         try
         {
             var stream = tcpClient.GetStream();
@@ -160,6 +193,15 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
             }
 
             var path = pathMatch.Groups[1].Value;
+
+            if (RequiredPath is { } requiredPath && !PathMatches(path, requiredPath))
+            {
+                _logger?.LogWarning("Rejecting connection from {Endpoint} to unexpected path {Path}, expected {Expected}",
+                    remoteEndPoint, path, requiredPath);
+                await SendHttpResponse(stream, 404, "Not Found", cancellationToken);
+                tcpClient.Dispose();
+                return;
+            }
 
             // Extract WebSocket key
             var keyMatch = WebSocketKeyHeaderRegex().Match(request);
@@ -208,11 +250,26 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
 
             ClientConnected?.Invoke(this, connection);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogDebug("WebSocket upgrade from {Endpoint} did not complete in time, or the server stopped",
+                remoteEndPoint);
+            tcpClient.Dispose();
+        }
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Error handling WebSocket upgrade from {Endpoint}", remoteEndPoint);
             tcpClient.Dispose();
         }
+    }
+
+    private static bool PathMatches(string requestTarget, string requiredPath)
+    {
+        var query = requestTarget.IndexOf('?');
+        var path = query >= 0 ? requestTarget.AsSpan(0, query) : requestTarget.AsSpan();
+
+        return path.Equals(requiredPath, StringComparison.OrdinalIgnoreCase)
+            || (path.EndsWith("/") && path[..^1].Equals(requiredPath, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -306,7 +363,9 @@ public sealed partial class SimpleWebSocketServer : IAsyncDisposable
     [GeneratedRegex(@"^GET\s+(\S+)\s+HTTP/1\.1")]
     private static partial Regex GetRequestLineRegex();
 
-    [GeneratedRegex(@"Sec-WebSocket-Key:\s*(\S+)", RegexOptions.IgnoreCase)]
+    // Anchored to a header line, and with horizontal whitespace only before the value: \s*
+    // crossed the line end, so an empty key header took the next header's name as its key.
+    [GeneratedRegex(@"^Sec-WebSocket-Key:[ \t]*(\S+)", RegexOptions.IgnoreCase | RegexOptions.Multiline)]
     private static partial Regex WebSocketKeyHeaderRegex();
 
     public async ValueTask DisposeAsync()
