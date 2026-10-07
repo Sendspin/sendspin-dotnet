@@ -789,10 +789,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             await using var registration = linkedCts.Token.Register(() => handshakeTcs.TrySetCanceled());
             var success = await handshakeTcs.Task;
 
-            if (success)
+            if (!success)
             {
-                _logger.LogInformation("Handshake complete with server {ServerId} ({ServerName})", ServerId, ServerName);
+                // Disconnected before the first server/activate was admitted, with no cause
+                // recorded (see CompleteHandshakeWait). Returning here would tell the caller
+                // it is connected.
+                throw new SendspinHandshakeException(HandshakeFailureKind.ConnectionClosed);
             }
+
+            _logger.LogInformation("Handshake complete with server {ServerId} ({ServerName})", ServerId, ServerName);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
@@ -2362,7 +2367,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// Reads the handshake waiter's TaskCompletionSource under <see cref="_handshakeLock"/>.
     /// </summary>
     /// <remarks>
-    /// The four completion sites on the message-handling path read the field unlocked, against
+    /// The completion site on the message-handling path reads the field unlocked, against
     /// a waiter that publishes it under the lock — the asymmetry #98 item 3 flags, and a
     /// contradiction of what the field's own comment says the lock is for. Only the read is
     /// guarded: completing outside the lock is deliberate, because the TCS runs its
@@ -2383,6 +2388,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <see cref="ConnectionStateChanged"/> would otherwise see the connect succeed and
     /// only find out when its first command threw "WebSocket is not connected".
     /// </summary>
+    /// <param name="failure">
+    /// The connection layer's verdict, or null when it has none — in which case a refusal
+    /// this client recorded before closing (<see cref="RefuseActivation"/>) is the cause.
+    /// </param>
     private void CompleteHandshakeWait(SendspinHandshakeException? failure)
     {
         TaskCompletionSource<bool>? tcs;
@@ -2393,6 +2402,10 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             if (failure is not null)
             {
                 _handshakeFailure = failure;
+            }
+            else
+            {
+                failure = _handshakeFailure;
             }
 
             tcs = _handshakeTcs;
@@ -2407,6 +2420,32 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             tcs?.TrySetResult(false);
         }
+    }
+
+    /// <summary>
+    /// Closes the connection over a <c>server/activate</c> this client will not accept, and
+    /// records why for a <see cref="ConnectAsync"/> still waiting on the handshake.
+    /// </summary>
+    /// <remarks>
+    /// Recorded rather than thrown to the waiter here: the disconnect completes the wait (see
+    /// <see cref="CompleteHandshakeWait"/>), so the caller resumes once the goodbye carrying
+    /// <paramref name="goodbyeReason"/> has gone out, not ahead of it. On the listen path, and
+    /// for an activation after the first, nothing is waiting and the record is never read.
+    /// </remarks>
+    private void RefuseActivation(string goodbyeReason, string detail)
+    {
+        var failure = new SendspinHandshakeException(
+            goodbyeReason == GoodbyeReasons.PairingRequired
+                ? HandshakeFailureKind.PairingRequired
+                : HandshakeFailureKind.ActivationRefused,
+            detail);
+
+        lock (_handshakeLock)
+        {
+            _handshakeFailure = failure;
+        }
+
+        DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
     }
 
     /// <summary>
@@ -2729,7 +2768,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         if (message is null)
         {
             _logger.LogWarning("Failed to deserialize server/hello");
-            CurrentHandshakeWaiter()?.TrySetResult(false);
+            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
             return;
         }
 
@@ -2835,8 +2874,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         {
             _logger.LogWarning("Inadmissible server/activate (activities: {Activities}); closing with {Reason}",
                 string.Join(", ", payload.ActivitiesList), goodbyeReason);
-            CurrentHandshakeWaiter()?.TrySetResult(false);
-            DisconnectAsync(goodbyeReason).SafeFireAndForget(_logger);
+            RefuseActivation(goodbyeReason, $"activities [{string.Join(", ", payload.ActivitiesList)}]");
             return;
         }
 
@@ -2857,8 +2895,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && _session.MatchedPsk?.Category != PskCategory.LongTerm)
         {
             _logger.LogWarning("server/activate activated source@v1 without user trust; closing");
-            CurrentHandshakeWaiter()?.TrySetResult(false);
-            DisconnectAsync("unauthorized").SafeFireAndForget(_logger);
+            RefuseActivation("unauthorized", "source role without a pairing");
             return;
         }
 

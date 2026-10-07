@@ -135,11 +135,18 @@ catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.Lega
     Console.Error.WriteLine(ex.Message);
     return;
 }
+catch (SendspinHandshakeException ex) when (ex.Kind == HandshakeFailureKind.PairingRequired)
+{
+    // The normal first contact with a new server: it offered playback, and this client is
+    // not paired with it and has unpaired access off. Pair, then connect again.
+    Console.Error.WriteLine(ex.Message);
+    return;
+}
 catch (SendspinHandshakeException ex)
 {
-    // HandshakeRejected: no usable pairing record, unsupported cipher suite, or a version
-    // mismatch. Pair again rather than retrying.
-    Console.Error.WriteLine($"Handshake rejected: {ex.Message}");
+    // Any other Kind: the handshake was rejected, or the connection closed before it
+    // completed. ex.Message carries the detail.
+    Console.Error.WriteLine($"Handshake failed: {ex.Message}");
     return;
 }
 
