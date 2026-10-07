@@ -406,4 +406,38 @@ public class SendspinHostServiceClientInitiatedTests
         await incoming.ConnectAsync(host.ListeningPort);
         Assert.Equal("concurrent_attempt", await incoming.WaitForGoodbyeAsync(Timeout));
     }
+
+    // -- #345: a dialled session while _sendspin._tcp is still advertised --------------------
+
+    [Fact]
+    public async Task AdoptingWhileAdvertising_Warns_AndNotOnceAdvertisingIsStopped()
+    {
+        // connection.md: "Clients MUST NOT manually connect to servers while advertising
+        // _sendspin._tcp". Stopping is the application's call to make, before it dials; what the
+        // host owes it is to say so when it has not. Advertises for real, as
+        // MdnsAnnouncementTests does, under a name nothing else on the LAN can be using.
+        var logs = new CapturingLoggerFactory();
+        await using var host = new SendspinHostService(
+            logs,
+            new SendspinClientOptions { Identity = SendspinIdentity.Generate() },
+            listenerOptions: new ListenerOptions { Port = 0 },
+            advertiserOptions: new AdvertiserOptions { InstanceName = $"adopt-test-{Guid.NewGuid():N}" });
+        await host.StartAsync();
+        Assert.True(host.IsAdvertising);
+
+        static bool IsAdvertisingWarning(string m) =>
+            m.Contains("while still advertising _sendspin._tcp", StringComparison.Ordinal);
+
+        var (dialled, _) = DialledSession();
+        using var _d = dialled;
+        host.AdoptClientInitiated(dialled, DialledServerId);
+
+        Assert.Single(logs.Messages, IsAdvertisingWarning);
+
+        host.ReleaseClientInitiated(DialledServerId);
+        await host.StopAdvertisingAsync();
+        host.AdoptClientInitiated(dialled, DialledServerId);
+
+        Assert.Single(logs.Messages, IsAdvertisingWarning);
+    }
 }
