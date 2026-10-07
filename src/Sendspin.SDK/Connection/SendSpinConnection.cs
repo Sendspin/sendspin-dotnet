@@ -416,6 +416,10 @@ public sealed class SendspinConnection : ISendspinConnection
                             "Inbound WebSocket message exceeds {Max} bytes; closing connection",
                             NoiseConstants.MaxWireMessageBytes);
 
+                        // Read before the close: once the socket leaves Open a concurrent send
+                        // can start a reconnect, and that resets the framing.
+                        var transportWasReady = _framing.IsTransportReady;
+
                         try
                         {
                             await _webSocket.CloseOutputAsync(
@@ -430,7 +434,7 @@ public sealed class SendspinConnection : ISendspinConnection
 
                         // Classified exactly as a framing fatal is below: a peer that is not
                         // speaking the protocol before transport mode, a desync after it.
-                        if (_framing.IsTransportReady)
+                        if (transportWasReady)
                         {
                             await HandleConnectionLostAsync(lossDuringHandshake: false);
                             return;

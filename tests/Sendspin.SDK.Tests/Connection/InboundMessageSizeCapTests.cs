@@ -24,14 +24,20 @@ public class InboundMessageSizeCapTests
 
         var delivered = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         var errored = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handlersInstalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         server.ClientConnected += (_, c) =>
         {
             c.OnBinary = data => delivered.TrySetResult(data.Length);
             c.OnError = ex => errored.TrySetResult(ex);
+            handlersInstalled.TrySetResult();
         };
 
         using var peer = new ClientWebSocket();
         await peer.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"), CancellationToken.None);
+
+        // The server starts its receive loop before raising ClientConnected, so a message sent
+        // straight after the upgrade can be read before the handlers above exist.
+        await handlersInstalled.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         // One message spread over continuation frames, so the bound has to hold across them
         // and not just per frame. Not awaited: once the listener stops reading, the tail of
@@ -60,15 +66,18 @@ public class InboundMessageSizeCapTests
         server.Start(0);
 
         var delivered = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handlersInstalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         server.ClientConnected += (_, c) =>
         {
             c.OnBinary = data => delivered.TrySetResult(data.Length);
             c.OnText = data => delivered.TrySetResult(data.Length);
             c.OnError = ex => delivered.TrySetException(ex);
+            handlersInstalled.TrySetResult();
         };
 
         using var peer = new ClientWebSocket();
         await peer.ConnectAsync(new Uri($"ws://127.0.0.1:{server.Port}/sendspin"), CancellationToken.None);
+        await handlersInstalled.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         var payload = new byte[size];
         Array.Fill(payload, (byte)'a');
