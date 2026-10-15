@@ -17,8 +17,9 @@ public sealed class ClientCommandMessage : IMessageWithPayload<ClientCommandPayl
     /// <summary>
     /// Creates a command message with the specified command. Each parameter is put on the wire
     /// only for the command that defines it ("only set if `command` is ...", controller/v1.md),
-    /// and <paramref name="volume"/> is clamped to the spec's 0-100; a reference server fails to
-    /// parse a command that carries another command's parameter and ignores it whole.
+    /// <paramref name="volume"/> is clamped to the spec's 0-100, and <paramref name="positionMs"/>
+    /// to at least 0; a reference server fails to parse a command that carries another command's
+    /// parameter or a value outside those ranges, and ignores it whole.
     /// </summary>
     /// <param name="command">Controller command to send (see <see cref="Commands"/>).</param>
     /// <param name="volume">Volume level (0-100), only for the 'volume' command.</param>
@@ -37,7 +38,7 @@ public sealed class ClientCommandMessage : IMessageWithPayload<ClientCommandPayl
                     Command = command,
                     Volume = command == Commands.Volume && volume is { } v ? Math.Clamp(v, 0, 100) : null,
                     Mute = command == Commands.Mute ? mute : null,
-                    PositionMs = command == Commands.Seek ? positionMs : null,
+                    PositionMs = command == Commands.Seek && positionMs is { } p ? Math.Max(p, 0) : null,
                     OffsetMs = command == Commands.SeekRelative ? offsetMs : null
                 }
             }
@@ -83,9 +84,9 @@ public sealed class ControllerCommand
     public bool? Mute { get; init; }
 
     /// <summary>
-    /// Absolute playback position in milliseconds, only used when command is "seek".
-    /// The server ignores the command when this falls outside 0 to
-    /// <see cref="ControllerState.SeekMaxMs"/>.
+    /// Absolute playback position in milliseconds, only used when command is "seek". Never
+    /// negative when built by <see cref="ClientCommandMessage.Create"/>; the server ignores the
+    /// command when this exceeds <see cref="ControllerState.SeekMaxMs"/>.
     /// </summary>
     [JsonPropertyName("position_ms")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
