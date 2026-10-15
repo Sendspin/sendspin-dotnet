@@ -14,8 +14,8 @@ the list under [Known deviations](#known-deviations) is what is known, and the c
 
 ## Compatibility floor
 
-**`aiosendspin >= 10.0.0`.** That release (2026-10-05) is the reference server's implementation
-of `1.0.0-rc1`, and it is the release Music Assistant ships.
+**`aiosendspin >= 10.0.0`.** That release (2026-10-05) is the reference server's first
+implementation of `1.0.0-rc1`, and the 10.x line is what Music Assistant ships.
 
 - There is one floor, and it applies to connecting as much as to pairing. A 10.x client
   speaks only the rc1 wire: every connection is encrypted, and there is no downgrade
@@ -29,8 +29,10 @@ of `1.0.0-rc1`, and it is the release Music Assistant ships.
 ## How conformance is checked
 
 The [Interop workflow](../.github/workflows/interop.yml) installs
-`aiosendspin[server]==10.0.0` and runs the SDK against it over a real WebSocket on every push
-and pull request to `main`. It runs six scenarios (see
+`aiosendspin[server]==10.1.0` and runs the SDK against it over a real WebSocket on every push
+and pull request to `main`. The server runs in strict mode (`allow_noncompliant_clients=False`),
+as Music Assistant does with its legacy-clients setting off: any deviation the server checks
+for closes the connection instead of logging a warning. It runs six scenarios (see
 [`tools/interop`](../tools/interop/README.md)):
 
 | Scenario | What it exercises |
@@ -40,10 +42,10 @@ and pull request to `main`. It runs six scenarios (see
 | `static-pin` | `static_pairing_code`: the CPace round, PSK wrapping, and the gesture gate (`client/pair-pending` must come first) |
 | `dynamic-pin` | `dynamic_pairing_code` with the `digits` format: the client derives and emits the code, the harness types it into the server |
 | `source` | `source@v1`: the server's `start` command, `client-stream/start`, and decoded audio arriving at the server |
-| `player` | `player@v1`: `stream/start`, the 13-byte audio chunk header with `send_ahead`, `stream/end`, every sample sent coming out of the client's decoder, and the initial `client/state` arriving inside the server's 5 s limit |
+| `player` | `player@v1`: `stream/start`, the 13-byte audio chunk header with `send_ahead`, `stream/end`, every sample sent coming out of the client's decoder, and the initial `client/state` arriving inside the 5 s a lenient server allows |
 
 The pin moves deliberately, with each `aiosendspin` release: a release is where a spec wire
-change first becomes observable.
+change, or a new server-side compliance check, first becomes observable.
 
 Everything else is covered by unit tests only. In particular, nothing in the live scenarios
 exercises:

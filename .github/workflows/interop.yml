@@ -27,11 +27,12 @@ jobs:
         with:
           python-version: '3.13'
 
-      # Pinned to the published aiosendspin release that implements the 1.0.0-rc1 wire, the
-      # same one Music Assistant ships. Bump deliberately on each release: a release is where a
-      # spec wire change first becomes observable. The 9.x line keeps its own pin on 9.1.1.
+      # Pinned to the newest published aiosendspin release on the 1.0.0-rc1 wire, the line Music
+      # Assistant ships. Bump deliberately on each release: a release is where a spec wire change,
+      # or a new server-side compliance check, first becomes observable. server.py runs it in
+      # strict mode, as Music Assistant does. The 9.x line keeps its own pin on 9.1.1.
       - name: Install aiosendspin reference server
-        run: pip install "aiosendspin[server]==10.0.0"
+        run: pip install "aiosendspin[server]==10.1.0"
 
       - name: Build interop client
         run: dotnet build tools/interop/InteropClient -c Release

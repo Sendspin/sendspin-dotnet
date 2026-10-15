@@ -34,11 +34,11 @@ Pick the line that matches your server.
 | **9.x** | Plaintext | Any `aiosendspin`, 10.0.0 included | Maintained for pre-encryption servers |
 
 10.0.0 implements [`Sendspin/spec`](https://github.com/Sendspin/spec) at tag `1.0.0-rc1`.
-`aiosendspin` 10.0.0 is the reference server's release of that spec and the one Music
-Assistant ships, and it is the floor: it gates connecting as much as pairing, so an older
+`aiosendspin` 10.0.0 is the reference server's first release of that spec (Music Assistant
+ships the 10.x line), and it is the floor: it gates connecting as much as pairing, so an older
 server stops playback, not just pairing. The
-[interop workflow](.github/workflows/interop.yml) runs the SDK against that release on every
-pull request. [docs/SPEC-VERSION.md](docs/SPEC-VERSION.md) records the pin, what is checked
+[interop workflow](.github/workflows/interop.yml) runs the SDK against the newest 10.x release,
+in the strict mode Music Assistant uses, on every pull request. [docs/SPEC-VERSION.md](docs/SPEC-VERSION.md) records the pin, what is checked
 against the server, and where the SDK is known to differ from the spec.
 
 A 9.x client keeps working against `aiosendspin` 10.0.0, which serves it on its legacy path,

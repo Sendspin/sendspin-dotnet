@@ -21,8 +21,12 @@ and drives one scenario against it:
                binary audio chunks and stream/end — and fail if the client's initial
                client/state arrived too late for the server's liking.
 
-Prints JSON result lines; exits non-zero on failure. Requires the pinned aiosendspin 10.0.0
+Prints JSON result lines; exits non-zero on failure. Requires the pinned aiosendspin 10.1.0
 release (see .github/workflows/interop.yml).
+
+The server runs in strict mode (allow_noncompliant_clients=False), as Music Assistant does
+with its legacy-clients setting off: every client deviation the server checks for closes the
+connection instead of logging a warning, so a scenario that passes here also passes there.
 
 Usage: server.py <scenario> <client_url> [secret]
        secret is the pairing PSK as hex for 'pairing', the 8-digit PIN for 'static-pin', or
@@ -59,29 +63,16 @@ PLAYER_PCM = b"".join(
     for sample in (int(8000 * math.sin(2 * math.pi * 440 * i / 48000)) for i in range(4800))
 )
 PLAYER_COMMITS = 20
+# How long a lenient aiosendspin server waits for the initial client/state before flagging it.
+# A strict one waits indefinitely and never flags it, so the harness applies the limit itself.
+INITIAL_STATE_LIMIT_S = 5
 
 
 def emit(**kw):
     print(json.dumps(kw), flush=True)
 
 
-class StateTimeoutWatch(logging.Handler):
-    """Notes whether the server flagged a late initial client/state.
-
-    aiosendspin tolerates the lateness by default and only logs it, so the log is the one
-    place it shows.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(logging.WARNING)
-        self.fired = False
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if "did not send the required initial client/state in time" in record.getMessage():
-            self.fired = True
-
-
-async def drive_player(server, state_timeout: StateTimeoutWatch) -> int:
+async def drive_player(server) -> int:
     """Stream PCM to the paired client's player role.
 
     The only live cover for stream/start and stream/end on the player role, and for the
@@ -102,9 +93,10 @@ async def drive_player(server, state_timeout: StateTimeoutWatch) -> int:
 
     # seconds_after_pairing is the time elapsed since the pairing record was persisted. It
     # over-states the activation-to-client/state latency by the re-handshake that precedes the
-    # activation.
-    emit(event="client_available", seconds_after_pairing=round(time.monotonic() - paired_at, 2))
-    if state_timeout.fired:
+    # activation, give or take the polling intervals on either end.
+    waited = time.monotonic() - paired_at
+    emit(event="client_available", seconds_after_pairing=round(waited, 2))
+    if waited > INITIAL_STATE_LIMIT_S:
         emit(event="initial_client_state_late")
         return 1
 
@@ -211,15 +203,17 @@ async def main() -> int:
     secret = sys.argv[3] if len(sys.argv) > 3 else None
     client_id = sys.argv[4] if len(sys.argv) > 4 else None
 
-    # Attaching a handler takes aiosendspin's warnings away from logging's stderr fallback;
-    # basicConfig puts them back in the output.
     logging.basicConfig(level=logging.WARNING)
-    state_timeout = StateTimeoutWatch()
-    logging.getLogger("aiosendspin").addHandler(state_timeout)
 
     loop = asyncio.get_running_loop()
     store = InMemoryServerPairingStore()
-    server = SendspinServer(loop, Identity.generate(), "interop-server", pairing_store=store)
+    server = SendspinServer(
+        loop,
+        Identity.generate(),
+        "interop-server",
+        pairing_store=store,
+        allow_noncompliant_clients=False,
+    )
     emit(event="server_ready", server_id=server.id, scenario=scenario)
 
     try:
@@ -307,7 +301,7 @@ async def main() -> int:
                 return await drive_source(server)
 
             if scenario == "player":
-                return await drive_player(server, state_timeout)
+                return await drive_player(server)
         else:
             server.connect_to_client(
                 client_url,
