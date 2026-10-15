@@ -100,6 +100,13 @@ exercises:
   - a chunk that reaches the pipeline between the `stream/start` and the decoder swap is
     decoded by the old decoder. The window opens only when the stream-lifecycle chain or the
     pipeline is busy, and it exists for a codec or bit-depth change too.
+- **`min_buffer_ms` is configured, not measured from arrival delay.** The spec has a player
+  size `min_buffer_ms` from the upper tail of its chunks' arrival delay,
+  `arrival - compute_client_time(timestamp - send_ahead)`, measured over a window long enough
+  to include intermittent interference (a SHOULD). The SDK reports
+  `ClientCapabilities.MinBufferMs` plus the audio player's output latency. It reads `send_ahead`
+  from every chunk but does not measure arrival delay with it, so on a link with more jitter
+  than the configured value allows for, raise `MinBufferMs`.
 - **Multi-server arbitration ranks `['playback', 'pairing']` as playback.** The spec's rule that
   a pairing attempt is not displaced by an incoming connection is applied only to a connection
   whose activity is pairing alone. An attempt running alongside playback can be displaced by an
