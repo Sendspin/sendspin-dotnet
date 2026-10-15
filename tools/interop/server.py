@@ -17,6 +17,10 @@ and drives one scenario against it:
   source:      ask the client to stream its source@v1 input, and decode the chunks that
                arrive — the server's start command, the client's client_stream/start, and
                real audio over the wire.
+  source-unpaired:
+               the same without a pairing: connect over unpaired access, then approve the
+               source role for the client as an operator would, which re-activates it with
+               source@v1.
   player:      stream two seconds of PCM to the client's player@v1 role — stream/start, the
                binary audio chunks and stream/end — and fail if the client's initial
                client/state arrived too late for the server's liking.
@@ -29,8 +33,9 @@ with its legacy-clients setting off: every client deviation the server checks fo
 connection instead of logging a warning, so a scenario that passes here also passes there.
 
 Usage: server.py <scenario> <client_url> [secret]
-       secret is the pairing PSK as hex for 'pairing', the 8-digit PIN for 'static-pin', or
-       the file the client's output is being written to for 'dynamic-pin'.
+       secret is the pairing PSK as hex for 'pairing', the 8-digit PIN for 'static-pin',
+       the file the client's output is being written to for 'dynamic-pin', or the client_id
+       to approve for 'source-unpaired'.
 """
 
 import asyncio
@@ -118,7 +123,7 @@ async def drive_player(server) -> int:
 
 
 async def drive_source(server) -> int:
-    """Ask the paired client to stream its source, and decode what arrives.
+    """Ask the client to stream its source, and decode what arrives.
 
     Proves the whole source path against a real counterparty: the server's start command,
     the client's client_stream/start with a codec the server can build a decoder for, and
@@ -219,8 +224,8 @@ async def main() -> int:
     try:
         # Start the dial as a background task (keeps the connection alive while we poll)
         # and let it complete the Sendspin handshake — do NOT close early.
-        # 'source' pairs first: the source role only runs at 'user' trust, so an unpaired
-        # session cannot exercise it. 'player' pairs the same way.
+        # 'source' and 'player' pair first; 'source-unpaired' runs the source role without a
+        # pairing, on the operator's approval.
         if scenario in ("pairing", "static-pin", "dynamic-pin", "source", "player"):
             gated = asyncio.Event()
             if scenario in ("pairing", "source", "player"):
@@ -319,6 +324,12 @@ async def main() -> int:
                 emit(event="client_never_connected")
                 return 1
 
+            if scenario == "source-unpaired":
+                # Approval implied by using the client for playback does not extend to
+                # source@v1 (roles/source/v1.md); the operator approves it explicitly, and the
+                # server re-activates the connected client with the role.
+                await server.trust_unpaired(secret, approved_roles={"source"})
+                return await drive_source(server)
 
         emit(event="success", scenario=scenario)
         return 0

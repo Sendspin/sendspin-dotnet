@@ -380,17 +380,39 @@ public class SendspinClientServiceSourceTests
     }
 
     [Fact]
-    public void SourceActivatedWithoutUserTrust_ClosesUnauthorized()
+    public void SourceActivatedOnAnUnpairedSession_WithUnpairedAccess_IsAdmittedAndStreams()
     {
-        // Unpaired access on: playback+roles is otherwise admissible, so the source
-        // trust gate (not the general PSK gate) is what refuses source@v1 at trust none.
-        var (client, connection, _) = CreateSourceClient(trust: PskCategory.Sentinel, unpairedAccess: true);
+        // pairing.md § Unpaired Access: a client that admits unpaired access lets a server with
+        // no pairing record activate its roles, and source@v1 is one of them. Approving the
+        // source role is the server's own gate (roles/source/v1.md: it "leaves the role out of
+        // active_roles until explicit approval"), so an activation that includes it means the
+        // operator approved it. Refusing it closed the connection with 'unauthorized', which
+        // aiosendspin 10.1.0 treats as final: the device stays offline.
+        var (client, connection, capture) = CreateSourceClient(trust: PskCategory.Sentinel, unpairedAccess: true);
+        using var _c = client;
+
+        Activate(connection);
+        connection.RaiseTextMessageReceived("""{"type":"server/command","payload":{"source":{"command":"start"}}}""");
+
+        Assert.NotEqual(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
+        Assert.True(capture.Capturing, "an approved unpaired source must stream when the server starts it");
+        Assert.Contains(connection.SentMessages, m => m is ClientStreamStartMessage);
+    }
+
+    [Fact]
+    public void SourceActivatedOnAnUnpairedSession_WithoutUnpairedAccess_ClosesPairingRequired()
+    {
+        // The other half, and the guarantee a client with a privacy-sensitive input relies on
+        // (roles/source/v1.md: such a client SHOULD ship with unpaired access disabled): with
+        // unpaired access off, no server without a pairing can activate the source role.
+        var (client, connection, capture) = CreateSourceClient(trust: PskCategory.Sentinel, unpairedAccess: false);
         using var _c = client;
 
         Activate(connection);
 
         Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
-        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+        Assert.Equal("pairing_required", connection.LastDisconnectReason);
+        Assert.False(capture.Capturing);
     }
 
     [Fact]

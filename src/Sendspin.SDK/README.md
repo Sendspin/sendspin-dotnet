@@ -947,13 +947,17 @@ buffer and streams it as a binary type-12 chunk timestamped in the **server** ti
 domain (local capture time mapped through the clock filter's offset+drift). On `stop`,
 role deactivation, or disposal it sends `client-stream/end` and stops capturing.
 
-**Trust required.** A source streams potentially sensitive audio, so `source@v1` MUST
-run on a paired connection (`TrustLevel` is `Paired`). The SDK enforces this in two places, because
-one is not enough: a `server/activate` that activates the role on an unpaired connection is
-refused and the connection is closed, per spec — and, independently, the capture device
-is never opened unless the connection is paired *and* the source role is
-currently in `active_roles`. The second check is what stops a `server/command
-{ source: { command: "start" } }` that skips activation entirely.
+**Trust required.** A source streams potentially sensitive audio, so `source@v1` runs on a
+paired connection (`TrustLevel` is `Paired`), or on an unpaired one only when
+`ClientCapabilities.UnpairedAccessEnabled` is on. On an unpaired connection the server also
+needs its operator's explicit approval of the role before it activates it; that gate is the
+server's. The SDK enforces its half in two places, because one is not enough: with unpaired
+access off, a `server/activate` that activates any role on an unpaired connection is refused
+with `pairing_required` — and, independently, the capture device is never opened unless the
+connection is paired or unpaired access is on, *and* the source role is currently in
+`active_roles`. The second check is what stops a `server/command
+{ source: { command: "start" } }` that skips activation entirely. For a privacy-sensitive input
+such as a microphone, the spec's advice is to ship with unpaired access off.
 
 **Availability required.** A `start` received while the client is unavailable — before clock
 sync is established, while held by an external source, or after a pipeline error — is ignored,

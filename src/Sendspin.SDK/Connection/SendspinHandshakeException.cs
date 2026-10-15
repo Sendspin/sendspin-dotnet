@@ -44,9 +44,8 @@ public enum HandshakeFailureKind
 
     /// <summary>
     /// The server's <c>server/activate</c> declared something the session's trust does not
-    /// permit — a pairing activity on a paired session, or the source role without a pairing —
-    /// so this client closed the connection with <c>client/goodbye</c> reason
-    /// <c>unauthorized</c>.
+    /// permit — a pairing activity on a paired session, for example — so this client closed the
+    /// connection with <c>client/goodbye</c> reason <c>unauthorized</c>.
     /// </summary>
     ActivationRefused,
 

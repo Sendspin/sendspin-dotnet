@@ -66,3 +66,9 @@ jobs:
       # discards source chunks until that state arrives.
       - name: Source streaming (server start command, client-stream/start, decoded audio)
         run: bash tools/interop/run.sh source
+
+      # The same role with no pairing: the client admits unpaired access, and the server's
+      # operator approves source@v1 for it explicitly, which re-activates the connection with
+      # the role. Music Assistant offers that approval from aiosendspin 10.1.0 on.
+      - name: Source streaming without a pairing (operator-approved source on unpaired access)
+        run: bash tools/interop/run.sh source-unpaired

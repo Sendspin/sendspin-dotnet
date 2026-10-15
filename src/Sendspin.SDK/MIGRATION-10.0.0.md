@@ -243,7 +243,9 @@ Consumers reading the raw protocol should expect `"available": true|false`. Cons
 
 Clients can now act as an audio **source** (line-in, microphone) rather than only a sink. Supply a `CaptureDevice`, add `"source@v1"` to `ClientCapabilities.Roles`, and the server can start and stop capture.
 
-The spec requires a source to run only on a paired connection, and the SDK enforces that at the point the capture device opens: it refuses to stream unless the session is paired (`TrustLevel` is `Paired`) with the source role active. Streaming is always server-initiated; a source never streams unsolicited.
+A source runs on a paired connection, or on an unpaired one when `ClientCapabilities.UnpairedAccessEnabled` is on. On an unpaired connection the server also needs its operator's explicit approval before it activates the role; that gate is the server's, and the client sees it only as `source@v1` appearing in `active_roles`. The SDK enforces its half at the point the capture device opens: it refuses to stream unless the session is paired (`TrustLevel` is `Paired`) or unpaired access is on, with the source role active. Streaming is always server-initiated; a source never streams unsolicited.
+
+The spec's advice for a privacy-sensitive input such as a microphone is to ship with unpaired access disabled, since anyone on the network could otherwise reach the captured audio. With it off, a server without a pairing that activates `source@v1` is refused like any other unpaired activation, with `client/goodbye` reason `pairing_required`.
 
 Two more conditions gate a `start`, both from the spec:
 

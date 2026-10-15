@@ -112,11 +112,12 @@ public class RoleStateAcrossActivationsTests
     }
 
     [Fact]
-    public void Rehandshake_OntoAnUnpairedSession_WithSourceStillPersisted_ClosesUnauthorized()
+    public void Rehandshake_OntoAnUnpairedSession_WithSourceStillPersisted_KeepsTheRole()
     {
-        // The source trust gate reads the roles in effect, not just the ones the message
-        // carries: a source@v1 persisted across a re-handshake down to an unpaired session is
-        // active there on exactly the terms an explicit one would be.
+        // A source@v1 persisted across a re-handshake down to an unpaired session is active
+        // there on exactly the terms an explicit one would be: with unpaired access on, the
+        // connection stays playback-capable, so the persisted roles stand, source included.
+        // (With it off they are treated as empty; see the test above.)
         var (client, connection, session) = TestClient.Create(
             unpairedAccess: true,
             configure: options => options with
@@ -134,8 +135,8 @@ public class RoleStateAcrossActivationsTests
             {"type":"server/activate","payload":{"activities":["playback"]}}
             """);
 
-        Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Disconnected, connection.State);
-        Assert.Equal("unauthorized", connection.LastDisconnectReason);
+        Assert.Equal(Sendspin.SDK.Connection.ConnectionState.Connected, connection.State);
+        Assert.Contains("source@v1", client.LastServerHello!.ActiveRoles);
     }
 
     [Fact]
