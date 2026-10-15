@@ -37,8 +37,8 @@ line that matches your server.
 | **9.x** | Plaintext | Any `aiosendspin`, 10.0.0 included | Maintained for pre-encryption servers |
 
 10.0.0 implements [`Sendspin/spec`](https://github.com/Sendspin/spec) at tag `1.0.0-rc1`.
-`aiosendspin` 10.0.0 is the reference server's release of that spec and the one Music Assistant
-ships; it is the floor for connecting as much as for pairing. The spec pin, what is checked
+`aiosendspin` 10.0.0 is the reference server's first release of that spec (Music Assistant ships
+the 10.x line); it is the floor for connecting as much as for pairing. The spec pin, what is checked
 against the server, and the known deviations are recorded in
 [SPEC-VERSION.md](https://github.com/Sendspin/sendspin-dotnet/blob/main/docs/SPEC-VERSION.md).
 Upgrading from 9.x is a breaking change at nearly every call site; see

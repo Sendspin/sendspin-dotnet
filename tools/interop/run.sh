@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Live interop harness: runs the .NET SDK host against the aiosendspin reference server
-# pinned in .github/workflows/interop.yml (10.0.0) for one scenario. Starts the .NET host (it prints its listening port), then
+# pinned in .github/workflows/interop.yml (10.1.0) for one scenario. Starts the .NET host (it prints its listening port), then
 # dials it from the Python server, and checks both sides report success.
 #
 # Usage: run.sh <scenario>   scenario: unpaired | pairing | static-pin | dynamic-pin | source | player

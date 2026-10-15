@@ -1,11 +1,15 @@
 # Live interop harness
 
 Runs the .NET SDK against the pinned [`aiosendspin`](https://pypi.org/project/aiosendspin/)
-10.0.0 release (the one [`.github/workflows/interop.yml`](../../.github/workflows/interop.yml)
+10.1.0 release (the one [`.github/workflows/interop.yml`](../../.github/workflows/interop.yml)
 installs) over a real WebSocket, exercising the encrypted protocol end to end.
 This is the conformance gate that turns the loopback/known-answer-vector confidence into
-real-server-verified confidence. `aiosendspin` 10.0.0 implements `Sendspin/spec` at
+real-server-verified confidence. `aiosendspin` 10.1.0 implements `Sendspin/spec` at
 `1.0.0-rc1`, the tag the SDK is pinned to; see [docs/SPEC-VERSION.md](../../docs/SPEC-VERSION.md).
+
+The server runs in strict mode (`allow_noncompliant_clients=False`), the way Music Assistant
+runs it with its legacy-clients setting off. A lenient server only logs a client's deviations;
+a strict one closes the connection on them, so a scenario that passes here passes there too.
 
 ## Topology
 
@@ -39,15 +43,16 @@ our host responds — the same path a real server-initiated deployment uses.
 - **`player`** — pairs, waits for the client to report itself available, then pushes two
   seconds of PCM at the `player@v1` role. Proves `stream/start`, `stream/end`, and the
   13-byte audio chunk header: the client must decode exactly the samples the server sent
-  and see a non-zero `send_ahead`. Also fails if the server logs the client's initial
-  `client/state` as late (aiosendspin allows 5 s), and prints how long it took.
+  and see a non-zero `send_ahead`. Also fails if the client's initial `client/state` takes
+  longer than the 5 s a lenient aiosendspin allows (a strict one waits indefinitely, so the
+  harness times it), and prints how long it took.
 
 ## Running locally
 
 ```bash
 # Mirror .github/workflows/interop.yml: install the pinned aiosendspin release, then run
 # a scenario.
-pip install "aiosendspin[server]==10.0.0"
+pip install "aiosendspin[server]==10.1.0"
 bash tools/interop/run.sh unpaired
 bash tools/interop/run.sh pairing
 bash tools/interop/run.sh static-pin
