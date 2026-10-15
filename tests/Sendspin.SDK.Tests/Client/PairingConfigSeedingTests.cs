@@ -74,22 +74,10 @@ public class PairingConfigSeedingTests
         HelloPairMethodDescriptors(connection).Keys.ToList();
 
     [Fact]
-    public void PairingPskEnabledFalse_IsNotAdvertised()
+    public void PairingPsk_IsAlwaysAdvertised()
     {
-        // #131's security-shaped case: an app turned pairing_psk off, and the method must not
-        // come back on restart.
-        var (client, connection) = CreateAndGreet(
-            new ClientCapabilities { PairingPskEnabled = false });
-        using var _c = client;
-
-        Assert.DoesNotContain("pairing_psk", HelloPairMethods(connection));
-    }
-
-    [Fact]
-    public void PairingPskEnabledDefault_IsAdvertised()
-    {
-        // Positive control: without it, a bug that advertises nothing at all would pass the
-        // test above.
+        // messaging.md, client/hello: "Every client offers at least the Pairing PSK method."
+        // A hello without it is rejected outright by a strict server (aiosendspin 10.0.1+).
         var (client, connection) = CreateAndGreet(new ClientCapabilities());
         using var _c = client;
 

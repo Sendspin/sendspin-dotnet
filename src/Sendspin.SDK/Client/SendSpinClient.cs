@@ -149,8 +149,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
 
     // Effective pairing-method configuration, seeded from capabilities at construction. Pairing
     // config is local and manufacturer-defined: nothing on the wire changes it. client/hello
-    // and CanOffer both read these.
-    private readonly bool _pairingPskEnabled;
+    // and CanOffer both read these. pairing_psk has no entry: every client offers it.
     private readonly bool _dynamicPairingCodeEnabled;
     private readonly bool _staticPairingCodeEnabled;
     private readonly string? _effectiveStaticPairingCode;
@@ -400,13 +399,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     internal INoiseSessionInfo Session => _session;
 
     /// <summary>
-    /// The <c>pairing_psk</c> method's effective enablement. Read live by this connection's
-    /// <see cref="RecordPskResolver"/>, which excludes Pairing-category records from the
-    /// handshake candidate set while the method is off (#202).
-    /// </summary>
-    internal bool IsPairingPskEnabled => _pairingPskEnabled;
-
-    /// <summary>
     /// The connection this client was constructed with (test-only introspection). Named to
     /// avoid shadowing the <c>Sendspin.SDK.Connection</c> namespace used elsewhere in this
     /// file (e.g. <c>Connection.Noise.SendspinIdentity</c>).
@@ -608,7 +600,6 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         // PairingCodeMethods keeps "not implemented" and "implemented but disabled" distinct,
         // which is what the spec keys different behaviour off, and keeps a default-constructed
         // ClientCapabilities reporting exactly what it did before these members existed.
-        _pairingPskEnabled = _capabilities.PairingPskEnabled;
         _dynamicPairingCodeEnabled = _capabilities.DynamicPairingCodeEnabled
             && _capabilities.PairingCodeMethods.Contains(PairMethods.DynamicPairingCode);
         _staticPairingCodeEnabled = _capabilities.StaticPairingCodeEnabled
@@ -3299,7 +3290,8 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// <summary>The method's effective enablement, as the app configured it.</summary>
     private bool IsMethodEnabled(string method) => method switch
     {
-        PairMethods.PairingPsk => _pairingPskEnabled,
+        // "Every client offers at least the Pairing PSK method" (messaging.md, client/hello).
+        PairMethods.PairingPsk => true,
         PairMethods.DynamicPairingCode => _dynamicPairingCodeEnabled,
         PairMethods.StaticPairingCode => _staticPairingCodeEnabled,
         _ => false,
@@ -3444,11 +3436,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
     /// </summary>
     private bool CanOffer(string? method) => method switch
     {
-        // pairing_psk is admissible only when the method is enabled, on a session already
-        // keyed by the Pairing PSK, and only when the resulting long-term record can
-        // actually be persisted.
-        PairMethods.PairingPsk => _pairingPskEnabled
-                         && _session.MatchedPsk?.Category == PskCategory.Pairing
+        // pairing_psk is admissible only on a session already keyed by the Pairing PSK, and
+        // only when the resulting long-term record can actually be persisted.
+        PairMethods.PairingPsk => _session.MatchedPsk?.Category == PskCategory.Pairing
                          && _pairingStore is not null,
 
         // The other direction of the same rule: the method is pairing_psk if and only if the
@@ -6556,19 +6546,9 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
         SendspinClientOptions options,
         ConnectionOptions? connectionOptions = null)
     {
-        // Assigned below, before anything can dial and so before the resolver can be asked
-        // anything. The closure is how the resolver reaches this connection's live pairing
-        // config, which only exists once the client does; until then the configured value is
-        // the same one the client will start from.
-        SendspinClientService? client = null;
-
         var framing = new NoiseWireFraming(
             options.Identity,
-            options.PairingRecordStore is null
-                ? null
-                : new RecordPskResolver(
-                    options.PairingRecordStore,
-                    () => client?.IsPairingPskEnabled ?? options.Capabilities.PairingPskEnabled),
+            options.PairingRecordStore is null ? null : new RecordPskResolver(options.PairingRecordStore),
             options.Suite);
 
         var connection = new SendspinConnection(
@@ -6576,7 +6556,7 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             connectionOptions,
             framing);
 
-        client = new SendspinClientService(
+        var client = new SendspinClientService(
             loggerFactory.CreateLogger<SendspinClientService>(),
             connection,
             framing,

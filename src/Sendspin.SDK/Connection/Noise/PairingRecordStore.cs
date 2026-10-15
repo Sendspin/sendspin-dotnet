@@ -498,20 +498,12 @@ public sealed class FilePairingRecordStore : IPairingRecordStore
 internal sealed class RecordPskResolver : INoisePskResolver
 {
     private readonly IPairingRecordStore _store;
-    private readonly Func<bool> _isPairingPskEnabled;
 
     /// <summary>Creates a resolver over the given record store.</summary>
     /// <param name="store">The records to resolve psk_ids against.</param>
-    /// <param name="isPairingPskEnabled">
-    /// Reports whether the <c>pairing_psk</c> method is currently enabled in the client's
-    /// pairing config. Called on every resolve rather than snapshotted, so the very next
-    /// handshake sees the current value. Defaults to always-enabled for callers with no
-    /// pairing config of their own.
-    /// </param>
-    public RecordPskResolver(IPairingRecordStore store, Func<bool>? isPairingPskEnabled = null)
+    public RecordPskResolver(IPairingRecordStore store)
     {
         _store = store;
-        _isPairingPskEnabled = isPairingPskEnabled ?? (static () => true);
     }
 
     /// <inheritdoc/>
@@ -519,13 +511,14 @@ internal sealed class RecordPskResolver : INoisePskResolver
     /// A pure lookup. This runs inside the framing layer's inbound path, before the
     /// AEAD has verified anything, so it must not mutate the store — the record is
     /// marked used by the client once a decrypted message proves the session
-    /// authenticated.
+    /// authenticated. Every record is a candidate: the pairing_psk method is always offered,
+    /// so its PSK stays among the candidates at all times, as the spec requires.
     /// </remarks>
     public NoisePsk? Resolve(string pskId, PskCategory category)
     {
         foreach (var record in _store.List())
         {
-            if (record.PskId == pskId && record.Category == category && IsCandidate(record))
+            if (record.PskId == pskId && record.Category == category)
             {
                 return new NoisePsk(record.Psk, record.Category, record.ServerId);
             }
@@ -533,19 +526,4 @@ internal sealed class RecordPskResolver : INoisePskResolver
 
         return SentinelPskResolver.Instance.Resolve(pskId, category);
     }
-
-    /// <summary>
-    /// Whether the record belongs in the handshake's candidate set. A PSK for a disabled
-    /// pairing method is excluded, so a handshake referencing it misses outright instead of
-    /// authenticating a channel that would only be refused later, at the pairing activation.
-    /// That is this SDK's decision (#202), not a spec rule: the spec's requirement to keep the
-    /// pairing PSK among the candidates at all times is met while the method is enabled.
-    /// </summary>
-    /// <remarks>
-    /// Only the <c>pairing_psk</c> method's own bootstrap secret is affected. A long-term
-    /// record from a completed pairing is not a pairing-method PSK — it is the credential that
-    /// pairing produced — so it keeps resolving however the method is configured.
-    /// </remarks>
-    private bool IsCandidate(PairingRecord record) =>
-        record.Category != PskCategory.Pairing || _isPairingPskEnabled();
 }
