@@ -884,16 +884,11 @@ public sealed class SendspinHostService : IAsyncDisposable
             // Each incoming connection gets its own Noise framing — the per-connection
             // crypto state cannot be shared. The server (dialer) is the Noise initiator
             // per spec; our side responds.
-            // The resolver reads this connection's live pairing config through `client`, which
-            // is assigned a few lines down — before StartAsync, so before any handshake can
-            // consult it. Until then the configured value is the one the client starts from.
             var framing = new Connection.Noise.NoiseWireFraming(
                 _options.Identity,
                 _options.PairingRecordStore is null
                     ? null
-                    : new Connection.Noise.RecordPskResolver(
-                        _options.PairingRecordStore,
-                        () => client?.IsPairingPskEnabled ?? _options.Capabilities.PairingPskEnabled),
+                    : new Connection.Noise.RecordPskResolver(_options.PairingRecordStore),
                 _options.Suite);
 
             var connection = new IncomingConnection(

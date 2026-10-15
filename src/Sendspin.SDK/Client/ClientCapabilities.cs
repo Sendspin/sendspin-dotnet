@@ -289,17 +289,6 @@ public sealed class ClientCapabilities
     public List<string> PairingPskLocations { get; set; } = new();
 
     /// <summary>
-    /// Whether the mandatory Pairing PSK method starts enabled. Default true.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="ISendspinClient.EnsurePairingPsk"/> and
-    /// <see cref="ISendspinClient.RotatePairingPsk"/> do not check this flag: an app that
-    /// sets it false and still calls either to render a pairing token (a QR code, say) hands
-    /// the operator a token whose method the client will refuse, with no error raised.
-    /// </remarks>
-    public bool PairingPskEnabled { get; set; } = true;
-
-    /// <summary>
     /// Whether <see cref="PairMethods.DynamicPairingCode"/> starts enabled, when it is listed
     /// in <see cref="PairingCodeMethods"/>. Default true, so listing the method is enough to
     /// offer it. Ignored when the method is not listed.
