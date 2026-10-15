@@ -163,7 +163,8 @@ public interface ISendspinClient : IAsyncDisposable
     /// <see cref="SeekRelativeAsync"/>, which cannot get this wrong. The same holds for a
     /// <c>volume</c> without an <see cref="int"/> <c>volume</c> and a <c>mute</c> without a
     /// <see cref="bool"/> <c>mute</c>. Only the parameter the command defines is sent, whatever
-    /// else the dictionary holds, and <c>volume</c> is clamped to 0-100.
+    /// else the dictionary holds, <c>volume</c> is clamped to 0-100, and a negative
+    /// <c>position_ms</c> is sent as 0.
     /// <para>
     /// The command is sent only while the <c>controller@v1</c> role is active and it appears in
     /// the group's latest <c>supported_commands</c>; otherwise it is logged and dropped. Until a
@@ -194,9 +195,11 @@ public interface ISendspinClient : IAsyncDisposable
     /// dropped with a warning when the role is inactive or <c>seek</c> is unlisted.
     /// </summary>
     /// <param name="positionMs">
-    /// Absolute position in milliseconds. Not clamped here: the valid range is 0 to the server's
-    /// <see cref="GroupState.SeekMaxMs"/>, which may be unknown, and the server ignores the
-    /// command when the position falls outside it.
+    /// Absolute position in milliseconds. The valid range is 0 to the server's
+    /// <see cref="GroupState.SeekMaxMs"/>. A negative position is sent as 0, because a reference
+    /// server rejects a negative one as malformed and a strict server closes the connection on
+    /// it. The top is not clamped here, since <see cref="GroupState.SeekMaxMs"/> may be unknown:
+    /// the server ignores a seek past it.
     /// </param>
     Task SeekAsync(int positionMs);
 

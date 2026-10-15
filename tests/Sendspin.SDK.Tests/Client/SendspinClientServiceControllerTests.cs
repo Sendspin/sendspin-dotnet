@@ -374,6 +374,29 @@ public class SendspinClientServiceControllerTests
     }
 
     [Theory]
+    [InlineData(-1, 0)]
+    [InlineData(-30_000, 0)]
+    [InlineData(42_000, 42_000)]
+    public async Task Seek_NegativePosition_IsClampedToZero_BySeekAsyncAndSendCommandAsync(int requested, int onTheWire)
+    {
+        // position_ms ranges from 0 (controller/v1.md:16). aiosendspin 10.0.1 and later reject a
+        // negative one as a malformed client/command, and a strict server closes the connection
+        // on it. The top of the range is the server's: it ignores a seek past seek_max_ms.
+        var (client, connection, _) = TestClient.Create();
+        using var _c = client;
+
+        ActivateController(connection);
+        await client.SendCommandAsync(Commands.Seek, new Dictionary<string, object> { ["position_ms"] = requested });
+        string viaSendCommand = LastCommandOnTheWire(connection);
+        await client.SeekAsync(requested);
+
+        Assert.Equal(
+            """{"type":"client/command","payload":{"controller":{"command":"seek","position_ms":""" + onTheWire + "}}}",
+            viaSendCommand);
+        Assert.Equal(viaSendCommand, LastCommandOnTheWire(connection));
+    }
+
+    [Theory]
     [InlineData("volume", null)] // no parameters at all
     [InlineData("volume", "50")] // a string, not an integer
     [InlineData("mute", null)]
