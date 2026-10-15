@@ -40,6 +40,10 @@ our host responds — the same path a real server-initiated deployment uses.
 - **`source`** — pairs, then the server asks the client to stream its `source@v1` input
   and decodes the chunks that arrive. Proves the server's start command, the client's
   `client-stream/start`, and real audio over the wire.
+- **`source-unpaired`** — the same with no pairing: the client admits unpaired access, the
+  server connects for playback, then approves `source@v1` for that client as its operator
+  would (`trust_unpaired(..., approved_roles={"source"})`). Proves the client accepts the
+  re-activation that adds the role and streams on it.
 - **`player`** — pairs, waits for the client to report itself available, then pushes two
   seconds of PCM at the `player@v1` role. Proves `stream/start`, `stream/end`, and the
   13-byte audio chunk header: the client must decode exactly the samples the server sent
@@ -58,6 +62,7 @@ bash tools/interop/run.sh pairing
 bash tools/interop/run.sh static-pin
 bash tools/interop/run.sh dynamic-pin
 bash tools/interop/run.sh source
+bash tools/interop/run.sh source-unpaired
 bash tools/interop/run.sh player
 ```
 

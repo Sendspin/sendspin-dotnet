@@ -19,8 +19,8 @@ namespace Sendspin.SDK.Audio.Source;
 /// Timestamps are the local capture time mapped to the server clock via
 /// <see cref="IClockSynchronizer.ClientToServerTime"/> (offset + drift), per the spec.
 /// The pipeline enforces the spec's trust rule itself, at the point the capture device
-/// opens: it refuses to stream unless <c>canStream</c> reports a paired connection and an
-/// active source role. Activate-time checking alone is insufficient, because server/command
+/// opens: it refuses to stream unless <c>canStream</c> reports a connection that may carry the
+/// role (paired, or unpaired with unpaired access on) and an active source role. Activate-time checking alone is insufficient, because server/command
 /// reaches this pipeline without passing through server/activate.
 /// Start, stop, and the per-connection reset (<see cref="ResetForConnectionLossAsync"/>)
 /// run one at a time in arrival order, so commands are idempotent against the stream's
@@ -162,12 +162,12 @@ public sealed class SourceStreamPipeline : IAsyncDisposable
 
             // Trust gate. Enforced here rather than at the command dispatch so that every
             // caller is covered — the activate path, the server/command path, and any path
-            // added later. A source streams potentially sensitive audio, so the spec
-            // requires a paired connection.
+            // added later. A source streams potentially sensitive audio, so it runs only on a
+            // paired connection or, with unpaired access enabled, on an unpaired one.
             if (!_canStream())
             {
                 _logger.LogWarning(
-                    "Refusing to stream: source@v1 requires a paired connection, an active source role and an available client");
+                    "Refusing to stream: source@v1 requires a paired connection or unpaired access, an active source role and an available client");
                 return;
             }
         }

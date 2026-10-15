@@ -9,6 +9,8 @@
 //   dynamic-pin full dynamic-pairing code round-trip; the code is derived per attempt and
 //               printed as a pairing_code event for the harness to relay
 //   source      stream captured PCM through the source@v1 role
+//   source-unpaired
+//               the same over unpaired access, once the server's operator approves the role
 //   player      receive a PCM stream through the player@v1 role and decode it
 using System.Text.Json;
 using Sendspin.SDK.Audio;
@@ -26,9 +28,10 @@ using Sendspin.SDK.Protocol;
 string scenario = args.Length > 0 ? args[0] : "unpaired";
 int port = args.Length > 1 ? int.Parse(args[1]) : 8930;
 string? secret = args.Length > 2 ? args[2] : null;
-// 'source' and 'player' pair first: the source role only runs at 'user' trust, and 'player'
-// follows it so both streaming scenarios reach their role the same way.
+// 'source' and 'player' pair first, so both streaming scenarios reach their role the same way;
+// 'source-unpaired' covers the source role without a pairing.
 bool pairs = scenario is "pairing" or "static-pin" or "dynamic-pin" or "source" or "player";
+bool sources = scenario is "source" or "source-unpaired";
 
 // Quiet by default so the JSON result lines stay readable; set INTEROP_LOG=Debug when a
 // scenario fails and you need the SDK's own account of what it did.
@@ -49,7 +52,7 @@ if (scenario is "pairing" or "source" or "player")
 var caps = new ClientCapabilities
 {
     ClientName = "dotnet-interop",
-    UnpairedAccessEnabled = scenario == "unpaired",
+    UnpairedAccessEnabled = scenario is "unpaired" or "source-unpaired",
 };
 
 if (scenario == "static-pin")
@@ -63,7 +66,7 @@ if (scenario == "dynamic-pin")
     caps.PairingCodeMethods.Add("dynamic_pairing_code");
 }
 
-if (scenario == "source")
+if (sources)
 {
     caps.Roles.Add("source@v1");
     caps.SourceRoleSupport = new SourceRoleSupport();
@@ -102,8 +105,8 @@ await using var host = new SendspinHostService(
             }
             : null,
         AudioPipeline = scenario == "player" ? pipeline : null,
-        CaptureDevice = scenario == "source" ? new ToneCaptureDevice() : null,
-        SourceEncoderFactory = scenario == "source" ? new PcmEncoderFactory() : null,
+        CaptureDevice = sources ? new ToneCaptureDevice() : null,
+        SourceEncoderFactory = sources ? new PcmEncoderFactory() : null,
     },
     listenerOptions: new ListenerOptions { Port = port },
     advertiserOptions: new AdvertiserOptions { Enabled = false });
@@ -181,7 +184,7 @@ try
 
     // Stay connected so the reference server can observe the connection/pairing before
     // teardown. The orchestrator terminates this process once the server confirms.
-    if (scenario == "source")
+    if (sources)
     {
         // The source role streams in server time, so nothing it sends counts until the
         // clock converges. Report what the filter actually did, so a stalled scenario says

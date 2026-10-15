@@ -3,7 +3,8 @@
 # pinned in .github/workflows/interop.yml (10.1.0) for one scenario. Starts the .NET host (it prints its listening port), then
 # dials it from the Python server, and checks both sides report success.
 #
-# Usage: run.sh <scenario>   scenario: unpaired | pairing | static-pin | dynamic-pin | source | player
+# Usage: run.sh <scenario>   scenario: unpaired | pairing | static-pin | dynamic-pin | source |
+#                                      source-unpaired | player
 # Env:   PYTHON  - python interpreter with aiosendspin[server] at that pin (default: python3)
 set -euo pipefail
 
@@ -50,6 +51,8 @@ case "$SCENARIO" in
   pairing|source|player) server_args+=("$CLIENT_ID") ;;
   # The server side plays the operator, reading the code off the client's output.
   dynamic-pin)           server_args+=("$CLIENT_OUT") ;;
+  # The operator approves the source role for this client; there is no secret.
+  source-unpaired)       server_args+=("$CLIENT_ID") ;;
 esac
 
 # Dial from the reference server.
