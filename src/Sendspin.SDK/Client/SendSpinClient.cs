@@ -679,14 +679,15 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             : [.. channels];
 
     /// <summary>
-    /// The spec's precondition for streaming captured audio: a paired
-    /// (<see cref="SendspinTrustLevel.Paired"/>) connection with the source role currently active, on a client that is available ("A
-    /// client MUST ignore <c>start</c> received while it is unavailable"). Evaluated per start
-    /// attempt, because trust, the active-role set and availability can all change over a
-    /// connection's life.
+    /// The spec's precondition for streaming captured audio: a connection that may carry roles
+    /// at all — paired (<see cref="SendspinTrustLevel.Paired"/>), or unpaired on a client that
+    /// admits unpaired access (pairing.md § Unpaired Access) — with the source role currently
+    /// active, on a client that is available ("A client MUST ignore <c>start</c> received while
+    /// it is unavailable"). Evaluated per start attempt, because trust, the active-role set and
+    /// availability can all change over a connection's life.
     /// </summary>
     private bool IsSourceStreamingPermitted() =>
-        _session.MatchedPsk?.Category == PskCategory.LongTerm
+        (_session.MatchedPsk?.Category == PskCategory.LongTerm || _unpairedAccessEnabled)
         && (LastServerHello?.ActiveRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false)
         && CurrentAvailability;
 
@@ -2990,16 +2991,12 @@ public sealed class SendspinClientService : ISendspinClient, IDisposable
             && IsAdmissible(matchedPsk.Category, payload.ActivitiesList, hasRoles: true, _unpairedAccessEnabled);
         var activeRoles = payload.ActiveRoles ?? (playbackCapable ? previousActiveRoles : []);
 
-        // Source role is trust-gated: it streams potentially sensitive captured audio,
-        // so it MUST only run on a paired connection (SendspinTrustLevel.Paired). If a server
-        // activates source@v1 on any other, refuse and close (spec).
-        if (activeRoles.Any(r => r.StartsWith("source@", StringComparison.Ordinal))
-            && _session.MatchedPsk?.Category != PskCategory.LongTerm)
-        {
-            _logger.LogWarning("server/activate activated source@v1 on a connection that is not paired; closing");
-            RefuseActivation("unauthorized", "source role without a pairing");
-            return;
-        }
+        // source@v1 needs no check of its own here. On an unpaired session
+        // ValidateActivateAdmissibility has already refused any active role unless this client
+        // admits unpaired access (pairing.md § Unpaired Access), and approving the source role
+        // for an unpaired client is the server's gate, which the client cannot see
+        // (roles/source/v1.md: the server "leaves the role out of active_roles until explicit
+        // approval").
 
         // "A server MUST NOT activate a role or version the client did not list in
         // supported_roles." The spec names no rejection for one that does, so the activation

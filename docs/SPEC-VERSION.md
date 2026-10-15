@@ -32,7 +32,7 @@ The [Interop workflow](../.github/workflows/interop.yml) installs
 `aiosendspin[server]==10.1.0` and runs the SDK against it over a real WebSocket on every push
 and pull request to `main`. The server runs in strict mode (`allow_noncompliant_clients=False`),
 as Music Assistant does with its legacy-clients setting off: any deviation the server checks
-for closes the connection instead of logging a warning. It runs six scenarios (see
+for closes the connection instead of logging a warning. It runs seven scenarios (see
 [`tools/interop`](../tools/interop/README.md)):
 
 | Scenario | What it exercises |
@@ -42,6 +42,7 @@ for closes the connection instead of logging a warning. It runs six scenarios (s
 | `static-pin` | `static_pairing_code`: the CPace round, PSK wrapping, and the gesture gate (`client/pair-pending` must come first) |
 | `dynamic-pin` | `dynamic_pairing_code` with the `digits` format: the client derives and emits the code, the harness types it into the server |
 | `source` | `source@v1`: the server's `start` command, `client-stream/start`, and decoded audio arriving at the server |
+| `source-unpaired` | `source@v1` with no pairing: unpaired access, the operator's explicit approval of the role re-activating the connection, and decoded audio arriving at the server |
 | `player` | `player@v1`: `stream/start`, the 13-byte audio chunk header with `send_ahead`, `stream/end`, every sample sent coming out of the client's decoder, and the initial `client/state` arriving inside the 5 s a lenient server allows |
 
 The pin moves deliberately, with each `aiosendspin` release: a release is where a spec wire

@@ -53,22 +53,6 @@ public class ConnectAsyncHandshakeFailureTests
     }
 
     [Fact]
-    public async Task SourceRoleActivatedWithoutUserTrust_ThrowsActivationRefused()
-    {
-        var (client, connection, _) = TestClient.Create(PskCategory.Sentinel, unpairedAccess: true);
-        using var _c = client;
-
-        var connecting = client.ConnectAsync(ServerUri);
-        connection.RaiseTextMessageReceived(ServerHello);
-        connection.RaiseTextMessageReceived(
-            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["source@v1"]}}""");
-
-        var ex = await Assert.ThrowsAsync<SendspinHandshakeException>(() => connecting.WaitAsync(Wait));
-        Assert.Equal(HandshakeFailureKind.ActivationRefused, ex.Kind);
-        Assert.Equal("unauthorized", connection.LastDisconnectReason);
-    }
-
-    [Fact]
     public async Task MalformedHandshakeMessage_ThrowsConnectionClosed()
     {
         // A server/hello whose payload is not an object: the client closes on it.

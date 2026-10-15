@@ -71,7 +71,8 @@ Protocol
   construction: a player with no flac or pcm format, a visualizer BufferCapacity or RateMax
   that is not positive, an invalid artwork channel, a MacAddress that is not lowercase
   colon-separated.
-- New source@v1 role for line-in and microphone capture, on paired connections only.
+- New source@v1 role for line-in and microphone capture, on paired connections, or on unpaired
+  ones when UnpairedAccessEnabled is on and the server's operator has approved the role.
 - ConnectionMode.Auto is removed. A persisted "Auto" no longer parses and the remaining
   ordinals shift.
 
