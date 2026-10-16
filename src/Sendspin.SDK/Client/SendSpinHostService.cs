@@ -31,6 +31,15 @@ public sealed class SendspinHostService : IAsyncDisposable
 
     private readonly Dictionary<string, ActiveServerConnection> _connections = new();
     private readonly HashSet<SendspinClientService> _openClients = new();
+
+    // The line-sense signal the app last reported (SetSourceSignalAsync), applied to every
+    // connection the host opens after it. Null until the app reports one. Guarded by
+    // _connectionsLock.
+    private bool? _sourceSignal;
+
+    // Serializes SetSourceSignalAsync with the seeding of a new connection, so a connection
+    // opened during a change ends with the newest signal rather than whichever write landed last.
+    private readonly SemaphoreSlim _sourceSignalGate = new(1, 1);
     private readonly object _connectionsLock = new();
 
     // Connections between their upgrade and their admission or rejection. Far above what a
@@ -203,6 +212,14 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 
     /// <summary>
+    /// Raised when a connection is admitted, and on each later <c>server/activate</c> it
+    /// receives, with whether its <c>source</c> role is active and the session's trust.
+    /// Raised on the connection's receive loop or during admission: handlers must not block,
+    /// and must marshal to a UI thread themselves.
+    /// </summary>
+    public event EventHandler<SourceRoleState>? SourceRoleStateChanged;
+
+    /// <summary>
     /// Gets the server ID of the last-playback server: the one that most recently held the
     /// admitted connection while <c>'playback'</c> was among its <c>server/activate</c>
     /// activities (connection.md). The group's playback state plays no part in it.
@@ -226,6 +243,78 @@ public sealed class SendspinHostService : IAsyncDisposable
         TrySaveLastPlayed(serverId);
         _logger.LogInformation("Last played server updated: {ServerId}", serverId);
         LastPlayedServerIdChanged?.Invoke(this, serverId);
+    }
+
+    /// <summary>
+    /// Reports whether this client's source input has signal (<c>line_sense</c>) on every open
+    /// connection, and on each connection the host accepts afterwards.
+    /// </summary>
+    /// <remarks>
+    /// The host owns its per-connection clients, so this is the server-initiated counterpart of
+    /// <see cref="ISendspinClient.SetSourceSignalAsync"/>. The value is remembered: a connection
+    /// opened later carries it in its initial <c>client/state</c>. A server may record a client's
+    /// first report without acting on it, so an app that drives autostart with the signal should
+    /// report <c>false</c> before its first <c>true</c>. Requires
+    /// <see cref="SourceRoleSupport.LineSense"/>; without it each client ignores the call.
+    /// </remarks>
+    /// <param name="present">True when the input has signal.</param>
+    public async Task SetSourceSignalAsync(bool present)
+    {
+        await _sourceSignalGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            List<SendspinClientService> clients;
+            lock (_connectionsLock)
+            {
+                _sourceSignal = present;
+                clients = _openClients.ToList();
+            }
+
+            foreach (var client in clients)
+            {
+                await ReportSourceSignalAsync(client, present).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _sourceSignalGate.Release();
+        }
+    }
+
+    private async Task SeedSourceSignalAsync(SendspinClientService client)
+    {
+        await _sourceSignalGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            bool? signal;
+            lock (_connectionsLock)
+            {
+                signal = _sourceSignal;
+            }
+
+            if (signal is { } present)
+            {
+                await ReportSourceSignalAsync(client, present).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            _sourceSignalGate.Release();
+        }
+    }
+
+    private async Task ReportSourceSignalAsync(SendspinClientService client, bool present)
+    {
+        try
+        {
+            await client.SetSourceSignalAsync(present).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // A connection closing under us. Its server is going away, and the next one is
+            // seeded when it opens.
+            _logger.LogDebug(ex, "Could not report the source signal to a connection");
+        }
     }
 
     private string? TryLoadLastPlayed()
@@ -905,6 +994,10 @@ public sealed class SendspinHostService : IAsyncDisposable
                 clientOptions);
             TrackOpenClient(client);
 
+            // Before the connection starts: the client records the signal and its initial
+            // client/state reads it live, so the server's first report is the current one.
+            await SeedSourceSignalAsync(client);
+
             client.PairingCompleted += (s, serverId) => PairingCompleted?.Invoke(this, serverId);
             client.PairingGestureRequested += (s, e) => PairingGestureRequested?.Invoke(this, e);
 
@@ -1028,6 +1121,10 @@ public sealed class SendspinHostService : IAsyncDisposable
                     RecordLastPlaybackServer(serverId, admittedActivate);
                 }
 
+                // Each later activate can grant or withdraw the source role — pairing's
+                // re-handshake, for one, is followed by a fresh activate at the new trust level.
+                client.ServerActivateReceived += (s, _) => RaiseSourceRoleState(serverId, client);
+
                 _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
                     serverId, client.ServerName);
 
@@ -1038,6 +1135,8 @@ public sealed class SendspinHostService : IAsyncDisposable
                     ConnectedAt = activeConnection.ConnectedAt,
                     ClockSyncStatus = client.ClockSyncStatus
                 });
+
+                RaiseSourceRoleState(serverId, client);
             }
             finally
             {
@@ -1138,6 +1237,13 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             client.ConnectionStateChanged -= OnStateChanged;
         }
+    }
+
+    private void RaiseSourceRoleState(string serverId, SendspinClientService client)
+    {
+        bool isActive = client.LastServerHello?.ActiveRoles
+            .Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false;
+        SourceRoleStateChanged?.Invoke(this, new SourceRoleState(serverId, isActive, client.TrustLevel));
     }
 
     private void RecordLastPlaybackServer(string serverId, ServerActivatePayload activate)

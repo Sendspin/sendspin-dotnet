@@ -25,6 +25,7 @@ internal class FakeServer : IAsyncDisposable
     private readonly byte[] _psk;
     private readonly string? _pskCategory;
     private readonly IReadOnlyList<string> _activities;
+    private readonly IReadOnlyList<string> _activeRoles;
     private readonly KeyPair _keys;
     private readonly TaskCompletionSource<string> _goodbye =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -33,6 +34,9 @@ internal class FakeServer : IAsyncDisposable
     // pair/abort can arrive on one connection — a pairing activate this double cannot satisfy
     // draws method_not_supported before arbitration's own abort ever lands.
     private readonly Channel<string> _pairAborts = Channel.CreateUnbounded<string>();
+
+    // Every source signal the host reports in client/state, in arrival order.
+    private readonly Channel<string> _sourceSignals = Channel.CreateUnbounded<string>();
     private TestNoiseServer? _noise;
     private Task? _receiveLoop;
     private TaskCompletionSource? _rehandshake;
@@ -41,11 +45,18 @@ internal class FakeServer : IAsyncDisposable
     /// <param name="activities">server/activate activities: ["playback"], or empty for discovery.</param>
     /// <param name="keys">Pass an existing pair so two instances share one server_id.</param>
     /// <param name="pskCategory">The psk_category code to declare; see <see cref="TestNoiseServer"/> for the default.</param>
-    internal FakeServer(byte[] psk, IReadOnlyList<string> activities, KeyPair? keys = null, string? pskCategory = null)
+    /// <param name="activeRoles">server/activate active_roles; empty when omitted.</param>
+    internal FakeServer(
+        byte[] psk,
+        IReadOnlyList<string> activities,
+        KeyPair? keys = null,
+        string? pskCategory = null,
+        IReadOnlyList<string>? activeRoles = null)
     {
         _psk = psk;
         _pskCategory = pskCategory;
         _activities = activities;
+        _activeRoles = activeRoles ?? [];
         _keys = keys ?? KeyPair.Generate();
 
         // server_id IS the static public key: the host decodes it as the Noise remote
@@ -113,6 +124,34 @@ internal class FakeServer : IAsyncDisposable
         catch (OperationCanceledException)
         {
             // Timed out: report the absence rather than throwing, matching WaitForGoodbyeAsync.
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether a <c>client/state</c> reporting source <c>signal</c> <paramref name="signal"/>
+    /// arrives before the timeout. Earlier reports are consumed and skipped.
+    /// </summary>
+    internal async Task<bool> WaitForSourceSignalAsync(string signal, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            while (await _sourceSignals.Reader.WaitToReadAsync(cts.Token))
+            {
+                while (_sourceSignals.Reader.TryRead(out var received))
+                {
+                    if (received == signal)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Timed out: report the absence, matching WaitForPairAbortAsync.
         }
 
         return false;
@@ -283,6 +322,18 @@ internal class FakeServer : IAsyncDisposable
                 _pairAborts.Writer.TryWrite(abort?.Payload.Reason ?? string.Empty);
                 break;
             }
+
+            case MessageTypes.ClientState:
+            {
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.GetProperty("payload").TryGetProperty("source", out var source)
+                    && source.TryGetProperty("signal", out var signal))
+                {
+                    _sourceSignals.Writer.TryWrite(signal.GetString() ?? string.Empty);
+                }
+
+                break;
+            }
         }
     }
 
@@ -292,7 +343,7 @@ internal class FakeServer : IAsyncDisposable
         ["payload"] = new Dictionary<string, object>
         {
             ["activities"] = _activities,
-            ["active_roles"] = Array.Empty<string>(),
+            ["active_roles"] = _activeRoles,
         },
     });
 
