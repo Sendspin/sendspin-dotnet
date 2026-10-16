@@ -101,5 +101,15 @@ Check("pull audio through the smooth correction chain", () =>
         && source.PlaybackRate <= buffer.SyncOptions.MaxRate;
 });
 
+// 7. The shared clock. On Linux it reads CLOCK_MONOTONIC_RAW through a libc P/Invoke, which is
+//    only bound the way a consumer's app binds it once published.
+Check("read the shared high-precision clock", () =>
+{
+    var start = HighPrecisionTimer.Shared.GetCurrentTimeMicroseconds();
+    Thread.Sleep(50);
+    var elapsed = HighPrecisionTimer.Shared.GetElapsedMicroseconds(start);
+    return elapsed >= 40_000 && elapsed < 5_000_000;
+});
+
 Console.WriteLine(failures == 0 ? "PASS" : $"FAIL ({failures})");
 return failures == 0 ? 0 : 1;
