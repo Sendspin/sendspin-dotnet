@@ -20,11 +20,21 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageReleaseNotes>
+v10.1.0 - Source role reporting through SendspinHostService
+
+Additive; no breaking changes from 10.0.0.
+- SendspinHostService.SetSourceSignalAsync(bool) reports the source line-sense signal for a
+  server-initiated app. The value is applied to every open connection and remembered, so
+  each new connection carries it in its initial client/state.
+- SendspinHostService.SourceRoleStateChanged (SourceRoleState: ServerId, IsActive,
+  TrustLevel) is raised when a connection is admitted and on every later server/activate,
+  so the app can see whether its source role is active and at what trust.
+
 v10.0.0 - Encrypted transport, Sendspin spec 1.0.0-rc1 (BREAKING)
 
 Implements Sendspin/spec at tag 1.0.0-rc1 (671a34d). Requires aiosendspin 10.0.0 or later,
-the release Music Assistant ships. There is no downgrade negotiation: use the 9.x line for
-an older server.
+the first release of that spec; Music Assistant ships the 10.x line. There is no downgrade
+negotiation: use the 9.x line for an older server.
 
 Transport and identity
 - Every connection is encrypted end to end (Noise KKpsk2). Plaintext is gone.
