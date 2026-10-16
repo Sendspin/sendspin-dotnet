@@ -212,6 +212,14 @@ public sealed class SendspinHostService : IAsyncDisposable
     public event EventHandler<PairingGestureRequestedEventArgs>? PairingGestureRequested;
 
     /// <summary>
+    /// Raised when a connection is admitted, and on each later <c>server/activate</c> it
+    /// receives, with whether its <c>source</c> role is active and the session's trust.
+    /// Raised on the connection's receive loop or during admission: handlers must not block,
+    /// and must marshal to a UI thread themselves.
+    /// </summary>
+    public event EventHandler<SourceRoleState>? SourceRoleStateChanged;
+
+    /// <summary>
     /// Gets the server ID of the last-playback server: the one that most recently held the
     /// admitted connection while <c>'playback'</c> was among its <c>server/activate</c>
     /// activities (connection.md). The group's playback state plays no part in it.
@@ -1113,6 +1121,10 @@ public sealed class SendspinHostService : IAsyncDisposable
                     RecordLastPlaybackServer(serverId, admittedActivate);
                 }
 
+                // Each later activate can grant or withdraw the source role — pairing's
+                // re-handshake, for one, is followed by a fresh activate at the new trust level.
+                client.ServerActivateReceived += (s, _) => RaiseSourceRoleState(serverId, client);
+
                 _logger.LogInformation("Server connected: {ServerId} ({ServerName})",
                     serverId, client.ServerName);
 
@@ -1123,6 +1135,8 @@ public sealed class SendspinHostService : IAsyncDisposable
                     ConnectedAt = activeConnection.ConnectedAt,
                     ClockSyncStatus = client.ClockSyncStatus
                 });
+
+                RaiseSourceRoleState(serverId, client);
             }
             finally
             {
@@ -1223,6 +1237,13 @@ public sealed class SendspinHostService : IAsyncDisposable
         {
             client.ConnectionStateChanged -= OnStateChanged;
         }
+    }
+
+    private void RaiseSourceRoleState(string serverId, SendspinClientService client)
+    {
+        bool isActive = client.LastServerHello?.ActiveRoles
+            .Any(r => r.StartsWith("source@", StringComparison.Ordinal)) ?? false;
+        SourceRoleStateChanged?.Invoke(this, new SourceRoleState(serverId, isActive, client.TrustLevel));
     }
 
     private void RecordLastPlaybackServer(string serverId, ServerActivatePayload activate)

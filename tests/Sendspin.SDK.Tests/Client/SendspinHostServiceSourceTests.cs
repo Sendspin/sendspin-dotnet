@@ -134,4 +134,60 @@ public class SendspinHostServiceSourceTests
 
         Assert.True(await second.WaitForSourceSignalAsync("present", Timeout));
     }
+
+    private static Task<SourceRoleState> NextSourceRoleStateAsync(
+        SendspinHostService host, Func<SourceRoleState, bool> match)
+    {
+        var tcs = new TaskCompletionSource<SourceRoleState>(TaskCreationOptions.RunContinuationsAsynchronously);
+        host.SourceRoleStateChanged += (s, state) =>
+        {
+            if (match(state))
+            {
+                tcs.TrySetResult(state);
+            }
+        };
+        return tcs.Task.WaitAsync(Timeout);
+    }
+
+    [Fact]
+    public async Task Admission_ReportsAnActiveSourceRole_AndTheTrust()
+    {
+        await using var host = await StartHostAsync();
+        var reported = NextSourceRoleStateAsync(host, _ => true);
+
+        await using var server = new FakeServer(TestPsk, ["playback"], activeRoles: SourceRole);
+        await server.ConnectAsync(host.ListeningPort);
+
+        var state = await reported;
+        Assert.Equal(server.ServerId, state.ServerId);
+        Assert.True(state.IsActive);
+        Assert.Equal(SendspinTrustLevel.Paired, state.TrustLevel);
+    }
+
+    [Fact]
+    public async Task Admission_WithoutTheSourceRole_ReportsItInactive()
+    {
+        await using var host = await StartHostAsync();
+        var reported = NextSourceRoleStateAsync(host, _ => true);
+
+        await using var server = new FakeServer(TestPsk, ["playback"]);
+        await server.ConnectAsync(host.ListeningPort);
+
+        Assert.False((await reported).IsActive);
+    }
+
+    [Fact]
+    public async Task ALaterActivate_ThatGrantsTheSourceRole_IsReported()
+    {
+        await using var host = await StartHostAsync();
+        await using var server = new FakeServer(TestPsk, ["playback"]);
+        await server.ConnectAsync(host.ListeningPort);
+        await WaitForServerConnectedAsync(host, server.ServerId);
+        var granted = NextSourceRoleStateAsync(host, s => s.IsActive);
+
+        await server.SendJsonAsync(
+            """{"type":"server/activate","payload":{"activities":["playback"],"active_roles":["source@v1"]}}""");
+
+        Assert.Equal(server.ServerId, (await granted).ServerId);
+    }
 }
